@@ -942,6 +942,7 @@ impl<Credentials: SlackCredentialPort, Clock: SlackClock> SlackConnector<Credent
         if let Some(remote_ts) = self.find_message(claim, token)? {
             return remote_receipt(&remote_ts, false);
         }
+        claim.require_new_write_authority()?;
         let body = self.message_body(claim, operation)?;
         let response = self.request(
             token,
@@ -1123,42 +1124,60 @@ impl<Credentials: SlackCredentialPort, Clock: SlackClock> SlackConnector<Credent
         }
         let authorization = format!("Bearer {}", token.value()?);
         let request_id = stable_uuid(operation_key);
-        let response = match (method, body) {
-            (SlackWebApiMethod::ConversationsHistory, None) => self
-                .agent
-                .get(url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("X-Slack-Request-Id", &request_id)
-                .header("User-Agent", USER_AGENT)
-                .call(),
-            (SlackWebApiMethod::ChatPostMessage, Some(body)) => self
-                .agent
-                .post(url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("X-Slack-Request-Id", &request_id)
-                .header("User-Agent", USER_AGENT)
-                .send_json(body),
-            _ => {
-                return Err(connector_error(
-                    ConnectorCallErrorKind::Permanent,
-                    "SLACK_REQUEST_INVALID",
-                ));
-            }
-        }
-        .map_err(|_| {
-            connector_error(
-                ConnectorCallErrorKind::Retryable,
-                "SLACK_TRANSPORT_UNAVAILABLE",
-            )
+        let replay = if matches!(method, SlackWebApiMethod::ChatPostMessage) {
+            winwincode_network::Replay::ReconcileFirst
+        } else {
+            winwincode_network::Replay::ReplayExact
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| match (method, body) {
+                (SlackWebApiMethod::ConversationsHistory, None) => agent
+                    .get(url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("X-Slack-Request-Id", &request_id)
+                    .header("User-Agent", USER_AGENT)
+                    .call(),
+                (SlackWebApiMethod::ChatPostMessage, Some(body)) => agent
+                    .post(url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("X-Slack-Request-Id", &request_id)
+                    .header("User-Agent", USER_AGENT)
+                    .send_json(body),
+                _ => unreachable!("validated connector request"),
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("SLACK_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
         })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "SLACK_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let retry_after_seconds = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+            .and_then(winwincode_network::retry_after_seconds);
         if status == 429
             && let Some(retry_after_millis) = retry_after_seconds
                 .filter(|seconds| *seconds > 0)
@@ -1171,18 +1190,8 @@ impl<Credentials: SlackCredentialPort, Clock: SlackClock> SlackConnector<Credent
                 retry_after_millis,
             )?;
         }
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "SLACK_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             serde_json::from_slice(&bytes).ok()
@@ -1403,7 +1412,14 @@ fn rate_limit_error(retry_after_seconds: Option<u64>) -> ConnectorCallError {
 }
 
 fn response_invalid() -> ConnectorCallError {
-    connector_error(ConnectorCallErrorKind::Retryable, "SLACK_RESPONSE_INVALID")
+    ConnectorCallError::from_network(
+        "SLACK_RESPONSE_INVALID",
+        winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::ProtocolInvalid,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Decode,
+        ),
+    )
 }
 
 fn operation_key_from_message(message: &Value) -> Option<&str> {

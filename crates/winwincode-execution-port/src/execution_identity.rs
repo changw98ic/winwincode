@@ -169,9 +169,18 @@ pub fn valid_lease_renewal(
     renewal: &LeaseRenewMessage,
     now: &Instant,
 ) -> bool {
-    let mut expected = current.clone();
-    expected.expires_at = renewal.lease.expires_at.clone();
-    [
+    lease_renewal_rejection(current, renewal, now).is_none()
+}
+
+/// Identifies the first rejected renewal predicate without exposing identity values.
+/// The boolean validator and diagnostics share this single set of checks.
+#[must_use]
+pub fn lease_renewal_rejection(
+    current: &ExecutionLeaseStamp,
+    renewal: &LeaseRenewMessage,
+    now: &Instant,
+) -> Option<&'static str> {
+    if ![
         &current.issued_at,
         &current.expires_at,
         &renewal.prior_expires_at,
@@ -181,11 +190,31 @@ pub fn valid_lease_renewal(
     ]
     .into_iter()
     .all(canonical_instant)
-        && expected == renewal.lease
-        && current.issued_at.0 <= renewal.sent_at.0
-        && renewal.sent_at.0 <= now.0
-        && renewal.sent_at.0 < renewal.prior_expires_at.0
-        && renewal.prior_expires_at.0 < renewal.lease.expires_at.0
-        && now.0 < current.expires_at.0
-        && (current.expires_at == renewal.prior_expires_at || *current == renewal.lease)
+    {
+        return Some("noncanonical_time");
+    }
+    let mut expected = current.clone();
+    expected.expires_at = renewal.lease.expires_at.clone();
+    if expected != renewal.lease {
+        return Some("authority_mismatch");
+    }
+    if current.issued_at.0 > renewal.sent_at.0 {
+        return Some("sent_before_issued");
+    }
+    if renewal.sent_at.0 > now.0 {
+        return Some("sent_in_future");
+    }
+    if renewal.sent_at.0 >= renewal.prior_expires_at.0 {
+        return Some("sent_after_prior_expiry");
+    }
+    if renewal.prior_expires_at.0 >= renewal.lease.expires_at.0 {
+        return Some("nonextending_expiry");
+    }
+    if now.0 >= current.expires_at.0 {
+        return Some("consumed_after_expiry");
+    }
+    if current.expires_at != renewal.prior_expires_at && *current != renewal.lease {
+        return Some("prior_expiry_mismatch");
+    }
+    None
 }

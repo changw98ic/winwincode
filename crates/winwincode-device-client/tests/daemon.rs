@@ -283,8 +283,8 @@ impl ServerSim {
                     && !state.assigned
                 {
                     if self.enrollment_settled.load(Ordering::SeqCst) {
-                        return Err(ExchangeTransportError::new(
-                            "device credential authentication failed",
+                        return Err(ExchangeTransportError::from_network(
+                            winwincode_network::NetworkFailure::http(401, None),
                         ));
                     }
                     state.assigned = true;
@@ -417,22 +417,23 @@ impl ExchangeTransport for ArmedBlockingTransport {
 const DRIVE_SLEEP_CAP: Duration = Duration::from_millis(10);
 
 /// Drives the loop deterministically: at most `max_ticks` exchanges or
-/// waits, sleeping only the durations the loop itself schedules.
+/// waits, advancing the supplied monotonic clock by each scheduled delay.
 fn drive(daemon: &mut DeviceDaemon, shutdown: &AtomicBool, max_ticks: usize) {
+    let mut now = Instant::now();
     for _ in 0..max_ticks {
         if shutdown.load(Ordering::Relaxed) {
             return;
         }
-        match daemon.tick(Instant::now()) {
+        match daemon.tick(now) {
             Ok(outcome @ (TickOutcome::Waiting { .. } | TickOutcome::Retrying { .. })) => {
                 let ready_in = match outcome {
                     TickOutcome::Waiting { ready_in } => ready_in,
                     TickOutcome::Retrying { after, .. } => after,
                     TickOutcome::Exchanged { .. } => unreachable!("matched above"),
                 };
-                thread::sleep(ready_in.min(DRIVE_SLEEP_CAP).max(Duration::from_millis(1)));
+                now += ready_in.max(Duration::from_millis(1));
             }
-            Ok(TickOutcome::Exchanged { .. }) => thread::sleep(Duration::from_millis(2)),
+            Ok(TickOutcome::Exchanged { .. }) => now += Duration::from_millis(2),
             Err(error) => panic!("daemon tick failed fatally: {error:?}"),
         }
     }
@@ -580,7 +581,7 @@ fn network_errors_back_off_and_recover() {
     let (store, identity) = open_identity(&root);
     let transport = Arc::new(FlakyTransport {
         inner: sim.clone(),
-        failures_remaining: AtomicUsize::new(2),
+        failures_remaining: AtomicUsize::new(6),
     });
     let mut daemon =
         DeviceDaemon::start(config.clone(), store, transport, &identity).expect("daemon start");
@@ -589,8 +590,8 @@ fn network_errors_back_off_and_recover() {
 
     let status = daemon.status().clone();
     assert!(
-        status.exchanges_started >= status.exchanges_succeeded + 2,
-        "the two network failures must show as attempts without successes: {status:?}"
+        status.exchanges_started >= status.exchanges_succeeded + 6,
+        "a prolonged outage must retain all attempts and recover: {status:?}"
     );
     assert!(
         status.last_error.is_some(),
@@ -652,7 +653,7 @@ fn gap_response_triggers_replay_from_the_hint() {
 }
 
 #[test]
-fn a_lost_enrollment_response_never_reenrolls_and_keeps_backing_off() {
+fn a_lost_enrollment_response_never_reenrolls_and_stops_at_authentication_rejection() {
     let root = temporary_directory("daemon-enroll-lost");
     let sim = Arc::new(ServerSim::new());
     // The first enroll exchange settles server-side (the identity was
@@ -669,7 +670,21 @@ fn a_lost_enrollment_response_never_reenrolls_and_keeps_backing_off() {
     let mut daemon =
         DeviceDaemon::start(config.clone(), store, transport, &identity).expect("daemon start");
 
-    drive(&mut daemon, &AtomicBool::new(false), 60);
+    let mut now = Instant::now();
+    let stopped = loop {
+        match daemon.tick(now) {
+            Ok(TickOutcome::Waiting { ready_in }) => now += ready_in.max(Duration::from_millis(1)),
+            Ok(TickOutcome::Retrying { after, .. }) => now += after.max(Duration::from_millis(1)),
+            Ok(TickOutcome::Exchanged { .. }) => panic!("lost enrollment cannot settle"),
+            Err(error) => break error,
+        }
+    };
+    assert!(matches!(stopped, DaemonError::Network(_)));
+    assert_eq!(
+        daemon.status().exchanges_started,
+        2,
+        "one lost response followed by the permanent authentication rejection"
+    );
 
     let status = daemon.status().clone();
     assert!(
@@ -678,7 +693,7 @@ fn a_lost_enrollment_response_never_reenrolls_and_keeps_backing_off() {
     );
     assert!(!status.enrolled, "the adoption cannot complete: {status:?}");
     assert!(
-        status.consecutive_failures >= 2,
+        status.consecutive_failures == 2,
         "the refusals back off: {status:?}"
     );
     assert!(status.last_error.is_some(), "{status:?}");

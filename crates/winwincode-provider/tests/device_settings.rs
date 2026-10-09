@@ -122,7 +122,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
     database
         .execute_batch(
             "ALTER TABLE exchanges DROP COLUMN accounting_chunks;
-             DROP TABLE accounting_closed_attempts;
+             DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts;
              UPDATE identity SET private_key=zeroblob(32);
              PRAGMA user_version=8;",
         )
@@ -133,7 +133,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .expect("retained schema version");
     assert_eq!(version, 8, "a failed open must roll back the migration");
     database
-        .pragma_update(None, "user_version", 11)
+        .pragma_update(None, "user_version", 14)
         .expect("future schema");
     assert!(DeviceProviderStore::open(&directory).is_err());
     drop(database);
@@ -585,7 +585,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let before = store.snapshot("device-1").expect("snapshot");
         drop(store);
         let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        db.execute_batch("DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
+        db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
             .expect("old schema");
         db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
             .expect("old schema");
@@ -620,7 +620,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 10);
+        assert_eq!(upgraded, 13);
         let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),

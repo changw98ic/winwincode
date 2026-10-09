@@ -130,6 +130,10 @@ use crate::workrun_runtime_projection::{
     verification_result_json_schema, verification_role,
 };
 
+#[path = "interaction_timeout.rs"]
+mod interaction_timeout;
+use interaction_timeout::StoredInteractionTimeout;
+
 const FORMAT_REPAIR_PROMPT: &str = "Return only one corrected JSON object matching the active ChangeBatchProposal schema. Correct the preceding final answer's formatting or patch syntax. Do not call tools, modify files, broaden scope, or perform implementation work.";
 
 const DEFAULT_EVENT_POLL_MILLIS: u64 = 25;
@@ -191,6 +195,7 @@ pub struct ProductionCodexConfig {
     jev_context: Option<AgentJevContextSettings>,
     jev_judge: Option<String>,
     sealed_benchmark_tools: bool,
+    host_action_approvals: bool,
     gateway_route: ModelGatewayRoute,
     registered_capabilities: WorkerCapabilitySet,
     discovered_capabilities: Vec<CapabilityDescriptor>,
@@ -202,13 +207,20 @@ pub struct ProductionCodexConfig {
     #[cfg(feature = "test-support")]
     event_poll_faults: VecDeque<ProductionEventPollFault>,
     #[cfg(feature = "test-support")]
-    close_kernel_before_session_start: bool,
+    lifecycle_faults: ProductionLifecycleFaults,
     #[cfg(feature = "test-support")]
     submission_faults: VecDeque<ProductionSubmissionFault>,
     #[cfg(feature = "test-support")]
     delegated_transition_faults: VecDeque<ProductionDelegatedTransitionFault>,
     #[cfg(feature = "test-support")]
     format_repair_faults: VecDeque<ProductionFormatRepairFault>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Default)]
+struct ProductionLifecycleFaults {
+    close_kernel_before_session_start: bool,
+    interaction_timeout_exit: bool,
 }
 
 /// Test-only faults injected at the embedded Kernel event boundary.
@@ -260,31 +272,54 @@ impl ProductionCodexConfig {
     /// Rejects relative or missing paths, blank routing fields, execution
     /// modes without production routing, and malformed capability discovery.
     pub fn try_new(options: ProductionCodexOptions) -> Result<Self, ProductionCodexError> {
-        Self::try_new_with_helper(options, project_helper)
+        Self::try_new_with_helper(options, project_helper_checked)
     }
 
     fn try_new_with_helper(
         options: ProductionCodexOptions,
-        resolve_helper: impl FnOnce(&Path, &HelperReleaseManifest) -> Option<Arc<[u8]>>,
+        resolve_helper: impl FnOnce(
+            &Path,
+            &HelperReleaseManifest,
+        ) -> Result<Arc<[u8]>, ProductionCodexError>,
     ) -> Result<Self, ProductionCodexError> {
         released_production_execution_mode_required(options.execution_mode)?;
-        if !options.data_directory.is_absolute()
-            || !options.helper_executable.is_absolute()
-            || !valid_route_token(&options.provider)
-            || !valid_route_token(&options.model)
-            || !valid_route_token(&options.gateway_route.route)
-            || !valid_route_token(&options.gateway_route.capability)
-            || options.execution_envelope.version == 0
-            || !valid_sha256_digest(&options.execution_envelope.digest.0)
-        {
-            return Err(ProductionCodexError::new(
-                ProductionCodexErrorKind::InvalidConfiguration,
-                "production Codex configuration is invalid",
-            ));
+        for (valid, code) in [
+            (
+                options.data_directory.is_absolute(),
+                "CODEX_DATA_PATH_INVALID",
+            ),
+            (
+                options.helper_executable.is_absolute(),
+                "HELPER_PATH_INVALID",
+            ),
+            (
+                valid_route_token(&options.provider),
+                "MODEL_PROVIDER_INVALID",
+            ),
+            (valid_route_token(&options.model), "MODEL_ID_INVALID"),
+            (
+                valid_route_token(&options.gateway_route.route),
+                "MODEL_GATEWAY_ROUTE_INVALID",
+            ),
+            (
+                valid_route_token(&options.gateway_route.capability),
+                "MODEL_GATEWAY_CAPABILITY_INVALID",
+            ),
+            (
+                options.execution_envelope.version > 0,
+                "EXECUTION_ENVELOPE_VERSION_INVALID",
+            ),
+            (
+                valid_sha256_digest(&options.execution_envelope.digest.0),
+                "EXECUTION_ENVELOPE_DIGEST_INVALID",
+            ),
+        ] {
+            if !valid {
+                return Err(configuration_failure(code));
+            }
         }
         let helper_bytes =
-            resolve_helper(&options.helper_executable, &options.helper_release_manifest)
-                .ok_or_else(invalid_configuration)?;
+            resolve_helper(&options.helper_executable, &options.helper_release_manifest)?;
         WorkerCapabilityCatalog::discover(
             &options.registered_capabilities,
             options.discovered_capabilities.clone(),
@@ -309,6 +344,7 @@ impl ProductionCodexConfig {
             jev_judge: None,
             jev_context: None,
             sealed_benchmark_tools: false,
+            host_action_approvals: false,
             gateway_route: options.gateway_route,
             registered_capabilities: options.registered_capabilities,
             discovered_capabilities: options.discovered_capabilities,
@@ -320,7 +356,7 @@ impl ProductionCodexConfig {
             #[cfg(feature = "test-support")]
             event_poll_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
-            close_kernel_before_session_start: false,
+            lifecycle_faults: ProductionLifecycleFaults::default(),
             #[cfg(feature = "test-support")]
             submission_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
@@ -342,7 +378,7 @@ impl ProductionCodexConfig {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_closed_kernel_before_session_start(mut self) -> Self {
-        self.close_kernel_before_session_start = true;
+        self.lifecycle_faults.close_kernel_before_session_start = true;
         self
     }
 
@@ -350,6 +386,23 @@ impl ProductionCodexConfig {
     #[must_use]
     pub fn with_sealed_benchmark_tools(mut self) -> Self {
         self.sealed_benchmark_tools = true;
+        self
+    }
+
+    /// Assigns tool approval ownership to the existing `ExecutionPort` action gate.
+    /// The host must already hold the operator's task authorization. This does
+    /// not expand sandbox, capability, lease, or receipt authority.
+    #[must_use]
+    pub fn with_host_action_approvals(mut self) -> Self {
+        self.host_action_approvals = true;
+        self
+    }
+
+    /// Exits a test subprocess after resolving an expired interaction, before delivery cleanup.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn with_test_interaction_timeout_exit(mut self) -> Self {
+        self.lifecycle_faults.interaction_timeout_exit = true;
         self
     }
 
@@ -551,20 +604,25 @@ impl ProductionCodexAdapter {
         // `create_dir_all` follow a caller-provided final symlink and then
         // chmod an unrelated directory.  The same check is repeated by the
         // Kernel for its own root and by the store for its database files.
-        ensure_private_directory(&config.data_directory).map_err(|_| unavailable())?;
-        ensure_private_directory(&config.kernel_home).map_err(|_| unavailable())?;
+        ensure_private_directory(&config.data_directory)
+            .map_err(|_| unavailable().at_bootstrap_stage("CODEX_DATA_ROOT_UNAVAILABLE"))?;
+        ensure_private_directory(&config.kernel_home)
+            .map_err(|_| unavailable().at_bootstrap_stage("KERNEL_HOME_UNAVAILABLE"))?;
         config.helper_executable = seal_helper(
             &config.helper_executable,
             Some(config.helper_bytes.as_ref()),
             &config.data_directory,
             &config.helper_release_manifest,
-        )?;
+        )
+        .map_err(|error| error.at_bootstrap_stage("HELPER_INSTALLATION_FAILED"))?;
         let capability_catalog = WorkerCapabilityCatalog::discover(
             &config.registered_capabilities,
             config.discovered_capabilities.clone(),
         )
         .map_err(|_| invalid_configuration())?;
-        let store = AdapterStore::open(&config.data_directory).map_err(map_store_error)?;
+        let store = AdapterStore::open(&config.data_directory).map_err(|error| {
+            map_store_error(error).at_bootstrap_stage("CODEX_STORE_OPEN_FAILED")
+        })?;
         migrate_stored_run_role_policies_v1_to_v2(&store)?;
         let outbox = ExecutionOutbox::open(store.clone()).map_err(map_store_error)?;
         let candidate_artifacts =
@@ -601,14 +659,12 @@ impl ProductionCodexAdapter {
             options
         };
         let kernel = Arc::new(
-            Kernel::new(kernel_options, bridge.model_port(), action_gate.clone()).map_err(
-                |_| {
-                    ProductionCodexError::new(
-                        ProductionCodexErrorKind::Kernel,
-                        "embedded Codex Kernel could not start",
-                    )
-                },
-            )?,
+            Kernel::new(kernel_options, bridge.model_port(), action_gate.clone())
+                .map_err(|error| {
+                    classified_kernel_error(CodexFailureStage::SessionCreate, &error)
+                        .at_bootstrap_stage("KERNEL_INITIALIZATION_FAILED")
+                })?
+                .with_host_action_approvals(config.host_action_approvals),
         );
         Ok(Self {
             config,
@@ -893,9 +949,11 @@ impl ProductionCodexAdapter {
         .map_err(|_| invalid_job())?;
         let prompt =
             result.and_then(|panel| crate::durable_fusion::aggregation_prompt(&goal, &panel));
-        match prompt {
-            Ok(prompt) => self.submit_kernel_turn(thread_id, &prompt).await?,
-            Err(_) => self.retain_submission_failure(&run_key).await?,
+        if let Ok(prompt) = prompt {
+            self.submit_kernel_turn(thread_id, &prompt).await?;
+        } else {
+            self.retain_infrastructure_failure_code(&run_key, "FUSION_PANEL_FAILED")?;
+            self.retain_submission_failure(&run_key).await?;
         }
         Ok(true)
     }
@@ -965,6 +1023,7 @@ impl ProductionCodexAdapter {
             }
             ExactTurnReconciliation::Started { .. }
             | ExactTurnReconciliation::NotSubmitted { .. } => {
+                self.retain_infrastructure_failure_code(&run_key, "KERNEL_TURN_IDENTITY_INVALID")?;
                 self.retain_submission_failure(&run_key).await?;
                 return Err(kernel_error());
             }
@@ -1443,11 +1502,31 @@ impl ProductionCodexAdapter {
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        // Replayed completion events cannot spend another repair round.
+        if run.record.terminal.is_none()
+            && run
+                .record
+                .format_repair
+                .as_ref()
+                .is_some_and(|repair| repair.turn_id != turn_id)
+        {
+            return Ok(CodexPoll::Pending);
+        }
+        let repair_round = run
+            .record
+            .format_repair
+            .as_ref()
+            .map_or(1, |repair| repair.round.saturating_add(1));
+        let repair_limit = if verification_role(&run.record.job.execution_profile) {
+            3
+        } else {
+            1
+        };
         if failed
             || matches!(failure, StageCompletionFailure::Unavailable)
             || !(verification_role(&run.record.job.execution_profile)
                 || run.record.job.execution_profile == "planner")
-            || run.record.format_repair.is_some()
+            || repair_round > repair_limit
             || run.record.terminal.is_some()
             || run.record.final_candidate_freeze.is_some()
         {
@@ -1484,6 +1563,7 @@ impl ProductionCodexAdapter {
             .map_err(map_store_error)?;
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.record.format_repair = Some(StoredFormatRepair {
+            round: repair_round,
             turn_id: canonical_parts_id(
                 "trn",
                 b"winwincode.verification-format-repair.v1",
@@ -1778,6 +1858,31 @@ impl ProductionCodexAdapter {
             .mark_performance_projection_retained(run_key)
             .map_err(map_store_error)?;
         Ok(message)
+    }
+
+    fn retain_infrastructure_failure_code(
+        &mut self,
+        run_key: &str,
+        code: &'static str,
+    ) -> Result<(), ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        // Preserve the historical audit field and publish through the shared diagnostic path.
+        let mut changed = false;
+        if run.record.infrastructure_failure_code.is_none() {
+            run.record.infrastructure_failure_code = Some(code.to_owned());
+            changed = true;
+        }
+        if run.record.failure_diagnostic.is_none() && run.record.terminal.is_none() {
+            run.record.failure_diagnostic = Some(CodexFailureDiagnostic::new(
+                CodexFailureStage::AdapterOperation,
+                code,
+            ));
+            changed = true;
+        }
+        if changed {
+            self.persist_run(run_key)?;
+        }
+        Ok(())
     }
 
     async fn poll_infrastructure_terminal(
@@ -2151,12 +2256,9 @@ impl ProductionCodexAdapter {
             }
             CodexEventMsg::RequestUserInput(request) => {
                 if let Some(message) = self.retain_input_request(run_key, &request)? {
-                    self.outbox
-                        .retain(&ExecutionPortMessage::InputRequestMessage(message.clone()))
-                        .map_err(map_store_error)?;
-                    self.action_gate
-                        .enqueue_message(ExecutionPortMessage::InputRequestMessage(message))
-                        .map_err(|_| unavailable())?;
+                    self.enqueue_interaction_request(ExecutionPortMessage::InputRequestMessage(
+                        message,
+                    ))?;
                 }
                 Ok(CodexPoll::Pending)
             }
@@ -2286,6 +2388,13 @@ impl ProductionCodexAdapter {
         completed: &codex_protocol::protocol::TurnCompleteEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        if self.runs.get(run_key).is_some_and(|run| {
+            run.record.format_repair.as_ref().is_some_and(|repair| {
+                repair.rejection.is_some() && repair.turn_id != completed.turn_id
+            })
+        }) {
+            return Ok(CodexPoll::Pending);
+        }
         if let Some(error) = &completed.error {
             self.retain_failure_diagnostic(
                 run_key,
@@ -2464,7 +2573,7 @@ impl ProductionCodexAdapter {
             self.runs
                 .get_mut(run_key)
                 .ok_or_else(unknown_thread)?
-                .batch_intent_emission = OneShotState::Consumed;
+                .batch_intent_emission = OperationDelivery::delivered(&event.identity.batch_id.0);
             Ok(CodexPoll::ChangeBatchProposed(Box::new(event)))
         } else {
             let bounded_transition = self.runs.get(run_key).and_then(|run| {
@@ -2499,6 +2608,7 @@ impl ProductionCodexAdapter {
                 );
                 let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
                 run.record.format_repair = Some(StoredFormatRepair {
+                    round: 1,
                     turn_id: repair_turn_id,
                     submitted: false,
                     prompt: None,
@@ -2575,13 +2685,16 @@ impl ProductionCodexAdapter {
         run_key: &str,
     ) -> Result<Option<CodexPoll>, ProductionCodexError> {
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
-        if run.batch_intent_emission == OneShotState::Consumed {
-            return Ok(None);
-        }
         let Some(intent) = run.record.batch_intent.as_ref() else {
             return Ok(None);
         };
-        run.batch_intent_emission = OneShotState::Consumed;
+        if run
+            .batch_intent_emission
+            .matches(&intent.event.identity.batch_id.0)
+        {
+            return Ok(None);
+        }
+        run.batch_intent_emission = OperationDelivery::delivered(&intent.event.identity.batch_id.0);
         Ok(Some(CodexPoll::ChangeBatchProposed(Box::new(
             intent.event.clone(),
         ))))
@@ -2608,19 +2721,20 @@ impl ProductionCodexAdapter {
             if run.record.batch_intent.is_some()
                 || run.record.terminal.is_some()
                 || run.record.final_candidate_freeze.is_some()
-                || run.format_repair_reconciliation == OneShotState::Consumed
             {
                 return Ok(None);
             }
             let Some(repair) = run.record.format_repair.clone() else {
                 return Ok(None);
             };
+            if run.format_repair_reconciliation.matches(&repair.turn_id) {
+                return Ok(None);
+            }
             let authority = self.bridge.authority();
             authority.update_now(now).map_err(map_bridge_error)?;
             authority
                 .validate_current(&run.binding.authority, now)
                 .map_err(|_| invalid_job())?;
-            run.format_repair_reconciliation = OneShotState::Consumed;
             (
                 run.record.kernel_session_id.clone(),
                 repair.turn_id,
@@ -2655,6 +2769,12 @@ impl ProductionCodexAdapter {
                 }
                 self.persist_run(run_key)?;
                 self.retain_stage_turn_started(run_key, &repair.1, now)?;
+                // Commit the delivery cursor only after durable submission. If this
+                // future is cancelled earlier, exact-turn reconciliation owns replay.
+                self.runs
+                    .get_mut(run_key)
+                    .ok_or_else(unknown_thread)?
+                    .format_repair_reconciliation = OperationDelivery::delivered(&repair.1);
                 Ok(Some(CodexPoll::Pending))
             }
             ExactTurnReconciliation::Completed(terminal) if terminal.turn_id == repair.1 => {
@@ -2705,6 +2825,7 @@ impl ProductionCodexAdapter {
             | ExactTurnReconciliation::Completed(_)
             | ExactTurnReconciliation::Failed(_)
             | ExactTurnReconciliation::NotSubmitted { .. } => {
+                self.retain_infrastructure_failure_code(run_key, "KERNEL_TURN_IDENTITY_INVALID")?;
                 if self.is_stage_result_run(run_key) {
                     self.retain_stage_failure(run_key, now).map(Some)
                 } else {
@@ -3145,6 +3266,7 @@ impl ProductionCodexAdapter {
                 question.id.as_bytes(),
             ],
         );
+        let timed_out = self.has_interaction_timeout(run_key, &input_request_id);
         let choice_replay_keys = interactive_input_choice_replay_keys(question)?;
         let request_digest =
             private_payload_digest(b"winwincode.kernel-input-request.v1", request)?;
@@ -3161,7 +3283,7 @@ impl ProductionCodexAdapter {
             // already-resolved operation; any changed request remains a
             // conflict.
             if existing.run_key != run_key
-                || existing.kernel_session_id != run.record.kernel_session_id
+                || (!timed_out && existing.kernel_session_id != run.record.kernel_session_id)
                 || existing.question_id != question.id
                 || existing.turn_id != turn_id
                 || existing.request_digest != request_digest
@@ -3187,7 +3309,7 @@ impl ProductionCodexAdapter {
                 .retain_input_operation(&operation)
                 .map_err(map_store_error)?
         };
-        if operation.state == StoredInputOperationState::Resolved {
+        if operation.state == StoredInputOperationState::Resolved && !timed_out {
             return Ok(None);
         }
         let choices = project_interactive_input_choices(
@@ -3201,7 +3323,7 @@ impl ProductionCodexAdapter {
         } else {
             InteractiveInputMode::Text
         };
-        Ok(Some(InputRequestMessage {
+        let generated = InputRequestMessage {
             allow_empty: false,
             choices,
             expires_at: authority.lease.expires_at.clone(),
@@ -3224,7 +3346,8 @@ impl ProductionCodexAdapter {
             sent_at: authority.lease.issued_at.clone(),
             session_identity: authority.session_identity.clone(),
             worker_session_id: authority.worker_session_id.clone(),
-        }))
+        };
+        Ok(Some(self.original_input_request(generated, timed_out)?))
     }
 
     /// A business outcome is sealed by its authority, original frame and Core cut.
@@ -3288,6 +3411,9 @@ impl ProductionCodexAdapter {
         kernel_live: bool,
         recovered: bool,
     ) -> Result<CodexThreadId, ProductionCodexError> {
+        if record.host_action_approvals != self.config.host_action_approvals {
+            return Err(configuration_failure("APPROVAL_OWNER_RESTART_MISMATCH"));
+        }
         let thread_id = binding.canonical_thread_id.clone();
         let replay = load_runtime_messages(&mut self.store, &binding)?;
         for message in &replay {
@@ -3398,9 +3524,15 @@ impl ProductionCodexAdapter {
                 {
                     return Err(conflict());
                 }
+                if record.interaction_timeouts.iter().any(|timeout| {
+                    matches!(&timeout.request, ExecutionPortMessage::ApprovalRequestMessage(request)
+                        if request.approval_id.0 == operation.approval_id)
+                }) {
+                    continue;
+                }
                 self.action_gate
                     .enqueue_message(ExecutionPortMessage::ApprovalRequestMessage(
-                        approval_request_message(&operation, &binding.authority),
+                        self.original_approval_request(&operation, &binding.authority)?,
                     ))
                     .map_err(|_| unavailable())?;
             }
@@ -3416,8 +3548,8 @@ impl ProductionCodexAdapter {
                 kernel_live,
                 kernel_close_pending: false,
                 recovered,
-                batch_intent_emission: OneShotState::Ready,
-                format_repair_reconciliation: OneShotState::Ready,
+                batch_intent_emission: OperationDelivery::default(),
+                format_repair_reconciliation: OperationDelivery::default(),
                 pending_fusion: None,
             },
         );
@@ -3454,15 +3586,10 @@ impl ProductionCodexAdapter {
     }
 
     fn enqueue_approval_request(
-        &self,
+        &mut self,
         message: ApprovalRequestMessage,
     ) -> Result<CodexPoll, ProductionCodexError> {
-        let frame = ExecutionPortMessage::ApprovalRequestMessage(message);
-        self.outbox.retain(&frame).map_err(map_store_error)?;
-        self.action_gate
-            .enqueue_message(frame)
-            .map_err(|_| unavailable())?;
-        Ok(CodexPoll::Pending)
+        self.enqueue_interaction_request(ExecutionPortMessage::ApprovalRequestMessage(message))
     }
 
     fn retain_mcp_approval_request(
@@ -3495,8 +3622,14 @@ impl ProductionCodexAdapter {
             .clone()
             .unwrap_or_else(|| request.call_id.clone());
         let turn_id = non_empty(request.turn_id.clone());
+        // Core creates a fresh observation timestamp when the same exact
+        // callback is replayed. That timestamp is not permission authority.
+        // Keep every command, target, scope and policy field in the digest;
+        // the original outbox frame remains the immutable deadline authority.
+        let mut authority_request = request.clone();
+        authority_request.started_at_ms = 0;
         let request_digest =
-            private_payload_digest(b"winwincode.exec-approval-request.v1", request)?;
+            private_payload_digest(b"winwincode.exec-approval-request.v1", &authority_request)?;
         let detail = exec_approval_detail(request, &request_digest);
         self.retain_approval_request(
             run_key,
@@ -3590,7 +3723,7 @@ impl ProductionCodexAdapter {
                 .map_err(map_store_error)?;
         }
         let authority = &run.binding.authority;
-        Ok(approval_request_message(&operation, authority))
+        self.original_approval_request(&operation, authority)
     }
 
     async fn accept_approval_decision_exact(
@@ -3608,7 +3741,8 @@ impl ProductionCodexAdapter {
             .get(&operation.run_key)
             .ok_or_else(unknown_thread)?;
         let authority = &run.binding.authority;
-        if decision.lease != authority.lease
+        let kernel_session_id = run.record.kernel_session_id.clone();
+        if !retained_lease_matches_current(&decision.lease, &authority.lease)
             || decision.worker_session_id != authority.worker_session_id
             || decision.session_identity != authority.session_identity
             || decision.sent_at != decision.decided_at
@@ -3617,6 +3751,7 @@ impl ProductionCodexAdapter {
             || !canonical_instant(&authority.lease.issued_at)
             || !canonical_instant(&authority.lease.expires_at)
             || decision.decided_at.0 < authority.lease.issued_at.0
+            || decision.decided_at.0 > received_at.0
             || decision.decided_at.0 >= authority.lease.expires_at.0
             || received_at.0 < authority.lease.issued_at.0
             || received_at.0 >= authority.lease.expires_at.0
@@ -3640,6 +3775,8 @@ impl ProductionCodexAdapter {
                 .map_err(map_store_error)?;
             return Ok(());
         }
+        self.ensure_approval_deadline(&operation, decision, received_at)
+            .await?;
         if operation.operation_kind == StoredApprovalOperationKind::Mcp
             && decision.decision == ApprovalDecisionMessageDecision::Approved
             && (operation.detail.is_none() || decision.scope != ApprovalDecisionMessageScope::Once)
@@ -3664,7 +3801,7 @@ impl ProductionCodexAdapter {
             ) => ApprovalDecision::Abort,
         };
         let response = ApprovalResponse {
-            session_id: run.record.kernel_session_id.clone(),
+            session_id: kernel_session_id,
             kind: match operation.operation_kind {
                 StoredApprovalOperationKind::Exec => ApprovalKind::Exec,
                 StoredApprovalOperationKind::Patch => ApprovalKind::Patch,
@@ -3752,6 +3889,8 @@ impl ProductionCodexAdapter {
                 &record.kernel_session_id,
             )
             .map_err(map_store_error)?;
+        self.recover_pending_input_requests(run_key, record)?;
+        self.recover_interaction_timeouts(run_key, record)?;
         self.store
             .save_run(run_key, record)
             .map_err(map_store_error)?;
@@ -3948,7 +4087,7 @@ fn complete_reconciled_turn(
                 .runs
                 .get_mut(run_key)
                 .ok_or_else(unknown_thread)?
-                .batch_intent_emission = OneShotState::Ready;
+                .batch_intent_emission = OperationDelivery::default();
         }
         return Ok(());
     }
@@ -4271,6 +4410,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.action_gate
             .update_now(now)
             .map_err(|_| unavailable())?;
+        self.expire_retained_interactions(now)?;
         self.kernel
             .enforce_private_permissions()
             .map_err(|_| kernel_error())
@@ -4327,6 +4467,43 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 }
                 responses
             }));
+    }
+
+    fn recovered_worker_session_id(
+        &mut self,
+        dispatch: &winwincode_execution_port::generated::JobDispatchMessage,
+    ) -> Result<Option<winwincode_domain::WorkerSessionId>, Self::Error> {
+        let run_key = crate::CodexRunKey::from_dispatch(dispatch)
+            .canonical_digest()
+            .map_err(|_| conflict())?
+            .0;
+        let Some(record) = load_stored_run(&self.store, &run_key)? else {
+            return Ok(None);
+        };
+        let (retained_key, bytes) = self
+            .store
+            .load_model_thread_lineage(&record.canonical_thread_id.0)
+            .map_err(map_store_error)?
+            .ok_or_else(conflict)?;
+        let authority: ModelLeaseAuthority =
+            serde_json::from_slice(&bytes).map_err(|_| conflict())?;
+        let expected_thread = crate::CodexRunKey::from_dispatch(dispatch)
+            .canonical_thread_id()
+            .map_err(|_| conflict())?;
+        if retained_key != run_key
+            || record.snapshot_id != dispatch.snapshot_id
+            || record.job != dispatch.job
+            || record.job_digest
+                != stage_product_job_digest(&dispatch.job).map_err(|_| conflict())?
+            || record.canonical_thread_id != expected_thread
+            || authority.lease != dispatch.lease
+            || authority.worker_session_id != authority.session_identity.worker_session_id
+            || authority.session_identity.codex_thread_id != expected_thread
+            || !valid_prefixed_id(&authority.worker_session_id.0, "wsn_")
+        {
+            return Err(conflict());
+        }
+        Ok(Some(authority.worker_session_id))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4454,7 +4631,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }
         let repository_rule_pack = load_repository_rule_pack(&workspace)?;
         #[cfg(feature = "test-support")]
-        if std::mem::take(&mut self.config.close_kernel_before_session_start) {
+        if std::mem::take(
+            &mut self
+                .config
+                .lifecycle_faults
+                .close_kernel_before_session_start,
+        ) {
             self.kernel.shutdown().await.map_err(|error| {
                 classified_kernel_error(CodexFailureStage::SessionCreate, &error)
             })?;
@@ -4470,6 +4652,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .await
             .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, &error))?;
         let record = StoredRun {
+            host_action_approvals: self.config.host_action_approvals,
             snapshot_id: start.snapshot_id.cloned(),
             job: start.job.clone(),
             workspace_revision: start.workspace_revision.clone(),
@@ -4490,6 +4673,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             terminal: None,
             failure_diagnostic: None,
             terminal_trace: None,
+            infrastructure_failure_code: None,
             current_turn_id: None,
             last_agent_message: None,
             stage_product_sources: Vec::new(),
@@ -4506,6 +4690,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             terminal_message_id: None,
             post_action_traces: Vec::new(),
             pending_completion: None,
+            interaction_timeouts: Vec::new(),
+            recovered_input_requests: Vec::new(),
         };
         self.store
             .save_run(&run_key, &record)
@@ -4761,7 +4947,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }
             run.record.delegated_budget = Some(transition.budget.clone());
             run.record.batch_intent = None;
-            run.batch_intent_emission = OneShotState::Consumed;
+            run.batch_intent_emission = OperationDelivery::default();
             run.record
                 .delegated_transitions
                 .push(StoredDelegatedTransition {
@@ -5061,6 +5247,28 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         Ok(terminal_outcome_usage(&self.store, run_key, &run.record))
     }
 
+    fn release_poll_delivery(
+        &mut self,
+        thread_id: &CodexThreadId,
+        delivery: &CodexPoll,
+    ) -> Result<(), Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+        if let CodexPoll::ChangeBatchProposed(event) = delivery
+            && run
+                .record
+                .batch_intent
+                .as_ref()
+                .is_some_and(|intent| intent.event.identity == event.identity)
+            && run
+                .batch_intent_emission
+                .matches(&event.identity.batch_id.0)
+        {
+            run.batch_intent_emission = OperationDelivery::default();
+        }
+        Ok(())
+    }
+
     async fn poll(
         &mut self,
         thread_id: &CodexThreadId,
@@ -5109,6 +5317,13 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 .await?
                 .unwrap_or(CodexPoll::Pending));
         }
+        // A durable terminal decision takes precedence over earlier operation
+        // intents. Retain those facts for audit, but never replay a batch or
+        // submit a continuation after cancellation or failure has settled.
+        if let Some(terminal) = self.poll_retained_terminal(&run_key)? {
+            return Ok(terminal);
+        }
+        self.settle_interaction_deadlines(&run_key, now).await?;
         let pending_delegated_turn = self.runs.get(&run_key).and_then(|run| {
             run.record
                 .delegated_transitions
@@ -5140,9 +5355,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }
         if let Some(repair) = self.reconcile_format_repair(&run_key, now).await? {
             return Ok(repair);
-        }
-        if let Some(terminal) = self.poll_retained_terminal(&run_key)? {
-            return Ok(terminal);
         }
         if self.poll_fusion_panel(thread_id).await? {
             return Ok(CodexPoll::Pending);
@@ -5250,6 +5462,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             || !canonical_instant(&authority.lease.issued_at)
             || !canonical_instant(&authority.lease.expires_at)
             || response.responded_at.0 < authority.lease.issued_at.0
+            || response.responded_at.0 > received_at.0
             || response.responded_at.0 >= authority.lease.expires_at.0
             || received_at.0 < authority.lease.issued_at.0
             || received_at.0 >= authority.lease.expires_at.0
@@ -5258,21 +5471,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        let value = match response.status {
-            InputResponseMessageStatus::Provided => {
-                let value = response.value.as_ref().ok_or_else(conflict)?;
-                if value.value.trim().is_empty() {
-                    return Err(conflict());
-                }
-                Some(value.value.clone())
-            }
-            InputResponseMessageStatus::Cancelled | InputResponseMessageStatus::Expired => {
-                if response.value.is_some() {
-                    return Err(conflict());
-                }
-                None
-            }
-        };
+        let value = interaction_timeout::input_response_value(response)?;
         // Advance the shared trusted clock only after the response has passed
         // all identity, lease, shape, and value checks.  An invalid response
         // must not be able to push a later valid operation past its lease.
@@ -5296,6 +5495,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 ))
                 .map_err(map_store_error);
         }
+        self.ensure_input_deadline(&operation, response, received_at)
+            .await?;
         let mut answers = HashMap::new();
         answers.insert(
             operation.question_id.clone(),
@@ -5432,6 +5633,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         at: &Instant,
     ) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        self.retain_infrastructure_failure_code(&run_key, "EXECUTION_DELIVERY_REJECTED")?;
         let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
         // Preserve existing immutable terminal authority. Worker can report the
         // transport failure while retaining the actual completed Core/candidate facts.
@@ -5875,7 +6077,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.action_gate
             .cancel_session(&session)
             .map_err(|_| unavailable())?;
-        // A repeat/infrastructure stop can already have closed this exact
+        // A prior terminal outcome can already have closed this exact
         // Kernel session while its durable terminal trace is still pending.
         // Cancel the retained bridge and authority without interrupting a
         // session that has already been unregistered.
@@ -6199,15 +6401,28 @@ struct ActiveRun {
     // Process-local close progress; durable final authority remains in StoredRun.
     kernel_close_pending: bool,
     recovered: bool,
-    batch_intent_emission: OneShotState,
-    format_repair_reconciliation: OneShotState,
+    batch_intent_emission: OperationDelivery,
+    format_repair_reconciliation: OperationDelivery,
     pending_fusion: Option<crate::FusionPanelFuture>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OneShotState {
-    Ready,
-    Consumed,
+// A delivery cursor is scoped to one durable logical operation. A new
+// operation never inherits another operation's consumed flag. In-flight work
+// uses exclusive adapter ownership; no latch survives cancellation or error.
+// This cursor is only an optimization. Durable intent and Core exact-turn
+// reconciliation remain authoritative after restart. One-use action receipts
+// and terminal ACKs have separate permanent consumption records.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct OperationDelivery(Option<String>);
+
+impl OperationDelivery {
+    fn delivered(identity: &str) -> Self {
+        Self(Some(identity.to_owned()))
+    }
+
+    fn matches(&self, identity: &str) -> bool {
+        self.0.as_deref() == Some(identity)
+    }
 }
 
 fn load_stored_run(
@@ -6259,6 +6474,8 @@ fn migrate_stored_run_role_policies_v1_to_v2(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
+    #[serde(default)]
+    host_action_approvals: bool,
     snapshot_id: Option<winwincode_domain::SnapshotId>,
     job: ExecutionJob,
     workspace_revision: WorkspaceRevision,
@@ -6280,6 +6497,8 @@ struct StoredRun {
     #[serde(default)]
     failure_diagnostic: Option<CodexFailureDiagnostic>,
     terminal_trace: Option<StoredTerminalTrace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    infrastructure_failure_code: Option<String>,
     #[serde(default)]
     current_turn_id: Option<String>,
     #[serde(default)]
@@ -6321,6 +6540,10 @@ struct StoredRun {
     post_action_traces: Vec<StoredPostActionTrace>,
     #[serde(default)]
     pending_completion: Option<StoredPendingCompletion>,
+    #[serde(default)]
+    interaction_timeouts: Vec<StoredInteractionTimeout>,
+    #[serde(default)]
+    recovered_input_requests: Vec<ExecutionMessageId>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -6426,12 +6649,18 @@ struct StoredBatchIntent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredFormatRepair {
+    #[serde(default = "first_repair_round")]
+    round: u8,
     turn_id: String,
     submitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejection: Option<StoredResultRejection>,
+}
+
+const fn first_repair_round() -> u8 {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -7485,37 +7714,58 @@ fn install_linux_sandbox_alias(helper: &Path) -> Result<PathBuf, ProductionCodex
     Ok(alias)
 }
 
+#[cfg(test)]
 fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[u8]>> {
-    let Ok(current_executable) = std::env::current_exe().and_then(|path| path.canonicalize())
-    else {
-        return None;
-    };
-    let current_directory = current_executable.parent()?;
+    project_helper_checked(path, manifest).ok()
+}
+
+fn project_helper_checked(
+    path: &Path,
+    manifest: &HelperReleaseManifest,
+) -> Result<Arc<[u8]>, ProductionCodexError> {
+    let current_executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|_| configuration_failure("HELPER_HOST_IDENTITY_UNAVAILABLE"))?;
+    let current_directory = current_executable
+        .parent()
+        .ok_or_else(|| configuration_failure("HELPER_HOST_RELEASE_UNAVAILABLE"))?;
     let release_directory =
         if current_directory.file_name().and_then(|name| name.to_str()) == Some("deps") {
             current_directory.parent().unwrap_or(current_directory)
         } else {
             current_directory
         };
-    project_helper_in_release(path, manifest, release_directory)
+    project_helper_in_release_checked(path, manifest, release_directory)
 }
 
+#[cfg(test)]
 fn project_helper_in_release(
     path: &Path,
     manifest: &HelperReleaseManifest,
     release_directory: &Path,
 ) -> Option<Arc<[u8]>> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
+    project_helper_in_release_checked(path, manifest, release_directory).ok()
+}
+
+fn project_helper_in_release_checked(
+    path: &Path,
+    manifest: &HelperReleaseManifest,
+    release_directory: &Path,
+) -> Result<Arc<[u8]>, ProductionCodexError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| configuration_failure("HELPER_IMAGE_METADATA_UNAVAILABLE"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
+        return Err(configuration_failure("HELPER_IMAGE_NOT_REGULAR"));
     }
-    let canonical_path = path.canonicalize().ok()?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|_| configuration_failure("HELPER_IMAGE_PATH_UNAVAILABLE"))?;
     if manifest.path().parent() != Some(release_directory)
         || canonical_path.parent() != Some(release_directory)
         || !canonical_path.is_file()
         || canonical_path.file_name().and_then(|name| name.to_str()) != Some(manifest.binary_path())
     {
-        return None;
+        return Err(configuration_failure("HELPER_RELEASE_LAYOUT_MISMATCH"));
     }
     #[cfg(unix)]
     {
@@ -7528,7 +7778,7 @@ fn project_helper_in_release(
             env!("CARGO_PKG_VERSION"),
             env!("WINWINCODE_HELPER_SOURCE_SHA256")
         );
-        validate_helper_image(
+        validate_helper_image_checked(
             &canonical_path,
             manifest,
             HELPER_RELEASE_BINARY_MODE,
@@ -7538,7 +7788,7 @@ fn project_helper_in_release(
     }
     #[cfg(not(unix))]
     {
-        None
+        Err(configuration_failure("HELPER_PLATFORM_UNSUPPORTED"))
     }
 }
 
@@ -7737,14 +7987,9 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn bounded_helper_handshake(path: &Path, expected: &[u8]) -> bool {
     bounded_helper_probe(path, "--winwincode-helper-handshake", expected)
-}
-
-#[cfg(unix)]
-fn bounded_helper_identity(path: &Path, expected: &[u8]) -> bool {
-    bounded_helper_probe(path, "--winwincode-helper-identity", expected)
 }
 
 #[cfg(unix)]
@@ -7755,14 +8000,27 @@ fn validate_helper_image(
     handshake: &[u8],
     identity: &[u8],
 ) -> Option<Arc<[u8]>> {
-    let bytes = read_helper_bytes(path).ok()?;
-    if helper_digest(&bytes) != manifest.binary_digest().0
-        || !path.metadata().is_ok_and(|metadata| {
-            metadata.permissions().mode() & 0o777 == required_mode
-                && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
-        })
-    {
-        return None;
+    validate_helper_image_checked(path, manifest, required_mode, handshake, identity).ok()
+}
+
+#[cfg(unix)]
+fn validate_helper_image_checked(
+    path: &Path,
+    manifest: &HelperReleaseManifest,
+    required_mode: u32,
+    handshake: &[u8],
+    identity: &[u8],
+) -> Result<Arc<[u8]>, ProductionCodexError> {
+    let bytes =
+        read_helper_bytes(path).map_err(|_| configuration_failure("HELPER_IMAGE_READ_FAILED"))?;
+    if helper_digest(&bytes) != manifest.binary_digest().0 {
+        return Err(configuration_failure("HELPER_IMAGE_DIGEST_MISMATCH"));
+    }
+    if !path.metadata().is_ok_and(|metadata| {
+        metadata.permissions().mode() & 0o777 == required_mode
+            && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
+    }) {
+        return Err(configuration_failure("HELPER_IMAGE_MODE_MISMATCH"));
     }
     let validation_key = format!(
         "{}\0{}\0{}",
@@ -7770,25 +8028,36 @@ fn validate_helper_image(
         manifest.package_version(),
         manifest.source_sha256()
     );
-    let Ok(mut validated) = HELPER_VALIDATIONS.lock() else {
-        return None;
-    };
+    let mut validated = HELPER_VALIDATIONS
+        .lock()
+        .map_err(|_| configuration_failure("HELPER_VALIDATION_LOCK_UNAVAILABLE"))?;
     if validated.contains(&validation_key) {
-        return Some(bytes.into());
+        return Ok(bytes.into());
     }
-    let probes_succeeded =
-        || bounded_helper_handshake(path, handshake) && bounded_helper_identity(path, identity);
-    if !probes_succeeded() {
-        std::thread::yield_now();
-        if !probes_succeeded() {
-            return None;
+    for (argument, expected, code) in [
+        (
+            "--winwincode-helper-handshake",
+            handshake,
+            "HELPER_HANDSHAKE_FAILED",
+        ),
+        (
+            "--winwincode-helper-identity",
+            identity,
+            "HELPER_IDENTITY_FAILED",
+        ),
+    ] {
+        if !bounded_helper_probe(path, argument, expected) {
+            std::thread::yield_now();
+            if !bounded_helper_probe(path, argument, expected) {
+                return Err(configuration_failure(code));
+            }
         }
     }
     if validated.len() >= 32 {
         validated.remove(0);
     }
     validated.push(validation_key);
-    Some(bytes.into())
+    Ok(bytes.into())
 }
 
 #[cfg(unix)]
@@ -7931,6 +8200,7 @@ pub enum ProductionCodexErrorKind {
 pub struct ProductionCodexError {
     kind: ProductionCodexErrorKind,
     message: &'static str,
+    diagnostic_code: Option<&'static str>,
     diagnostic: Option<CodexFailureDiagnostic>,
 }
 
@@ -7939,8 +8209,26 @@ impl ProductionCodexError {
         Self {
             kind,
             message,
+            diagnostic_code: None,
             diagnostic: None,
         }
+    }
+
+    fn at_bootstrap_stage(mut self, code: &'static str) -> Self {
+        self.diagnostic_code.get_or_insert(code);
+        if self.diagnostic.is_none() {
+            self.diagnostic = Some(CodexFailureDiagnostic::new(
+                CodexFailureStage::AdapterOperation,
+                code,
+            ));
+        }
+        self
+    }
+
+    /// Returns a secret-safe stable bootstrap diagnostic when available.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> Option<&'static str> {
+        self.diagnostic_code
     }
 
     fn with_diagnostic(mut self, diagnostic: CodexFailureDiagnostic) -> Self {
@@ -7956,11 +8244,26 @@ impl ProductionCodexError {
 
 impl fmt::Display for ProductionCodexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = self.diagnostic_code {
+            write!(formatter, "{code}: ")?;
+        }
         formatter.write_str(self.message)
     }
 }
 
 impl std::error::Error for ProductionCodexError {}
+
+fn configuration_failure(code: &'static str) -> ProductionCodexError {
+    ProductionCodexError {
+        kind: ProductionCodexErrorKind::InvalidConfiguration,
+        message: "production Codex bootstrap validation failed",
+        diagnostic_code: Some(code),
+        diagnostic: Some(CodexFailureDiagnostic::new(
+            CodexFailureStage::AdapterOperation,
+            code,
+        )),
+    }
+}
 
 fn invalid_configuration() -> ProductionCodexError {
     ProductionCodexError::new(
@@ -8542,8 +8845,8 @@ mod tests {
                     let session = Box::pin(adapter.ensure_thread(start)).await.unwrap();
                     let key = run_key.canonical_digest().unwrap().0;
                     adapter.runs.get_mut(&key).unwrap().record.delegated_budget = Some(delegated_budget_fixture());
-                    let began = Instant("2026-08-28T00:00:00Z".into());
-                    let completed = Instant("2026-08-28T00:00:01Z".into());
+                    let began = Instant("2026-08-28T00:00:00.000Z".into());
+                    let completed = Instant("2026-08-28T00:00:01.000Z".into());
                     adapter.store.record_performance_start(&key, PerformanceOperationKind::PrimaryModel, "pending-request", &began).unwrap();
                     adapter.store.record_performance_completion(&key, PerformanceOperationKind::PrimaryModel, "accepted-request", &completed,
                         PerformanceOperationCompletion { usage_known: true, input_tokens: 40, output_tokens: 8, ..Default::default() }).unwrap();
@@ -8616,6 +8919,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn run_shell_isolated_session_end_test(test_name: &str) -> bool {
+        if std::env::var("WWC_SESSION_END_TEST_CHILD").as_deref() == Ok(test_name) {
+            return false;
+        }
+        // Keep user shell initialization outside the one-second shutdown seam.
+        // Only this test child receives the isolated shell environment.
+        let directory = test_root(&format!(
+            "session-end-shell-environment-{}",
+            test_name.replace(':', "_")
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+            .env("WWC_SESSION_END_TEST_CHILD", test_name)
+            .env("SHELL", "/bin/sh")
+            .env("ZDOTDIR", &directory)
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(status.success(), "isolated SessionEnd fixture failed");
+        true
+    }
+
+    #[cfg(unix)]
     struct SessionEndShutdownFixture {
         root: PathBuf,
         adapter: ProductionCodexAdapter,
@@ -8640,6 +8967,7 @@ mod tests {
         use std::{sync::Arc, time::Duration};
         use winwincode_kernel::{Kernel, KernelOptions};
         let root = test_root(case_name);
+        std::fs::create_dir_all(&root).unwrap();
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let (record, binding) = delegated_record_and_binding();
@@ -8659,8 +8987,21 @@ mod tests {
         };
         let key = run_key.canonical_digest().unwrap().0;
         let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
-        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
-        let home = adapter.config.kernel_home.clone();
+        let mut config = diagnostic_adapter_config(&root);
+        // SessionEnd follows real Code Mode shutdown, so the handshake-only
+        // diagnostic shim cannot stand in for the executable Core host here.
+        let helper = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("winwincode-kernel-helper");
+        config.helper_bytes = Arc::from(std::fs::read(&helper).unwrap());
+        config.helper_release_manifest = HelperReleaseManifest::from_test_helper(&helper).unwrap();
+        config.helper_executable = helper;
+        let mut adapter = ProductionCodexAdapter::open(config).unwrap();
+        let home = adapter.config.kernel_home.canonicalize().unwrap();
         let entered = home.join("session-end-entered.json");
         let release = home.join("session-end-release");
         let done = home.join("session-end-done");
@@ -8862,6 +9203,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn recorded_closed_cell_is_projected_while_core_shutdown_is_pending() {
+        if run_shell_isolated_session_end_test(
+            "adapter::tests::recorded_closed_cell_is_projected_while_core_shutdown_is_pending",
+        ) {
+            return;
+        }
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
@@ -8978,18 +9324,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn session_shutdown_timeout_keeps_completed_authority_pending_until_same_core_closes() {
+        if run_shell_isolated_session_end_test(
+            "adapter::tests::session_shutdown_timeout_keeps_completed_authority_pending_until_same_core_closes",
+        ) {
+            return;
+        }
         run_session_end_shutdown_test(false, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn session_shutdown_timeout_keeps_cancelled_authority_pending_until_same_core_closes() {
+        if run_shell_isolated_session_end_test(
+            "adapter::tests::session_shutdown_timeout_keeps_cancelled_authority_pending_until_same_core_closes",
+        ) {
+            return;
+        }
         run_session_end_shutdown_test(true, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn direct_outcome_retention_returns_on_real_shutdown_timeout_without_busy_retry() {
+        if run_shell_isolated_session_end_test(
+            "adapter::tests::direct_outcome_retention_returns_on_real_shutdown_timeout_without_busy_retry",
+        ) {
+            return;
+        }
         run_session_end_shutdown_test(true, true);
     }
 
@@ -9170,9 +9531,9 @@ mod tests {
                     ExecutionPortMessage::JobOutcomeMessage(_)
                 ))
         );
+        let restart_config = fixture.adapter.config.clone();
         drop(fixture.adapter);
-        let mut restarted =
-            ProductionCodexAdapter::open(diagnostic_adapter_config(&fixture.root)).unwrap();
+        let mut restarted = ProductionCodexAdapter::open(restart_config).unwrap();
         let stored = load_stored_run(&restarted.store, &fixture.key)
             .unwrap()
             .unwrap();
@@ -9834,7 +10195,8 @@ mod tests {
     #[test]
     fn retained_business_terminal_survives_a_corrupt_performance_projection() {
         use super::{
-            ActiveRun, ExecutionOutcomeUsage, OneShotState, StoredTerminal, terminal_outcome_usage,
+            ActiveRun, ExecutionOutcomeUsage, OperationDelivery, StoredTerminal,
+            terminal_outcome_usage,
         };
         let root = test_root("corrupt-optional-performance");
         let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
@@ -9858,8 +10220,8 @@ mod tests {
                 kernel_live: false,
                 kernel_close_pending: false,
                 recovered: true,
-                batch_intent_emission: OneShotState::Ready,
-                format_repair_reconciliation: OneShotState::Ready,
+                batch_intent_emission: OperationDelivery::default(),
+                format_repair_reconciliation: OperationDelivery::default(),
                 pending_fusion: None,
             },
         );
@@ -10258,7 +10620,9 @@ mod tests {
                 execution_mode: ExecutionMode::React,
                 observer_mode: ObserverMode::Off,
             },
-            |path, manifest| super::project_helper_in_release(path, manifest, &release_directory),
+            |path, manifest| {
+                super::project_helper_in_release_checked(path, manifest, &release_directory)
+            },
         )
         .expect("validate diagnostic adapter config")
     }
@@ -10417,10 +10781,10 @@ mod tests {
                 1,
                 "must stop before calling Core"
             );
-            assert!(matches!(
+            assert_eq!(
                 adapter.runs[&key].format_repair_reconciliation,
-                super::OneShotState::Ready
-            ));
+                super::OperationDelivery::default()
+            );
             let retained = load_stored_run(&adapter.store, &key).unwrap().unwrap();
             assert!(!retained.format_repair.unwrap().submitted);
             assert!(retained.terminal.is_none());
@@ -10600,6 +10964,75 @@ mod tests {
         (commit, revision)
     }
 
+    fn pending_fusion_member_open_count(adapter: &ProductionCodexAdapter) -> usize {
+        adapter
+            .outbox
+            .pending()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row.message, ExecutionPortMessage::ModelOpenMessage(_)))
+            .count()
+    }
+
+    fn assert_same_worker_fusion_panel(adapter: &ProductionCodexAdapter, thread: &CodexThreadId) {
+        let panel_opens = adapter
+            .outbox
+            .pending()
+            .unwrap()
+            .into_iter()
+            .filter_map(|row| {
+                if let ExecutionPortMessage::ModelOpenMessage(open) = row.message {
+                    Some(open)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            adapter.runs.len(),
+            1,
+            "a panel must remain inside its original Worker run"
+        );
+        let first = &panel_opens[0];
+        let mut routes = std::collections::BTreeSet::new();
+        let mut exchanges = std::collections::BTreeSet::new();
+        for open in &panel_opens {
+            assert_eq!(open.lease, first.lease);
+            assert_eq!(open.worker_session_id, first.worker_session_id);
+            assert_eq!(open.session_identity, first.session_identity);
+            assert_eq!(&open.session_identity.codex_thread_id, thread);
+            let payload: serde_json::Value = serde_json::from_slice(
+                &base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &open.request.data_base64,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            routes.insert((
+                payload["provider"].as_str().unwrap().to_owned(),
+                payload["request"]["model"].as_str().unwrap().to_owned(),
+            ));
+            exchanges.insert(open.model_exchange_id.0.clone());
+        }
+        assert_eq!(
+            exchanges.len(),
+            4,
+            "members retain separate physical model accounting"
+        );
+        assert_eq!(
+            routes,
+            [
+                ("zhipu-glm".into(), "glm-5.3-flash".into()),
+                ("xiaomi-mimo".into(), "mimo-v2.6-pro".into()),
+                ("deepseek".into(), "deepseek-flash".into()),
+                ("qwen".into(), "qwen3.8-flash".into()),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
     #[tokio::test]
     async fn fusion_reviews_only_a_frozen_candidate_and_cancellation_keeps_core_unstarted() {
         let root = test_root("fusion-scheduled");
@@ -10679,18 +11112,10 @@ mod tests {
             assert!(adapter.poll_fusion_panel(&thread).await.unwrap());
             adapter.take_execution_messages().unwrap();
         }
-        let open_count = |adapter: &ProductionCodexAdapter| {
-            adapter
-                .outbox
-                .pending()
-                .unwrap()
-                .iter()
-                .filter(|row| matches!(row.message, ExecutionPortMessage::ModelOpenMessage(_)))
-                .count()
-        };
-        assert_eq!(open_count(&adapter), 4);
+        assert_eq!(pending_fusion_member_open_count(&adapter), 4);
+        assert_same_worker_fusion_panel(&adapter, &thread);
         assert!(adapter.poll_fusion_panel(&thread).await.unwrap());
-        assert_eq!(open_count(&adapter), 4);
+        assert_eq!(pending_fusion_member_open_count(&adapter), 4);
         assert!(adapter.runs[&key].record.current_turn_id.is_none());
         adapter
             .interrupt(&thread, &Instant("2026-08-28T00:00:01.000Z".into()))
@@ -10947,6 +11372,13 @@ mod tests {
         let key = run_key.canonical_digest().expect("run digest").0;
         let kernel_session = adapter.runs[&key].record.kernel_session_id.clone();
         let now = Instant("2030-01-01T00:01:00.000Z".into());
+        let retained_event = adapter
+            .retain_runtime_trace(
+                &key,
+                super::WorkerRuntimeTraceState::Checkpointed,
+                "checkpointed",
+            )
+            .expect("retain runtime event before renewal");
         let mut extended = lease.clone();
         extended.expires_at = Instant("2030-01-01T00:10:00.000Z".into());
         let renewal = LeaseRenewMessage {
@@ -10986,6 +11418,50 @@ mod tests {
             .expect("retained authority");
         let durable: ModelLeaseAuthority = serde_json::from_slice(&bytes).expect("authority JSON");
         assert_eq!(durable.lease, extended);
+        let ack = winwincode_execution_port::generated::RuntimeAckMessage {
+            ack_sequence: ExecutionAckSequence(retained_event.event.sequence.0),
+            error: None,
+            kind: winwincode_execution_port::generated::RuntimeAckMessageKind::RuntimeAck,
+            lease: retained_event.lease.clone(),
+            message_id: ExecutionMessageId("xmsg_00000000000000000000000002".into()),
+            replay_from_sequence: None,
+            schema_version: SchemaVersion::WinwincodeV1,
+            session_identity: retained_event.session_identity.clone(),
+            sent_at: retained_event.sent_at.clone(),
+            status: LeaseWriteStatus::Accepted,
+            worker_session_id: retained_event.worker_session_id.clone(),
+        };
+        let mutations: [fn(&mut winwincode_execution_port::generated::RuntimeAckMessage); 9] = [
+            |m| m.lease.attempt += 1,
+            |m| m.lease.fencing_token = FencingToken("99".into()),
+            |m| m.lease.lease_id = LeaseId("lse_00000000000000000000000999".into()),
+            |m| m.lease.expires_at = Instant("2030-01-01T00:15:00.000Z".into()),
+            |m| m.lease.expires_at = Instant("2030-01-01T00:00:00.000Z".into()),
+            |m| m.lease.expires_at = Instant("2030-01-01T00:05:0X.000Z".into()),
+            |m| m.worker_session_id = WorkerSessionId("wsn_00000000000000000000000999".into()),
+            |m| {
+                m.session_identity.codex_thread_id =
+                    CodexThreadId("cdx_00000000000000000000000999".into());
+            },
+            |m| m.ack_sequence = ExecutionAckSequence(999),
+        ];
+        let before_ack = adapter.outbox.pending().unwrap();
+        for mutate in mutations {
+            let mut forged = ack.clone();
+            mutate(&mut forged);
+            assert!(
+                adapter
+                    .accept_execution_delivery_ack(&ExecutionPortMessage::RuntimeAckMessage(forged))
+                    .is_err()
+            );
+            assert_eq!(adapter.outbox.pending().unwrap(), before_ack);
+        }
+        adapter
+            .accept_execution_delivery_ack(&ExecutionPortMessage::RuntimeAckMessage(ack.clone()))
+            .expect("ACK for retained original event survives lease renewal");
+        adapter
+            .accept_execution_delivery_ack(&ExecutionPortMessage::RuntimeAckMessage(ack.clone()))
+            .expect("exact ACK replay remains idempotent after renewal");
         adapter
             .interrupt(&session.thread_id, &now)
             .await
@@ -11011,6 +11487,9 @@ mod tests {
         .expect("recover retained terminal");
         assert_eq!(recovered.thread_id, session.thread_id);
         assert!(!adapter.runs[&key].kernel_live);
+        adapter
+            .accept_execution_delivery_ack(&ExecutionPortMessage::RuntimeAckMessage(ack))
+            .expect("old ACK stays idempotent after reopening durable renewed authority");
         let mut next = renewal.clone();
         next.prior_expires_at = extended.expires_at.clone();
         next.lease.expires_at = Instant("2030-01-01T00:15:00.000Z".into());
@@ -11277,6 +11756,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn production_missing_assigned_test_requests_durable_react() {
+        run_command_output_ack_fixture(3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_schema_repair_does_not_consume_missing_evidence_repair() {
+        run_command_output_ack_fixture(4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_infrastructure_failure_retains_safe_reason_after_restart() {
+        run_command_output_ack_fixture(5);
+    }
+
+    #[cfg(unix)]
     fn run_command_output_ack_fixture(scenario: u8) {
         std::thread::Builder::new()
             .name("diagnostic-ack".to_owned())
@@ -11311,6 +11808,8 @@ mod tests {
             "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
         );
+        job.work_input.as_mut().unwrap().work_contract.criteria[0].verification_method =
+            Some("cargo test".to_owned());
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let lease = ExecutionLeaseStamp {
             attempt: 1,
@@ -11349,6 +11848,28 @@ mod tests {
             .await
             .expect("open diagnostic thread");
         let run_digest = run_key.canonical_digest().expect("run digest").0;
+        if scenario == 5 {
+            adapter
+                .fail_required_execution_delivery(&session.thread_id, &now)
+                .await
+                .unwrap();
+            drop(adapter);
+            let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            let saved = load_stored_run(&reopened.store, &run_digest)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved.infrastructure_failure_code.as_deref(),
+                Some("EXECUTION_DELIVERY_REJECTED")
+            );
+            assert!(matches!(
+                saved.terminal,
+                Some(super::StoredTerminal::InfrastructureFailed { .. })
+            ));
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         adapter
             .retain_stage_turn_started(&run_digest, "turn-diagnostic", &now)
             .expect("retain reviewer policy before command evidence");
@@ -11359,7 +11880,11 @@ mod tests {
             process_id: None,
             turn_id: "turn-diagnostic".to_owned(),
             completed_at_ms: 1,
-            command: vec!["cargo".to_owned(), "test".to_owned()],
+            command: if scenario >= 3 {
+                vec!["git".to_owned(), "status".to_owned()]
+            } else {
+                vec!["cargo".to_owned(), "test".to_owned()]
+            },
             cwd: serde_json::from_value(serde_json::json!(format!(
                 "file://{}",
                 workspace.display()
@@ -11448,21 +11973,91 @@ mod tests {
         assert!(output.contains("stdout-real"));
         assert!(output.contains("stderr-real"));
         let placeholder_result = "{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"UNIQUE_FINDING_ID\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"OBSERVED_RESULT\",\"evidence_sources\":[{\"source_id\":\"FUNCTION_CALL_ID\"}]}]}";
-        adapter
-            .accept_turn_complete(
-                &run_digest,
-                &TurnCompleteEvent {
-                    turn_id: "turn-diagnostic".to_owned(),
-                    last_agent_message: Some(placeholder_result.to_owned()),
-                    error: None,
-                    started_at: None,
-                    completed_at: None,
-                    duration_ms: Some(1),
-                    time_to_first_token_ms: None,
-                },
-                &now,
+        let missing_test_result = placeholder_result
+            .replace("UNIQUE_FINDING_ID", "finding-inspection")
+            .replace(
+                "OBSERVED_RESULT",
+                "Inspection succeeded; assigned host test was not run.",
             )
-            .expect("retain invalid output for correction");
+            .replace("FUNCTION_CALL_ID", "call-real-command-output");
+        if scenario == 4 {
+            adapter
+                .accept_turn_complete(
+                    &run_digest,
+                    &TurnCompleteEvent {
+                        turn_id: "turn-diagnostic".to_owned(),
+                        last_agent_message: Some("{}".to_owned()),
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: Some(1),
+                        time_to_first_token_ms: None,
+                    },
+                    &now,
+                )
+                .unwrap();
+            let first = load_stored_run(&adapter.store, &run_digest)
+                .unwrap()
+                .unwrap()
+                .format_repair
+                .unwrap();
+            assert_eq!(
+                first.rejection.as_ref().unwrap().reason_code,
+                "RESULT_SCHEMA_INVALID"
+            );
+            let first_turn_id = first.turn_id.clone();
+            adapter
+                .accept_turn_started(&run_digest, &first.turn_id, &now)
+                .unwrap();
+            adapter
+                .accept_turn_complete(
+                    &run_digest,
+                    &TurnCompleteEvent {
+                        turn_id: first.turn_id,
+                        last_agent_message: Some(missing_test_result.clone()),
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: Some(1),
+                        time_to_first_token_ms: None,
+                    },
+                    &now,
+                )
+                .unwrap();
+            let second = load_stored_run(&adapter.store, &run_digest)
+                .unwrap()
+                .unwrap()
+                .format_repair
+                .unwrap();
+            assert_eq!(
+                second.rejection.as_ref().unwrap().source_turn_id,
+                first_turn_id,
+                "missing evidence must create its own repair intent"
+            );
+            assert_ne!(second.turn_id, first_turn_id);
+            assert_eq!(second.round, 2);
+        }
+        if scenario != 4 {
+            adapter
+                .accept_turn_complete(
+                    &run_digest,
+                    &TurnCompleteEvent {
+                        turn_id: "turn-diagnostic".to_owned(),
+                        last_agent_message: Some(if scenario == 3 {
+                            missing_test_result.clone()
+                        } else {
+                            placeholder_result.to_owned()
+                        }),
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: Some(1),
+                        time_to_first_token_ms: None,
+                    },
+                    &now,
+                )
+                .expect("retain invalid output for correction");
+        }
         let record = load_stored_run(&adapter.store, &run_digest)
             .expect("load repair intent")
             .expect("run");
@@ -11487,6 +12082,86 @@ mod tests {
                 .expect("evidence feedback")
                 .contains("FUNCTION_CALL_ID")
         );
+        if scenario >= 3 {
+            assert!(
+                repair
+                    .prompt
+                    .as_deref()
+                    .unwrap()
+                    .contains("verificationMethod")
+            );
+            assert!(repair.prompt.as_deref().unwrap().contains("cargo test"));
+            drop(adapter);
+            let mut reopened =
+                ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            let saved = load_stored_run(&reopened.store, &run_digest)
+                .unwrap()
+                .unwrap();
+            assert!(saved.terminal.is_none());
+            assert_eq!(saved.format_repair.unwrap().turn_id, repair.turn_id);
+            if scenario == 4 {
+                Box::pin(reopened.ensure_thread(start))
+                    .await
+                    .expect("restore live repair authority");
+                let completion = |turn_id: &str| TurnCompleteEvent {
+                    turn_id: turn_id.to_owned(),
+                    last_agent_message: Some(missing_test_result.clone()),
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: Some(1),
+                    time_to_first_token_ms: None,
+                };
+                reopened
+                    .accept_turn_started(&run_digest, &repair.turn_id, &now)
+                    .unwrap();
+                reopened
+                    .accept_turn_complete(&run_digest, &completion(&repair.turn_id), &now)
+                    .unwrap();
+                let third = load_stored_run(&reopened.store, &run_digest)
+                    .unwrap()
+                    .unwrap()
+                    .format_repair
+                    .unwrap();
+                assert_eq!(
+                    third.round, 3,
+                    "restart preserves the consumed repair budget"
+                );
+                reopened
+                    .accept_turn_complete(&run_digest, &completion(&repair.turn_id), &now)
+                    .unwrap();
+                assert_eq!(
+                    load_stored_run(&reopened.store, &run_digest)
+                        .unwrap()
+                        .unwrap()
+                        .format_repair
+                        .unwrap()
+                        .turn_id,
+                    third.turn_id,
+                    "duplicate completion cannot allocate another repair turn"
+                );
+                reopened
+                    .accept_turn_started(&run_digest, &third.turn_id, &now)
+                    .unwrap();
+                reopened
+                    .accept_turn_complete(&run_digest, &completion(&third.turn_id), &now)
+                    .unwrap();
+                let exhausted = load_stored_run(&reopened.store, &run_digest)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(exhausted.format_repair.unwrap().round, 3);
+                assert!(
+                    matches!(
+                        exhausted.pending_completion.unwrap().kind,
+                        super::StoredPendingTerminalKind::Failed
+                    ),
+                    "exhausted repair budget must enter the durable failed path"
+                );
+            }
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         adapter
             .accept_turn_started(&run_digest, &repair.turn_id, &now)
             .expect("repair read-only policy");
@@ -11752,6 +12427,7 @@ mod tests {
             .expect("Delivery policy");
         let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
+            host_action_approvals: false,
             snapshot_id: None,
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
@@ -11772,6 +12448,7 @@ mod tests {
             terminal: None,
             failure_diagnostic: None,
             terminal_trace: None,
+            infrastructure_failure_code: None,
             current_turn_id: None,
             last_agent_message: None,
             stage_product_sources: Vec::new(),
@@ -11788,6 +12465,8 @@ mod tests {
             terminal_message_id: None,
             post_action_traces: Vec::new(),
             pending_completion: None,
+            interaction_timeouts: Vec::new(),
+            recovered_input_requests: Vec::new(),
         };
         let mut legacy = serde_json::to_value(record).expect("encode stored run");
         let role_policy = legacy
@@ -11915,6 +12594,7 @@ mod tests {
             .expect("delegated role policy");
         let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
+            host_action_approvals: false,
             snapshot_id: None,
             role_policy: Some(role_policy),
             agent_config,
@@ -11935,6 +12615,7 @@ mod tests {
             terminal: None,
             failure_diagnostic: None,
             terminal_trace: None,
+            infrastructure_failure_code: None,
             current_turn_id: Some("turn-fixture".to_owned()),
             last_agent_message: None,
             stage_product_sources: Vec::new(),
@@ -11951,6 +12632,8 @@ mod tests {
             terminal_message_id: None,
             post_action_traces: Vec::new(),
             pending_completion: None,
+            interaction_timeouts: Vec::new(),
+            recovered_input_requests: Vec::new(),
         };
         let binding = ModelRunBinding {
             run_key: format!("sha256:{}", "b".repeat(64)),

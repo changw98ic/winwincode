@@ -10,8 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -996,32 +995,29 @@ fn managed_health_state(config: &ManagedAppRunConfig, pid: u32) -> ManagedAppSta
 }
 
 fn health_state(config: &ManagedAppRunConfig) -> ManagedAppState {
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.listen_port);
     let timeout = Duration::from_millis(u64::from(config.health_check.timeout_ms));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
-        return ManagedAppState::Unhealthy;
-    };
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-        config.health_check.path
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .timeout_global(Some(timeout))
+            .build(),
     );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return ManagedAppState::Unhealthy;
-    }
-    let mut response = [0_u8; 32];
-    let Ok(bytes) = stream.read(&mut response) else {
-        return ManagedAppState::Unhealthy;
-    };
-    if response[..bytes].starts_with(b"HTTP/1.")
-        && response[..bytes]
-            .get(9..12)
-            .is_some_and(|code| code[0] == b'2')
-    {
-        ManagedAppState::Healthy
-    } else {
-        ManagedAppState::Unhealthy
+    let url = format!(
+        "http://127.0.0.1:{}{}",
+        config.listen_port, config.health_check.path
+    );
+    match winwincode_network::http::execute_http(
+        &agent,
+        |agent| agent.get(&url).call(),
+        1024 * 1024,
+        winwincode_network::Replay::ReplayExact,
+        timeout,
+        || true,
+    ) {
+        Ok(response) if response.status().is_success() => ManagedAppState::Healthy,
+        _ => ManagedAppState::Unhealthy,
     }
 }
 

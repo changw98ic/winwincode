@@ -322,14 +322,18 @@ fn device_session_pool(
         .active_lease_for_node(&grant.client_node_id)
         .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
         .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
+    let occupancy_authorized = match lease.state {
+        winwincode_control_plane::OccupancyLeaseState::Occupied
+        | winwincode_control_plane::OccupancyLeaseState::Draining => true,
+        winwincode_control_plane::OccupancyLeaseState::RecoveryPending => {
+            grant.state == winwincode_storage::WorkerLaunchGrantState::Consumed
+        }
+        _ => false,
+    };
     if !grant.state.is_non_terminal()
         || lease.occupancy_lease_id != grant.occupancy_lease_id
         || lease.fencing_token != grant.occupancy_fencing_token
-        || !matches!(
-            lease.state,
-            winwincode_control_plane::OccupancyLeaseState::Occupied
-                | winwincode_control_plane::OccupancyLeaseState::Draining
-        )
+        || !occupancy_authorized
     {
         return Err(RemoteWorkerAuthenticationError::revoked());
     }

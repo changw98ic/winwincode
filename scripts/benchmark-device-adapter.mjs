@@ -1,16 +1,18 @@
+import { deviceBenchmarkProfileKey } from './device-agent-environment.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, globSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
+import { NetworkError } from '../packages/network-request/src/index.mjs'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
   recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource,
   validateBenchmarkDispatchPolicy, validateFormalBenchmarkOptions, verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
   loadDeviceProviderEnvironment, deviceTaskProvider,
-  runDeviceTaskVertical } from './run-device-task-vertical.mjs'
+  runDeviceTaskVertical, resumeRegisteredDeviceTask } from './run-device-task-vertical.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDeviceTask, terminalDeviceFailure,
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
@@ -64,7 +66,7 @@ export function deviceBenchmarkExperimentBinding(options, source, catalog) {
   const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
   assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
   const executionLock = publicSmokeExecutionLock(options.publicSmokeExecutionLock)
-  return { experimentId: options.experimentId, source, aggregationProvider,
+  return { experimentId: options.experimentId, source, fusionExecution: { kind: 'native-panel', coordinatorProvider: aggregationProvider, version: 2 },
     automaticTaskActions,
     ...(executionLock === null ? {} : { publicSmokeExecutionLock: executionLock }),
     preparedCatalogSha256: sha256(JSON.stringify(catalog)),
@@ -77,7 +79,7 @@ export function benchmarkDeviceProfiles(plan, options = {}) {
   validateBenchmarkDispatchPolicy(plan, options)
   const selected = options.selectedConfigurationIds === undefined ? null : new Set(options.selectedConfigurationIds)
   const profiles = [...new Map(plan.cells.filter(cell => selected === null || selected.has(cell.configurationId))
-    .map(cell => [cell.configurationId, cell])).values()]
+    .map(cell => [deviceBenchmarkProfileKey(cell), cell])).values()]
   // Validate the profiles being admitted before claiming work. The full frozen
   // plan stays in the ledger, including profiles awaiting real JEV settings.
   for (const profile of profiles) benchmarkDeviceEnvironment(profile,
@@ -124,7 +126,7 @@ export async function executeDeviceBenchmark(options) {
   const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
     profiles,
     providers: Object.keys(seats).map(name => deviceTaskProvider(seats[name], providerEnvironment)),
-    agentSettings: options.agentSettings, providerEnvironment,
+    agentSettings: options.agentSettings, providerEnvironment, automaticTaskActions: options.automaticTaskActions ?? false,
   }, async runtime => {
     const sharedOptions = { ...options, runtimeResolver: runtime.forTask }
     const adapter = {
@@ -508,6 +510,7 @@ export function failedDispatchDeviceResult(request, launch, options, expectedRep
 }
 
 function loopbackUnavailable(error) {
+  if (error instanceof NetworkError && ['connection_unavailable', 'transport_interrupted', 'timeout'].includes(error.failure.kind)) return true
   const transientCodes = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH'])
   for (let cause = error; cause; cause = cause.cause) if (transientCodes.has(cause.code)) return true
   return false
@@ -561,6 +564,14 @@ export async function resolveRegisteredDeviceTask(request, launch, options = {},
         assert.ok(terminalBenchmarkDeviceFailure(observation) || observation.delivery.status === 'done',
           'an unavailable product can only recover from a durable terminal projection')
       }
+    }
+    if (observation.workRunAggregate.runs.some(run => ['queued', 'leased', 'running'].includes(run.state))
+      && options.runtimeResolver) {
+      const runtime = await options.runtimeResolver(request, {
+        directory: launch.directory, taskInputPath: resolve(launch.directory, 'task-input.json'),
+      })
+      await resumeRegisteredDeviceTask({ launch, runtime, automaticTaskActions: options.automaticTaskActions ?? false })
+      observation = await inspectRegisteredDeviceTask(launch)
     }
     assert.ok(observation.workRunAggregate.runs.every(run => !['queued', 'leased', 'running'].includes(run.state)),
       'active product execution cannot be finalized by recovery')

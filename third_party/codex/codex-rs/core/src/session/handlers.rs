@@ -578,16 +578,12 @@ pub(super) async fn submission_loop(
                 }
                 Op::RecoverTurn {
                     thread_settings,
-                    submit_change_batch,
+                    start,
                     reply,
                 } => {
-                    let result = turn_input::handle_recovery(
-                        &sess,
-                        thread_settings,
-                        submit_change_batch,
-                        sub.id.clone(),
-                    )
-                    .await;
+                    let result =
+                        turn_input::handle_recovery(&sess, thread_settings, start, sub.id.clone())
+                            .await;
                     let _ = reply.send(result);
                     false
                 }

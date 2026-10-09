@@ -2,6 +2,10 @@
 
 //! Device-local Sign in with `ChatGPT`, using the official open-source public-client flow.
 
+#[cfg(test)]
+#[path = "chatgpt_oauth_diagnostics.test.rs"]
+mod diagnostics_tests;
+
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -197,6 +201,7 @@ fn random() -> Result<String, DeviceProviderError> {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
         .max_redirects(0)
         .build()
         .into()
@@ -228,10 +233,15 @@ fn token_request(
     agent: &ureq::Agent,
     fields: &[(&str, &str)],
 ) -> Result<TokenResponse, DeviceProviderError> {
-    let response = agent
-        .post(TOKEN)
-        .send_form(fields.iter().copied())
-        .map_err(|_| DeviceProviderError)?;
+    // A grant can rotate credentials. An unknown response must not replay it.
+    let response = winwincode_network::http::execute_http_once(
+        agent,
+        |agent| agent.post(TOKEN).send_form(fields.iter().copied()),
+        524_288,
+        Duration::from_secs(30),
+        || true,
+    )
+    .map_err(|_| DeviceProviderError)?;
     let response: TokenResponse = read_json(response)?;
     if !response.token_type.eq_ignore_ascii_case("bearer") || !valid_token(&response.access_token) {
         return Err(DeviceProviderError);
@@ -240,15 +250,11 @@ fn token_request(
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(
-    mut response: ureq::http::Response<ureq::Body>,
+    response: ureq::http::Response<Vec<u8>>,
 ) -> Result<T, DeviceProviderError> {
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(524_289)
-        .read_to_end(&mut bytes)?;
-    let parsed = if bytes.len() <= 524_288 {
+    let success = response.status().is_success();
+    let mut bytes = response.into_body();
+    let parsed = if success && bytes.len() <= 524_288 {
         serde_json::from_slice(&bytes).map_err(|_| DeviceProviderError)
     } else {
         Err(DeviceProviderError)
@@ -258,7 +264,17 @@ fn read_json<T: serde::de::DeserializeOwned>(
 }
 
 fn load_jwks(agent: &ureq::Agent) -> Result<JwkSet, DeviceProviderError> {
-    read_json(agent.get(JWKS).call().map_err(|_| DeviceProviderError)?)
+    read_json(
+        winwincode_network::http::execute_http(
+            agent,
+            |agent| agent.get(JWKS).call(),
+            524_288,
+            winwincode_network::Replay::ReplayExact,
+            Duration::from_secs(30),
+            || true,
+        )
+        .map_err(|_| DeviceProviderError)?,
+    )
 }
 
 #[derive(Deserialize)]
@@ -591,11 +607,20 @@ pub(crate) fn models(record: &Credentials) -> Result<Vec<String>, DeviceProvider
         visibility: String,
     }
     let catalog: Catalog = read_json(
-        agent()
-            .get("https://api.openai.com/v1/models")
-            .header("Authorization", &format!("Bearer {}", record.access_token))
-            .call()
-            .map_err(|_| DeviceProviderError)?,
+        winwincode_network::http::execute_http(
+            &agent(),
+            |agent| {
+                agent
+                    .get("https://api.openai.com/v1/models")
+                    .header("Authorization", &format!("Bearer {}", record.access_token))
+                    .call()
+            },
+            524_288,
+            winwincode_network::Replay::ReplayExact,
+            Duration::from_secs(30),
+            || true,
+        )
+        .map_err(|_| DeviceProviderError)?,
     )?;
     let models: Vec<_> = catalog
         .models

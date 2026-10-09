@@ -739,12 +739,11 @@ impl RetryPolicy {
         if attempt == 0 || attempt > self.max_attempts {
             return Err(corrupt());
         }
-        let shift = attempt.saturating_sub(1).min(62);
-        let factor = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
-        let delay = self
-            .initial_backoff_millis
-            .saturating_mul(factor)
-            .min(self.max_backoff_millis);
+        let delay = winwincode_network::duration_millis(winwincode_network::exponential_delay(
+            attempt,
+            std::time::Duration::from_millis(self.initial_backoff_millis),
+            std::time::Duration::from_millis(self.max_backoff_millis),
+        ));
         let retry_at = failed_at.checked_add(delay).ok_or_else(invalid)?;
         validate_time(retry_at)?;
         Ok(retry_at)
@@ -931,9 +930,37 @@ pub struct OutboundClaim {
     payload: Vec<u8>,
     attempt: u32,
     lease_id: IntegrationLeaseId,
+    reconciliation_required: bool,
 }
 
 impl OutboundClaim {
+    #[must_use]
+    pub const fn requiring_reconciliation(mut self, required: bool) -> Self {
+        self.reconciliation_required = required;
+        self
+    }
+    #[must_use]
+    pub const fn requires_reconciliation(&self) -> bool {
+        self.reconciliation_required
+    }
+    /// A missing lookup marker is insufficient evidence to repeat an unknown write.
+    /// # Errors
+    /// Requires reconciliation rather than issuing another non-idempotent create.
+    pub fn require_new_write_authority(&self) -> Result<(), crate::ConnectorCallError> {
+        if self.reconciliation_required {
+            Err(crate::ConnectorCallError::from_network(
+                "INTEGRATION_WRITE_OUTCOME_UNKNOWN",
+                winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::ProtocolInvalid,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::Persist,
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub const fn from_stored(
         authority: ConnectorAuthority,
         operation_key: IntegrationOperationKey,
@@ -951,6 +978,7 @@ impl OutboundClaim {
             payload,
             attempt,
             lease_id,
+            reconciliation_required: false,
         }
     }
 

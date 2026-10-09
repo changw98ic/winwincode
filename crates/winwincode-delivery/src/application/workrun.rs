@@ -154,6 +154,9 @@ impl WorkRunAggregate {
             WorkItemState::InProgress,
         ] {
             if self.items.iter().any(|item| item.state == state) {
+                if state == WorkItemState::CandidateReady {
+                    return self.candidate_consumer_failure().unwrap_or(state);
+                }
                 return state;
             }
         }
@@ -196,6 +199,30 @@ impl WorkRunAggregate {
             }
         }
         WorkItemState::Cancelled
+    }
+
+    // Runs are appended in dispatch order. Retain the candidate for an explicit
+    // retry, but expose the latest consumer's failure for the current input.
+    fn candidate_consumer_failure(&self) -> Option<WorkItemState> {
+        for (run_state, item_state) in [
+            (WorkRunState::Failed, WorkItemState::Failed),
+            (WorkRunState::Cancelled, WorkItemState::Cancelled),
+        ] {
+            if self.items.iter().any(|item| {
+                item.state == WorkItemState::CandidateReady
+                    && self
+                        .runs
+                        .iter()
+                        .rev()
+                        .find(|run| {
+                            run.work_item_id == item.id && run.work_item_revision == item.revision
+                        })
+                        .is_some_and(|run| run.state == run_state)
+            }) {
+                return Some(item_state);
+            }
+        }
+        None
     }
 
     /// Checks stored relationships before scheduling or accepting an appended run.
@@ -945,6 +972,38 @@ mod aggregate_tests {
             .iter_mut()
             .for_each(|item| item.state = WorkItemState::Done);
         assert_eq!(value.summary_state(false), WorkItemState::Done);
+    }
+
+    #[test]
+    fn latest_candidate_consumer_failure_is_visible_and_retry_can_recover() {
+        let mut value = aggregate();
+        value.items.truncate(1);
+        value.items[0].state = WorkItemState::CandidateReady;
+        let mut producer = run(&value, 1);
+        producer.state = WorkRunState::CandidateReady;
+        let mut consumer = producer.clone();
+        consumer.id = WorkRunId("wrn_01J00000000000000000000001".into());
+        consumer.execution_job_id =
+            winwincode_domain::ExecutionJobId("job_01J00000000000000000000001".into());
+        consumer.state = WorkRunState::Failed;
+        value.runs = vec![producer.clone(), consumer];
+        value.validate().unwrap();
+        assert_eq!(value.summary_state(false), WorkItemState::Failed);
+        assert_eq!(value.summary_state(true), WorkItemState::WaitingHuman);
+        assert!(value.start_verification(&value.items[0].id).is_ok());
+        let mut retry = run(&value, 1);
+        retry.id = WorkRunId("wrn_01J00000000000000000000002".into());
+        retry.execution_job_id =
+            winwincode_domain::ExecutionJobId("job_01J00000000000000000000002".into());
+        value.append_verification_run(retry).unwrap();
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        value.runs[2].state = WorkRunState::Settled;
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        value.runs[2].state = WorkRunState::Cancelled;
+        assert_eq!(value.summary_state(false), WorkItemState::Cancelled);
+        value.items[0].revision = Revision(2);
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        assert_eq!(value.runs[0], producer);
     }
 
     #[test]

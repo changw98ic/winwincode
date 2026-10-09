@@ -2599,6 +2599,90 @@ impl SqliteStorage {
 }
 
 impl SqliteStorage {
+    /// Opens an application sidecar under the same bounded initialization
+    /// boundary as product-state storage.
+    ///
+    /// The initializer configures journal settings and prepares its existing
+    /// schema while openings of the same canonical database are serialized.
+    /// It must finish schema preparation before returning, without external
+    /// I/O or recursively opening this database. Runtime reads and writes use
+    /// the ordinary busy timeout after initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an open failure through `E::from`, or preserves the
+    /// initializer's own error. Lock waiting and `SQLite` busy retries share one
+    /// five-second deadline. This method does not retry application writes.
+    pub fn open_sidecar<E>(
+        database_path: impl AsRef<Path>,
+        initialize: impl FnOnce(&Connection) -> Result<(), E>,
+    ) -> Result<Connection, E>
+    where
+        E: From<StorageError>,
+    {
+        let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
+        Self::open_sidecar_until(database_path, open_deadline, initialize)
+    }
+
+    /// Opens a sidecar within a caller-owned initialization deadline.
+    ///
+    /// Use the same deadline for any safe schema-initialization retries so
+    /// reopening a connection cannot restart the waiting budget. The same
+    /// per-database lock and `SQLite` busy handler apply as in [`Self::open_sidecar`].
+    /// The caller may shorten the default five-second limit, but not extend it.
+    /// Runtime reads and writes are not retried by this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an open or deadline failure through `E::from`, or preserves the
+    /// initializer's own error. An expired deadline never enters the initializer.
+    pub fn open_sidecar_until<E>(
+        database_path: impl AsRef<Path>,
+        open_deadline: StdInstant,
+        initialize: impl FnOnce(&Connection) -> Result<(), E>,
+    ) -> Result<Connection, E>
+    where
+        E: From<StorageError>,
+    {
+        let open_deadline = open_deadline.min(StdInstant::now() + SQLITE_OPEN_TIMEOUT);
+        remaining_sqlite_open_time(open_deadline).map_err(E::from)?;
+        let requested_path = database_path.as_ref();
+        let name = requested_path.file_name().ok_or_else(|| {
+            E::from(StorageError::invalid_input(
+                "SQLite sidecar file name is missing",
+            ))
+        })?;
+        let parent = requested_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .map_err(|error| E::from(StorageError::adapter(error.to_string())))?;
+        let canonical_parent = fs::canonicalize(parent)
+            .map_err(|error| E::from(StorageError::adapter(error.to_string())))?;
+        let database_path = canonical_parent.join(name);
+        let open_lock = sqlite_open_lock(&database_path, open_deadline).map_err(E::from)?;
+        let _open_guard =
+            acquire_mutex_before_open_deadline(&open_lock, open_deadline).map_err(E::from)?;
+        let previous_deadline = SQLITE_OPEN_BUSY_DEADLINE.get();
+        let result = (|| {
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+            let connection = Connection::open_with_flags(&database_path, flags)
+                .map_err(|error| E::from(sql_error(error)))?;
+            set_open_busy_deadline(&connection, open_deadline).map_err(E::from)?;
+            initialize(&connection)?;
+            remaining_sqlite_open_time(open_deadline).map_err(E::from)?;
+            connection
+                .busy_timeout(SQLITE_BUSY_TIMEOUT)
+                .map_err(|error| E::from(sql_error(error)))?;
+            Ok(connection)
+        })();
+        SQLITE_OPEN_BUSY_DEADLINE.set(previous_deadline);
+        result
+    }
+
     /// Opens the local database and applies all schema migrations before return.
     ///
     /// # Errors
@@ -2859,7 +2943,7 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Sto
     open_deadline
         .checked_duration_since(StdInstant::now())
         .filter(|remaining| *remaining >= Duration::from_millis(1))
-        .ok_or_else(|| StorageError::adapter("SQLite storage open exceeded its five-second limit"))
+        .ok_or_else(|| StorageError::adapter("SQLite storage initialization deadline exceeded"))
 }
 
 impl ProductStateStorage for SqliteStorage {

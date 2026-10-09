@@ -82,6 +82,18 @@ pub struct DeviceProviderStore {
 }
 
 impl DeviceProviderStore {
+    pub(crate) fn sse_failure_log_directory(
+        &self,
+    ) -> Result<std::path::PathBuf, DeviceProviderError> {
+        Ok(
+            Path::new(self.connection.path().ok_or(DeviceProviderError)?)
+                .parent()
+                .ok_or(DeviceProviderError)?
+                .join("logs")
+                .join("sse-failures"),
+        )
+    }
+
     /// Opens or creates the device-private database. Existing unsafe permissions fail closed.
     ///
     /// # Errors
@@ -116,7 +128,7 @@ impl DeviceProviderStore {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 10 {
+        let key = if version == 13 {
             load_device_key(&connection)?
         } else {
             // Only an actual migration needs the writer lock. Worker polling,
@@ -558,15 +570,33 @@ impl DeviceProviderStore {
             Some(headers) => headers,
             None => self.custom_headers(&mutation.config.provider_id)?,
         };
-        let _permit = match self.try_provider_model_permit(&mutation.config.provider_id)? {
-            crate::DeviceModelAdmission::Ready(permit) => permit,
-            crate::DeviceModelAdmission::Deferred => return Err(DeviceProviderError),
-        };
-        let adapter = adapter(&mutation.config, headers, codex_account)?;
+        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let journal = winwincode_network::journal::RequestJournal::open(
+            &database
+                .parent()
+                .ok_or(DeviceProviderError)?
+                .join("provider-probe-network.sqlite3"),
+        )
+        .map_err(|_| DeviceProviderError)?;
+        let adapter = adapter(&mutation.config, headers, codex_account)?
+            .with_journal(journal)
+            .with_sse_failure_log(self.sse_failure_log_directory()?);
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange.clone(),
+            request_id: request.clone(),
+            route: ModelRoute {
+                provider_id: mutation.config.provider_id.clone(),
+                model_id: model.clone(),
+                credential_reference_id: CredentialReferenceId(format!("crd_{id}")),
+            },
+            adapter_request_id: adapter_id.clone(),
+            idempotent_replay: false,
+            stream_leak_gate: leak_gate,
+        };
         adapter
-            .open(
+            .open_recovering_admitted(
                 &ProviderAdapterInvocation {
                     model_exchange_id: &exchange,
                     request_id: &request,
@@ -576,21 +606,18 @@ impl DeviceProviderStore {
                     payload: &payload,
                 },
                 &secret,
+                &receipt,
+                &|| true,
+                || match self.try_provider_model_permit(&mutation.config.provider_id) {
+                    Ok(crate::DeviceModelAdmission::Ready(permit)) => Ok(permit),
+                    Ok(crate::DeviceModelAdmission::Deferred) => {
+                        Err(crate::ProviderAdapterError::rate_limited())
+                    }
+                    Err(_) => Err(crate::ProviderAdapterError::unavailable()),
+                },
             )
             .map_err(|_| DeviceProviderError)?;
         drop(secret);
-        let receipt = ProviderGatewayOpenReceipt {
-            model_exchange_id: exchange.clone(),
-            request_id: request,
-            route: ModelRoute {
-                provider_id: mutation.config.provider_id,
-                model_id: model,
-                credential_reference_id: CredentialReferenceId(format!("crd_{id}")),
-            },
-            adapter_request_id: adapter_id.clone(),
-            idempotent_replay: false,
-            stream_leak_gate: leak_gate,
-        };
         let result = adapter.drain_canonical(&receipt);
         let _ = adapter.control(&exchange, &adapter_id, ProviderStreamControlAction::Release);
         let completion = result.map_err(|_| DeviceProviderError)?;
@@ -1023,7 +1050,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -1077,7 +1104,7 @@ fn migrate_device_store(
             CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
             PRAGMA user_version=9;")?;
     }
-    if version < 10 {
+    if version < 13 {
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS model_invocation_attempts (
             exchange_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number>0),
@@ -1085,6 +1112,23 @@ fn migrate_device_store(
             failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB,
             PRIMARY KEY(exchange_id,attempt_number));
             PRAGMA user_version=10;",
+        )?;
+    }
+    if version < 13 {
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS model_attempt_diagnostics (
+            exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
+            sequence INTEGER NOT NULL CHECK(sequence>0),
+            policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+            started_ms INTEGER NOT NULL, finished_ms INTEGER,
+            outcome TEXT NOT NULL CHECK(outcome IN ('in_flight','accepted','failed')),
+            failure_json TEXT, stop_reason TEXT,
+            PRIMARY KEY(exchange_id,sequence));
+        CREATE TABLE IF NOT EXISTS jev_attempt_diagnostics (
+            operation_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0),
+            role TEXT NOT NULL CHECK(role IN ('context','judge')),
+            recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
+            PRIMARY KEY(operation_id,sequence)); PRAGMA user_version=13;",
         )?;
     }
     Ok(())

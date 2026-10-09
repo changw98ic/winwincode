@@ -319,6 +319,11 @@ test('device recovery settles only complete terminal failures and leaves product
   const observation = { delivery: { status: 'failed', attention: [] },
     workRunAggregate: { items: [{ state: 'failed' }], runs: [{ state: 'failed' }] } }
   assert.deepEqual(terminalDeviceFailure(observation), { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' })
+  assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'failed', attention: [] },
+    workRunAggregate: { items: [{ id: 'item', revision: 1, state: 'candidate_ready' }], runs: [
+      { workItemId: 'item', workItemRevision: 1, state: 'candidate_ready' },
+      { workItemId: 'item', workItemRevision: 1, state: 'failed' },
+    ] } }), { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' })
   assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'cancelled', attention: [] },
     workRunAggregate: { items: [{ state: 'done' }, { state: 'cancelled' }],
       runs: [{ state: 'settled' }, { state: 'cancelled' }] } }),
@@ -334,6 +339,11 @@ test('device recovery settles only complete terminal failures and leaves product
   assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'candidate_ready', attention: [] },
     workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'candidate_ready' }, { state: 'failed' }] } }),
   { code: 'DEVICE_PRODUCT_STALLED', status: 'candidate_ready' })
+  assert.equal(terminalDeviceFailure({ delivery: { status: 'failed', attention: [] },
+    workRunAggregate: { items: [{ id: 'item', revision: 1, state: 'candidate_ready' }], runs: [
+      { workItemId: 'item', workItemRevision: 1, state: 'failed' },
+      { workItemId: 'item', workItemRevision: 1, state: 'settled' },
+    ] } }), null, 'an earlier failed consumer cannot override a successful retry')
   const waitingHuman = { delivery: { status: 'waiting_human', attention: [{ status: 'open', blocking: true }] },
     workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'settled' }] } }
   assert.equal(terminalDeviceFailure(waitingHuman), null)
@@ -354,42 +364,33 @@ test('a returned terminal Device failure remains a failed benchmark row', async 
   assert.equal(result.model, model)
 })
 
-test('a returned failed Fusion aggregation remains a failed cell after retaining all member outcomes', async () => {
-  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = plan.cells.find(value => value.configurationId === 'main-C' && value.comparison === 'fusion-4')
-  const failure = { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' }
-  const result = await executeBenchmarkCell(cell, {
-    runModel: async request => ({ status: 'completed', provider: request.provider }),
-    aggregate: async () => ({ status: 'failed', failure }),
-  })
-  assert.equal(result.status, 'failed')
-  assert.deepEqual(result.failure, failure)
-  assert.equal(result.members.length, 4)
-  assert.equal(result.aggregateReceipt.callCount, 1)
-  assert.deepEqual(result.productOutcome, result.aggregate)
+test('a returned native Fusion failure remains one failed product cell', async () => {
+  const cell = buildBenchmarkPlan({taskIds: Array.from({length:20}, (_, i) => `task-${i}`)}).cells[4]
+  const failure = {code:'DEVICE_PRODUCT_FAILED',status:'failed'}
+  const calls=[]
+  const result=await executeBenchmarkCell(cell, {runModel: async request => {
+    calls.push(request); return {status:'failed',failure}
+  }, aggregate: () => assert.fail('native Fusion does not submit an aggregation WorkRun')})
+  assert.equal(calls.length,1)
+  assert.equal(calls[0].executionFusion,true)
+  assert.deepEqual(result.failure,failure)
+  assert.equal(result.status,'failed')
+  assert.equal(result.productOutcome,result.model)
 })
 
-test('a settled attention failure retains its Fusion member and runs the remaining providers', async () => {
-  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = plan.cells.find(value => value.configurationId === 'main-C' && value.comparison === 'fusion-4')
-  const called = []
-  const calls = []
-  const result = await executeBenchmarkCell(cell, {
-    runModel: async request => {
-      called.push(request.provider)
-      if (called.length === 1) return { status: 'failed', provider: request.provider,
-        failure: { code: 'DEVICE_TASK_ATTENTION', status: 'waiting_human' } }
-      return { status: 'completed', provider: request.provider }
-    },
-    aggregate: async request => ({ status: 'failed', failure: { code: 'DEVICE_TASK_ATTENTION' },
-      memberCount: request.members.length }),
-  }, { recordCall: call => calls.push(call) })
-  assert.equal(called.length, 4)
-  assert.equal(result.members[0].failure.code, 'DEVICE_TASK_ATTENTION')
-  assert.equal(result.aggregate.memberCount, 4)
-  assert.equal(calls.length, 5)
-  assert.equal(calls[0].status, 'returned')
+
+test('native Fusion attention preserves the one product failure without launching siblings', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const calls=[]
+  const result=await executeBenchmarkCell(cell,{runModel:async request=>{
+    assert.equal(request.fusionKind,'native-panel')
+    return {status:'failed',failure:{code:'DEVICE_TASK_ATTENTION',status:'waiting_human'}}
+  },aggregate:()=>assert.fail('attention cannot trigger another product task')},{recordCall:call=>calls.push(call)})
+  assert.equal(result.failure.code,'DEVICE_TASK_ATTENTION')
+  assert.equal(calls.length,1)
+  assert.equal(calls[0].status,'returned')
 })
+
 
 test('the durable benchmark row keeps a returned product failure failed and never reexecutes it', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-returned-failure-'))
@@ -580,64 +581,36 @@ test('a prelaunch crash becomes an explicit failed row without starting a produc
   assert.deepEqual(result.records[0].calls, [])
 })
 
-test('recovery leaves incomplete Fusion unresolved and propagates retained stops', async () => {
-  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[4]
-  const calls = []
-  const expected = await executeBenchmarkCell(cell, {
-    runModel: request => ({ provider: request.provider }), aggregate: request => ({ digest: request.inputDigest }),
-  }, { recordCall: call => calls.push(call) })
-  const recovered = await recoverBenchmarkCell(cell, { calls, launches: [] })
-  assert.deepEqual(recovered.aggregateReceipt, expected.aggregateReceipt)
-  assert.deepEqual(recovered.members, expected.members)
-  await assert.rejects(recoverBenchmarkCell(cell, { calls: calls.slice(0, 4), launches: [] }), { code: 'LEDGER_RUN_UNRESOLVED' })
-  const stoppedCall = {
-    callId: calls[0].callId, status: 'failed', failure: { code: 'TASK_CANCELLED' }, termination: { reason: 'TASK_CANCELLED' },
-  }
-  const stopped = await recoverBenchmarkCell(cell, { launches: [], calls: [stoppedCall, ...calls.slice(1, 4)] })
-  assert.equal(stopped.status, 'failed')
-  assert.equal(stopped.termination.reason, 'TASK_CANCELLED')
-  await assert.rejects(recoverBenchmarkCell(cell, { launches: [], calls: [stoppedCall] }), { code: 'LEDGER_RUN_UNRESOLVED' })
-  await assert.rejects(recoverBenchmarkCell(cell, { launches: [], calls: [{
-    callId: calls[0].callId, status: 'failed', failure: { code: 'BENCHMARK_EVIDENCE_FAILED' },
-  }] }), { code: 'LEDGER_RUN_UNRESOLVED' })
+test('native Fusion recovery uses the registered product and preserves its retained stop', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const callId=`${cell.runId}:native-panel`
+  const complete={callId,status:'returned',result:{status:'completed',answer:'native fixture'}}
+  const recovered=await recoverBenchmarkCell(cell,{calls:[complete],launches:[]})
+  assert.deepEqual(recovered.model,complete.result)
+  await assert.rejects(recoverBenchmarkCell(cell,{calls:[],launches:[{callId}]}),{code:'LEDGER_RUN_UNRESOLVED'})
+  const stopped={callId,status:'failed',failure:{code:'TASK_CANCELLED'},termination:{reason:'TASK_CANCELLED'}}
+  const stoppedResult=await recoverBenchmarkCell(cell,{calls:[stopped],launches:[]})
+  assert.equal(stoppedResult.termination.reason,'TASK_CANCELLED')
+  assert.equal(stoppedResult.status,'failed')
 })
 
-test('one failed Fusion member does not omit siblings and recovery reproduces the same aggregation input', async () => {
-  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[4]
-  const providers = []
-  const calls = []
-  let aggregations = 0
-  const result = await executeBenchmarkCell(cell, {
-    runModel: request => {
-      providers.push(request.provider)
-      if (providers.length === 1) throw Object.assign(new Error('retained provider failure'), { code: 'MODEL_FAILED' })
-      return { provider: request.provider, status: 'completed' }
-    },
-    aggregate: request => {
-      aggregations += 1
-      assert.equal(request.members.length, 4)
-      assert.equal(request.members[0].failure.code, 'MODEL_FAILED')
-      return { status: 'completed', inputDigest: request.inputDigest }
-    },
-  }, { recordCall: call => calls.push(call) })
-  assert.equal(providers.length, 4)
-  assert.equal(new Set(providers).size, 4)
-  assert.equal(aggregations, 1)
-  assert.deepEqual(calls.map(call => call.status), ['failed', 'returned', 'returned', 'returned', 'returned'])
-  const recovered = await recoverBenchmarkCell(cell, { calls, launches: [] })
-  assert.deepEqual(recovered.members, result.members)
-  assert.deepEqual(recovered.aggregateReceipt, result.aggregateReceipt)
-  let attempts = 0
-  await assert.rejects(executeBenchmarkCell(cell, {
-    runModel: async (_request, runner) => {
-      attempts += 1
-      try { await runner.registerLaunch({}) } catch { /* May not swallow persistence failure. */ }
-      return { status: 'completed' }
-    },
-    aggregate: () => assert.fail('storage failure must prevent aggregation'),
-  }, { registerLaunch: () => { throw Object.assign(new Error('disk unavailable'), { code: 'ENOSPC' }) } }), { code: 'ENOSPC' })
-  assert.equal(attempts, 4)
+
+test('retained legacy Fusion reconstructs all five old receipts without new dispatch', async () => {
+  const current=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const cell={...current,fusionKind:'independent-aggregate',executionContractVersion:1}
+  const providers=['glm-5.3-flash','mimo-v2.6-pro','deepseek-flash','qwen3.8-flash']
+  const members=providers.map(provider=>({provider,status:'completed'}))
+  const calls=members.map(member=>({callId:`${cell.runId}:member:${member.provider}`,status:'returned',result:member}))
+  calls.push({callId:`${cell.runId}:aggregation`,status:'returned',result:{status:'completed',answer:'retained'}})
+  const recovered=await recoverBenchmarkCell(cell,{calls,launches:[]},()=>assert.fail('complete old receipts cannot call a provider'))
+  assert.deepEqual(recovered.members,members)
+  assert.equal(recovered.aggregate.answer,'retained')
+  await assert.rejects(recoverBenchmarkCell(cell,{calls:calls.slice(0,4),launches:[]}),{code:'LEDGER_RUN_UNRESOLVED'})
+  let sends=0
+  await assert.rejects(executeBenchmarkCell(cell,{runModel:()=>{sends++},aggregate:()=>{sends++}}),{code:'BENCHMARK_FUSION_TOPOLOGY_INVALID'})
+  assert.equal(sends,0)
 })
+
 
 test('product aggregation binds four independent frozen candidates and rejects reused or changed member inputs', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-aggregation-'))
@@ -849,7 +822,7 @@ test('frozen task catalog produces exactly 700 unique benchmark cells', () => {
   assert.equal(new Set(plan.cells.map(cell => cell.runId)).size, 700)
 })
 
-test('every experimental arm reaches both member execution and aggregation unchanged', async () => {
+test('every experimental arm reaches its single product execution unchanged', async () => {
   const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
   const cells = plan.cells.filter(cell => cell.taskId === 'task-1')
   assert.equal(cells.length, 35)
@@ -863,7 +836,8 @@ test('every experimental arm reaches both member execution and aggregation uncha
       return { answer: 'fixture' }
     }
     await executeBenchmarkCell(cell, { runModel: check, aggregate: check })
-    assert.equal(calls.length, cell.comparison === 'fusion-4' ? 5 : 1)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].executionFusion, cell.comparison === 'fusion-4' || cell.fusion)
   }
 })
 
@@ -918,255 +892,93 @@ test('Device rejects missing experimental configuration before launch side effec
 
 
 
-test('an independent fusion cell calls each member once and aggregates once', async () => {
-  const calls = []
-  const cell = {
-    ...benchmarkConfiguration('main-C'),
-    runId: 'main-C:task-0001:fusion-4',
-    taskId: 'task-0001',
-    comparison: 'fusion-4',
-    fusionKind: 'independent-aggregate',
-    reasoningEffort: 'max',
-    budgetLimits: null,
-  }
-  const result = await executeBenchmarkCell(cell, {
-    runModel: async request => {
-      calls.push({ type: 'model', request })
-      return { provider: request.provider, answer: request.provider }
-    },
-    aggregate: async request => {
-      calls.push({ type: 'aggregate', request })
-      return { answer: 'aggregated' }
-    },
-  })
-
-  assert.deepEqual(calls.map(call => call.type), ['model', 'model', 'model', 'model', 'aggregate'])
-  assert.deepEqual(calls.slice(0, 4).map(call => call.request.provider), [
-    'glm-5.3-flash',
-    'mimo-v2.6-pro',
-    'deepseek-flash',
-    'qwen3.8-flash',
-  ])
-  assert.ok(calls.slice(0, 4).every(call => call.request.reasoningEffort === 'max'))
-  assert.equal(result.aggregate.answer, 'aggregated')
-  assert.equal(calls[4].request.engine, 'fusion-engine')
-  assert.equal(calls[4].request.algorithmVersion, 'fusion-4-v1')
-  assert.equal('provider' in calls[4].request, false)
-  assert.equal('modelId' in calls[4].request, false)
-  assert.equal('reasoningEffort' in calls[4].request, false)
-  assert.equal(result.aggregateReceipt.callKind, 'fusion-engine')
-  assert.equal(result.aggregateReceipt.inputDigest, calls[4].request.inputDigest)
-  assert.match(result.aggregateReceipt.outputDigest, /^[0-9a-f]{64}$/u)
+test('a native Fusion cell launches one coordinator product and no independent member tasks', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const requests=[]
+  const result=await executeBenchmarkCell(cell,{runModel:async request=>{requests.push(request);return {answer:'native fixture'}},
+    aggregate:()=>assert.fail('independent aggregation is not a formal product path')})
+  assert.equal(requests.length,1)
+  assert.equal(requests[0].provider,'glm-5.3-flash')
+  assert.equal(requests[0].callId,`${cell.runId}:native-panel`)
+  assert.equal(requests[0].executionFusion,true)
+  assert.equal(requests[0].executionContractVersion,2)
+  assert.equal(requests[0].reasoningEffort,'max')
+  assert.equal(result.model.answer,'native fixture')
 })
 
-test('Fusion members overlap and aggregation joins every result in provider order', async () => {
-  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = plan.cells[4]
-  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
-  const releases = new Map()
-  const receipts = new Map()
-  const started = []
-  const calls = []
-  let aggregations = 0
-  const execution = executeBenchmarkCell(cell, {
-    runModel: async request => {
-      started.push(request.provider)
-      await new Promise(resolve => releases.set(request.provider, resolve))
-      return { provider: request.provider, answer: request.provider }
-    },
-    aggregate: async request => {
-      aggregations += 1
-      assert.deepEqual(request.members.map(member => member.provider), providers)
-      assert.equal(calls.length, 4)
-      assert.equal(request.inputDigest, benchmarkAggregationDigest(cell.runId, cell.taskId, request.members))
-      return { answer: 'aggregated' }
-    },
-  }, { recordCall: call => {
-    calls.push(call)
-    receipts.get(call.callId)?.()
-  } })
-  try {
-    assert.deepEqual(started, providers, 'all four members must start before any member finishes')
-    for (const provider of [providers[3], providers[1], providers[2]]) {
-      const receipt = new Promise(resolve => receipts.set(`${cell.runId}:member:${provider}`, resolve))
-      releases.get(provider)()
-      await receipt
-      assert.equal(aggregations, 0, 'aggregation must wait for the slowest member')
-    }
-    releases.get(providers[0])()
-    const result = await execution
-    assert.equal(aggregations, 1)
-    assert.deepEqual(result.members.map(member => member.provider), providers)
-    assert.deepEqual(calls.map(call => call.callId), [
-      ...[providers[3], providers[1], providers[2], providers[0]].map(provider => `${cell.runId}:member:${provider}`),
-      `${cell.runId}:aggregation`,
-    ])
-  } finally {
-    for (const release of releases.values()) release()
-    await execution.catch(() => {})
-  }
+
+test('a native Fusion cell waits for its original product completion without launching another', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  let release,started=0,settled=false
+  const execution=executeBenchmarkCell(cell,{runModel:async()=>{started++;await new Promise(resolve=>{release=resolve});return {status:'completed'}},aggregate:()=>assert.fail('no aggregation task')})
+  const observed=execution.then(value=>{settled=true;return value})
+  assert.equal(started,1)
+  assert.equal(settled,false)
+  release()
+  assert.equal((await observed).model.status,'completed')
+  assert.equal(started,1)
 })
 
-test('a Fusion member stop waits for launched siblings to retain their results', async () => {
-  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[4]
-  const releases = []
-  const calls = []
-  let started = 0
-  let settled = false
-  const stop = { termination: { reason: 'TASK_CANCELLED' } }
-  const execution = executeBenchmarkCell(cell, {
-    runModel: async request => {
-      const index = started++
-      if (index === 0) return stop
-      await new Promise(resolve => releases.push(resolve))
-      return { status: 'completed', provider: request.provider }
-    },
-    aggregate: () => assert.fail('a task stop must prevent aggregation'),
-  }, { recordCall: call => calls.push(call) })
-  const observed = execution.then(() => { settled = true }, error => { settled = true; return error })
-  try {
-    await new Promise(resolve => setImmediate(resolve))
-    assert.equal(started, 4)
-    assert.equal(settled, false, 'a stop must not close the cell while siblings still run')
-    assert.equal(calls.length, 1)
-    for (const release of releases) release()
-    const error = await observed
-    assert.equal(error.code, 'TASK_CANCELLED')
-    assert.equal(calls.length, 4)
-    assert.deepEqual(calls[0].result, stop)
-    assert.equal(calls.slice(1).every(call => call.status === 'returned'), true)
-  } finally {
-    for (const release of releases) release()
-    await observed
-  }
+
+test('a native Fusion product stop retains one receipt and does not start siblings', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const stop={termination:{reason:'TASK_CANCELLED'}}
+  const calls=[]
+  let started=0
+  await assert.rejects(executeBenchmarkCell(cell,{runModel:async()=>{started++;return stop},aggregate:()=>assert.fail('no aggregation task')},{recordCall:call=>calls.push(call)}),{code:'TASK_CANCELLED'})
+  assert.equal(started,1)
+  assert.equal(calls.length,1)
+  assert.deepEqual(calls[0].result,stop)
 })
 
-test('Fusion recovery preserves out-of-order durable member receipts', async t => {
-  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-parallel-recovery-'))
-  t.after(() => rm(directory, { recursive: true, force: true }))
-  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = plan.cells[4]
-  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
-  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
-    experimentBinding: { experimentId: 'parallel-recovery' } }
-  const releases = new Map()
-  const receipts = new Map()
-  const calls = []
-  const execution = runBenchmarkPlan({ cells: [cell] }, { ...options,
-    executeCell: (value, context) => executeBenchmarkCell(value, {
-      runModel: async request => {
-        await new Promise(resolve => releases.set(request.provider, resolve))
-        return request.provider === providers[0]
-          ? { termination: { reason: 'TASK_CANCELLED' } }
-          : { status: 'completed', provider: request.provider }
-      },
-      aggregate: () => assert.fail('a stopped member must not aggregate'),
-    }, { ...context, recordCall: call => {
-      context.recordCall(call)
-      calls.push(call)
-      receipts.get(call.callId)?.()
-    } }).catch(error => {
-      assert.equal(error.code, 'TASK_CANCELLED')
-      // Preserve the unfinished claim as if the coordinator stopped before
-      // committing the cell, after every member receipt was already durable.
-      throw Object.assign(new Error('coordinator interrupted'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
-    }),
-  }).catch(error => error)
-  try {
-    assert.equal(releases.size, 4)
-    for (const provider of [...providers].reverse()) {
-      const receipt = new Promise(resolve => receipts.set(`${cell.runId}:member:${provider}`, resolve))
-      releases.get(provider)()
-      await receipt
-    }
-    assert.equal((await execution).code, 'BENCHMARK_EVIDENCE_FAILED')
-    const recovered = await runBenchmarkPlan({ cells: [cell] }, { ...options,
-      executeCell: () => assert.fail('recovery must not launch new model work'),
-      recoverCell: recoverBenchmarkCell,
-    })
-    assert.equal(recovered.records[0].termination.reason, 'TASK_CANCELLED')
-    assert.deepEqual(recovered.records[0].calls, calls)
-    assert.deepEqual(recovered.records[0].calls.map(call => call.callId),
-      [...providers].reverse().map(provider => `${cell.runId}:member:${provider}`))
-  } finally {
-    for (const release of releases.values()) release()
-    await execution
-  }
+
+test('native Fusion recovery preserves the durable product receipt after coordinator interruption', async t => {
+  const directory=await mkdtemp(resolve(tmpdir(),'native-fusion-recovery-'))
+  t.after(()=>rm(directory,{recursive:true,force:true}))
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const options={ledgerPath:resolve(directory,'ledger.sqlite3'),experimentBinding:{experimentId:'native-recovery'}}
+  let started=0
+  await assert.rejects(runBenchmarkPlan({cells:[cell]},{...options,executeCell:async(value,context)=>{
+    await executeBenchmarkCell(value,{runModel:async()=>{started++;return {status:'completed',answer:'retained native result'}}},context)
+    throw Object.assign(new Error('coordinator interrupted'),{code:'BENCHMARK_EVIDENCE_FAILED'})
+  }}),{code:'BENCHMARK_EVIDENCE_FAILED'})
+  const recovered=await runBenchmarkPlan({cells:[cell]},{...options,executeCell:()=>assert.fail('registered native task must not launch again'),recoverCell:recoverBenchmarkCell})
+  assert.equal(started,1)
+  assert.equal(recovered.records[0].calls.length,1)
+  assert.equal(recovered.records[0].model.answer,'retained native result')
 })
 
-test('a Fusion member stop cannot hide a sibling evidence or unresolved-ledger failure', async t => {
-  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-mixed-stop-failure-'))
-  t.after(() => rm(directory, { recursive: true, force: true }))
-  const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = full.cells[4]
-  const providers = full.cells.slice(0, 4).map(value => value.comparison)
-  const plan = { cells: [cell, full.cells[0]] }
-  for (const code of ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED']) {
-    await t.test(code, async () => {
-      const options = { ledgerPath: resolve(directory, `${code}.sqlite3`),
-        experimentBinding: { experimentId: code } }
-      let models = 0
-      let nextCellStarted = false
-      await assert.rejects(runBenchmarkPlan(plan, { ...options,
-        executeCell: (value, context) => {
-          if (value.runId !== cell.runId) { nextCellStarted = true; assert.fail('a recovery error must stop the batch') }
-          return executeBenchmarkCell(value, {
-            runModel: async request => {
-              models += 1
-              if (request.provider === providers[0]) return { termination: { reason: 'TASK_CANCELLED' } }
-              if (request.provider === providers[1]) throw Object.assign(new Error('member recovery required'), { code })
-              return { status: 'completed', provider: request.provider }
-            },
-            aggregate: () => assert.fail('recovery errors must prevent aggregation'),
-          }, context)
-        },
-      }), { code })
-      assert.equal(models, 4)
-      assert.equal(nextCellStarted, false)
-      await assert.rejects(runBenchmarkPlan(plan, { ...options,
-        executeCell: () => assert.fail('the original claim must remain unresolved'),
-      }), error => {
-        assert.equal(error.code, 'LEDGER_RUN_UNRESOLVED')
-        assert.equal(error.calls.length, 4)
-        assert.equal(error.calls.find(call => call.callId.endsWith(providers[1])).failure.code, code)
-        return true
-      })
-    })
-  }
-})
 
-test('one Fusion launch persistence failure preserves its siblings returned receipts', async () => {
-  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
-  const cell = plan.cells[4]
-  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
-  const calls = []
-  await assert.rejects(executeBenchmarkCell(cell, {
-    runModel: async (request, runner) => {
-      try { await runner.registerLaunch({ callId: request.callId }) } catch { /* Own launch failure must remain fatal. */ }
-      return { status: 'completed', provider: request.provider, answer: `answer-${request.provider}` }
-    },
-    aggregate: () => assert.fail('a launch persistence failure must prevent aggregation'),
-  }, {
-    registerLaunch: target => {
-      if (target.callId.endsWith(providers[0])) throw Object.assign(new Error('launch disk failure'), { code: 'ENOSPC' })
-    },
-    recordCall: call => calls.push(call),
-  }), { code: 'ENOSPC' })
-  assert.equal(calls.length, 4)
-  assert.equal(calls.find(call => call.callId.endsWith(providers[0])).status, 'failed')
-  for (const provider of providers.slice(1)) {
-    const call = calls.find(value => value.callId.endsWith(provider))
-    assert.equal(call.status, 'returned')
-    assert.deepEqual(call.result, { status: 'completed', provider, answer: `answer-${provider}` })
+test('native Fusion evidence failures leave its claim unresolved and stop the next cell', async t => {
+  const directory=await mkdtemp(resolve(tmpdir(),'native-fusion-storage-'))
+  t.after(()=>rm(directory,{recursive:true,force:true}))
+  const full=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)})
+  const cell=full.cells[4]
+  for(const code of ['BENCHMARK_EVIDENCE_FAILED','LEDGER_RUN_UNRESOLVED']) {
+    const options={ledgerPath:resolve(directory,`${code}.sqlite3`),experimentBinding:{experimentId:code}}
+    let started=0
+    await assert.rejects(runBenchmarkPlan({cells:[cell,full.cells[0]]},{...options,executeCell:(value,context)=>{
+      assert.equal(value.runId,cell.runId)
+      return executeBenchmarkCell(value,{runModel:async()=>{started++;throw Object.assign(new Error('native evidence failure'),{code})}},context)
+    }}),{code})
+    assert.equal(started,1)
+    await assert.rejects(runBenchmarkPlan({cells:[cell,full.cells[0]]},{...options,executeCell:()=>assert.fail('unresolved native claim cannot restart')}),{code:'LEDGER_RUN_UNRESOLVED'})
   }
 })
 
 
-
-
-
-
-
+test('a native Fusion launch persistence failure prevents any second product task', async () => {
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const calls=[]
+  let started=0
+  await assert.rejects(executeBenchmarkCell(cell,{runModel:async(request,runner)=>{
+    started++;try{await runner.registerLaunch({callId:request.callId})}catch{}
+    return {status:'completed'}
+  },aggregate:()=>assert.fail('no independent task after persistence failure')},{registerLaunch:()=>{throw Object.assign(new Error('fixture disk failure'),{code:'ENOSPC'})},recordCall:call=>calls.push(call)}),{code:'ENOSPC'})
+  assert.equal(started,1)
+  assert.equal(calls.length,1)
+  assert.equal(calls[0].status,'failed')
+})
 
 
 test('a stuck tool request terminates only its task and retains all 700 rows', async () => {
@@ -1698,8 +1510,18 @@ test('typed query interruption drains admitted cells and recovers the original r
     assert.equal(rows[3].token, null)
     assert.equal(rows[3].record, null)
     originalCallBytes = before.prepare('SELECT record FROM benchmark_call WHERE ordinal = 0').get().record
-    assert.deepEqual(JSON.parse(originalCallBytes), { callId: launch.callId, status: 'failed',
-      failure: { code: 'TRUSTED_FACTS_UNAVAILABLE' }, unresolvedDeviceExecution: true })
+    const retainedInterruption = JSON.parse(originalCallBytes)
+    assert.equal(retainedInterruption.callId, launch.callId)
+    assert.equal(retainedInterruption.status, 'failed')
+    assert.equal(retainedInterruption.unresolvedDeviceExecution, true)
+    assert.equal(retainedInterruption.failure.code, 'TRUSTED_FACTS_UNAVAILABLE')
+    assert.equal(retainedInterruption.failure.message, 'TRUSTED_FACTS_UNAVAILABLE')
+    assert.equal(retainedInterruption.failure.executionUnresolved, true)
+    assert.equal(retainedInterruption.failure.diagnostic.phase, 'call')
+    assert.ok(retainedInterruption.failure.diagnostic.stack.every(frame =>
+      frame.file === 'tests/real-task-benchmark-runner.test.mjs' && frame.line > 0 && frame.column > 0))
+    assert.equal(originalCallBytes.includes('query returned HTTP 503'), false)
+    assert.equal(originalCallBytes.includes(directory), false)
     assert.deepEqual(JSON.parse(before.prepare('SELECT target FROM benchmark_launch WHERE ordinal = 0').get().target), launch)
   } finally { before.close() }
   const authoritativeTerminal = { status: 'failed', directory: launch.directory,
@@ -1942,7 +1764,7 @@ test('model adapter registers separate standalone and Fusion launch targets befo
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-adapter-launch-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
-  const plan = { cells: [full.cells[0], full.cells.find(cell => cell.fusionKind === 'independent-aggregate')] }
+  const plan = { cells: [full.cells[0], full.cells.find(cell => cell.fusionKind === 'native-panel')] }
   const ledgerPath = resolve(directory, 'ledger.sqlite3')
   let launches = 0
   const adapter = {
@@ -1961,9 +1783,9 @@ test('model adapter registers separate standalone and Fusion launch targets befo
   const result = await runBenchmarkPlan(plan, { ledgerPath, experimentBinding: { experimentId: 'test-only' },
     executeCell: (cell, context) => executeBenchmarkCell(cell, adapter, context),
   })
-  assert.equal(launches, 5)
+  assert.equal(launches, 2)
   assert.equal(result.records[0].launches.length, 1)
-  assert.equal(result.records[1].launches.length, 4)
+  assert.equal(result.records[1].launches.length, 1)
 })
 
 test('actual Device launcher commits its product address before starting and survives process death', async t => {
@@ -2044,7 +1866,7 @@ test('concurrent runner cannot execute an already claimed cell', async t => {
   }
 })
 
-test('Core repeat stop survives restart while unclaimed tasks continue exactly once', async t => {
+test('task cancellation survives restart while unclaimed tasks continue exactly once', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-stop-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
@@ -2141,52 +1963,31 @@ test('externally scored failures remain in the denominator and Fusion regret is 
   assert.equal(regretReport.gates.minority.status, 'pass')
 })
 
-test('Fusion member receipts survive aggregation failure and unfinished-ledger reopen', async t => {
-  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-member-receipts-'))
-  t.after(() => rm(directory, { recursive: true, force: true }))
-  const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i + 1}`) })
-  const cell = full.cells.find(item => item.fusionKind === 'independent-aggregate')
-  const path = resolve(directory, 'ledger.sqlite3')
-  const result = await runBenchmarkPlan({ cells: [cell] }, {
-    ledgerPath: path, experimentBinding: { experimentId: 'receipt-test' },
-    executeCell: (item, context) => executeBenchmarkCell(item, {
-      runModel: request => ({ provider: request.provider, candidateCommit: 'fixture' }),
-      aggregate: () => {
-        const db = new DatabaseSync(path, { readOnly: true })
-        try { assert.equal(db.prepare('SELECT count(*) AS n FROM benchmark_call').get().n, 4) }
-        finally { db.close() }
-        throw Object.assign(new Error('fixture aggregation failure'), { code: 'AGGREGATION_FAILED' })
-      },
-    }, context),
-  })
-  assert.equal(result.records[0].status, 'failed')
-  assert.deepEqual(result.records[0].calls.map(call => call.status), ['returned', 'returned', 'returned', 'returned', 'failed'])
-  assert.equal(result.records[0].calls[4].failure.code, 'AGGREGATION_FAILED')
-  assert.equal(result.records[0].score, null)
-  const interruptedPath = resolve(directory, 'interrupted.sqlite3')
-  let ledger = openBenchmarkLedger(interruptedPath, 'identity', [cell])
-  const { token } = ledger.claim(0)
-  const receipt = result.records[0].calls[0]
-  ledger.recordCall(0, token, receipt)
-  ledger.recordCall(0, token, receipt)
-  assert.throws(() => ledger.recordCall(0, token, { ...receipt, result: 'changed' }), { code: 'LEDGER_CALL_CONFLICT' })
-  assert.throws(() => ledger.recordCall(0, 'wrong-token', receipt), { code: 'LEDGER_CLAIM_MISMATCH' })
-  ledger.close()
-  ledger = openBenchmarkLedger(interruptedPath, 'identity', [cell])
-  try {
-    assert.throws(() => ledger.claim(0), error => {
-      assert.equal(error.code, 'LEDGER_RUN_UNRESOLVED')
-      assert.deepEqual(error.calls, [receipt])
-      return true
-    })
-  } finally { ledger.close() }
+test('a failed native Fusion receipt survives unfinished-ledger reopen without replay', async t => {
+  const directory=await mkdtemp(resolve(tmpdir(),'native-fusion-failed-receipt-'))
+  t.after(()=>rm(directory,{recursive:true,force:true}))
+  const cell=buildBenchmarkPlan({taskIds:Array.from({length:20},(_,i)=>`task-${i}`)}).cells[4]
+  const path=resolve(directory,'ledger.sqlite3')
+  const result=await runBenchmarkPlan({cells:[cell]},{ledgerPath:path,experimentBinding:{experimentId:'failed-receipt'},executeCell:(item,context)=>executeBenchmarkCell(item,{runModel:async()=>{throw Object.assign(new Error('native fixture failure'),{code:'MODEL_FAILED'})}},context)})
+  assert.equal(result.records[0].status,'failed')
+  assert.equal(result.records[0].calls.length,1)
+  assert.equal(result.records[0].calls[0].failure.code,'MODEL_FAILED')
+  const interrupted=resolve(directory,'interrupted.sqlite3')
+  let ledger=openBenchmarkLedger(interrupted,'identity',[cell])
+  const {token}=ledger.claim(0),receipt=result.records[0].calls[0]
+  ledger.recordCall(0,token,receipt);ledger.recordCall(0,token,receipt)
+  assert.throws(()=>ledger.recordCall(0,token,{...receipt,result:'changed'}),{code:'LEDGER_CALL_CONFLICT'})
+  assert.throws(()=>ledger.recordCall(0,'wrong-token',receipt),{code:'LEDGER_CLAIM_MISMATCH'})
+  ledger.close();ledger=openBenchmarkLedger(interrupted,'identity',[cell])
+  try{assert.throws(()=>ledger.claim(0),error=>{assert.equal(error.code,'LEDGER_RUN_UNRESOLVED');assert.deepEqual(error.calls,[receipt]);return true})}finally{ledger.close()}
 })
+
 
 test('member receipt write failure stops execution and leaves the cell unresolved', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-member-write-failure-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i + 1}`) })
-  const plan = { cells: [full.cells.find(cell => cell.fusionKind === 'independent-aggregate')] }
+  const plan = { cells: [full.cells.find(cell => cell.fusionKind === 'native-panel')] }
   const ledgerPath = resolve(directory, 'ledger.sqlite3')
   const options = { ledgerPath, experimentBinding: { experimentId: 'write-failure' } }
   let executions = 0
@@ -2203,7 +2004,7 @@ test('member receipt write failure stops execution and leaves the cell unresolve
       aggregate: () => assert.fail('aggregation must not start'),
     }, context),
   }), /receipt disk failure/u)
-  assert.equal(executions, 4)
+  assert.equal(executions, 1)
   await assert.rejects(runBenchmarkPlan(plan, { ...options,
     executeCell: () => assert.fail('unresolved member must not rerun'),
   }), { code: 'LEDGER_RUN_UNRESOLVED' })
@@ -2213,8 +2014,8 @@ test('returned product stop halts its standalone or Fusion task while the next t
   const root = await mkdtemp(resolve(tmpdir(), 'wwc-returned-stop-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i + 1}`) })
-  const fusion = full.cells.find(cell => cell.fusionKind === 'independent-aggregate')
-  for (const stage of ['standalone', 'member', 'aggregation']) {
+  const fusion = full.cells.find(cell => cell.fusionKind === 'native-panel')
+  for (const stage of ['standalone', 'native-panel']) {
     const first = stage === 'standalone' ? full.cells[0] : fusion
     const next = full.cells.find(cell => cell.runId !== first.runId)
     let calls = 0
@@ -2228,7 +2029,7 @@ test('returned product stop halts its standalone or Fusion task while the next t
       executeCell: (cell, context) => executeBenchmarkCell(cell, cell.runId === first.runId
         ? adapter : { runModel: () => { calls += 1; return { answer: 'next task' } } }, context),
     })
-    assert.equal(calls, stage === 'aggregation' ? 6 : stage === 'member' ? 5 : 2)
+    assert.equal(calls, 2)
     assert.equal(ledger.records[0].status, 'failed')
     assert.equal(ledger.records[0].termination.reason, 'TASK_CANCELLED')
     assert.deepEqual(ledger.records[0].claims, stop.claims)
@@ -2339,6 +2140,20 @@ test('Fusion Device provisioning binds four exact models and preserves private s
 })
 
 
+test('durable assertion failures retain the source location and safe cause', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-assertion-diagnostic-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const result = await runBenchmarkPlan({ cells: [{ runId: 'assertion' }] }, {
+    ledgerPath: resolve(directory, 'ledger.sqlite'),
+    experimentBinding: { experimentId: 'assertion-diagnostic' },
+    executeCell: async () => { assert.equal('recovery_pending', 'occupied') },
+  })
+  const failure = result.records[0].failure
+  assert.equal(failure.code, 'ERR_ASSERTION')
+  assert.ok(failure.diagnostic.stack.some(frame => frame.file === 'tests/real-task-benchmark-runner.test.mjs'))
+  assert.equal(failure.diagnostic.phase, 'cell')
+})
+
 test('durable failures retain safe codes but never raw adapter errors', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-failure-redaction-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -2354,7 +2169,7 @@ test('durable failures retain safe codes but never raw adapter errors', async t 
     },
   }
   const ledger = await runBenchmarkPlan(plan, options)
-  assert.deepEqual(ledger.records.map(row => row.failure), [
+  assert.deepEqual(ledger.records.map(row => ({ code: row.failure.code, message: row.failure.message })), [
     { code: 'PROVIDER_UNAVAILABLE', message: 'PROVIDER_UNAVAILABLE' },
     { code: 'RUNNER_UNEXPECTED', message: 'RUNNER_UNEXPECTED' },
   ])
@@ -2385,6 +2200,7 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
   const cursor = { deliveryId: target.deliveryId, token: 'frozen-cursor' }
   const requests = []
   let wrongCursor = false
+  const interruptions = []
   const server = createServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
@@ -2397,6 +2213,24 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
     }
     if (request.url !== '/api/v1/queries') {
       response.writeHead(405).end('{}')
+      return
+    }
+    if (body.query === 'delivery.get' && interruptions.length > 0) {
+      const interruption = interruptions.shift()
+      if (interruption === 'reset') {
+        request.socket.destroy()
+        return
+      }
+      if (interruption === 'truncated') {
+        response.writeHead(200, { 'Content-Length': 1000 })
+        response.write('{"schemaVersion":')
+        setImmediate(() => response.destroy())
+        return
+      }
+      response.setHeader('Retry-After', '0')
+      response.writeHead(interruption === 'unavailable' ? 503 : 403)
+      response.end(JSON.stringify({ error: { code: interruption === 'unavailable'
+        ? 'TRUSTED_FACTS_UNAVAILABLE' : 'PERMISSION_DENIED' } }))
       return
     }
     const results = {
@@ -2429,6 +2263,36 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
     assert.deepEqual(requests.map(r => r.body?.query ?? r.path),
       ['/api/v1/auth/session', 'delivery.get', 'workrun.get', 'session.get'])
     assert.deepEqual(requests[2].body.parameters.atCursor, cursor)
+    interruptions.push('reset', 'unavailable')
+    const retryStart = requests.length
+    const recovered = await inspectUnresolvedDeviceTasks(path)
+    assert.equal(recovered[0].observation, 'queried', 'transient queries must retain the native task')
+    const attempts = requests.slice(retryStart).filter(row => row.body?.query === 'delivery.get')
+    assert.equal(attempts.length, 3)
+    assert.deepEqual(attempts[1], attempts[0], 'retry must preserve the exact query request')
+    assert.deepEqual(attempts[2], attempts[0])
+    interruptions.push('truncated')
+    const truncatedStart = requests.length
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'queried')
+    const truncatedAttempts = requests.slice(truncatedStart).filter(row => row.body?.query === 'delivery.get')
+    assert.equal(truncatedAttempts.length, 2)
+    assert.deepEqual(truncatedAttempts[1], truncatedAttempts[0])
+    interruptions.push('forbidden')
+    const forbiddenStart = requests.length
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
+    assert.equal(requests.slice(forbiddenStart).filter(row => row.body?.query === 'delivery.get').length, 1,
+      'permission errors must not retry')
+    interruptions.push(...Array(8).fill('unavailable'))
+    const exhaustedStart = requests.length
+    const unavailableSince = performance.now()
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
+    const timedAttempts = requests.slice(exhaustedStart).filter(row => row.body?.query === 'delivery.get')
+    assert.ok(timedAttempts.length > 1 && timedAttempts.length < 8)
+    assert.ok(performance.now() - unavailableSince >= 25_000 && performance.now() - unavailableSince < 40_000,
+      'read-only inspection must stop at its explicit deadline')
+    for (const attempt of timedAttempts) assert.deepEqual(attempt, timedAttempts[0])
+    assert.ok(interruptions.length > 0, 'deadline must end inspection while the original Server is unavailable')
+    interruptions.length = 0
     wrongCursor = true
     assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
     const requestCount = requests.length

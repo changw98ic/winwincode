@@ -155,7 +155,7 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "6903c021c4c50ecd10da20e464e75a548a43e0767514ebd216289f526a726333",
+      "sha256": "8049dad69c17f0f7f74707362b1f59f44ef053afd2faef3a1ce116f087512c59",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]

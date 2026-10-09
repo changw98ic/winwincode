@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'node:url'
+import { requestFetch } from '../packages/network-request/src/index.mjs'
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u
@@ -80,7 +81,7 @@ async function workflowRuns({ defaultBranch, repository, token }) {
     url.searchParams.set('branch', defaultBranch)
     url.searchParams.set('per_page', '100')
     url.searchParams.set('page', String(page))
-    const response = await fetch(url, {
+    const response = await requestFetch(fetch, url, {
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,

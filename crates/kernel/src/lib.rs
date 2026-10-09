@@ -1027,6 +1027,7 @@ pub struct Kernel {
     options: KernelOptions,
     model_port: Arc<dyn ModelPort>,
     action_gate: Arc<dyn KernelActionGate>,
+    host_action_approvals: bool,
     runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
 }
@@ -1112,9 +1113,19 @@ impl Kernel {
             options,
             model_port,
             action_gate,
+            host_action_approvals: false,
             runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// Assign approval ownership to the installed host action gate. The host
+    /// must hold task authorization; sandbox and exact action receipts remain
+    /// enforced. Explicit per-tool human approval settings remain effective.
+    #[must_use]
+    pub fn with_host_action_approvals(mut self, enabled: bool) -> Self {
+        self.host_action_approvals = enabled;
+        self
     }
 
     /// Return static and configured build identity.
@@ -1323,7 +1334,11 @@ impl Kernel {
         })
     }
 
-    async fn session_config(runtime: &Runtime, options: &SessionOptions) -> KernelResult<Config> {
+    async fn session_config(
+        runtime: &Runtime,
+        options: &SessionOptions,
+        host_action_approvals: bool,
+    ) -> KernelResult<Config> {
         validate_agent_session_config(&options.agent_config).map_err(|_| {
             KernelFailure::new(
                 "INVALID_AGENT_CONFIG",
@@ -1422,7 +1437,40 @@ impl Kernel {
             };
             Self::apply_workspace_permissions(&mut config, workspace_write)?;
         }
+        if host_action_approvals {
+            Self::apply_host_action_approvals(&mut config)?;
+        }
         Ok(config)
+    }
+
+    fn apply_host_action_approvals(config: &mut Config) -> KernelResult<()> {
+        // The host gate owns action approval and validates every side effect.
+        // Preserve role sandbox, escalation, and explicit human boundaries.
+        let mut servers = config.mcp_servers.get().clone();
+        for server in servers.values_mut() {
+            let mode = serde_json::to_value(server.default_tools_approval_mode).map_err(|_| {
+                KernelFailure::new(
+                    "SESSION_POLICY_UNAVAILABLE",
+                    "Tool approval policy is invalid",
+                )
+            })?;
+            if mode.is_null() || mode == Value::String("auto".to_owned()) {
+                server.default_tools_approval_mode = Some(
+                    serde_json::from_value(Value::String("approve".to_owned())).map_err(|_| {
+                        KernelFailure::new(
+                            "SESSION_POLICY_UNAVAILABLE",
+                            "Host tool approval policy is invalid",
+                        )
+                    })?,
+                );
+            }
+        }
+        config.mcp_servers.set(servers).map_err(|_| {
+            KernelFailure::new(
+                "SESSION_POLICY_UNAVAILABLE",
+                "Host tool approval policy could not be installed",
+            )
+        })
     }
 
     fn validate_role_session_policy(
@@ -1495,7 +1543,8 @@ impl Kernel {
     pub async fn create_session(&self, options: SessionOptions) -> KernelResult<SessionInfo> {
         Self::guard(async {
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options).await?;
+            let config =
+                Self::session_config(&runtime, &options, self.host_action_approvals).await?;
             let thread = runtime
                 .manager
                 .start_thread(StartThreadOptions::new(config.clone()))
@@ -1525,7 +1574,8 @@ impl Kernel {
                 ));
             }
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options).await?;
+            let config =
+                Self::session_config(&runtime, &options, self.host_action_approvals).await?;
             let thread = Box::pin(runtime.manager.resume_thread_from_rollout(
                 config.clone(),
                 rollout_path,
@@ -1684,7 +1734,7 @@ impl Kernel {
                                 turn_id,
                                 thread_settings: ThreadSettingsOverrides::default(),
                                 trace: None,
-                                submit_change_batch: options.submit_change_batch,
+                                start: turn_start_options(&options),
                             })
                             .await
                     } else {
@@ -2173,11 +2223,15 @@ fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInput
         image_url: url.clone(),
         detail: None,
     }));
-    TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+    TurnInputRequest::user_input(input).on_start(turn_start_options(options))
+}
+
+fn turn_start_options(options: &TurnSubmissionOptions) -> TurnStartOptions {
+    TurnStartOptions {
         final_output_json_schema: options.final_output_json_schema.clone(),
         submit_change_batch: options.submit_change_batch,
         ..TurnStartOptions::default()
-    })
+    }
 }
 
 fn submission_info(submission: TurnInputSubmission) -> SubmissionInfo {
@@ -3026,7 +3080,7 @@ mod tests {
                 },
             )
             .expect("change Device config between tasks");
-            let result = Kernel::session_config(&runtime, &options).await;
+            let result = Kernel::session_config(&runtime, &options, false).await;
             if sandbox == "unrestricted" {
                 assert_eq!(
                     result.expect_err("unknown sandbox").code(),
@@ -3060,6 +3114,105 @@ mod tests {
         drop(runtime);
         kernel.shutdown().await.expect("shutdown kernel");
         std::fs::remove_dir_all(root).expect("remove chat fixture");
+    }
+
+    #[tokio::test]
+    async fn host_action_owner_preserves_explicit_modes_and_role_sandbox() {
+        use winwincode_execution_port::agent_config::{
+            AgentProfileSettings, resolve_agent_session_config,
+        };
+        let root =
+            std::env::temp_dir().join(format!("winwincode-host-owner-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        prepare_chat_permission_workspace(&workspace, &home);
+        std::fs::write(home.join("config.toml"), concat!(
+            "[mcp_servers.inherited]\ncommand = \"python3\"\n",
+            "[mcp_servers.automatic]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"auto\"\n",
+            "[mcp_servers.prompted]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"prompt\"\n",
+            "[mcp_servers.writes]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"writes\"\n",
+        )).expect("write private installation policy");
+        let kernel = Kernel::new(
+            KernelOptions::new(home, std::env::current_exe().expect("test executable")),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct kernel");
+        let runtime = kernel.runtime().await.expect("initialize runtime");
+        let worker =
+            serde_json::from_value(serde_json::json!("wrk_host_fixture")).expect("worker id");
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "capabilityDigest": format!("sha256:{}", "a".repeat(64)),
+            "features": ["sandbox"], "maxConcurrentJobs": 1, "platform": "aarch64-apple-darwin"
+        }))
+        .expect("capabilities");
+        for sandbox in ["candidate", "read-only"] {
+            let options = super::SessionOptions {
+                cwd: workspace.clone(),
+                provider: "fixture-provider".into(),
+                model: "fixture-model".into(),
+                role_policy: None,
+                agent_config: resolve_agent_session_config(
+                    &worker,
+                    &capabilities,
+                    "codex-chat",
+                    AgentProfileSettings {
+                        fusion: None,
+                        jev_judge: None,
+                        jev_context: None,
+                        provider: "fixture-provider".into(),
+                        model: "fixture-model".into(),
+                        reasoning: "provider_default".into(),
+                        tools: vec!["worker:sandbox".into()],
+                        sandbox: sandbox.into(),
+                        instructions: None,
+                    },
+                )
+                .expect("agent configuration"),
+            };
+            let original = Kernel::session_config(&runtime, &options, false)
+                .await
+                .expect("core-owned config");
+            let hosted = Kernel::session_config(&runtime, &options, true)
+                .await
+                .expect("host-owned config");
+            assert_eq!(
+                original.permissions.permission_profile(),
+                hosted.permissions.permission_profile()
+            );
+            assert_eq!(
+                original.permissions.approval_policy.value(),
+                hosted.permissions.approval_policy.value()
+            );
+            let mode = |configuration: &codex_core_api::Config, name: &str| {
+                serde_json::to_value(
+                    configuration.mcp_servers.get()[name].default_tools_approval_mode,
+                )
+                .expect("mode")
+            };
+            assert_eq!(mode(&original, "inherited"), serde_json::Value::Null);
+            assert_eq!(mode(&original, "automatic"), "auto");
+            assert_eq!(mode(&hosted, "inherited"), "approve");
+            assert_eq!(mode(&hosted, "automatic"), "approve");
+            for name in ["prompted", "writes"] {
+                assert_eq!(mode(&hosted, name), mode(&original, name));
+            }
+            let policy = hosted.permissions.file_system_sandbox_policy();
+            assert_eq!(
+                policy.can_write_path_with_cwd(
+                    workspace.join("fixture.txt").as_path(),
+                    workspace.as_path()
+                ),
+                sandbox == "candidate"
+            );
+            assert!(!policy.can_write_path_with_cwd(
+                std::path::Path::new("/outside-project.txt"),
+                workspace.as_path()
+            ));
+        }
+        drop(runtime);
+        kernel.shutdown().await.expect("shutdown kernel");
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[tokio::test]

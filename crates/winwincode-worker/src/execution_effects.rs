@@ -383,7 +383,7 @@ where
         let mut sent_bytes = 0;
         let mut deferred = None;
         for delivery in deliveries {
-            if tokio::time::Instant::now() >= deadline {
+            if self.port.has_pending_controls() || tokio::time::Instant::now() >= deadline {
                 break;
             }
             let previous_cursor = self.outbox_flush_cursor.clone();
@@ -434,8 +434,8 @@ where
             };
             let delivery_id = delivery.delivery_id.clone();
             sent_bytes += frame_bytes;
-            // Finish an in-flight exchange under the port's own timeout. In
-            // particular, do not cancel its receipt/accounting commit halfway.
+            // A shutdown may drop active HTTP I/O. The attempt journal then
+            // retains unknown acceptance until the durable queue reconciles it.
             let sent = self.dispatch_retained_effect(delivery).await;
             if let Err(error) = sent {
                 if error.code == WorkerErrorCode::ModelStartDeferred {
@@ -462,6 +462,11 @@ where
                 && sequence > active.last_event_sequence.0
             {
                 active.last_event_sequence = ExecutionAckSequence(sequence);
+            }
+            // The just-completed exchange can enqueue a renewal, cancellation
+            // or ACK. Its receipt is durable; yield before any further I/O.
+            if self.port.has_pending_controls() {
+                break;
             }
         }
         deferred.map_or(Ok(()), Err)

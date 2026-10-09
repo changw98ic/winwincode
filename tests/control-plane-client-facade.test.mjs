@@ -43,7 +43,8 @@ test('repository registration uses the configured transport and rejects unrelate
   assert.equal(calls[0].url, 'https://control.example.test/api/v1/clients/4113447224/repositories')
   assert.equal(calls[0].init.credentials, 'include')
   assert.equal(calls[0].init.redirect, 'error')
-  assert.equal(calls[0].init.signal, signal)
+  assert.ok(calls[0].init.signal instanceof AbortSignal)
+  assert.equal(calls[0].init.signal.aborted, false)
   assert.deepEqual(JSON.parse(calls[0].init.body), envelope)
   assert.deepEqual((await api.receipt('4113447224', 'repository_test', signal)).receipt, receipt)
   receipt = { ...receipt, requestId: 'other_request' }
@@ -238,6 +239,7 @@ test('query cancellation reaches the transport and never retries the cancelled r
       },
     },
   })
+  const started = performance.now()
   const pending = client.query(deliveryListQuery(), { signal: controller.signal })
   controller.abort()
 
@@ -248,6 +250,7 @@ test('query cancellation reaches the transport and never retries the cancelled r
       && error.code === 'REQUEST_CANCELLED',
   )
   assert.equal(attempts, 1)
+  assert.ok(performance.now() - started < 500, 'cancellation must bypass network backoff')
 })
 
 test('authentication, authorization, and schema versions use one safe error shape', async () => {

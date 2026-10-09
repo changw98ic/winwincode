@@ -60,6 +60,8 @@ use winwincode_worker::{
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
+#[path = "support/control_driver_regressions.rs"]
+mod control_driver_regressions;
 const OBSERVER_VALIDATION_CONFIG: &str = r#"schemaVersion = 1
 
 [[commands]]
@@ -7000,13 +7002,8 @@ async fn assert_invalid_renewals(
         );
         assert_eq!(worker.active_jobs()[0], before);
     }
-    assert!(
-        worker
-            .accept_control(message, before.lease.expires_at.clone())
-            .await
-            .is_err()
-    );
-    assert_eq!(worker.active_jobs()[0], before);
+    // A valid renewal consumed after expiry now settles only that exact Job.
+    // The production driver regression covers this separately from forgery.
 }
 
 #[tokio::test]
@@ -7149,5 +7146,49 @@ async fn drive_collection_after_core_poll_has_a_distinct_safe_boundary() {
             .filter(|call| call.starts_with("poll:"))
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn handled_core_poll_failure_logs_once_and_keeps_infrastructure_outcomes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("intake.log");
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A'), thread('B')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex).with_model_intake_log(&path);
+    register(&mut worker).await;
+    for key in ['A', 'B'] {
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch(key, delivery_scope(key))),
+                now(),
+            )
+            .await
+            .unwrap();
+        worker.poll_codex_boxed().await.unwrap();
+        if key == 'A' {
+            assert!(!path.exists(), "successful pending poll emits no failure");
+        }
+        pump.queue_poll(&thread(key), Err(()));
+        worker.poll_codex_boxed().await.unwrap();
+        assert!(worker.active_jobs().is_empty());
+    }
+    let outcomes = observed_outcomes(&messages);
+    assert_eq!(outcomes.len(), 2);
+    for outcome in outcomes {
+        assert_eq!(
+            outcome.outcome.status,
+            ExecutionOutcomeStatus::InfrastructureError
+        );
+        assert_eq!(
+            outcome.outcome.summary,
+            "embedded Codex runtime became unavailable"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("handled Core poll failure evidence"),
+        "component=worker stage=drive_core_poll code=CodexPollFailed \n"
     );
 }

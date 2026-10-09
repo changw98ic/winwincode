@@ -8,6 +8,7 @@ import test from 'node:test'
 import { benchmarkDeviceProfiles, deviceBenchmarkExperimentBinding,
   persistedBenchmarkDeviceFailure, removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
 import { buildBenchmarkPlan } from '../scripts/run-real-task-benchmark.mjs'
+import { deviceBenchmarkProfileKey } from '../scripts/device-agent-environment.mjs'
 import { benchmarkDeviceEnvironment, deviceTaskProvider } from '../scripts/run-device-task-vertical.mjs'
 import { DEVICE_PROVIDER_ENCRYPTION_CONTEXT, runtimeChildEnvironment,
   seedDeviceLocalProvider } from '../scripts/device-production-fixture.mjs'
@@ -101,7 +102,13 @@ test('Device admission retains the full plan while provisioning only the selecte
   const options = { concurrency: 12, selectedConfigurationIds: ['main-C', 'main-A'],
     agentSettings: {}, providerEnvironment }
   const profiles = benchmarkDeviceProfiles(plan, options)
-  assert.deepEqual(profiles.map(profile => profile.configurationId), ['main-A', 'main-C'])
+  assert.deepEqual([...new Set(plan.cells.map(cell => cell.configurationId))],
+    ['main-A', 'main-B', 'main-C', 'main-D', 'jev-context-only', 'jev-judge-only', 'jev-full'])
+  assert.deepEqual([...new Set(profiles.map(profile => profile.configurationId))], ['main-A', 'main-C'])
+  assert.deepEqual(profiles.map(deviceBenchmarkProfileKey), ['main-A', 'main-A--native-panel', 'main-C'])
+  assert.equal(profiles[0].executionFusion, false)
+  assert.equal(profiles[1].executionFusion, true)
+  assert.equal(profiles[2].executionFusion, true)
   assert.equal(plan.cells.filter(cell => profiles.some(profile => profile.configurationId === cell.configurationId)).length, 200)
   assert.equal(plan.cells.length, 700)
   assert.equal(JSON.stringify(plan), original)

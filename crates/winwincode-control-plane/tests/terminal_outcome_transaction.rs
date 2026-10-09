@@ -2299,6 +2299,15 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
             .find(|run| run.execution_job_id == job.job_id)
             .expect("final verifier run");
         assert_eq!(run.state, expected_run);
+        assert_eq!(
+            settled.snapshot().work_run_aggregate.summary_state(false),
+            if expected_run == winwincode_domain::WorkRunState::Cancelled {
+                winwincode_domain::WorkItemState::Cancelled
+            } else {
+                winwincode_domain::WorkItemState::Failed
+            },
+            "a failed read-only consumer must not leave candidate_ready as the public state"
+        );
         assert!(
             settled
                 .snapshot()

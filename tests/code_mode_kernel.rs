@@ -997,6 +997,125 @@ fn repeated_internal_calls_reach_current_model_at_yield_and_keep_cell_alive() {
     });
 }
 
+#[derive(Debug)]
+struct DiagnosisRecoveryModel {
+    script: ScriptedModel,
+    changed_tool: Mutex<bool>,
+}
+
+impl ModelPort for DiagnosisRecoveryModel {
+    fn stream(
+        &self,
+        request: ModelPortRequest,
+    ) -> BoxFuture<'static, Result<ModelPortStream, ModelPortFailure>> {
+        let payload: Value = serde_json::from_str(&request.payload_json).unwrap();
+        let latest_output = payload["request"]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("custom_tool_call_output" | "function_call_output")
+                )
+            })
+            .map(Value::to_string)
+            .unwrap_or_default();
+        let mut changed = self.changed_tool.lock().unwrap();
+        if !*changed && latest_output.contains("diagnosis-cell-resumed") {
+            let mut history = self.script.requests.lock().unwrap();
+            assert!(
+                history.iter().any(|request| {
+                    request["request"]["input"]
+                        .to_string()
+                        .contains("model_behavior_diagnosis")
+                }),
+                "the model must receive the diagnosis before changing tools"
+            );
+            *changed = true;
+            let index = history.len();
+            history.push(payload);
+            let source = "const shell = ALL_TOOLS.find(t => t.name.endsWith('exec_command'));\n\
+                text(await tools[shell.name]({cmd:'printf changed-tool-completed',login:false}));";
+            let frames = [
+                json!({"type":"created"}).to_string(),
+                json!({"type":"output_item_done","item":call_item("exec", "changed-tool", &json!(source))}).to_string(),
+                json!({"type":"completed","responseId":format!("recovery-{index}"),"endTurn":false}).to_string(),
+            ];
+            return Box::pin(async move {
+                Ok(Box::pin(futures::stream::iter(frames.into_iter().map(Ok))) as ModelPortStream)
+            });
+        }
+        drop(changed);
+        self.script.stream(request)
+    }
+}
+
+#[test]
+fn model_can_change_tools_after_repeated_operation_diagnosis_and_complete() {
+    run_native_test(|runtime| {
+        runtime.block_on(async {
+            let fixture = Fixture::new();
+            let model = Arc::new(DiagnosisRecoveryModel {
+                script: ScriptedModel {
+                    requests: Mutex::new(Vec::new()),
+                    source: DIAGNOSTIC_SOURCE,
+                    exec_count: 1,
+                    cancel_boundary: None,
+                    cancelled_cell: Mutex::new(None),
+                    direct_probe: false,
+                },
+                changed_tool: Mutex::new(false),
+            });
+            let gate = Arc::new(RecordingGate::default());
+            let kernel =
+                Kernel::new(fixture.kernel_options(), model.clone(), gate.clone()).unwrap();
+            let session = kernel
+                .create_session(fixture.session_options())
+                .await
+                .unwrap();
+            kernel
+                .submit_turn(
+                    &session.session_id,
+                    "Use the diagnosis to change tools and finish".into(),
+                    TurnSubmissionOptions::default(),
+                )
+                .await
+                .unwrap();
+            wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            assert!(*model.changed_tool.lock().unwrap());
+            let outputs = model_outputs(&model.script);
+            assert!(outputs.contains("model_behavior_diagnosis"));
+            assert!(outputs.contains("changed-tool-completed"));
+            {
+                let authorizations = gate.0.lock().unwrap();
+                assert_eq!(
+                    authorizations
+                        .iter()
+                        .filter(|request| request.tool_name.ends_with("echo"))
+                        .count(),
+                    6
+                );
+                assert_eq!(
+                    authorizations
+                        .iter()
+                        .filter(|request| request.tool_name == "exec_command")
+                        .count(),
+                    1
+                );
+            }
+            let facts = all_facts(&kernel, &session.session_id).await;
+            assert!(
+                facts
+                    .iter()
+                    .any(|fact| fact["kind"] == "diagnostic_response")
+            );
+            kernel.shutdown().await.unwrap();
+        });
+    });
+}
+
 const ALTERNATING_SOURCE: &str = r"
 const echo = ALL_TOOLS.find(tool => tool.name.endsWith('fixture__echo'));
 for (let i = 0; i < 6; i++) await tools[echo.name]({value: i % 2 === 0 ? 'state-a' : 'state-b'});

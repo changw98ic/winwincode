@@ -10,9 +10,15 @@ import test from 'node:test'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.json'), 'utf8'))
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
-const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-'))
+const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options')
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
+// The retrospective 0094 export was already present in P1; the clean archive replay covers it.
 const originalHashes = {
+  "codex-rs/core/src/session/turn_input.rs": "9886eb4b9e1afab5583e7e667cc4926127983c195402c9d7fbd7e31ce7409e16",
+  "codex-rs/core/src/session/turn_input_tests.rs": "45152701a3009a7d16ad2d7251836dba0307097b7606aedc5074aedd639de383",
+  "codex-rs/core/tests/suite/turn_input_submission.rs": "d7130ff7377381976d468832067f18ecb5b875285067597c095d2537aaf90f75",
+  "codex-rs/protocol/src/protocol.rs": "aa056aeb5d2b6cc676df3b0a2bbba636e095c3afb6024f9de7c2139adf86accc",
+  "codex-rs/protocol/src/turn_input.rs": "93ce61d4b2f3ba97e696b9fd4f8cf95764062917ad2362b455ce64ef0903a888",
   "codex-rs/exec-server/tests/common/exec_server.rs": "5a8ad34ef0f3367b83dd3d3722dc7362b95ec5c82af1be9b7a3f92e4f7db14b2",
   "codex-rs/exec-server/tests/process.rs": "519d5afce8a35b45b4d0de588c3c498768a49dbfd977512b599beae2272129f0",
   "codex-rs/core/src/agent/control_tests.rs": "bb4203241d8c93f606726d1cf9aa4473ad438d19d37e4cc16a96414ce155c08f",
@@ -135,6 +141,7 @@ const originalHashes = {
   "codex-rs/core/tests/suite/mcp_tool_exposure.rs": "02d5aa372f94c8c87974b73381701d119d08f93224cde5debaa52bb842d9a100",
   "codex-rs/core/tests/suite/model_runtime_selectors.rs": "301d554123ef29ee252375e500a9a951d43955add31a21893e1c2e8b38d45ab4",
   "codex-rs/core/tests/suite/multi_agent_resume.rs": "fa3e452b96ec3f02f79cafeac3c15e6329bf201a298767f7823f1a78380b92a3",
+  "codex-rs/core/tests/suite/rollout_budget.rs": "771922d708ba95a5e84a8a653bcf674d85950366d219b4a94c8aaa974f1a7de9",
   "codex-rs/core/tests/suite/send_user_message_async.rs": "f921f899c80f9047fdd377b03df69dc927b87a505393c93214a1cf005c087255",
   "codex-rs/core/tests/suite/skills_extension.rs": "42a74c95549c12cf4f0918dff87b4a16f8dcc91de5e89d88eaff33523739eaac",
   "codex-rs/core/tests/suite/subagent_notifications.rs": "4b9277bd89e66179c50ec2cab17d77b665480ce69055fd7a1b410649ed9a2a2d",
@@ -243,7 +250,9 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 78)
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-recover-original-turn-start-options')?.file, 'upstream/patches/codex/0093-recover-original-turn-start-options.patch')
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-export-mcp-server-transport-config')?.file, 'upstream/patches/codex/0094-export-mcp-server-transport-config.patch')
+  assert.equal(patches.length, 80)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

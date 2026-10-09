@@ -557,6 +557,19 @@ impl ChangeBatchStore {
         }))
     }
 
+    /// Loads the workspace binding owned by one exact retained batch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown batch or corrupt workspace binding.
+    pub fn workspace_binding_for_batch(
+        &self,
+        batch_id: &ChangeBatchId,
+    ) -> Result<WorkspaceBatchBinding, ChangeBatchStoreError> {
+        let record = load_record(&self.connection, batch_id)?;
+        load_binding(&self.connection, &record.workspace_id)
+    }
+
     /// Loads every retained proposal record for one Job.
     ///
     /// # Errors

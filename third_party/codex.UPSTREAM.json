@@ -97,6 +97,9 @@
     "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
     "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
     "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
-    "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch"
+    "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+    "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+    "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+    "upstream/patches/codex/0094-export-mcp-server-transport-config.patch"
   ]
 }

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
-  prepareDeviceBenchmarkProviderSlots } from '../scripts/device-task-runtime.mjs'
+  prepareDeviceBenchmarkProviderSlots, ensureBenchmarkDeviceOccupancy } from '../scripts/device-task-runtime.mjs'
 import { deviceProviderSecretValues, pendingDeviceTaskWorkRuns } from '../scripts/run-device-task-vertical.mjs'
 import { assertDeviceSecretsNeverOnServer, deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
 
@@ -349,4 +349,29 @@ test('queued Controller roles are discovered only for their own Delivery before 
   assert.deepEqual(pendingDeviceTaskWorkRuns(directory, 'task-a'), [])
   db.prepare("UPDATE scheduler_execution_jobs SET state = 'queued', dispatch_payload = '{}' WHERE job_id = 'reviewer'").run()
   assert.throws(() => pendingDeviceTaskWorkRuns(directory, 'task-a'))
+})
+
+
+test('benchmark admission waits for its original Device occupancy recovery without claiming another lease', async () => {
+  const states = ['recovery_pending', 'occupied']
+  const requests = []
+  await ensureBenchmarkDeviceOccupancy({ devicePath: { publicClientId: 'device-a' }, api: {
+    actor: { id: 'holder-a' },
+    request: async (path, options) => {
+      requests.push({ path, options })
+      return { json: { occupancy: states.shift(), holderUserId: 'holder-a' } }
+    },
+  } })
+  assert.equal(requests.length, 2)
+  assert.ok(requests.every(request => request.path === '/api/v1/clients/device-a/occupancy' && request.options.method === undefined
+    && request.options.timeoutMillis > 0 && request.options.timeoutMillis <= 300_000))
+})
+
+test('benchmark admission rejects another holder with a safe occupancy diagnostic', async () => {
+  let requests = 0
+  await assert.rejects(ensureBenchmarkDeviceOccupancy({ devicePath: { publicClientId: 'device-a' }, api: {
+    actor: { id: 'holder-a' },
+    request: async () => { requests++; return { json: { occupancy: 'recovery_pending', holderUserId: 'holder-b' } } },
+  } }), { code: 'DEVICE_OCCUPANCY_FOREIGN_HOLDER', benchmarkPhase: 'occupancy' })
+  assert.equal(requests, 1)
 })

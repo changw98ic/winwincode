@@ -18,6 +18,8 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     'component=model_bridge stage=resolve code=MODEL_EXCHANGE_UNKNOWN exchange=SECRET-CANARY detail=SECRET-CANARY',
     'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
     'component=worker stage=drive_collect_effects code=UnexpectedMessage detail=SECRET-CANARY',
+    'component=worker stage=drive_core_poll code=CodexPollFailed detail=SECRET-CANARY',
+    'component=worker stage=drive_collect_effects code=CodexPollFailed detail=SECRET-CANARY',
     'component=worker stage=drive_UNKNOWN code=UnexpectedMessage detail=SECRET-CANARY',
     'component=worker stage=drive_collect_effects code=SECRET_CANARY detail=SECRET-CANARY',
     'component=worker stage=drive code=RuntimeTraceMismatch trace_next=9007199254740993 trace_observed=106 trace_lease=true trace_worker=true trace_session=true trace_thread=true',
@@ -35,11 +37,19 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
   device.close()
   const adapter = new DatabaseSync(join(runtime, 'worker-codex.sqlite3'))
   adapter.exec(`CREATE TABLE codex_run (run_key TEXT, record_json BLOB);
-    CREATE TABLE execution_outbox (family TEXT, state TEXT, frame_json BLOB)`)
+    CREATE TABLE execution_outbox (family TEXT, state TEXT, frame_json BLOB);
+    CREATE TABLE runtime_replay (stream_key TEXT, snapshot_json BLOB)`)
+  adapter.prepare('INSERT INTO runtime_replay VALUES (?, ?)').run('SECRET-CANARY', Buffer.from(JSON.stringify({
+    ackSequence: 42, highestSequence: 43, events: [{ frame: 'SECRET-CANARY' }],
+  })))
+  adapter.prepare('INSERT INTO runtime_replay VALUES (?, ?)').run('unsafe', Buffer.from(JSON.stringify({
+    ackSequence: 'SECRET-CANARY', highestSequence: 9_007_199_254_740_992, events: 'SECRET-CANARY',
+  })))
   adapter.prepare('INSERT INTO codex_run VALUES (?, ?)').run('run', Buffer.from(JSON.stringify({
     kernelSessionId: 'kernel', canonicalThreadId: 'thread', phase: 'running',
     terminal: { kind: 'cancelled', secret: 'SECRET-CANARY' },
-    coreToolCursor: 7, coreToolFinalCursor: null, coreToolPending: null,
+    coreToolCursor: 7, coreToolFinalCursor: null,
+    coreToolPending: { event: { sequence: 44, payload: 'SECRET-CANARY' } },
     terminalTrace: { sequence: 42, retained: true },
     lastAgentMessage: 'SECRET-CANARY', providerApiKey: 'SECRET-CANARY',
   })))
@@ -47,6 +57,15 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     .run('runtime-event', 'sent_attempt', Buffer.from('SECRET-CANARY'))
   adapter.prepare('INSERT INTO execution_outbox VALUES (?, ?, ?)')
     .run('runtime', 'pending', Buffer.from(JSON.stringify({ event: { sequence: 43 }, secret: 'SECRET-CANARY' })))
+  adapter.prepare('INSERT INTO execution_outbox VALUES (?, ?, ?)')
+    .run('transport', 'pending', Buffer.from(JSON.stringify({ kind: 'job.outcome', outcome: { status: 'infrastructure_error', summary: 'SECRET-CANARY' } })))
+  adapter.prepare('INSERT INTO execution_outbox VALUES (?, ?, ?)')
+    .run('transport', 'pending', Buffer.from(JSON.stringify({ kind: 'SECRET-CANARY', outcome: { status: 'SECRET-CANARY' } })))
+  for (const [key, sequence] of [['unsafe-text', 'SECRET-CANARY'], ['unsafe-number', 9_007_199_254_740_992]]) {
+    adapter.prepare('INSERT INTO codex_run VALUES (?, ?)').run(key, Buffer.from(JSON.stringify({
+      coreToolPending: { event: { sequence } },
+    })))
+  }
   adapter.close()
   const core = new DatabaseSync(join(home, 'state_5.sqlite'))
   core.exec(`CREATE TABLE tool_runtime_cells (
@@ -64,15 +83,26 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     { component: 'model_bridge', stage: 'resolve', code: 'MODEL_EXCHANGE_UNKNOWN', count: 1 },
     { component: 'worker', stage: 'accept_chunk', code: 'MODEL_CHUNK_ACCEPT_FAILED', count: 2 },
     { component: 'worker', stage: 'drive_collect_effects', code: 'UnexpectedMessage', count: 1 },
+    { component: 'worker', stage: 'drive_core_poll', code: 'CodexPollFailed', count: 1 },
     { component: 'worker', stage: 'drive', code: 'RuntimeTraceMismatch', count: 3, traceMismatch: { nextSequence: 104, observedSequence: 106, leaseMatches: true, workerSessionMatches: true, sessionIdentityMatches: false, codexThreadMatches: true } },
   ])
   assert.deepEqual(evidence[0].adapter.outbox.map(row => ({ ...row })), [
     { family: 'runtime', state: 'pending', count: 1 },
     { family: 'runtime-event', state: 'sent_attempt', count: 1 },
+    { family: 'transport', state: 'pending', count: 2 },
   ])
   assert.equal(evidence[0].adapter.runs[0].terminalTraceSequence, 42)
   assert.equal(evidence[0].adapter.runs[0].terminalTraceRetained, 1)
   assert.deepEqual(evidence[0].adapter.pendingRuntime.map(row => ({ ...row })), [{ executionSequence: 43 }])
+  assert.deepEqual(evidence[0].adapter.runs.map(row => row.pendingCoreRuntimeSequence), [44, null, null])
+  assert.deepEqual(evidence[0].adapter.pendingTransport.map(row => ({ ...row })), [
+    { kind: 'job.outcome', outcomeStatus: 'infrastructure_error' },
+    { kind: 'other', outcomeStatus: null },
+  ])
+  assert.deepEqual(evidence[0].adapter.runtimeReplay.map(row => ({ ...row })), [
+    { ackSequence: 42, highestSequence: 43, retainedCount: 1 },
+    { ackSequence: null, highestSequence: null, retainedCount: null },
+  ])
   assert.ok(!JSON.stringify(evidence).includes('SECRET-CANARY'))
   assert.ok(!JSON.stringify(evidence).includes(root))
 })

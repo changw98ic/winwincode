@@ -359,6 +359,18 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
+    /// Restores the exact persisted Worker session before opening its checkout.
+    /// A lease renewal changes its deadline, not its existing session identity.
+    ///
+    /// # Errors
+    /// Rejects a stored run whose Job, snapshot, lease, or thread differs.
+    fn recovered_worker_session_id(
+        &mut self,
+        _dispatch: &JobDispatchMessage,
+    ) -> Result<Option<WorkerSessionId>, Self::Error> {
+        Ok(None)
+    }
+
     /// Returns the first retained safe classification for this exact run.
     fn retained_failure_diagnostic(
         &self,
@@ -492,6 +504,20 @@ pub trait CodexCoreAdapter {
         thread_id: &CodexThreadId,
         now: &Instant,
     ) -> impl Future<Output = Result<CodexPoll, Self::Error>> + Send;
+
+    /// Releases an unaccepted poll delivery for exact replay. Durable operation
+    /// identities and committed effects remain unchanged; this must never reset
+    /// action receipts or terminal ACKs.
+    ///
+    /// # Errors
+    /// Rejects a thread or operation that does not match the retained delivery.
+    fn release_poll_delivery(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _delivery: &CodexPoll,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn accept_model_chunk(
         &mut self,
@@ -877,6 +903,12 @@ pub enum ExecutionPortFailureKind {
 /// Outbound canonical `ExecutionPort` used identically by local and remote IO.
 pub trait WorkerExecutionPort {
     type Error;
+
+    /// A response may carry controls as well as the outbound acceptance receipt.
+    /// Drivers must consume those controls before starting another outbound batch.
+    fn has_pending_controls(&self) -> bool {
+        false
+    }
 
     /// Existing ports default to a connection failure, which yields the batch.
     fn failure_kind(_error: &Self::Error) -> ExecutionPortFailureKind {

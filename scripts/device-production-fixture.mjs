@@ -24,6 +24,7 @@ import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { deviceAgentEnvironment } from './device-agent-environment.mjs'
 
 /** Runtime children receive platform settings, never the orchestrator's credentials. */
 export function runtimeChildEnvironment(environment = process.env) {
@@ -805,8 +806,11 @@ export async function removeDevicePublicSmoke({ api, publicClientId, id, timeout
 
 /** Resolve only approvals belonging to the currently observed Device WorkRuns. */
 export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
-  automaticTaskActions = false, onDecision }) {
+  automaticTaskActions = false, approvalOwner = 'core', corePendingApprovalIds = [],
+  onPending = () => {}, onDecision }) {
   assert.equal(typeof automaticTaskActions, 'boolean')
+  assert.ok(Array.isArray(corePendingApprovalIds))
+  const corePending = new Set(corePendingApprovalIds)
   const currentRun = approval => runs.find(run => {
     const binding = approval.binding
     const identity = binding?.sessionIdentity
@@ -820,11 +824,19 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
       && binding.workerSessionId === run.workerSessionId
       && binding.executionJobId === run.executionJobId
   })
-  const pending = await api.query('approval.list', { states: ['pending'] })
+  const pending = await api.query('approval.list', { states: ['pending', 'expired'] })
   assert.equal(pending.page?.hasMore, false, 'Device task approval list must be complete')
   assert.ok(Array.isArray(pending.result?.items), 'Device task approval list is invalid')
+  // Expiry in the query is a deadline projection. Core can still be waiting
+  // for the exact tool response. Keep that wait visible until Core settles it.
+  await onPending(pending.result.items.filter(item => currentRun(item)
+    && (item.state === 'pending' || corePending.has(item.id))))
+  // Host-owned approval is resolved at the common action boundary. A true
+  // human request must remain visible rather than be approved by this driver.
+  if (approvalOwner === 'execution_port') return
+  assert.equal(approvalOwner, 'core')
   for (const item of pending.result.items) {
-    if (!currentRun(item)) continue
+    if (item.state !== 'pending' || !currentRun(item)) continue
     const approval = (await api.query('approval.get', { approvalId: item.id })).result
     if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
     const detail = approval.sanitizedDetail
@@ -1088,10 +1100,17 @@ export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, l
       .get(launched.workerSessionId)
     assert.equal(record.worker_id, launched.workerId)
     assert.equal(record.worker_instance_id, launched.workerInstanceId)
-    const row = registeredFixtureWorkers(deviceData, processSnapshot()).find(row => row.pid === record.pid)
-    assert.ok(row, 'source anchor process must match its Device registry identity')
-    process.kill(row.pid, 'SIGINT')
-    await waitFor(() => !ownedProcessAlive(row, processSnapshot()), 'unused task anchor graceful exit', 30_000)
+    const observed = processSnapshot().get(record.pid)
+    const bootIdentity = observed && (process.platform === 'linux' ? observed.start : `darwin-ps-${observed.start}`)
+    const row = bootIdentity === record.process_start_identity && !observed.state.startsWith('Z') ? observed : null
+    // Reconciliation can resume after SIGINT but before the exit was projected.
+    // Signal only the same witnessed boot; never a reused PID.
+    if (row) {
+      try { process.kill(row.pid, 'SIGINT') } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+      await waitFor(() => !ownedProcessAlive(row, processSnapshot()), 'unused task anchor graceful exit', 30_000)
+    }
     await waitFor(() => device.prepare('SELECT state FROM worker_process_registry WHERE worker_session_id = ?')
       .get(launched.workerSessionId).state !== 'running', 'Device observed unused task anchor exit', 30_000)
     return { workerSessionId: launched.workerSessionId, workerId: launched.workerId, state: 'drained' }
@@ -1226,14 +1245,7 @@ export async function establishDeviceOnlyExecutionPath({
   })
   const deviceEnvironment = {
     ...runtimeChildEnvironment(),
-    ...(agentEnvironment.PYTHONDONTWRITEBYTECODE === '1' ? { PYTHONDONTWRITEBYTECODE: '1' } : {}),
-    WWC_WORKER_MODEL_REASONING_EFFORT: agentEnvironment.WWC_WORKER_MODEL_REASONING_EFFORT,
-    WWC_WORKER_FUSION: agentEnvironment.WWC_WORKER_FUSION,
-    WWC_WORKER_JEV_JUDGE: agentEnvironment.WWC_WORKER_JEV_JUDGE,
-    WWC_WORKER_JEV_CONTEXT: agentEnvironment.WWC_WORKER_JEV_CONTEXT,
-    WWC_DEVICE_JEV_SETTINGS_FILE: agentEnvironment.WWC_DEVICE_JEV_SETTINGS_FILE,
-    WWC_DEVICE_PROVIDER_HTTPS_PROXY: agentEnvironment.WWC_DEVICE_PROVIDER_HTTPS_PROXY,
-    WWC_BENCHMARK_SEALED_TOOLS: agentEnvironment.WWC_BENCHMARK_SEALED_TOOLS,
+    ...deviceAgentEnvironment(agentEnvironment),
     WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
     WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
       ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE

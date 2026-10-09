@@ -1220,20 +1220,11 @@ fn open_mirror_view_connection(
         if remaining.is_zero() {
             return Err(MirrorRevisionViewError::Storage);
         }
-        let connection =
-            rusqlite::Connection::open(&database).map_err(|_| MirrorRevisionViewError::Storage)?;
-        let initialized = initialize_mirror_view_connection(&connection, deadline);
+        let initialized = SqliteStorage::open_sidecar_until(&database, deadline, |connection| {
+            initialize_mirror_view_connection(connection, deadline)
+        });
         match initialized {
-            Ok(()) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(MirrorRevisionViewError::Storage);
-                }
-                connection
-                    .busy_timeout(std::time::Duration::from_secs(5))
-                    .map_err(|_| MirrorRevisionViewError::Storage)?;
-                if std::time::Instant::now() >= deadline {
-                    return Err(MirrorRevisionViewError::Storage);
-                }
+            Ok(connection) => {
                 return Ok(connection);
             }
             Err(MirrorInitializationError::Storage) => {
@@ -1241,8 +1232,8 @@ fn open_mirror_view_connection(
             }
             Err(MirrorInitializationError::Busy) => {
                 // A WAL-mode lock upgrade can skip SQLite's busy handler while
-                // this connection owns a read cut. Release it before retrying.
-                drop(connection);
+                // the connection owns a read cut. The shared open boundary
+                // drops that failed connection before this retry starts.
                 #[cfg(test)]
                 observe_mirror_init_retry_for_test();
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1278,6 +1269,12 @@ enum MirrorInitializationError {
     Storage,
 }
 
+impl From<winwincode_storage::StorageError> for MirrorInitializationError {
+    fn from(_: winwincode_storage::StorageError) -> Self {
+        Self::Storage
+    }
+}
+
 fn initialize_mirror_view_connection(
     connection: &rusqlite::Connection,
     deadline: std::time::Instant,
@@ -1286,9 +1283,8 @@ fn initialize_mirror_view_connection(
     if remaining.is_zero() {
         return Err(MirrorInitializationError::Storage);
     }
-    connection
-        .busy_timeout(remaining)
-        .map_err(|_| MirrorInitializationError::Storage)?;
+    // The shared open boundary has already installed its absolute-deadline
+    // busy handler. Do not replace it with a new relative waiting budget.
     let mode: String = connection
         .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
         .map_err(|error| mirror_initialization_error(&error))?;
@@ -1299,9 +1295,6 @@ fn initialize_mirror_view_connection(
     if remaining.is_zero() {
         return Err(MirrorInitializationError::Storage);
     }
-    connection
-        .busy_timeout(remaining)
-        .map_err(|_| MirrorInitializationError::Storage)?;
     connection
         .execute_batch(MIRROR_VIEW_SCHEMA)
         .map_err(|error| mirror_initialization_error(&error))?;

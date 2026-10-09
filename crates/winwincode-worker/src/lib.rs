@@ -12,6 +12,7 @@ pub mod action_enforcement;
 pub mod candidate_ref;
 pub mod change_batch_store;
 pub mod context_safety;
+pub mod control_driver;
 pub mod debug_experiment;
 pub mod debug_probe_context;
 mod device_model;
@@ -102,7 +103,10 @@ use winwincode_execution_port::generated::{
 use winwincode_execution_port::{
     change_batch_identity::validate_change_batch_identity_derivation,
     change_batch_progress::ChangeBatchProgressLedger,
-    execution_identity::{canonical_dispatch_session_identity, valid_lease_renewal},
+    execution_identity::{
+        canonical_dispatch_session_identity, lease_renewal_rejection,
+        retained_lease_matches_current, valid_lease_renewal,
+    },
     repair_loop_context::seal_repair_loop_context_pack,
 };
 
@@ -767,6 +771,14 @@ where
     ///
     /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn start(&mut self, now: Instant) -> Result<(), WorkerError> {
+        if matches!(
+            self.lifecycle,
+            WorkerLifecycleState::Booting | WorkerLifecycleState::Registering
+        ) {
+            self.codex
+                .observe_now(&now)
+                .map_err(|_| codex_model_error())?;
+        }
         if self.lifecycle == WorkerLifecycleState::Registering {
             return self.flush_durable_execution_deliveries().await;
         }
@@ -876,7 +888,35 @@ where
         now: Instant,
     ) -> Result<(), WorkerError> {
         self.observe_driver_clock(now.clone());
-        Box::pin(self.apply_control(message, now)).await?;
+        let renewal_predicate = match message {
+            ExecutionPortMessage::LeaseRenewMessage(renewal) => self
+                .active
+                .get(&renewal.lease.job_id.0)
+                .map_or(Some("job_not_active"), |active| {
+                    if active.lifecycle == ActiveJobLifecycle::Running {
+                        lease_renewal_rejection(&active.lease, renewal, &now)
+                    } else {
+                        Some("job_not_running")
+                    }
+                }),
+            _ => None,
+        };
+        let applied = Box::pin(self.apply_control(message, now.clone())).await;
+        if let ExecutionPortMessage::LeaseRenewMessage(renewal) = message {
+            let outcome = applied
+                .as_ref()
+                .map_or_else(|error| format!("{:?}", error.code), |()| "consumed".into());
+            eprintln!(
+                "component=worker stage=lease_renewal_consumed message_sha256={:x} processed_at={} prior_expires_at={} new_expires_at={} sent_at={} predicate={} outcome={outcome}",
+                Sha256::digest(renewal.message_id.0.as_bytes()),
+                now.0,
+                renewal.prior_expires_at.0,
+                renewal.lease.expires_at.0,
+                renewal.sent_at.0,
+                renewal_predicate.unwrap_or("valid")
+            );
+        }
+        applied?;
         // Acknowledgement means applied + durable handoff, never transport success.
         self.enqueue_codex_effects()
     }
@@ -904,7 +944,7 @@ where
                 Box::pin(self.accept_snapshot_dispatch(message, now)).await
             }
             ExecutionPortMessage::LeaseRenewMessage(renewal) => {
-                self.accept_lease_renewal(renewal, &now)
+                Box::pin(self.accept_lease_renewal_control(renewal, now)).await
             }
             ExecutionPortMessage::JobCancelMessage(cancel) => {
                 Box::pin(self.accept_cancel(cancel, now)).await
@@ -969,6 +1009,45 @@ where
                 "message is not handled by the Worker lifecycle core",
             )),
         }
+    }
+
+    async fn accept_lease_renewal_control(
+        &mut self,
+        renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        if self
+            .active
+            .get(&renewal.lease.job_id.0)
+            .is_some_and(|active| {
+                now.0 >= active.lease.expires_at.0
+                    && valid_lease_renewal(&active.lease, renewal, &renewal.sent_at)
+            })
+        {
+            // Exact authority which arrived too late cannot extend the
+            // expired lease. Settle only its Job, preserving other Jobs.
+            let summary = format!(
+                "lease renewal expired before consumption: prior_expires_at={} new_expires_at={} sent_at={} processed_at={}",
+                renewal.prior_expires_at.0, renewal.lease.expires_at.0, renewal.sent_at.0, now.0
+            );
+            eprintln!("component=worker stage=lease_renewal code=LEASE_RENEWAL_EXPIRED {summary}");
+            return self
+                .finish_job(
+                    &renewal.lease.job_id.0,
+                    ExecutionOutcomeStatus::Failed,
+                    &summary,
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::LeaseExpired,
+                        &summary,
+                        false,
+                    )),
+                    now,
+                )
+                .await;
+        }
+        self.accept_lease_renewal(renewal, &now)
     }
 
     /// Sends one explicit heartbeat with current capacity and lease progress.
@@ -1051,6 +1130,9 @@ where
     ) -> Result<(), WorkerError> {
         use drive_diagnostics::DriveStage;
         self.observe_driver_clock(now.clone());
+        if self.port.has_pending_controls() {
+            return Ok(());
+        }
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -1080,6 +1162,9 @@ where
         self.enqueue_codex_effects()?;
         *stage = DriveStage::FlushBeforePoll;
         let dispatch_error = self.flush_durable_execution_deliveries().await.err();
+        if self.port.has_pending_controls() {
+            return dispatch_error.map_or(Ok(()), Err);
+        }
         let mut intake_error = None;
         loop {
             *stage = DriveStage::DeviceRead;
@@ -1312,6 +1397,8 @@ where
             let polled = match self.codex.poll(&thread_id, &now).await {
                 Ok(polled) => polled,
                 Err(error) => {
+                    self.drive_diagnostics
+                        .record_core_poll_failure(self.intake_log_path.as_deref());
                     let diagnostic = self
                         .codex
                         .retained_failure_diagnostic(&thread_id)
@@ -1321,15 +1408,30 @@ where
                     continue;
                 }
             };
-            *stage = DriveStage::CollectPollEffects;
-            self.enqueue_codex_effects()?;
-            if self.core_interaction_jobs.remove(&job_id) {
-                self.deferred_core_interaction_jobs.remove(&job_id);
+            let replayable = match &polled {
+                CodexPoll::ChangeBatchProposed(_) => Some(polled.clone()),
+                _ => None,
+            };
+            let delivery_result = async {
+                *stage = DriveStage::CollectPollEffects;
+                self.enqueue_codex_effects()?;
+                if self.core_interaction_jobs.remove(&job_id) {
+                    self.deferred_core_interaction_jobs.remove(&job_id);
+                }
+                // Completion includes workspace manifest decoding. Keep its large
+                // async state off the polling stack before entering that decoder.
+                *stage = DriveStage::CoreFact;
+                Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await
             }
-            // Completion includes workspace manifest decoding. Keep its large
-            // async state off the polling stack before entering that decoder.
-            *stage = DriveStage::CoreFact;
-            Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await?;
+            .await;
+            if let Err(error) = delivery_result {
+                if let Some(delivery) = replayable {
+                    self.codex
+                        .release_poll_delivery(&thread_id, &delivery)
+                        .map_err(|_| codex_model_error())?;
+                }
+                return Err(error);
+            }
         }
         if let Some(error) = dispatch_error {
             *stage = DriveStage::FlushBeforePoll;
@@ -1961,8 +2063,8 @@ where
         let prepared = self
             .workspaces
             .prepare_candidate(&active, RoleExecutionMode::DelegatedBatch)
-            .map_err(|_| {
-                candidate_artifact_error("accepted delegated batch could not be frozen")
+            .map_err(|error| {
+                candidate_preparation_error(&error, "accepted delegated batch could not be frozen")
             })?;
         self.retain_candidate_artifact(&active.job.job_id, prepared, now)
             .await
@@ -2476,14 +2578,20 @@ where
                 "candidate preparation failed",
             )
         };
+        let diagnostic = format!(
+            "{summary}; stage={}; cause_code={}",
+            preparation_error.stage(),
+            preparation_error.cause_code()
+        );
+        eprintln!("component=worker code=CANDIDATE_PREPARATION_FAILED {diagnostic}");
         self.pending_candidates.remove(job_id);
         self.finish_job(
             job_id,
             ExecutionOutcomeStatus::Failed,
-            summary,
+            &diagnostic,
             diagnostics_for_failure,
             usage_for_failure,
-            Some(port_error(code, summary, false)),
+            Some(port_error(code, &diagnostic, false)),
             now,
         )
         .await
@@ -3893,7 +4001,9 @@ where
         // from which WorkerMain can reconstruct that cursor, so the first
         // canonical trace resumes at the adapter-provided sequence.
         let resumes_fully_acknowledged_cursor = last_sequence == 0 && sequence > 0;
-        if message.lease != active.lease
+        // Recovery replays the immutable original frame. Renewal can extend
+        // its expiry without changing the exact Job, lease, or session owner.
+        if !retained_lease_matches_current(&message.lease, &active.lease)
             || message.worker_session_id != active.worker_session_id
             || message.session_identity != active.session_identity
             || message.codex_thread_id != active.codex_thread_id
@@ -4017,7 +4127,7 @@ where
                     let prepared = self
                         .workspaces
                         .prepare_candidate(&active, RoleExecutionMode::React)
-                        .map_err(|_| workspace_error())?;
+                        .map_err(|error| candidate_preparation_error(&error, "Chat candidate preparation failed"))?;
                     return Box::pin(self.retain_candidate_artifact(
                         &active.job.job_id,
                         prepared,
@@ -4085,9 +4195,16 @@ where
         // process stops between these durable boundaries, the accepted
         // candidate and the outcome remain discoverable and the original
         // mutable workspace is still recoverable on the next dispatch.
-        self.workspaces
-            .prepare_close_job(&active.job.job_id, close_reason, &now)
-            .map_err(|_| workspace_error())?;
+        if let Some(progress) = self.workspaces
+            .prepare_terminal_job_close(&active, close_reason, &now)
+            .map_err(|_| workspace_error())?
+        {
+            eprintln!("WWC_TERMINAL_WORKSPACE_QUARANTINED job={} batch={}",
+                active.job.job_id.0, progress.identity.batch_id.0);
+            self.delegated_poll_outcomes.push_back(
+                DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress)),
+            );
+        }
         if let Some(record) = self.dispatches.get_mut(job_id) {
             record.terminal = true;
         }
@@ -4147,10 +4264,17 @@ where
     }
 
     fn worker_session_id(
-        &self,
+        &mut self,
         dispatch: &JobDispatchMessage,
         run_key: &CodexRunKey,
     ) -> Result<WorkerSessionId, WorkerError> {
+        if let Some(retained) = self
+            .codex
+            .recovered_worker_session_id(dispatch)
+            .map_err(|_| workspace_error())?
+        {
+            return Ok(retained);
+        }
         let (worker_session_id, _) = canonical_dispatch_session_identity(
             &self.config.worker_id,
             &self.config.worker_instance_id,
@@ -5109,6 +5233,17 @@ fn worker_error(code: WorkerErrorCode, reason: &str) -> WorkerError {
 
 fn candidate_artifact_error(reason: &str) -> WorkerError {
     worker_error(WorkerErrorCode::CandidateArtifactMismatch, reason)
+}
+
+fn candidate_preparation_error(
+    error: &workspace_runtime::JobWorkspaceError,
+    reason: &str,
+) -> WorkerError {
+    candidate_artifact_error(&format!(
+        "{reason}; stage={}; cause_code={}",
+        error.stage(),
+        error.cause_code()
+    ))
 }
 
 fn workspace_error() -> WorkerError {

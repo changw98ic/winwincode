@@ -542,6 +542,26 @@ impl ExecutionPortActionGate {
         Ok(())
     }
 
+    pub(crate) fn discard_interaction_message(
+        &self,
+        delivery_id: &str,
+    ) -> Result<(), ActionBridgeError> {
+        self.state
+            .messages
+            .lock()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .retain(|message| match message {
+                ExecutionPortMessage::ApprovalRequestMessage(request) => {
+                    request.message_id.0 != delivery_id
+                }
+                ExecutionPortMessage::InputRequestMessage(request) => {
+                    request.message_id.0 != delivery_id
+                }
+                _ => true,
+            });
+        Ok(())
+    }
+
     pub(crate) fn cancel_session(&self, session_id: &str) -> Result<(), ActionBridgeError> {
         let pending = {
             let mut generations = self

@@ -14,6 +14,8 @@ test('Device public smoke configures encrypted extensions without Client build a
   await mkdir(join(directory, 'scripts'))
   const fixture = join(directory, 'scripts/device-production-fixture.mjs')
   await copyFile(new URL('../scripts/device-production-fixture.mjs', import.meta.url), fixture)
+  await copyFile(new URL('../scripts/device-agent-environment.mjs', import.meta.url),
+    join(directory, 'scripts/device-agent-environment.mjs'))
   const { installDevicePublicSmoke } = await import(pathToFileURL(fixture).href)
   for (const outcome of ['tested', 'connection_failed']) {
     const device = createECDH('prime256v1')
@@ -213,7 +215,7 @@ def entered(child):
     assert child.stdout.readline().strip() == b'entered'
 try:
     with tempfile.TemporaryDirectory() as directory:
-        root = pathlib.Path(directory)
+        root = pathlib.Path(directory).resolve(strict=True)
         lock = root / 'execution.lock'
         owner = start(lock)
         entered(owner)

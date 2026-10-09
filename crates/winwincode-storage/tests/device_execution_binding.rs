@@ -1011,7 +1011,7 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
     let root = temporary_directory("credential-renewal");
     let mut storage = SqliteStorage::open(&root).unwrap();
     storage.execution_registry().unwrap();
-    for seed in [20000, 22000] {
+    for (seed, occupancy_state) in [(20000, "draining"), (22000, "recovery_pending")] {
         let (fixture, grant, job) = seed_bound_job(&mut storage, seed);
         storage
             .worker_launch_grant_ledger()
@@ -1058,8 +1058,8 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
         }))
         .unwrap();
         let db = rusqlite::Connection::open(storage.database_path()).unwrap();
-        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state='draining' WHERE occupancy_lease_id=?2",
-            params![T1,fixture.lease_id]).unwrap();
+        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state=?3 WHERE occupancy_lease_id=?2",
+            params![T1,fixture.lease_id,occupancy_state]).unwrap();
         db.execute("INSERT INTO execution_workers VALUES (?1,?2,?3,'auth','v1','{}','{}','digest','local','healthy',?3,7,1,1,0)",
             params![grant.worker_id,grant.worker_instance_id,T0]).unwrap();
         db.execute(
@@ -1123,6 +1123,38 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
                 .unwrap()
                 .is_none()
         );
+        for forbidden_state in ["recovery_pending_issued", "released"] {
+            if forbidden_state == "released" {
+                db.execute("UPDATE client_occupancy_leases SET state='released' WHERE occupancy_lease_id=?1", [&fixture.lease_id]).unwrap();
+            } else {
+                db.execute("UPDATE worker_launch_grants SET state='issued' WHERE worker_launch_grant_id=?1", [&grant.worker_launch_grant_id]).unwrap();
+            }
+            assert!(
+                storage
+                    .worker_session_credential_ledger()
+                    .unwrap()
+                    .renew_after_accepted_heartbeat(
+                        &record,
+                        &heartbeat,
+                        lease,
+                        &expiry,
+                        &renewal_time
+                    )
+                    .unwrap()
+                    .is_none(),
+                "{forbidden_state} must not renew credentials"
+            );
+            db.execute(
+                "UPDATE client_occupancy_leases SET state=?2 WHERE occupancy_lease_id=?1",
+                params![fixture.lease_id, occupancy_state],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE worker_launch_grants SET state='consumed' WHERE worker_launch_grant_id=?1",
+                [&grant.worker_launch_grant_id],
+            )
+            .unwrap();
+        }
         let renewed = storage
             .worker_session_credential_ledger()
             .unwrap()
@@ -2006,6 +2038,23 @@ fn process_closure_is_exact_and_survives_multiple_device_reboots() {
         .unwrap()
         .settle_device_launch_ack(&f.node, &ack, &instant(T2))
         .unwrap();
+    let revision = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(&f.node)
+        .unwrap()
+        .unwrap()
+        .revision;
+    storage
+        .client_node_registry()
+        .unwrap()
+        .update_presence(&f.node, ClientPresenceState::Offline, revision)
+        .unwrap();
+    storage
+        .client_occupancy_ledger()
+        .unwrap()
+        .mark_recovery_pending(&f.lease_id, &instant(GRANT_EXPIRES), &instant(T2))
+        .unwrap();
     let mut closure = DeviceLaunchProcessClosure {
         worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
         client_instance_id: f.instance.clone(),
@@ -2114,6 +2163,28 @@ fn process_closure_is_exact_and_survives_multiple_device_reboots() {
             )
             .is_err()
     );
+    let revision = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(&f.node)
+        .unwrap()
+        .unwrap()
+        .revision;
+    storage
+        .client_node_registry()
+        .unwrap()
+        .update_presence(&f.node, ClientPresenceState::Online, revision)
+        .unwrap();
+    storage
+        .client_occupancy_ledger()
+        .unwrap()
+        .reconcile_resume(
+            &f.lease_id,
+            winwincode_storage::OccupancyReconcileTarget::ResumeOccupied,
+            None,
+            &instant(T3),
+        )
+        .unwrap();
     f.instance = closure.reporting_client_instance_id;
     let successor = LaunchGrantIssuance::try_new(
         id("wlg", seed + 1),

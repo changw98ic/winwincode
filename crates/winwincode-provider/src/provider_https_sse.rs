@@ -491,6 +491,7 @@ pub struct HttpsSseProviderError {
     metadata: Box<ProviderFailureMetadata>,
     response: Option<Vec<u8>>,
     observed_receipt: Option<Box<(String, ProviderTokenUsage)>>,
+    network: Option<Box<winwincode_network::NetworkFailure>>,
 }
 
 impl fmt::Debug for HttpsSseProviderError {
@@ -499,6 +500,7 @@ impl fmt::Debug for HttpsSseProviderError {
             .debug_struct("HttpsSseProviderError")
             .field("kind", &self.kind)
             .field("metadata", &self.metadata)
+            .field("network", &self.network)
             .field("response", &self.response.as_ref().map(|_| "[REDACTED]"))
             .field(
                 "observed_receipt",
@@ -515,6 +517,7 @@ impl HttpsSseProviderError {
             metadata: Box::default(),
             response: None,
             observed_receipt: None,
+            network: None,
         }
     }
 
@@ -529,13 +532,64 @@ impl HttpsSseProviderError {
     }
 
     #[must_use]
-    pub const fn retryable(&self) -> bool {
-        matches!(
-            self.kind,
-            HttpsSseProviderErrorKind::Transport
-                | HttpsSseProviderErrorKind::IncompleteStream
-                | HttpsSseProviderErrorKind::RateLimited
-        )
+    pub fn retryable(&self) -> bool {
+        self.network_failure().retryable()
+    }
+
+    #[must_use]
+    pub fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+        self.network.as_deref().copied().unwrap_or_else(|| {
+            if let Some(status) = self.metadata.status.filter(|status| *status >= 400) {
+                return NetworkFailure::http(
+                    status,
+                    self.metadata
+                        .provider_retry_after_millis
+                        .map(Duration::from_millis),
+                );
+            }
+            let mut failure = NetworkFailure::new(
+                match self.kind {
+                    HttpsSseProviderErrorKind::Transport => ErrorKind::TransportInterrupted,
+                    HttpsSseProviderErrorKind::IncompleteStream => ErrorKind::StreamIncomplete,
+                    HttpsSseProviderErrorKind::RateLimited => ErrorKind::RateLimited,
+                    HttpsSseProviderErrorKind::SseFraming
+                    | HttpsSseProviderErrorKind::SseEvent
+                    | HttpsSseProviderErrorKind::StreamConversion
+                    | HttpsSseProviderErrorKind::SizeLimit => ErrorKind::ProtocolInvalid,
+                    HttpsSseProviderErrorKind::CredentialLeak
+                    | HttpsSseProviderErrorKind::IdentityConflict => ErrorKind::IntegrityInvalid,
+                    HttpsSseProviderErrorKind::Paused => ErrorKind::Cancelled,
+                    HttpsSseProviderErrorKind::Unavailable => ErrorKind::StorageUnavailable,
+                    _ => ErrorKind::RequestInvalid,
+                },
+                Acceptance::ResponseReceived,
+                Phase::Stream,
+            );
+            failure.http_status = self.metadata.status;
+            failure.retry_after_ms = self.metadata.provider_retry_after_millis;
+            failure.diagnostic = Some(winwincode_network::NetworkDiagnostic::new(
+                match self.kind {
+                    HttpsSseProviderErrorKind::SseFraming => {
+                        winwincode_network::DiagnosticCode::SseFraming
+                    }
+                    HttpsSseProviderErrorKind::SseEvent => {
+                        winwincode_network::DiagnosticCode::SseEvent
+                    }
+                    HttpsSseProviderErrorKind::StreamConversion => {
+                        winwincode_network::DiagnosticCode::StreamConversion
+                    }
+                    HttpsSseProviderErrorKind::IncompleteStream => {
+                        winwincode_network::DiagnosticCode::StreamIncomplete
+                    }
+                    HttpsSseProviderErrorKind::SizeLimit => {
+                        winwincode_network::DiagnosticCode::BodyTooLarge
+                    }
+                    _ => winwincode_network::DiagnosticCode::TransportOther,
+                },
+            ));
+            failure
+        })
     }
 
     pub(crate) fn response(&self) -> Option<&[u8]> {
@@ -618,9 +672,19 @@ pub struct HttpsSseProviderAdapter {
     shared: Arc<SharedAdapter>,
 }
 
+struct AttemptDone<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for AttemptDone<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 struct SharedAdapter {
     config: HttpsSseProviderConfig,
     streams: Mutex<BTreeMap<String, StreamRecord>>,
+    sse_failure_log: Mutex<Option<std::path::PathBuf>>,
+    journal: Mutex<Option<winwincode_network::journal::RequestJournal>>,
+    completions: Mutex<BTreeMap<String, HttpsSseProviderCompletion>>,
     cancellation: Mutex<Option<Arc<crate::provider_transport::ExchangeCancellation>>>,
 }
 
@@ -668,6 +732,187 @@ enum StreamState {
 }
 
 impl HttpsSseProviderAdapter {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one durable attempt ownership loop keeps prepare, external effect and commit ordered"
+    )]
+    pub(crate) fn open_recovering_admitted<G>(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+        mut admit: impl FnMut() -> Result<G, ProviderAdapterError>,
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        use winwincode_network::{
+            Acceptance, ErrorKind, NetworkFailure, Phase, Replay,
+            journal::{QueuePermit, now_millis},
+        };
+        let storage = || {
+            ProviderAdapterError::from_network(NetworkFailure::new(
+                ErrorKind::StorageUnavailable,
+                Acceptance::NotSent,
+                Phase::Persist,
+            ))
+        };
+        let journal = self
+            .shared
+            .journal
+            .lock()
+            .map_err(|_| storage())?
+            .clone()
+            .ok_or_else(storage)?;
+        let operation = invocation_digest(HttpInvocation::from_adapter(invocation));
+        let cached = self
+            .shared
+            .completions
+            .lock()
+            .map_err(|_| storage())?
+            .contains_key(invocation.adapter_request_id());
+        if cached {
+            return self.open(invocation, credential);
+        }
+        let started = std::time::Instant::now();
+        let live = || {
+            can_start()
+                && (!self.shared.config.deadlines_enabled
+                    || started.elapsed() < self.shared.config.total_timeout)
+        };
+        let stopped = || {
+            ProviderAdapterError::from_network(NetworkFailure::new(
+                if can_start() {
+                    ErrorKind::Timeout
+                } else {
+                    ErrorKind::AuthorityExpired
+                },
+                Acceptance::Unknown,
+                Phase::Stream,
+            ))
+        };
+        loop {
+            if !live() {
+                return Err(stopped());
+            }
+            let sequence = match journal
+                .prepare(
+                    &operation,
+                    Replay::RetryInference,
+                    winwincode_network::defaults().max_attempts,
+                    now_millis(),
+                )
+                .map_err(ProviderAdapterError::from_network)?
+            {
+                QueuePermit::Ready(sequence) => sequence,
+                QueuePermit::Stopped(failure) => {
+                    return Err(ProviderAdapterError::from_network(failure));
+                }
+                QueuePermit::Waiting(delay, _) => {
+                    let until = std::time::Instant::now() + delay;
+                    while let Some(remaining) =
+                        until.checked_duration_since(std::time::Instant::now())
+                    {
+                        if !live() {
+                            return Err(stopped());
+                        }
+                        std::thread::sleep(remaining.min(Duration::from_millis(
+                            winwincode_network::defaults().authority_check_ms,
+                        )));
+                    }
+                    continue;
+                }
+            };
+            let permit = match admit() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    journal
+                        .finish(
+                            &operation,
+                            sequence,
+                            Some(error.network_failure()),
+                            now_millis(),
+                        )
+                        .map_err(ProviderAdapterError::from_network)?;
+                    return Err(error);
+                }
+            };
+            let result = self.recovering_attempt(invocation, credential, receipt, &live);
+            drop(permit);
+            let failure = result
+                .as_ref()
+                .err()
+                .map(ProviderAdapterError::network_failure);
+            journal
+                .finish(&operation, sequence, failure, now_millis())
+                .map_err(ProviderAdapterError::from_network)?;
+            match result {
+                Ok((ack, mut completion)) => {
+                    if journal
+                        .has_unknown_usage(&operation)
+                        .map_err(ProviderAdapterError::from_network)?
+                        && let ProviderGatewayTerminal::Completed {
+                            actual_cost_micros, ..
+                        } = &mut completion.terminal
+                    {
+                        *actual_cost_micros = None;
+                    }
+                    self.shared
+                        .completions
+                        .lock()
+                        .map_err(|_| storage())?
+                        .insert(invocation.adapter_request_id().to_owned(), completion);
+                    return Ok(ack);
+                }
+                Err(error) => {
+                    // Only an exact failed drain can reopen. Terminal controls remain fences.
+                    let mut streams = self.shared.streams.lock().map_err(|_| storage())?;
+                    if let Some(record) = streams.get(invocation.adapter_request_id())
+                        && matches!(record.state, StreamState::Drained)
+                        && record.model_exchange_id == *invocation.model_exchange_id()
+                        && record.invocation_digest == operation
+                    {
+                        streams.remove(invocation.adapter_request_id());
+                    }
+                    if !error.network_failure().retryable() {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    fn recovering_attempt(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        live: &(dyn Fn() -> bool + Sync),
+    ) -> Result<(ProviderAdapterOpenReceipt, HttpsSseProviderCompletion), ProviderAdapterError>
+    {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    if !live()
+                        && let Ok(streams) = self.shared.streams.lock()
+                        && let Some(record) = streams.get(invocation.adapter_request_id())
+                    {
+                        record.io.cancel();
+                    }
+                    // Observe until open has installed its cancellable record.
+                    std::thread::sleep(Duration::from_millis(
+                        winwincode_network::defaults().authority_check_ms,
+                    ));
+                }
+            });
+            let _done = AttemptDone(&done);
+            self.open(invocation, credential).and_then(|ack| {
+                self.drain_attempt(receipt)
+                    .map(|completion| (ack, completion))
+                    .map_err(|error| ProviderAdapterError::from_network(error.network_failure()))
+            })
+        })
+    }
+
     fn agent(
         config: &HttpsSseProviderConfig,
         io: Arc<crate::provider_transport::ExchangeIo>,
@@ -721,9 +966,30 @@ impl HttpsSseProviderAdapter {
             shared: Arc::new(SharedAdapter {
                 config,
                 streams: Mutex::new(BTreeMap::new()),
+                sse_failure_log: Mutex::new(None),
+                journal: Mutex::new(None),
+                completions: Mutex::new(BTreeMap::new()),
                 cancellation: Mutex::new(None),
             }),
         })
+    }
+
+    /// Attaches the durable logical-request attempt journal.
+    #[must_use]
+    pub fn with_journal(self, journal: winwincode_network::journal::RequestJournal) -> Self {
+        if let Ok(mut current) = self.shared.journal.lock() {
+            *current = Some(journal);
+        }
+        self
+    }
+
+    /// Retains private failed response bytes with a payload-free log reference.
+    #[must_use]
+    pub fn with_sse_failure_log(self, directory: std::path::PathBuf) -> Self {
+        if let Ok(mut current) = self.shared.sse_failure_log.lock() {
+            *current = Some(directory);
+        }
+        self
     }
 
     pub(crate) fn with_cancellation(
@@ -764,6 +1030,22 @@ impl HttpsSseProviderAdapter {
                 HttpsSseProviderErrorKind::IdentityConflict,
             ));
         }
+        if let Some(completion) = self
+            .shared
+            .completions
+            .lock()
+            .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?
+            .remove(&receipt.adapter_request_id)
+        {
+            return Ok(completion);
+        }
+        self.drain_attempt(receipt)
+    }
+
+    fn drain_attempt(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut body = self.take_body(receipt)?;
         let tool_bindings = self.stream_tool_bindings(receipt)?;
         let response_schema = self.stream_response_schema(receipt)?;
@@ -777,6 +1059,22 @@ impl HttpsSseProviderAdapter {
                     error.metadata = Box::new(record.metadata.clone());
                     error.metadata.diagnostic = diagnostic;
                 }
+                let mut failure = error.network_failure();
+                if let Some(bytes) = error.response.as_deref()
+                    && let Ok(directory) = self.shared.sse_failure_log.lock()
+                    && let Some(directory) = directory.as_ref()
+                {
+                    let mut diagnostic = failure.diagnostic.unwrap_or_else(|| winwincode_network::NetworkDiagnostic::new(winwincode_network::DiagnosticCode::SseEvent));
+                    match crate::provider_sse_failure_log::retain(directory, &serde_json::json!({"schemaVersion":1,"failure":failure,"providerDiagnostic":error.metadata.diagnostic}), bytes) {
+                        Ok(id) => {
+                            diagnostic.response_log = winwincode_network::SseResponseLogId::parse(&format!("{id}.log"));
+                            diagnostic.response_log_status = Some(winwincode_network::ResponseLogStatus::Retained);
+                        }
+                        Err(_) => diagnostic.response_log_status = Some(winwincode_network::ResponseLogStatus::WriteFailed),
+                    }
+                    failure.diagnostic = Some(diagnostic);
+                }
+                error.network = Some(Box::new(failure));
                 error
             });
         self.finish_drain(receipt)?;
@@ -1036,11 +1334,26 @@ impl HttpsSseProviderAdapter {
                         .with_response(bytes),
                 );
             }
-            let Ok(read) = reader.read(&mut buffer) else {
-                return Err(
-                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
-                        .with_response(bytes),
-                );
+            let read = match reader.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    let mut failure =
+                        HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
+                            .with_response(bytes);
+                    failure.network = Some(Box::new(
+                        winwincode_network::NetworkFailure::new(
+                            if error.kind() == std::io::ErrorKind::TimedOut {
+                                winwincode_network::ErrorKind::Timeout
+                            } else {
+                                winwincode_network::ErrorKind::TransportInterrupted
+                            },
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::ResponseBody,
+                        )
+                        .with_diagnostic(winwincode_network::NetworkDiagnostic::io(&error)),
+                    ));
+                    return Err(failure);
+                }
             };
             if read == 0 {
                 return Ok(bytes);
@@ -1370,13 +1683,19 @@ impl HttpsSseProviderAdapter {
             credential,
             &self.shared.config.custom_headers,
         );
-        if status == 429 {
+        if !(200..=299).contains(&status)
+            && winwincode_network::NetworkFailure::http(status, None).retryable()
+        {
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::rate_limited().with_metadata(metadata));
-        }
-        if (500..=599).contains(&status) {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::upstream().with_metadata(metadata));
+            return Err(ProviderAdapterError::from_network(
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    metadata
+                        .provider_retry_after_millis
+                        .map(Duration::from_millis),
+                ),
+            )
+            .with_metadata(metadata));
         }
         if !(200..=299).contains(&status) {
             self.finish_open(invocation, StreamState::Fenced)?;
@@ -1395,10 +1714,29 @@ impl HttpsSseProviderAdapter {
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(canonical_event_stream_content_type)
         {
-            self.finish_open(invocation, StreamState::Fenced)?;
+            self.abandon_retryable_open(invocation)?;
             return Err(ProviderAdapterError::response_content_type().with_metadata(metadata));
         }
         Ok(metadata)
+    }
+
+    fn http_open_failure(
+        io: &winwincode_network::transport::ExchangeIo,
+        error: &ureq::Error,
+    ) -> winwincode_network::NetworkFailure {
+        if io.is_cancelled() {
+            winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::Cancelled,
+                winwincode_network::Acceptance::Unknown,
+                winwincode_network::Phase::ResponseHeaders,
+            )
+        } else {
+            winwincode_network::classify_ureq(
+                error,
+                !io.connection_established(),
+                winwincode_network::Phase::ResponseHeaders,
+            )
+        }
     }
 
     fn open_https(
@@ -1481,7 +1819,9 @@ impl HttpsSseProviderAdapter {
             Ok(response) => response,
             Err(error) => {
                 self.abandon_retryable_open(invocation)?;
-                return Err(classify_open_error(&error));
+                return Err(ProviderAdapterError::from_network(Self::http_open_failure(
+                    &io, &error,
+                )));
             }
         };
         let metadata = self.validate_http_response(invocation, &response, credential)?;
@@ -1512,6 +1852,16 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
             HttpInvocation::from_adapter(invocation),
             credential.expose(),
         )
+    }
+
+    fn open_recovering(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        self.open_recovering_admitted(invocation, credential, receipt, can_start, || Ok(()))
     }
 
     fn control(
@@ -2152,34 +2502,13 @@ fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
     digest.finalize().into()
 }
 
+#[cfg(test)]
 fn classify_open_error(error: &ureq::Error) -> ProviderAdapterError {
-    match error {
-        ureq::Error::Io(error)
-            if error.get_ref().is_some_and(
-                <dyn std::error::Error + Send + Sync + 'static>::is::<rustls::Error>,
-            ) || matches!(
-                error.kind(),
-                std::io::ErrorKind::InvalidInput
-                    | std::io::ErrorKind::InvalidData
-                    | std::io::ErrorKind::Unsupported
-                    | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            ProviderAdapterError::protocol()
-        }
-        ureq::Error::Io(_)
-        | ureq::Error::Timeout(_)
-        | ureq::Error::HostNotFound
-        | ureq::Error::ConnectionFailed
-        | ureq::Error::ConnectProxyFailed(_) => ProviderAdapterError::connection(),
-        ureq::Error::Http(_)
-        | ureq::Error::BadUri(_)
-        | ureq::Error::InvalidProxyUrl
-        | ureq::Error::RequireHttpsOnly(_) => ProviderAdapterError::request_invalid(),
-        // Permanent certificate, TLS configuration, request and HTTP protocol
-        // failures cannot become an endless paid retry while the task is live.
-        _ => ProviderAdapterError::protocol(),
-    }
+    ProviderAdapterError::from_network(winwincode_network::classify_ureq(
+        error,
+        false,
+        winwincode_network::Phase::ResponseHeaders,
+    ))
 }
 
 fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
@@ -2284,7 +2613,11 @@ mod tests {
             )),
         ] {
             let failure = classify_open_error(&error);
-            assert!(!failure.retryable());
+            assert!(
+                !failure.retryable(),
+                "error category {:?}, safe failure {failure:?}",
+                std::mem::discriminant(&error)
+            );
             assert!(!format!("{failure:?}").contains("private"));
         }
     }
@@ -3735,6 +4068,20 @@ mod tests {
     fn retryable_status_reuses_identity_and_sse_is_strict_and_accounted() {
         let fixture = TlsFixture::start(vec![
             TestResponse {
+                status: "408 Request Timeout",
+                content_type: "application/json",
+                body: "{}",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
+                status: "425 Too Early",
+                content_type: "application/json",
+                body: "{}",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
                 status: "500 Internal Server Error",
                 content_type: "application/json",
                 body: "{}",
@@ -3760,6 +4107,14 @@ mod tests {
         let exchange = ModelExchangeId("mdl_00000000000000000000000002".to_owned());
         let request_id = RequestId("req_00000000000000000000000002".to_owned());
         let request = invocation(&exchange, &request_id);
+        for status in [408, 425] {
+            let failure = adapter
+                .open_https(request, SECRET)
+                .expect_err("retryable HTTP")
+                .network_failure();
+            assert_eq!(failure.http_status, Some(status));
+            assert!(failure.retryable());
+        }
         assert_eq!(
             adapter.open_https(request, SECRET).expect_err("5xx").kind(),
             crate::ProviderAdapterErrorKind::Upstream
@@ -3772,7 +4127,7 @@ mod tests {
             .open_https(request, SECRET)
             .expect("retry exact idempotency identity");
         let requests = fixture.finish();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 5);
         assert!(
             requests
                 .iter()

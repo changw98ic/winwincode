@@ -748,6 +748,8 @@ impl ExecutionJobDispatcher for RecordingDispatcher {
     }
 }
 
+const VERIFICATION_FIXTURE_COMMAND: &str = "cat fixture.txt";
+
 fn delivery_before_execution(read_only: bool) -> Delivery {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
@@ -768,6 +770,10 @@ fn delivery_before_execution(read_only: bool) -> Delivery {
     };
     "Reply with the deterministic loopback result.".clone_into(&mut item.goal);
     if read_only {
+        snapshot.spec.acceptance_criteria[0].verification_method =
+            Some(VERIFICATION_FIXTURE_COMMAND.to_owned());
+        snapshot.work_run_aggregate.contract.criteria[0].verification_method =
+            Some(VERIFICATION_FIXTURE_COMMAND.to_owned());
         snapshot.work_run_aggregate.runs.truncate(1);
         snapshot.work_run_aggregate.runs[0].state = WorkRunState::CandidateReady;
     } else {
@@ -3603,7 +3609,19 @@ async fn poll_until_candidate_outcome(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("verification stage did not produce a terminal outcome");
+    let messages = port.messages();
+    let model_requests = messages
+        .iter()
+        .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+        .count();
+    let artifact_opens = messages
+        .iter()
+        .filter(|message| matches!(message, ExecutionPortMessage::ArtifactOpenMessage(_)))
+        .count();
+    panic!(
+        "verification stage did not produce a terminal outcome; active_jobs={}, model_requests={model_requests}, artifact_opens={artifact_opens}",
+        worker.active_jobs().len()
+    );
 }
 
 fn candidate_ack(
@@ -3640,7 +3658,12 @@ fn runtime_payload(event: &RuntimeEventMessage) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, call_id: &str) {
+fn assert_verification_products(
+    messages: &[ExecutionPortMessage],
+    role: &str,
+    call_id: &str,
+    command: &str,
+) {
     let runtime_events = messages
         .iter()
         .filter_map(|message| match message {
@@ -3657,12 +3680,26 @@ fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, c
         }),
         "{role} must retain its read-only policy before command/test evidence"
     );
-    assert!(
-        runtime_events.iter().any(|event| matches!(
-            event.event.category,
-            ExecutionEventCategory::Command | ExecutionEventCategory::Test
-        )),
-        "{role} must retain direct command or test evidence"
+    let command_receipt = runtime_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event.category,
+                ExecutionEventCategory::Command | ExecutionEventCategory::Test
+            )
+        })
+        .find_map(|event| runtime_payload(event).filter(|payload| payload["source_id"] == call_id))
+        .expect("verification must retain the exact direct command receipt");
+    assert_eq!(command_receipt["status"], "completed");
+    assert_eq!(command_receipt["exit_code"], 0);
+    assert_eq!(
+        command_receipt["command_digest"],
+        serde_json::to_value(
+            winwincode_domain::verification_method_digest(command)
+                .expect("canonical fixture verification command")
+        )
+        .unwrap(),
+        "{role} command receipt must match the sealed verification method"
     );
     let result = runtime_events.iter().find_map(|event| {
         if event.event.category != ExecutionEventCategory::Activity {
@@ -3690,6 +3727,19 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         SnapshotVerificationDispatchMessageKind,
     };
     let mut dispatch = verification_dispatch(root, role);
+    assert_eq!(
+        dispatch
+            .job
+            .work_input
+            .as_ref()
+            .unwrap()
+            .work_contract
+            .criteria[0]
+            .verification_method
+            .as_deref(),
+        Some(command),
+        "the canonical verification input must bind the actual command"
+    );
     let port = RecordedPort::default();
     let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(root))
         .expect("open verification production adapter");
@@ -4015,6 +4065,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
             .await
             .expect("deliver canonical verification result");
     }
+    eprintln!("verification fixture role={role}");
     let outcome = poll_until_candidate_outcome(&mut worker, &port, &decided_at).await;
     assert_eq!(
         outcome.outcome.status,
@@ -4046,7 +4097,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
             assert_eq!(open.snapshot_id, dispatch.snapshot_id);
         }
     }
-    assert_verification_products(&port.messages(), role, &evidence_call_id);
+    assert_verification_products(&port.messages(), role, &evidence_call_id, command);
     worker
         .shutdown(at("2030-01-01T00:00:03.000Z"))
         .await
@@ -4057,9 +4108,9 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
 fn production_worker_reviewer_and_verifier_emit_bound_work_run_products() {
     run_on_large_stack(async {
         let reviewer_root = TestDirectory::new("production-reviewer-work-run");
-        run_verification_work_run(&reviewer_root, "reviewer", "cat fixture.txt").await;
+        run_verification_work_run(&reviewer_root, "reviewer", VERIFICATION_FIXTURE_COMMAND).await;
         let verifier_root = TestDirectory::new("production-verifier-work-run");
-        run_verification_work_run(&verifier_root, "verifier", "cat fixture.txt").await;
+        run_verification_work_run(&verifier_root, "verifier", VERIFICATION_FIXTURE_COMMAND).await;
     });
 }
 
@@ -6463,7 +6514,112 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
 
 #[test]
 fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
+    shell_approval_and_action_receipt_body(false);
+}
+
+#[test]
+fn real_shell_approval_survives_lease_renewal() {
+    shell_approval_and_action_receipt_body(true);
+}
+
+#[test]
+fn rejected_runtime_ack_becomes_one_durable_job_failure() {
     run_on_large_stack(async {
+        use winwincode_execution_port::generated::{
+            LeaseWriteStatus, RuntimeAckMessage, RuntimeAckMessageKind,
+        };
+        let root = TestDirectory::new("runtime-ack-rejection");
+        let dispatch = dispatch(&root);
+        let port = RecordedPort::default();
+        let adapter =
+            winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root)).unwrap();
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        let now = at("2030-01-01T00:00:01.000Z");
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch),
+                now.clone(),
+            )
+            .await
+            .unwrap();
+        let event = poll_until_message(
+            &mut worker,
+            &port,
+            &now,
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::RuntimeEventMessage(event) => Some(event.clone()),
+                    _ => None,
+                })
+            },
+            "runtime event before rejection",
+        )
+        .await;
+        let ack = ExecutionPortMessage::RuntimeAckMessage(RuntimeAckMessage {
+            ack_sequence: winwincode_domain::ExecutionAckSequence(0),
+            error: None,
+            kind: RuntimeAckMessageKind::RuntimeAck,
+            lease: event.lease,
+            message_id: ExecutionMessageId(id("xmsg", 950)),
+            replay_from_sequence: None,
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now.clone(),
+            session_identity: event.session_identity,
+            status: LeaseWriteStatus::RejectedConflict,
+            worker_session_id: event.worker_session_id,
+        });
+        worker
+            .accept_control(&ack, now.clone())
+            .await
+            .expect("rejected ACK is durably handled without process failure");
+        worker
+            .poll_codex(now.clone())
+            .await
+            .expect("settle only the affected job");
+        assert!(worker.active_jobs().is_empty());
+        assert_eq!(
+            worker.lifecycle(),
+            winwincode_worker::WorkerLifecycleState::Active
+        );
+        let outcomes = port
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].outcome.status,
+            ExecutionOutcomeStatus::InfrastructureError
+        );
+        worker
+            .accept_control(&ack, now.clone())
+            .await
+            .expect("duplicate rejected ACK after completion");
+        worker.poll_codex(now.clone()).await.unwrap();
+        let replayed = port
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(replayed.iter().all(|outcome| outcome == &outcomes[0]));
+        worker.shutdown(now).await.unwrap();
+    });
+}
+
+fn shell_approval_and_action_receipt_body(renew: bool) {
+    run_on_large_stack(async move {
         let root = TestDirectory::new("production-shell-approval");
         let repository = root.sources().join(id("rep", 1));
         let _ = root.source_revision();
@@ -6504,7 +6660,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             )
             .await
             .expect("accept approval dispatch");
-        let active = worker.active_jobs()[0].clone();
+        let mut active = worker.active_jobs()[0].clone();
         let checkout = detached_checkout(&root);
 
         let first_open = poll_until_message(
@@ -6630,26 +6786,103 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
         ));
         assert_eq!(detail.working_directory.as_deref(), Some("workspace"));
         let decided_at = at("2030-01-01T00:00:02.000Z");
+        if renew {
+            let mut lease = active.lease.clone();
+            lease.expires_at = at("2030-01-01T02:00:00.000Z");
+            let renewal = serde_json::from_value(serde_json::json!({
+                "kind": "lease.renew", "lease": lease,
+                "priorExpiresAt": active.lease.expires_at,
+                "messageId": id("xmsg", 899), "requestId": id("req", 899),
+                "schemaVersion": "winwincode/v1", "sentAt": decided_at
+            }))
+            .expect("renewal frame");
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::LeaseRenewMessage(renewal),
+                    decided_at.clone(),
+                )
+                .await
+                .expect("renew before original approval arrives");
+            active = worker.active_jobs()[0].clone();
+            assert_ne!(active.lease.expires_at, approval.lease.expires_at);
+            let mut storage = SqliteStorage::open(root.data()).unwrap();
+            let lease = &active.lease;
+            let result = storage
+                .execution_registry()
+                .unwrap()
+                .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                    expires_at: lease.expires_at.clone(),
+                    fencing_token: lease.fencing_token.clone(),
+                    job_id: lease.job_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    message_id: ExecutionMessageId(id("xmsg", 899)),
+                    prior_expires_at: approval.lease.expires_at.clone(),
+                    request_id: RequestId(id("req", 899)),
+                    sent_at: decided_at.clone(),
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                    attempt: 1,
+                })
+                .expect("renew the loopback Server lease authority too");
+            assert_eq!(result.status, StorageLeaseWriteStatus::Accepted);
+        }
+        let decision = ApprovalDecisionMessage {
+            approval_id: approval.approval_id.clone(),
+            decided_at: decided_at.clone(),
+            decision: ApprovalDecisionMessageDecision::Approved,
+            kind: ApprovalDecisionMessageKind::ApprovalDecision,
+            lease: approval.lease.clone(),
+            message_id: ExecutionMessageId(id("xmsg", 900)),
+            reason: None,
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: ApprovalDecisionMessageScope::Once,
+            sent_at: decided_at.clone(),
+            session_identity: approval.session_identity.clone(),
+            worker_session_id: approval.worker_session_id.clone(),
+        };
+        if renew {
+            let mutations: [fn(&mut ApprovalDecisionMessage); 8] = [
+                |m| m.lease.attempt += 1,
+                |m| m.lease.fencing_token = FencingToken("99".into()),
+                |m| m.lease.lease_id = LeaseId(id("lse", 999)),
+                |m| m.lease.worker_instance_id = WorkerInstanceId(id("wki", 999)),
+                |m| m.lease.expires_at = at("2030-01-01T03:00:00.000Z"),
+                |m| m.worker_session_id = winwincode_domain::WorkerSessionId(id("wsn", 999)),
+                |m| {
+                    m.session_identity.codex_thread_id =
+                        winwincode_domain::CodexThreadId(id("cdx", 999));
+                },
+                |m| {
+                    m.decided_at = at("2030-01-01T00:00:03.000Z");
+                    m.sent_at = m.decided_at.clone();
+                },
+            ];
+            for mutate in mutations {
+                let mut forged = decision.clone();
+                mutate(&mut forged);
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::ApprovalDecisionMessage(forged),
+                        decided_at.clone(),
+                    )
+                    .await
+                    .expect_err("foreign, future, or fenced approval stays rejected");
+            }
+        }
         worker
             .accept_control(
-                &ExecutionPortMessage::ApprovalDecisionMessage(ApprovalDecisionMessage {
-                    approval_id: approval.approval_id.clone(),
-                    decided_at: decided_at.clone(),
-                    decision: ApprovalDecisionMessageDecision::Approved,
-                    kind: ApprovalDecisionMessageKind::ApprovalDecision,
-                    lease: approval.lease.clone(),
-                    message_id: ExecutionMessageId(id("xmsg", 900)),
-                    reason: None,
-                    schema_version: SchemaVersion::WinwincodeV1,
-                    scope: ApprovalDecisionMessageScope::Once,
-                    sent_at: decided_at.clone(),
-                    session_identity: approval.session_identity.clone(),
-                    worker_session_id: approval.worker_session_id.clone(),
-                }),
+                &ExecutionPortMessage::ApprovalDecisionMessage(decision.clone()),
                 decided_at.clone(),
             )
             .await
             .expect("resolve exact embedded approval");
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ApprovalDecisionMessage(decision),
+                decided_at.clone(),
+            )
+            .await
+            .expect("exact approval replay does not execute another action");
 
         let action = poll_until_message(
             &mut worker,

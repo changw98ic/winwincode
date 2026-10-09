@@ -14,8 +14,12 @@ use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, Connector, Either, LazyBuffers, NextTimeout, Transport,
 };
 
+#[cfg(test)]
+#[path = "transport_diagnostics.test.rs"]
+mod diagnostics_regression_tests;
+
 #[derive(Debug)]
-pub(crate) struct ExchangeIo {
+pub struct ExchangeIo {
     cancelled: AtomicBool,
     body: AtomicBool,
     socket: Mutex<Option<TcpStream>>,
@@ -24,7 +28,7 @@ pub(crate) struct ExchangeIo {
     idle: Duration,
 }
 impl ExchangeIo {
-    pub(crate) fn new(connect: Duration, idle: Duration) -> Arc<Self> {
+    pub fn new(connect: Duration, idle: Duration) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
             body: AtomicBool::new(false),
@@ -34,10 +38,16 @@ impl ExchangeIo {
             idle,
         })
     }
-    pub(crate) fn body_started(&self) {
+    pub fn body_started(&self) {
         self.body.store(true, Ordering::Release);
     }
-    pub(crate) fn cancel(&self) {
+    pub fn connection_established(&self) -> bool {
+        self.socket.lock().map_or(true, |socket| socket.is_some())
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Ok(socket) = self.socket.lock()
             && let Some(socket) = socket.as_ref()
@@ -49,8 +59,8 @@ impl ExchangeIo {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted());
         }
-        // ureq's not_zero() maps an elapsed deadline to one additional second.
-        // An expired configured deadline must fail before granting idle time.
+        // ureq's not_zero() substitutes one second for an expired deadline.
+        // An exchange must stop before applying that socket-timeout fallback.
         if next.after.is_zero() {
             return Err(ureq::Error::Timeout(next.reason));
         }
@@ -67,7 +77,6 @@ impl ExchangeIo {
             .map_or(duration, |value| duration.min(*value)))
     }
 }
-
 fn interrupted() -> ureq::Error {
     std::io::Error::new(
         std::io::ErrorKind::ConnectionAborted,
@@ -83,8 +92,20 @@ fn timed_out() -> ureq::Error {
     .into()
 }
 
+pub fn transient_transport(error: &ureq::Error) -> bool {
+    crate::classify_ureq(error, false, crate::Phase::ResponseHeaders).retryable()
+}
+
+pub fn wait_for_connection(error: &ureq::Error, io: &ExchangeIo) -> bool {
+    !io.connection_established()
+        && matches!(
+            crate::classify_ureq(error, true, crate::Phase::Connect).kind,
+            crate::ErrorKind::ConnectionUnavailable | crate::ErrorKind::Timeout
+        )
+}
+
 #[derive(Debug)]
-pub(crate) struct ExchangeConnector(pub(crate) Arc<ExchangeIo>);
+pub struct ExchangeConnector(pub Arc<ExchangeIo>);
 impl<In: Transport> Connector<In> for ExchangeConnector {
     type Out = Either<In, ExchangeTransport>;
     fn connect(
@@ -108,7 +129,7 @@ impl<In: Transport> Connector<In> for ExchangeConnector {
                 .checked_duration_since(Instant::now())
                 .filter(|v| !v.is_zero())
                 .ok_or_else(timed_out)?;
-            match TcpStream::connect_timeout(address, remaining) {
+            match connect_cancellable(*address, remaining, &self.0) {
                 Ok(socket) => {
                     socket.set_nodelay(true)?;
                     let mut retained = self.0.socket.lock().map_err(|_| interrupted())?;
@@ -133,7 +154,7 @@ impl<In: Transport> Connector<In> for ExchangeConnector {
     }
 }
 #[derive(Debug)]
-pub(crate) struct ExchangeTransport {
+pub struct ExchangeTransport {
     socket: TcpStream,
     buffers: LazyBuffers,
     io: Arc<ExchangeIo>,
@@ -165,16 +186,16 @@ impl Transport for ExchangeTransport {
 
 /// Shared cancellation from before semantic preprocessing through the final model stream.
 #[derive(Debug, Default)]
-pub(crate) struct ExchangeCancellation {
+pub struct ExchangeCancellation {
     cancelled: AtomicBool,
     sockets: Mutex<Vec<std::sync::Weak<ExchangeIo>>>,
     changed: tokio::sync::Notify,
 }
 impl ExchangeCancellation {
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
-    pub(crate) fn attach(&self, io: &Arc<ExchangeIo>) {
+    pub fn attach(&self, io: &Arc<ExchangeIo>) {
         if let Ok(mut sockets) = self.sockets.lock() {
             sockets.retain(|socket| socket.strong_count() > 0);
             sockets.push(Arc::downgrade(io));
@@ -185,7 +206,7 @@ impl ExchangeCancellation {
             io.cancel();
         }
     }
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Ok(sockets) = self.sockets.lock() {
             for io in sockets.iter().filter_map(std::sync::Weak::upgrade) {
@@ -194,7 +215,7 @@ impl ExchangeCancellation {
         }
         self.changed.notify_waiters();
     }
-    pub(crate) async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         let notified = self.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -204,42 +225,88 @@ impl ExchangeCancellation {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ureq::unversioned::transport::time::Duration as TransportDuration;
-
-    #[test]
-    fn an_expired_configured_deadline_cannot_restart_with_an_idle_wait() {
-        let io = ExchangeIo::new(Duration::from_secs(1), Duration::from_secs(2));
-        io.body_started();
-        for reason in [ureq::Timeout::Global, ureq::Timeout::RecvBody] {
-            assert!(matches!(
-                io.timeout(NextTimeout { after: Duration::ZERO.into(), reason }),
-                Err(ureq::Error::Timeout(actual)) if actual == reason,
-            ));
+fn connect_cancellable(
+    address: std::net::SocketAddr,
+    timeout: Duration,
+    io: &ExchangeIo,
+) -> std::io::Result<TcpStream> {
+    static REACTOR: std::sync::OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> =
+        std::sync::OnceLock::new();
+    let runtime = REACTOR.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+    });
+    let runtime = runtime
+        .as_ref()
+        .map_err(|_| std::io::Error::other("network reactor unavailable"))?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let task = runtime.spawn(async move {
+        let result = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address))
+            .await
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))
+            .and_then(std::convert::identity)
+            .and_then(tokio::net::TcpStream::into_std);
+        let _ = sender.send(result);
+    });
+    loop {
+        if io.is_cancelled() {
+            task.abort();
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        match receiver.recv_timeout(Duration::from_millis(crate::defaults().authority_check_ms)) {
+            Ok(result) => {
+                let socket = result?;
+                socket.set_nonblocking(false)?;
+                return Ok(socket);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(std::io::Error::other("network reactor stopped"));
+            }
         }
     }
+}
 
-    #[test]
-    fn a_disabled_total_deadline_preserves_idle_wait_and_future_deadlines() {
-        let io = ExchangeIo::new(Duration::from_secs(1), Duration::from_secs(2));
-        io.body_started();
-        assert_eq!(
-            io.timeout(NextTimeout {
-                after: TransportDuration::NotHappening,
-                reason: ureq::Timeout::Global,
-            })
-            .unwrap(),
-            Duration::from_secs(2),
-        );
-        assert_eq!(
-            io.timeout(NextTimeout {
-                after: Duration::from_millis(50).into(),
-                reason: ureq::Timeout::Global,
-            })
-            .unwrap(),
-            Duration::from_millis(50),
-        );
+/// Stops waiting for DNS when authority ends. A platform getaddrinfo already
+/// running may finish in its resolver thread; its result cannot open a socket.
+#[derive(Debug)]
+pub struct ExchangeResolver(pub Arc<ExchangeIo>);
+impl ureq::unversioned::resolver::Resolver for ExchangeResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        if self.0.is_cancelled() {
+            return Err(interrupted());
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let uri = uri.clone();
+        let config = config.clone();
+        std::thread::spawn(move || {
+            let result = ureq::unversioned::resolver::DefaultResolver::default()
+                .resolve(&uri, &config, timeout);
+            let _ = sender.send(result);
+        });
+        loop {
+            if self.0.is_cancelled() {
+                return Err(interrupted());
+            }
+            let remaining = self
+                .0
+                .connect
+                .checked_sub(self.0.started.elapsed())
+                .ok_or_else(timed_out)?;
+            match receiver.recv_timeout(
+                remaining.min(Duration::from_millis(crate::defaults().authority_check_ms)),
+            ) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(interrupted()),
+            }
+        }
     }
 }

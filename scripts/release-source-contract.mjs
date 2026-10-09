@@ -11,6 +11,7 @@ export const PRODUCT_PACKAGE_DIRECTORIES = Object.freeze([
   'packages/browser-ui',
   'packages/contracts',
   'packages/control-plane-client',
+  'packages/network-request',
   'packages/strongflow',
 ])
 

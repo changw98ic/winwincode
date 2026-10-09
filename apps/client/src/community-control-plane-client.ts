@@ -1,3 +1,4 @@
+import { requestFetch as sendHttp, withResponseFailure } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -100,7 +101,7 @@ export function createControlPlaneManagedAppTemplatePort(options: {
     `${location.serverUrl}/api/v1/repositories/${encodeURIComponent(repositoryBindingId)}/managed-app-template`
   async function request(repositoryBindingId: string, method: 'GET' | 'POST', signal: AbortSignal | undefined, template?: ControlPlaneManagedAppTemplate): Promise<unknown> {
     if (transportFetch === undefined) throw new Error('项目运行设置服务不可用。')
-    const response = await transportFetch(pathFor(repositoryBindingId), {
+    const response = await sendHttp(transportFetch, pathFor(repositoryBindingId), {
       method,
       headers: {},
       credentials: 'include',
@@ -111,7 +112,7 @@ export function createControlPlaneManagedAppTemplatePort(options: {
       ...(template === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(template) }),
     })
     const source = await response.text()
-    if (!response.ok) throw new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该项目的权限。' : '项目运行设置未保存，请稍后重试。')
+    if (!response.ok) throw withResponseFailure(new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该项目的权限。' : '项目运行设置未保存，请稍后重试。'), response)
     try { return JSON.parse(source) as unknown } catch { throw new Error('项目运行设置返回了无效结果。') }
   }
   function parseSnapshot(value: unknown): ControlPlaneManagedAppTemplateSnapshot {
@@ -161,11 +162,11 @@ export function createControlPlaneRepositoryRegistration(options: {
   const transportFetch = options.transport.fetch
   async function request(path: string, signal: AbortSignal, body?: DeviceConfigurationEnvelope): Promise<unknown> {
     if (transportFetch === undefined) throw new Error('项目接入服务不可用。')
-    const response = await transportFetch(`${location.serverUrl}${path}`, {
+    const response = await sendHttp(transportFetch, `${location.serverUrl}${path}`, {
       method: body === undefined ? 'GET' : 'POST', credentials: 'include', cache: 'no-store', redirect: 'error', signal,
       headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-    if (!response.ok) throw new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该设备的权限。' : '设备请求未完成，请检查连接后重试。')
+    if (!response.ok) throw withResponseFailure(new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该设备的权限。' : '设备请求未完成，请检查连接后重试。'), response)
     return JSON.parse(await response.text()) as unknown
   }
   return {
@@ -307,10 +308,11 @@ const generatedTransport = Object.freeze<ControlPlaneGeneratedTransport<
           headers: init.headers,
           body: init.body,
           credentials: 'include',
+          ...(init.signal === undefined ? {} : { signal: init.signal }),
         }])
       ),
       maxNetworkRetries: options.maxNetworkRetries,
-      waitBeforeRetry: options.waitBeforeRetry,
+      ...(options.waitBeforeRetry === undefined ? {} : { waitBeforeRetry: options.waitBeforeRetry }),
     })
     return {
       submitCommand(command) {
@@ -326,7 +328,7 @@ const generatedTransport = Object.freeze<ControlPlaneGeneratedTransport<
     const socketOptions: ControlPlaneWebSocketClientOptions = {
       baseUrl: options.baseUrl,
       ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
-      reconnectDelayMillis: options.reconnectDelayMillis,
+      ...(options.reconnectDelayMillis === undefined ? {} : { reconnectDelayMillis: options.reconnectDelayMillis }),
       ...(options.onEventQueued === undefined ? {} : {
         onEventQueued: event => { options.onEventQueued?.(event) },
       }),
@@ -695,7 +697,7 @@ async function repositoriesListRequest(
     })
   }
   try {
-    const response = await transportFetch(
+    const response = await sendHttp(transportFetch,
       `${location.serverUrl}${REPOSITORY_DIRECTORY_LIST_PATH}`
         + `?clientId=${encodeURIComponent(clientId)}`,
       {
@@ -709,7 +711,7 @@ async function repositoriesListRequest(
       },
     )
     const source = await response.text()
-    if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+    if (!response.ok) throw withResponseFailure(clientDirectoryBoundaryError(response.status, source), response)
     if (response.status !== 200) throw invalidRepositoryListError()
     return repositoryListResponse(source)
   } catch (error) {
@@ -721,6 +723,7 @@ async function repositoriesListRequest(
       message: 'The Control Plane server could not be reached.',
       requestId: null,
       retryable: true,
+      cause: error,
     })
   }
 }
@@ -1030,7 +1033,7 @@ export function createControlPlaneClientDirectory(options: {
         retryable: false,
       })
     }
-    return transportFetch(`${location.serverUrl}${path}`, {
+    return sendHttp(transportFetch, `${location.serverUrl}${path}`, {
       method,
       headers: body === null ? {} : { 'Content-Type': 'application/json' },
       ...(body === null ? {} : { body }),
@@ -1059,7 +1062,7 @@ export function createControlPlaneClientDirectory(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientDirectoryBoundaryError(response.status, source), response)
       if (response.status !== 201) throw invalidDeviceListError()
       return deviceListResponse(source)
     } catch (error) {
@@ -1071,6 +1074,7 @@ export function createControlPlaneClientDirectory(options: {
         message: 'The Control Plane server could not be reached.',
         requestId: null,
         retryable: true,
+        cause: error,
       })
     }
   }
@@ -1086,7 +1090,7 @@ export function createControlPlaneClientDirectory(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientDirectoryBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidDeviceListError()
       return deviceListResponse(source)
     } catch (error) {
@@ -1098,6 +1102,7 @@ export function createControlPlaneClientDirectory(options: {
         message: 'The Control Plane server could not be reached.',
         requestId: null,
         retryable: true,
+        cause: error,
       })
     }
   }
@@ -1351,13 +1356,14 @@ function invalidOccupancyResponseError(): ControlPlaneClientError {
   })
 }
 
-function occupancyNetworkError(): ControlPlaneClientError {
+function occupancyNetworkError(cause: unknown): ControlPlaneClientError {
   return new ControlPlaneClientError({
     kind: 'network',
     code: 'NETWORK_ERROR',
     message: 'The Control Plane server could not be reached.',
     requestId: null,
     retryable: true,
+    cause,
   })
 }
 
@@ -1656,7 +1662,7 @@ export function createControlPlaneClientOccupancy(options: {
         retryable: false,
       })
     }
-    return transportFetch(`${location.serverUrl}${path}`, {
+    return sendHttp(transportFetch, `${location.serverUrl}${path}`, {
       method,
       headers: body === null ? {} : { 'Content-Type': 'application/json' },
       ...(body === null ? {} : { body }),
@@ -1683,13 +1689,13 @@ export function createControlPlaneClientOccupancy(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientOccupancyBoundaryError(response.status, source), response)
       if (response.status !== 201) throw invalidOccupancyResponseError()
       return occupancyHolderViewResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw occupancyNetworkError()
+      throw occupancyNetworkError(error)
     }
   }
 
@@ -1705,13 +1711,13 @@ export function createControlPlaneClientOccupancy(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientOccupancyBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidOccupancyResponseError()
       return occupancyStatusResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw occupancyNetworkError()
+      throw occupancyNetworkError(error)
     }
   }
 
@@ -1732,13 +1738,13 @@ export function createControlPlaneClientOccupancy(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientOccupancyBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidOccupancyResponseError()
       return occupancyReleaseResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw occupancyNetworkError()
+      throw occupancyNetworkError(error)
     }
   }
 
@@ -1757,13 +1763,13 @@ export function createControlPlaneClientOccupancy(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientOccupancyBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidOccupancyResponseError()
       return occupancyForceReleaseResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw occupancyNetworkError()
+      throw occupancyNetworkError(error)
     }
   }
 
@@ -2059,13 +2065,14 @@ function invalidCandidateResponseError(): ControlPlaneClientError {
   })
 }
 
-function candidateNetworkError(): ControlPlaneClientError {
+function candidateNetworkError(cause: unknown): ControlPlaneClientError {
   return new ControlPlaneClientError({
     kind: 'network',
     code: 'NETWORK_ERROR',
     message: 'The Control Plane server could not be reached.',
     requestId: null,
     retryable: true,
+    cause,
   })
 }
 
@@ -2408,7 +2415,7 @@ export function createControlPlaneClientCandidates(options: {
         retryable: false,
       })
     }
-    return transportFetch(`${location.serverUrl}${path}`, {
+    return sendHttp(transportFetch, `${location.serverUrl}${path}`, {
       method,
       headers: body === null ? {} : { 'Content-Type': 'application/json' },
       ...(body === null ? {} : { body }),
@@ -2432,13 +2439,13 @@ export function createControlPlaneClientCandidates(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(candidateBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidCandidateResponseError()
       return candidateListResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw candidateNetworkError()
+      throw candidateNetworkError(error)
     }
   }
 
@@ -2459,13 +2466,13 @@ export function createControlPlaneClientCandidates(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(candidateBoundaryError(response.status, source), response)
       if (response.status !== 201) throw invalidCandidateResponseError()
       return candidateBranchOutcomeResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw candidateNetworkError()
+      throw candidateNetworkError(error)
     }
   }
 
@@ -2488,13 +2495,13 @@ export function createControlPlaneClientCandidates(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(candidateBoundaryError(response.status, source), response)
       if (response.status !== 201) throw invalidCandidateResponseError()
       return candidateApplyReceiptValue(parsedCandidatePayload(source).receipt)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw candidateNetworkError()
+      throw candidateNetworkError(error)
     }
   }
 
@@ -2515,13 +2522,13 @@ export function createControlPlaneClientCandidates(options: {
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(candidateBoundaryError(response.status, source), response)
       if (response.status !== 200) throw invalidCandidateResponseError()
       return candidateSummaryResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
-      throw candidateNetworkError()
+      throw candidateNetworkError(error)
     }
   }
 
@@ -2706,7 +2713,7 @@ export function createControlPlaneWorkerSessionPort(options: {
       })
       let response: ControlPlaneHttpResponse
       try {
-        response = await transportFetch(`${location.serverUrl}/api/v1/sessions`, {
+        response = await sendHttp(transportFetch, `${location.serverUrl}/api/v1/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2731,7 +2738,7 @@ export function createControlPlaneWorkerSessionPort(options: {
         })
       }
       const source = await response.text()
-      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(clientOccupancyBoundaryError(response.status, source), response)
       if (response.status !== 201) {
         throw new ControlPlaneClientError({
           kind: response.status === 401 ? 'authentication' : 'protocol',

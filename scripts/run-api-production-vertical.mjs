@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter } from '../packages/network-request/src/index.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   createHash,
@@ -755,7 +756,7 @@ function responseSetCookie(headers) {
  * Request JSON without a UI process or global TLS switches. The fixture uses a
  * self-signed certificate, so only this local request opts out of trust.
  */
-function requestJson(url, {
+function requestJsonOnce(url, {
   method = 'GET',
   origin,
   cookie = null,
@@ -763,9 +764,11 @@ function requestJson(url, {
   body = undefined,
   timeoutMillis = 30_000,
   ca,
+  signal,
+  serializedBody,
 } = {}) {
   const target = new URL(url)
-  const serialized = body === undefined ? null : JSON.stringify(body)
+  const serialized = serializedBody === undefined ? (body === undefined ? null : JSON.stringify(body)) : serializedBody
   const headers = {
     Accept: 'application/json',
     Connection: 'close',
@@ -778,7 +781,9 @@ function requestJson(url, {
     ...(authorization === null ? {} : { Authorization: `Bearer ${authorization}` }),
   }
   return new Promise((resolvePromise, reject) => {
+    let connected = false
     const request = httpsRequest(target, {
+      signal,
       method,
       headers,
       rejectUnauthorized: ca !== undefined,
@@ -788,7 +793,18 @@ function requestJson(url, {
     }, response => {
       const chunks = []
       response.setEncoding('utf8')
-      response.on('data', chunk => chunks.push(chunk))
+      let bytes = 0
+      response.on('data', chunk => {
+        bytes += Buffer.byteLength(chunk)
+        if (bytes > 32 * 1024 * 1024) {
+          const failure = new NetworkError({ kind: 'integrity_invalid', acceptance: 'response_received', phase: 'response_body', httpStatus: response.statusCode ?? null, retryAfterMs: null })
+          reject(failure)
+          response.destroy()
+        } else chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('aborted', () => reject(Object.assign(
+        new Error('HTTP response was interrupted'), { code: 'ECONNRESET' })))
       response.on('end', () => {
         const text = chunks.join('')
         let json = null
@@ -796,8 +812,10 @@ function requestJson(url, {
           try {
             json = JSON.parse(text)
           } catch {
-            reject(new Error(`HTTP ${response.statusCode ?? 0} returned invalid JSON`))
-            return
+            if ((response.statusCode ?? 0) >= 200 && (response.statusCode ?? 0) <= 299) {
+              reject(new NetworkError({ kind: 'protocol_invalid', acceptance: 'response_received', phase: 'decode', httpStatus: response.statusCode ?? null, retryAfterMs: null }))
+              return
+            }
           }
         }
         resolvePromise({
@@ -808,11 +826,39 @@ function requestJson(url, {
         })
       })
     })
-    request.on('timeout', () => request.destroy(new Error('HTTP request timed out')))
-    request.on('error', reject)
+    request.on('timeout', () => request.destroy(Object.assign(
+      new Error('HTTP request timed out'), { code: 'ETIMEDOUT' })))
+    request.on('socket', socket => { socket.once('secureConnect', () => { connected = true }) })
+    request.on('error', error => reject(Object.assign(error, { networkFailure: classifyError(error, { notSent: !connected }) })))
     if (serialized !== null) request.write(serialized)
     request.end()
   })
+}
+
+export async function requestJson(url, options = {}) {
+  const target = new URL(url)
+  const method = options.method ?? 'GET'
+  // Occupancy replays for the same signed-in holder and client return the
+  // existing lease or wait for its original offer acknowledgement.
+  const occupancyClaim = method === 'POST' && target.pathname === '/api/v1/clients/occupancy'
+  const exact = method === 'GET' || occupancyClaim || ['/api/v1/queries', '/api/v1/commands'].includes(target.pathname)
+  const prepared = { ...options, serializedBody: options.body === undefined ? null : JSON.stringify(options.body) }
+  const deadline = performance.now() + (options.timeoutMillis ?? (occupancyClaim ? 120_000 : 30_000))
+  try {
+    return await executeRequest(async ({ signal }) => {
+      const response = await requestJsonOnce(url, { ...prepared, signal, timeoutMillis: Math.max(1, deadline - performance.now()) })
+      if (response.status < 200 || response.status > 299) throw new NetworkError(httpFailure(response.status, retryAfter(response.headers['retry-after'])), response)
+      return response
+    }, { replay: exact ? 'replay_exact' : 'reconcile_first', deadline })
+  } catch (error) {
+    if (error instanceof NetworkError && error.response !== undefined) return error.response
+    throw error
+  }
+}
+
+// Queries and commands use the same executor and their retained request identity.
+async function requestReadOnlyJson(url, options) {
+  return requestJson(url, options)
 }
 
 class ApiClient {
@@ -1027,7 +1073,7 @@ async function freePort() {
   return port
 }
 
-function createCertificate(directory) {
+export function createCertificate(directory) {
   const configuration = join(directory, 'openssl.cnf')
   const key = join(directory, 'fixture-key.pem')
   const cert = join(directory, 'fixture-cert.pem')
@@ -1712,7 +1758,10 @@ export function terminalDeviceFailure(observation) {
       || items.some(item => !['done', 'candidate_ready', 'failed', 'cancelled'].includes(item.state))
       || !runs.some(run => ['failed', 'cancelled'].includes(run.state))) return null
   if (['failed', 'cancelled'].includes(delivery.status)
-      && !items.some(item => ['failed', 'cancelled'].includes(item.state))) return null
+      && !items.some(item => ['failed', 'cancelled'].includes(item.state)
+        || (item.state === 'candidate_ready' && item.id !== undefined
+          && ['failed', 'cancelled'].includes(runs.findLast(run => run.workItemId === item.id
+            && run.workItemRevision === item.revision)?.state)))) return null
   if (!['failed', 'cancelled'].includes(delivery.status) && delivery.status !== 'candidate_ready') return null
   const stalled = delivery.status === 'candidate_ready'
   return { code: stalled ? 'DEVICE_PRODUCT_STALLED'

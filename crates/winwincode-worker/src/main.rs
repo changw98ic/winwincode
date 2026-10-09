@@ -299,25 +299,34 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         }
     }
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+    let heartbeat_interval_ms = worker
+        .heartbeat_interval_ms()
+        .ok_or("registered Worker heartbeat interval is unavailable")?;
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut drive = tokio::time::interval(Duration::from_millis(25));
     let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
             () = interrupt.wait() => break,
             _ = heartbeat.tick() => {
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
-                // A refused upstream frame still carries valid controls.
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
+                let step = async {
+                    Box::pin(drain_controls(&mut worker, &handle)).await?;
+                    let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
+                    // A refused upstream frame still carries valid controls.
+                    Box::pin(drain_controls(&mut worker, &handle)).await?;
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                result?;
             }
             _ = drive.tick() => {
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                if worker.transport_failure().is_some() { break; }
+                let step = async {
+                if worker.transport_failure().is_some() { return Ok(true); }
                 // The shared driver retries one bounded outbox batch and polls
                 // Core even when that batch is backpressured. A separate
                 // pre-flush must not prevent cancellation facts from draining.
-                if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await {
+                if let Some(error) = Box::pin(worker.drive_with_controls(&handle, now_instant)).await? {
                     // Retain each finite category once. A trace mismatch also
                     // carries only numeric cursors and identity-match booleans;
                     // never persist raw frames, identities or Provider content.
@@ -334,7 +343,10 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                         eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
                     }
                 }
-                if exit_after_work && worker.work_drained() { break; }
+                Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                if result? { break; }
             }
         }
         if handle.terminal_error().is_some()
@@ -365,51 +377,7 @@ where
     Port: winwincode_codex::WorkerExecutionPort,
     Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
 {
-    while let Some((delivery_id, message)) = handle.next_control()? {
-        match worker.accept_control(&message, now_instant()?).await {
-            Ok(()) => handle.confirm(delivery_id)?,
-            Err(error) => {
-                if env::var_os("WWC_DEBUG_REMOTE_WORKER").is_some() {
-                    let kind = serde_json::to_value(&message)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("kind")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    eprintln!(
-                        "remote Worker control rejected: kind={kind}; category={:?}",
-                        error.code
-                    );
-                }
-                handle.retry(&delivery_id)?;
-                if matches!(
-                    error.code,
-                    winwincode_worker::WorkerErrorCode::ExecutionPort
-                        | winwincode_worker::WorkerErrorCode::ExecutionBackpressure
-                ) {
-                    return Ok(());
-                }
-                // Keep the process alive while durable Worker→Server evidence
-                // is still pending. Exiting here after a Server restart or a
-                // transient control reject strands verification frames that
-                // never reach the Control Plane verdict path.
-                if worker.has_pending_durable_evidence() {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!(
-                            "remote Worker control rejected with pending durable evidence; retrying kind category={:?}",
-                            error.code
-                        );
-                    }
-                    return Ok(());
-                }
-                return Err(Box::new(error));
-            }
-        }
-    }
-    Ok(())
+    worker.drain_controls(handle, now_instant).await
 }
 
 fn production_codex(
@@ -480,6 +448,11 @@ fn production_codex(
         observer_mode,
     };
     let mut config = ProductionCodexConfig::try_new(options)?;
+    match env::var("WWC_WORKER_APPROVAL_OWNER").as_deref() {
+        Ok("execution_port") => config = config.with_host_action_approvals(),
+        Ok("core") | Err(env::VarError::NotPresent) => {}
+        _ => return Err("invalid Worker approval owner".into()),
+    }
     if let Some(value) = env::var_os("WWC_BENCHMARK_SEALED_TOOLS") {
         if value != "1" {
             return Err("invalid benchmark sealed tools".into());

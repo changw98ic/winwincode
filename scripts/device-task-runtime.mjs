@@ -11,6 +11,7 @@ import { checkedWwc, configuredDeviceModelRoute, establishDeviceOnlyExecutionPat
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { runApiProductionVertical } from './run-api-production-vertical.mjs'
 import { benchmarkDeviceEnvironment, deviceProviderSecretValues } from './run-device-task-vertical.mjs'
+import { assertDeviceAgentEnvironmentForwarded, deviceBenchmarkProfileKey } from './device-agent-environment.mjs'
 
 // Stable protocol identities for an already frozen launch, not a retry attempt.
 export function deviceTaskIdentities(experimentId, callId) {
@@ -64,6 +65,33 @@ export function prepareDeviceTaskBaseline(repository, taskInputPath, directory) 
 
 const taskRepositories = new WeakMap()
 
+export async function ensureBenchmarkDeviceOccupancy(context) {
+  const occupancyPath = `/api/v1/clients/${context.devicePath.publicClientId}/occupancy`
+  const rejected = code => { throw Object.assign(new Error(code), { code, benchmarkPhase: 'occupancy' }) }
+  const deadline = performance.now() + 300_000
+  const request = (path, options = {}) => context.api.request(path, {
+    ...options, timeoutMillis: Math.max(1, deadline - performance.now()),
+  })
+  await waitFor(async () => {
+    let occupancy = (await request(occupancyPath)).json
+    if (occupancy.occupancy === 'available') {
+      await request('/api/v1/clients/occupancy', { method: 'POST',
+        body: { schemaVersion: 'winwincode/v1', clientId: context.devicePath.publicClientId } })
+      occupancy = (await request(occupancyPath)).json
+    }
+    if (['reserving', 'recovery_pending'].includes(occupancy.occupancy)) {
+      if (occupancy.holderUserId && occupancy.holderUserId !== context.api.actor.id) rejected('DEVICE_OCCUPANCY_FOREIGN_HOLDER')
+      return false
+    }
+    if (occupancy.occupancy !== 'occupied') rejected('DEVICE_OCCUPANCY_NOT_READY')
+    if (occupancy.holderUserId !== context.api.actor.id) rejected('DEVICE_OCCUPANCY_FOREIGN_HOLDER')
+    return true
+  }, 'Device occupancy recovery', 300_000, 1_000).catch(error => {
+    if (error.code) throw error
+    rejected('DEVICE_OCCUPANCY_RECOVERY_TIMEOUT')
+  })
+}
+
 // Profile Devices keep their settings and databases separate, but this benchmark
 // consumes the same four Provider accounts. Fixed hard links make their existing
 // OS-lock admission share three slots per Provider across every profile.
@@ -82,14 +110,14 @@ export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, provi
   }
   const shared = join(directory, 'model-provider-slots')
   privateDirectory(shared)
-  for (const profile of profiles) assert.match(profile.configurationId, /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u,
+  for (const profile of profiles) assert.match(deviceBenchmarkProfileKey(profile), /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u,
     'benchmark configuration must name one Device directory')
   // The first profile owns device-data, while other profiles have named paths.
   // Admission may expand, but cannot reassign that retained Device to a different
   // immutable configuration on restart.
   const baseProfilePath = join(directory, 'base-profile.json')
   const baseProfile = `${JSON.stringify({ schemaVersion: 1,
-    configurationId: profiles[0].configurationId }, null, 2)}\n`
+    configurationId: profiles[0].configurationId, policyKey: deviceBenchmarkProfileKey(profiles[0]) }, null, 2)}\n`
   if (!existsSync(baseProfilePath) && existsSync(join(directory, 'device-data', 'device-client.sqlite3'))) {
     throw Object.assign(new Error('retained benchmark base Device has no profile identity'), {
       code: 'BENCHMARK_BASE_PROFILE_IDENTITY_MISSING',
@@ -105,7 +133,7 @@ export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, provi
   }
   const devices = profiles.map((profile, index) => {
     const device = index === 0 ? join(directory, 'device-data')
-      : join(directory, 'devices', profile.configurationId)
+      : join(directory, 'devices', deviceBenchmarkProfileKey(profile))
     privateDirectory(device)
     const providerDirectory = join(device, 'providers')
     privateDirectory(providerDirectory)
@@ -183,7 +211,7 @@ async function registerTaskRepository(runtime, prepared, directory) {
 // settings are immutable process inputs. Tasks share the Server and their
 // profile's Device; only product Session/Delivery identities vary per launch.
 export async function withDeviceTaskRuntime({ directory, profiles, providers, agentSettings,
-  providerEnvironment = process.env, build = false, timeoutMillis }, run) {
+  providerEnvironment = process.env, automaticTaskActions = false, build = false, timeoutMillis }, run) {
   assert.ok(profiles.length > 0 && providers.length > 0)
   const first = profiles[0], primary = providers[0]
   const additionalDevices = []
@@ -193,17 +221,19 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
     retainRepository: true, deviceProvider: primary,
     deviceProviderSecrets: providers.flatMap(deviceProviderSecretValues).filter(Boolean),
     deviceRoute: { providerId: primary.providerId, modelId: primary.modelId },
-    deviceAgentEnvironment: benchmarkDeviceEnvironment(first, agentSettings, providerEnvironment),
+    deviceAgentEnvironment: benchmarkDeviceEnvironment(first, { ...agentSettings, automaticTaskActions }, providerEnvironment),
     serverEnvironment: { WWC_SERVER_WORKER_MODE: 'remote', WWC_SERVER_MAX_RUNTIME_SECONDS: 'unlimited',
-      WWC_SERVER_EXECUTION_LEASE_SECONDS: '600' },
+      WWC_SERVER_EXECUTION_LEASE_SECONDS: '900' },
     scenario: { async run(base) {
       const contexts = new Map()
       try {
         for (const profile of profiles) {
+          const expectedAgentEnvironment = benchmarkDeviceEnvironment(profile,
+            { ...agentSettings, automaticTaskActions }, providerEnvironment)
           const devicePath = profile === first ? base.devicePath : await establishDeviceOnlyExecutionPath({
             api: base.api, wwc: base.devicePath.wwc, directory, repository: base.repository,
-            deviceData: join(directory, 'devices', profile.configurationId),
-            logName: `device-${profile.configurationId}.log`,
+            deviceData: join(directory, 'devices', deviceBenchmarkProfileKey(profile)),
+            logName: `device-${deviceBenchmarkProfileKey(profile)}.log`,
             schemaVersion: base.devicePath.schemaVersion,
             helperReleaseManifest: base.devicePath.deviceEnvironment.WWC_WORKER_HELPER_RELEASE_MANIFEST,
             helperExecutable: base.devicePath.deviceEnvironment.WWC_WORKER_HELPER_EXECUTABLE,
@@ -211,19 +241,21 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
             repositoryScope: { organizationId: 'org_01J00000000000000000000000',
               workspaceId: 'wsp_01J00000000000000000000000', projectId: 'prj_01J00000000000000000000000',
               repositoryId: 'rep_01J00000000000000000000000' },
-            agentEnvironment: benchmarkDeviceEnvironment(profile, agentSettings, providerEnvironment),
+            agentEnvironment: expectedAgentEnvironment,
           })
           if (profile !== first) additionalDevices.push(devicePath)
+          assertDeviceAgentEnvironmentForwarded(expectedAgentEnvironment, devicePath.deviceEnvironment)
           for (const provider of providers.slice(1)) await seedDeviceLocalProvider({
             api: base.api, publicClientId: devicePath.publicClientId, ...provider,
           })
-          contexts.set(profile.configurationId, { ...base, directory, devicePath })
+          contexts.set(deviceBenchmarkProfileKey(profile), { ...base, directory, devicePath })
         }
         return await run({ async forTask(request, prepared) {
-          const context = contexts.get(request.configurationId)
+          const context = contexts.get(deviceBenchmarkProfileKey(request))
           assert.ok(context, 'task configuration was not provisioned')
           const provider = providers.find(provider => provider.modelId === request.provider)
           assert.ok(provider, 'task model was not provisioned')
+          await ensureBenchmarkDeviceOccupancy(context)
           const bound = await registerDeviceTaskRepository(context, prepared.taskInputPath,
             join(prepared.directory, 'repository'))
           return { ...bound, modelRoute: configuredDeviceModelRoute({

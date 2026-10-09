@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Finite drive boundaries for otherwise indistinguishable model-bridge errors.
+//! Finite drive boundaries for propagated bridge errors and handled Core poll failures.
 
 use std::{collections::HashSet, io::Write as _, path::Path};
 
@@ -43,13 +43,38 @@ impl DriveStage {
 
 #[derive(Default)]
 pub(super) struct DriveDiagnostics {
-    observed: HashSet<DriveStage>,
+    observed: HashSet<(DriveStage, DriveFailure)>,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum DriveFailure {
+    UnexpectedMessage,
+    CodexPollFailed,
+}
+
+impl DriveFailure {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::UnexpectedMessage => "UnexpectedMessage",
+            Self::CodexPollFailed => "CodexPollFailed",
+        }
+    }
 }
 
 impl DriveDiagnostics {
     pub(super) fn record(&mut self, path: Option<&Path>, stage: DriveStage, code: WorkerErrorCode) {
+        if code == WorkerErrorCode::UnexpectedMessage {
+            self.record_failure(path, stage, DriveFailure::UnexpectedMessage);
+        }
+    }
+
+    pub(super) fn record_core_poll_failure(&mut self, path: Option<&Path>) {
+        self.record_failure(path, DriveStage::CorePoll, DriveFailure::CodexPollFailed);
+    }
+
+    fn record_failure(&mut self, path: Option<&Path>, stage: DriveStage, failure: DriveFailure) {
         let Some(path) = path else { return };
-        if code != WorkerErrorCode::UnexpectedMessage || !self.observed.insert(stage) {
+        if !self.observed.insert((stage, failure)) {
             return;
         }
         if let Some(parent) = path.parent() {
@@ -64,8 +89,9 @@ impl DriveDiagnostics {
             // and Provider content never enter this diagnostic record.
             let _ = writeln!(
                 log,
-                "component=worker stage=drive_{} code=UnexpectedMessage ",
-                stage.name()
+                "component=worker stage=drive_{} code={} ",
+                stage.name(),
+                failure.name()
             );
         }
     }

@@ -350,6 +350,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
@@ -893,14 +894,14 @@ impl SessionIo {
         thread_settings: ThreadSettingsOverrides,
         trace: Option<W3cTraceContext>,
         turn_id: String,
-        submit_change_batch: bool,
+        start: TurnStartOptions,
     ) -> CodexResult<TurnInputSubmission> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_with_id(Submission {
             id: turn_id,
             op: Op::RecoverTurn {
                 thread_settings,
-                submit_change_batch,
+                start,
                 reply: reply_tx,
             },
             trace,

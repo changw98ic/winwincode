@@ -1,3 +1,4 @@
+import { requestFetch as sendHttp } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountButton, mountPageHeader } from '@winwincode/browser-ui'
@@ -149,7 +150,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
   }
   async function request(path: string, body?: unknown): Promise<unknown> {
     if (fetcher === undefined || options.serverUrl === undefined) throw new Error('设备设置连接尚未就绪。')
-    const response = await fetcher(new URL(path, options.serverUrl).toString(), { method: body === undefined ? 'GET' : 'POST', credentials: 'include', signal: controller.signal,
+    const response = await sendHttp(fetcher, new URL(path, options.serverUrl).toString(), { method: body === undefined ? 'GET' : 'POST', credentials: 'include', signal: controller.signal,
       headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
     if (!response.ok) throw new Error(response.status === 403 ? '需要所选设备的管理权限。' : response.status === 409 ? '设备离线或配置已变更，请刷新。' : '设备设置请求失败，请检查连接。')
     return JSON.parse(await response.text()) as unknown

@@ -157,7 +157,7 @@ impl Default for ClientExchangeConfig {
         Self {
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             max_frames_per_exchange: 64,
-            heartbeat_interval_ms: 15_000,
+            heartbeat_interval_ms: 5_000,
         }
     }
 }
@@ -1695,23 +1695,7 @@ fn settle_worker_reconciliation(
         {
             return Ok(());
         }
-        let Some(binding) = winwincode_control_plane::DeviceExecutionBindingService::new(storage)
-            .snapshot(&report.worker_session_id)
-            .map_err(|_| ClientExchangeError::unavailable())?
-        else {
-            return Ok(());
-        };
-        let Some(grant) = WorkerLaunchGrantService::new(storage)
-            .snapshot(&binding.worker_launch_grant_id)
-            .map_err(|_| ClientExchangeError::unavailable())?
-        else {
-            return Ok(());
-        };
-        if binding.client_node_id != node_id
-            || binding.occupancy_lease_id != lease.occupancy_lease_id
-            || binding.occupancy_fencing_token != lease.fencing_token
-            || grant.worker_instance_id != report.worker_instance_id
-        {
+        if !worker_reconciliation_authority_matches(storage, node_id, &lease, report)? {
             return Ok(());
         }
     }
@@ -1748,6 +1732,65 @@ fn settle_worker_reconciliation(
         .reconcile_resume(&lease.occupancy_lease_id, target, None, now)
         .map_err(|_| ClientExchangeError::unavailable())?;
     Ok(())
+}
+
+fn worker_reconciliation_authority_matches(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    lease: &winwincode_storage::OccupancyLeaseRecord,
+    report: &winwincode_client_port::messages::ClientWorkerReconciliation,
+) -> Result<bool, ClientExchangeError> {
+    use winwincode_client_port::domain::WorkerReconcileState;
+    let binding = winwincode_control_plane::DeviceExecutionBindingService::new(storage)
+        .snapshot(&report.worker_session_id)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    let grant = if let Some(binding) = &binding {
+        if binding.client_node_id != node_id
+            || binding.occupancy_lease_id != lease.occupancy_lease_id
+            || binding.occupancy_fencing_token != lease.fencing_token
+        {
+            return Ok(false);
+        }
+        WorkerLaunchGrantService::new(storage).snapshot(&binding.worker_launch_grant_id)
+    } else {
+        // Source anchors can launch and exit without ever claiming a Job.
+        // Their exact launch grant remains the process authority.
+        WorkerLaunchGrantService::new(storage).active_grant_for_session(&report.worker_session_id)
+    }
+    .map_err(|_| ClientExchangeError::unavailable())?;
+    let Some(grant) = grant else {
+        return Ok(false);
+    };
+    if grant.client_node_id != node_id
+        || grant.worker_session_id != report.worker_session_id
+        || grant.occupancy_lease_id != lease.occupancy_lease_id
+        || grant.occupancy_fencing_token != lease.fencing_token
+        || grant.holder_user_id != lease.holder_user_id
+        || grant.worker_instance_id != report.worker_instance_id
+    {
+        return Ok(false);
+    }
+    let exited = storage
+        .worker_launch_grant_ledger()
+        .and_then(|ledger| ledger.has_trusted_exit(&grant.worker_launch_grant_id))
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if report.reconcile_state == WorkerReconcileState::StillRunning {
+        let current = storage
+            .client_node_registry()
+            .and_then(|registry| registry.snapshot(node_id))
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        if exited
+            || grant.state != winwincode_storage::WorkerLaunchGrantState::Consumed
+            || current.and_then(|node| node.current_instance_id).as_deref()
+                != Some(grant.client_instance_id.as_str())
+        {
+            return Ok(false);
+        }
+    } else if !exited {
+        // A report alone never closes a process, including an unbound anchor.
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2901,5 +2944,262 @@ mod tests {
         );
         Box::new(storage).close().expect("close storage");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn recovery_reconciles_closed_source_anchors_without_job_bindings() {
+        use winwincode_client_port::domain::WorkerReconcileState;
+        use winwincode_client_port::messages::{
+            ClientWorkerReconcilePayload, ClientWorkerReconciliation,
+        };
+        use winwincode_storage::{
+            AccessGrantIssuance, GrantPermissions, GrantSource, GrantTrustMode,
+            LaunchGrantIssuance, OccupancyClaim, RepositoryAccessGrantIssuance,
+            RepositoryBindingProjection,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "reconcile-source-anchor-{}",
+            generate_prefixed_id("wlg_").unwrap()
+        ));
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let id = |prefix: &str| format!("{prefix}_00000000000000000000000001");
+        let (node, instance, user, binding, occupancy) =
+            (id("cnd"), id("cix"), id("usr"), id("rbd"), id("ocl"));
+        let now = Instant("2027-01-15T08:00:00.000Z".into());
+        let later = Instant("2027-01-15T08:01:00.000Z".into());
+        storage
+            .client_node_registry()
+            .unwrap()
+            .register(
+                &ClientNodeRegistration::try_new(
+                    &node,
+                    "0000000001",
+                    "recovery fixture",
+                    "aarch64-apple-darwin",
+                    "aarch64",
+                    "1.0.0",
+                    None,
+                    Some(instance.clone()),
+                    4,
+                )
+                .unwrap(),
+                0,
+                &now,
+            )
+            .unwrap();
+        storage
+            .client_node_registry()
+            .unwrap()
+            .update_presence(&node, ClientPresenceState::Online, 1)
+            .unwrap();
+        storage
+            .client_connect_ledger()
+            .unwrap()
+            .create_grant(
+                &AccessGrantIssuance::try_new(
+                    id("cag"),
+                    &node,
+                    &user,
+                    &user,
+                    GrantTrustMode::Trusted,
+                    None,
+                )
+                .unwrap(),
+                GrantSource::Administrator,
+                GrantPermissions::USE,
+                &now,
+            )
+            .unwrap();
+        storage
+            .repository_binding_ledger()
+            .unwrap()
+            .upsert(
+                &RepositoryBindingProjection::try_new(
+                    &binding,
+                    &node,
+                    "fixture",
+                    Some("main".into()),
+                    Some("a".repeat(40)),
+                    RepositoryDirtyState::Clean,
+                    RepositoryAvailability::Available,
+                    format!("sha256:{}", "a".repeat(64)),
+                )
+                .unwrap(),
+                None,
+                0,
+                &now,
+            )
+            .unwrap();
+        storage
+            .repository_binding_ledger()
+            .unwrap()
+            .create_grant(
+                &RepositoryAccessGrantIssuance::try_new(id("rag"), &binding, &user, &user).unwrap(),
+                RepositoryGrantPermissions::Use,
+                &now,
+            )
+            .unwrap();
+        let lease = storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .atomic_claim(
+                &OccupancyClaim::try_new(&occupancy, &node, &user, id("req")).unwrap(),
+                &now,
+            )
+            .unwrap();
+        storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .record_acknowledgement(&occupancy, lease.fencing_token, None, &now)
+            .unwrap();
+        let grant = WorkerLaunchGrantService::new(&mut storage)
+            .issue(
+                &LaunchGrantIssuance::try_new(
+                    id("wlg"),
+                    &node,
+                    &instance,
+                    &user,
+                    &occupancy,
+                    lease.fencing_token,
+                    &binding,
+                    id("wsn"),
+                    id("wrk"),
+                    id("wki"),
+                    format!("sha256:{}", "b".repeat(64)),
+                    Some(id("psn")),
+                    None,
+                    Instant("2027-01-15T09:00:00.000Z".into()),
+                )
+                .unwrap(),
+                &now,
+            )
+            .unwrap();
+        WorkerLaunchGrantService::new(&mut storage)
+            .settle_device_launch_ack(
+                &node,
+                &LaunchAckSettlement::try_new(
+                    &grant.worker_launch_grant_id,
+                    &occupancy,
+                    lease.fencing_token,
+                    &grant.worker_session_id,
+                    &grant.worker_id,
+                    &grant.worker_instance_id,
+                    true,
+                    None,
+                )
+                .unwrap(),
+                &now,
+            )
+            .unwrap();
+        assert!(
+            storage
+                .device_execution_binding_ledger()
+                .unwrap()
+                .snapshot(&grant.worker_session_id)
+                .unwrap()
+                .is_none()
+        );
+        let revision = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(&node)
+            .unwrap()
+            .unwrap()
+            .revision;
+        storage
+            .client_node_registry()
+            .unwrap()
+            .update_presence(&node, ClientPresenceState::Offline, revision)
+            .unwrap();
+        storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .mark_recovery_pending(
+                &occupancy,
+                &Instant("2027-01-15T08:05:00.000Z".into()),
+                &later,
+            )
+            .unwrap();
+        let mut payload = ClientWorkerReconcilePayload {
+            occupancy_lease_id: Some(occupancy.clone()),
+            workers: vec![ClientWorkerReconciliation {
+                worker_session_id: grant.worker_session_id.clone(),
+                worker_instance_id: grant.worker_instance_id.clone(),
+                reconcile_state: WorkerReconcileState::Terminal,
+                observed_at: later.0.clone(),
+            }],
+        };
+        settle_worker_reconciliation(&mut storage, &node, &payload, &later.0, &later).unwrap();
+        assert_eq!(
+            storage
+                .client_occupancy_ledger()
+                .unwrap()
+                .snapshot(&occupancy)
+                .unwrap()
+                .unwrap()
+                .state,
+            OccupancyLeaseState::RecoveryPending,
+            "a terminal claim requires a durable exit"
+        );
+        settle_worker_exit(
+            &mut storage,
+            &node,
+            &winwincode_client_port::messages::ClientWorkerStatePayload {
+                occupancy_lease_id: Some(occupancy.clone()),
+                worker_session_id: grant.worker_session_id.clone(),
+                worker_instance_id: grant.worker_instance_id.clone(),
+                state: winwincode_client_port::domain::ClientWorkerRunState::Stopped,
+                exit_code: Some(0),
+                observed_at: later.0.clone(),
+                process_closure: Some(
+                    winwincode_client_port::messages::ClientWorkerProcessClosure {
+                        worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+                        client_instance_id: instance.clone(),
+                        reporting_client_instance_id: instance.clone(),
+                        occupancy_fencing_token: lease.fencing_token,
+                        never_started: false,
+                        process_boot_digest: Some(format!("sha256:{}", "c".repeat(64))),
+                    },
+                ),
+            },
+            &later,
+        )
+        .unwrap();
+        assert!(
+            storage
+                .worker_launch_grant_ledger()
+                .unwrap()
+                .has_trusted_exit(&grant.worker_launch_grant_id)
+                .unwrap()
+        );
+        payload.workers[0].worker_instance_id = "wki_00000000000000000000000002".into();
+        settle_worker_reconciliation(&mut storage, &node, &payload, &later.0, &later).unwrap();
+        assert_eq!(
+            storage
+                .client_occupancy_ledger()
+                .unwrap()
+                .snapshot(&occupancy)
+                .unwrap()
+                .unwrap()
+                .state,
+            OccupancyLeaseState::RecoveryPending,
+            "a foreign process cannot reconcile the anchor"
+        );
+        payload.workers[0].worker_instance_id = grant.worker_instance_id;
+        settle_worker_reconciliation(&mut storage, &node, &payload, &later.0, &later).unwrap();
+        let recovered = storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .snapshot(&occupancy)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.state,
+            OccupancyLeaseState::Draining,
+            "a durably closed launch anchor needs no Job binding to finish reconciliation"
+        );
+        assert_eq!(recovered.fencing_token, lease.fencing_token);
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
     }
 }

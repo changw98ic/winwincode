@@ -53,6 +53,24 @@ pub enum WorkspaceErrorCode {
     Io,
 }
 
+impl WorkspaceErrorCode {
+    /// Stable public category; raw Git/IO messages remain private.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "WORKSPACE_INVALID_INPUT",
+            Self::NotFound => "WORKSPACE_NOT_FOUND",
+            Self::Conflict => "WORKSPACE_CONFLICT",
+            Self::UnchangedCandidate => "WORKSPACE_UNCHANGED_CANDIDATE",
+            Self::PathEscape => "WORKSPACE_PATH_ESCAPE",
+            Self::DigestMismatch => "WORKSPACE_DIGEST_MISMATCH",
+            Self::Corrupt => "WORKSPACE_CORRUPT",
+            Self::Git => "WORKSPACE_GIT",
+            Self::Io => "WORKSPACE_IO",
+        }
+    }
+}
+
 /// Test-only process interruption points in durable workspace creation.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

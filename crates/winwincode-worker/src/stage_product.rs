@@ -37,17 +37,38 @@ pub enum CandidateProductErrorCode {
 pub struct CandidateProductError {
     code: CandidateProductErrorCode,
     message: &'static str,
+    workspace_cause: Option<crate::workspace::WorkspaceErrorCode>,
 }
 
 impl CandidateProductError {
     const fn new(code: CandidateProductErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            workspace_cause: None,
+        }
     }
 
     /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> CandidateProductErrorCode {
         self.code
+    }
+
+    /// Lower-level category retained without command text or repository paths.
+    #[must_use]
+    pub const fn cause_code(&self) -> &'static str {
+        if let Some(cause) = self.workspace_cause {
+            return cause.as_str();
+        }
+        match self.code {
+            CandidateProductErrorCode::InvalidLifecycle => "CANDIDATE_INVALID_LIFECYCLE",
+            CandidateProductErrorCode::InvalidRole => "CANDIDATE_INVALID_ROLE",
+            CandidateProductErrorCode::InvalidScope => "CANDIDATE_INVALID_SCOPE",
+            CandidateProductErrorCode::AuthorityMismatch => "CANDIDATE_AUTHORITY_MISMATCH",
+            CandidateProductErrorCode::Workspace => "CANDIDATE_WORKSPACE",
+            CandidateProductErrorCode::UnchangedCandidate => "WORKSPACE_UNCHANGED_CANDIDATE",
+        }
     }
 }
 
@@ -61,14 +82,16 @@ impl std::error::Error for CandidateProductError {}
 
 impl From<WorkspaceError> for CandidateProductError {
     fn from(error: WorkspaceError) -> Self {
-        Self::new(
+        let mut failure = Self::new(
             if error.code() == crate::workspace::WorkspaceErrorCode::UnchangedCandidate {
                 CandidateProductErrorCode::UnchangedCandidate
             } else {
                 CandidateProductErrorCode::Workspace
             },
             "candidate workspace snapshot or verification failed",
-        )
+        );
+        failure.workspace_cause = Some(error.code());
+        failure
     }
 }
 

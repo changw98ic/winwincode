@@ -174,17 +174,36 @@ impl ObservationModelConfiguration {
 pub struct JobWorkspaceError {
     code: JobWorkspaceErrorCode,
     message: &'static str,
+    stage: &'static str,
+    cause_code: &'static str,
 }
 
 impl JobWorkspaceError {
     fn new(code: JobWorkspaceErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            stage: "job_workspace",
+            cause_code: "JOB_WORKSPACE",
+        }
     }
 
     /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> JobWorkspaceErrorCode {
         self.code
+    }
+
+    /// Safe failure boundary, independent of private checkout paths.
+    #[must_use]
+    pub const fn stage(&self) -> &'static str {
+        self.stage
+    }
+
+    /// Safe lower-level category preserved through candidate preparation.
+    #[must_use]
+    pub const fn cause_code(&self) -> &'static str {
+        self.cause_code
     }
 }
 
@@ -197,30 +216,39 @@ impl fmt::Display for JobWorkspaceError {
 impl std::error::Error for JobWorkspaceError {}
 
 impl From<WorkspaceError> for JobWorkspaceError {
-    fn from(_: WorkspaceError) -> Self {
-        Self::new(
+    fn from(error: WorkspaceError) -> Self {
+        let mut failure = Self::new(
             JobWorkspaceErrorCode::Workspace,
             "detached Job workspace operation failed",
-        )
+        );
+        failure.stage = "workspace";
+        failure.cause_code = error.code().as_str();
+        failure
     }
 }
 
 impl From<CandidateProductError> for JobWorkspaceError {
     fn from(error: CandidateProductError) -> Self {
-        Self::new(
+        let mut failure = Self::new(
             if error.code() == crate::stage_product::CandidateProductErrorCode::UnchangedCandidate {
                 JobWorkspaceErrorCode::UnchangedCandidate
             } else {
                 JobWorkspaceErrorCode::Candidate
             },
             "detached Job candidate preparation failed",
-        )
+        );
+        failure.stage = "candidate_prepare";
+        failure.cause_code = error.cause_code();
+        failure
     }
 }
 
 impl From<ChangeBatchStoreError> for JobWorkspaceError {
     fn from(error: ChangeBatchStoreError) -> Self {
-        Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message())
+        let mut failure = Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message());
+        failure.stage = "change_batch_store";
+        failure.cause_code = "CHANGE_BATCH_STORE";
+        failure
     }
 }
 
@@ -962,6 +990,16 @@ impl JobWorkspaceRuntime {
         for record in &records {
             if !same_change_batch_lease_authority(&record.event, active) {
                 return Err(authority_error());
+            }
+            if self
+                .change_batch_store
+                .workspace_binding_for_batch(&record.event.identity.batch_id)?
+                .state
+                == BatchState::Quarantined
+            {
+                return Err(change_batch_error(
+                    "ChangeBatch workspace remains quarantined",
+                ));
             }
             if record.receipt.as_ref().is_some_and(|receipt| {
                 matches!(
@@ -2039,6 +2077,86 @@ impl JobWorkspaceRuntime {
             ));
         }
         self.consume_workspace(job_id, reason)
+    }
+
+    /// Closes a terminal Job while retaining any unresolved batch checkout.
+    ///
+    /// Failed or cancelled Jobs may release their execution lease after the
+    /// exact unresolved workspace is durably quarantined. Its files, receipt,
+    /// active batch and accepted revision remain unchanged for diagnosis.
+    /// Successful Jobs still require the ordinary proven cleanup boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign authority, unavailable durable state, or unresolved
+    /// mutation on a successful Job.
+    pub fn prepare_terminal_job_close(
+        &mut self,
+        active: &ActiveJob,
+        reason: WorkspaceCloseReason,
+        now: &Instant,
+    ) -> Result<Option<ChangeBatchProgressEvent>, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        let workspace_id = workspace.id().to_owned();
+        let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
+        let Some(binding) = binding.filter(|binding| binding.active_batch_id.is_some()) else {
+            self.prepare_close_job(&active.job.job_id, reason, now)?;
+            return Ok(None);
+        };
+        if reason == WorkspaceCloseReason::Completed {
+            return Err(change_batch_error(
+                "Successful Job has an unresolved ChangeBatch",
+            ));
+        }
+        let batch_id = binding
+            .active_batch_id
+            .as_ref()
+            .ok_or_else(authority_error)?;
+        let record = self
+            .change_batch_store
+            .batch_record(batch_id)?
+            .ok_or_else(authority_error)?;
+        if !same_change_batch_lease_authority(&record.event, active)
+            || self
+                .change_batch_store
+                .workspace_binding_for_batch(batch_id)?
+                != binding
+        {
+            return Err(authority_error());
+        }
+        let progress = self.change_batch_store.progress_events(batch_id)?;
+        let terminal = if binding.state == BatchState::Quarantined {
+            progress
+                .last()
+                .filter(|event| event.state == ChangeBatchProgressState::InfrastructureFailed)
+                .cloned()
+                .ok_or_else(authority_error)?
+        } else {
+            next_progress(
+                &progress,
+                &record.event,
+                ChangeBatchProgressState::InfrastructureFailed,
+                "Job ended with unresolved ChangeBatch; checkout retained for diagnosis",
+                Vec::new(),
+                now,
+            )
+        };
+        self.change_batch_store.retain_workspace_progress(
+            &workspace_id,
+            &terminal,
+            binding.state,
+            BatchState::Quarantined,
+        )?;
+        // Drop only the live owner lock. The quarantined checkout is never
+        // consumed or exposed to another execution through recovery.
+        self.active.remove(&active.job.job_id.0);
+        Ok(Some(terminal))
     }
 
     /// Returns whether this process owns an open checkout for the Job.

@@ -74,6 +74,7 @@ fn canonical_failure_categories_and_paid_cost_survive_attempt_recovery() {
             "RATE_LIMIT",
             429,
         ),
+        (crate::ProviderStreamFailureKind::Timeout, "TIMEOUT", 408),
     ] {
         let receipt = ProviderGatewayOpenReceipt {
             model_exchange_id: open.model_exchange_id.clone(),
@@ -126,19 +127,31 @@ fn canonical_failure_categories_and_paid_cost_survive_attempt_recovery() {
             },
         };
         let outcome = completion_outcome(&open, &completion).unwrap();
-        let accounting = if kind == crate::ProviderStreamFailureKind::RateLimit {
+        let accounting = if matches!(
+            kind,
+            crate::ProviderStreamFailureKind::RateLimit | crate::ProviderStreamFailureKind::Timeout
+        ) {
             let ModelAttemptOutcome::Failed {
                 chunk,
                 accounting,
-                retry_after,
                 retryable,
+                network,
                 ..
             } = outcome
             else {
-                panic!("real limit remains recoverable");
+                panic!("transient failure remains recoverable");
             };
             assert!(retryable);
-            assert_eq!(retry_after, Some(2_500));
+            assert_eq!(
+                network.kind,
+                if kind == crate::ProviderStreamFailureKind::Timeout {
+                    winwincode_network::ErrorKind::Timeout
+                } else {
+                    winwincode_network::ErrorKind::RateLimited
+                }
+            );
+            assert_eq!(network.http_status, Some(status));
+            assert_eq!(network.retry_after_ms, Some(2_500));
             let metadata: serde_json::Value = serde_json::from_slice(
                 &STANDARD
                     .decode(&chunk.payload.as_ref().unwrap().data_base64)
@@ -146,11 +159,41 @@ fn canonical_failure_categories_and_paid_cost_survive_attempt_recovery() {
             )
             .unwrap();
             assert_eq!(metadata["status"], status);
+            assert_eq!(metadata["providerRetryAfterMillis"], 2_500);
             accounting.unwrap()
         } else {
-            let ModelAttemptOutcome::TerminalFailure(chunks, accounting) = outcome else {
+            let ModelAttemptOutcome::TerminalFailure {
+                chunks,
+                accounting,
+                network,
+            } = outcome
+            else {
                 panic!("nontransient categories remain canonical");
             };
+            assert_eq!(
+                network.http_status,
+                if code == "CONTENT_FILTER" {
+                    None
+                } else {
+                    Some(status)
+                }
+            );
+            assert_eq!(
+                network.retry_after_ms,
+                if code == "CONTENT_FILTER" {
+                    None
+                } else {
+                    Some(2_500)
+                }
+            );
+            assert_eq!(
+                network.kind,
+                if kind == crate::ProviderStreamFailureKind::Authentication {
+                    winwincode_network::ErrorKind::Authentication
+                } else {
+                    winwincode_network::ErrorKind::RequestInvalid
+                }
+            );
             let decoded = STANDARD
                 .decode(&chunks.last().unwrap().payload.as_ref().unwrap().data_base64)
                 .unwrap();
@@ -169,6 +212,67 @@ fn canonical_failure_categories_and_paid_cost_survive_attempt_recovery() {
         assert_eq!(value["tokenUsage"]["input_tokens"], 3);
         assert_eq!(value["tokenUsage"]["output_tokens"], 2);
     }
+}
+
+#[test]
+fn cancelled_completion_retains_canonical_failure_and_safe_category() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let open: ModelOpenMessage = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "model.open")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let receipt = ProviderGatewayOpenReceipt {
+        model_exchange_id: open.model_exchange_id.clone(),
+        request_id: open.request_id.clone(),
+        route: ModelRoute {
+            provider_id: "fixture-provider".into(),
+            model_id: "fixture-model".into(),
+            credential_reference_id: CredentialReferenceId("crd_00000000000000000000000001".into()),
+        },
+        adapter_request_id: "fixture-cancel".into(),
+        idempotent_replay: false,
+        stream_leak_gate: CredentialLeakGate::new(),
+    };
+    let mut converter = crate::ProviderStreamConverter::from_gateway_receipt(&receipt);
+    let mut frames = converter
+        .ingest(crate::ProviderStreamEvent::ResponseStarted {
+            provider_response_id: "cancel-response".into(),
+            observed_model_id: None,
+        })
+        .unwrap();
+    frames.extend(
+        converter
+            .ingest(crate::ProviderStreamEvent::Cancelled)
+            .unwrap(),
+    );
+    let original = frames.last().unwrap().payload_json().as_bytes().to_vec();
+    let completion = crate::HttpsSseProviderCompletion {
+        frames,
+        terminal: crate::ProviderGatewayTerminal::Cancelled,
+    };
+    let ModelAttemptOutcome::TerminalFailure {
+        chunks, network, ..
+    } = completion_outcome(&open, &completion).unwrap()
+    else {
+        panic!("cancelled completion must retain a terminal failure diagnostic");
+    };
+    assert_eq!(network.kind, winwincode_network::ErrorKind::Cancelled);
+    assert!(!network.retryable());
+    assert_eq!(
+        STANDARD
+            .decode(&chunks.last().unwrap().payload.as_ref().unwrap().data_base64)
+            .unwrap(),
+        original
+    );
 }
 
 #[test]
@@ -231,6 +335,8 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             "invoking"
         };
         store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state) VALUES(?1,1,?2,?3)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state]).unwrap();
+        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
+        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
         if original_state == "completed_before_outer" {
             let accounting = observed_accounting_chunk(
                 &open,
@@ -282,6 +388,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 runtime.is_none(),
                 "financial recovery never manufactures a completed model result"
             );
+            assert_interrupted_diagnostics_settled(&store, &open);
             drop(store);
             std::fs::remove_dir_all(root).unwrap();
             continue;
@@ -347,9 +454,37 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             store.accounting_statement(&open.lease, &key).unwrap(),
             Some(statement)
         );
+        assert_interrupted_diagnostics_settled(&store, &open);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &ModelOpenMessage) {
+    let original: (i64, i64, String, Option<String>, String) = store.connection.query_row(
+        "SELECT started_ms,finished_ms,outcome,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=1",
+        [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
+    assert_eq!(
+        original,
+        (10, 20, "accepted".into(), None, "original_terminal".into())
+    );
+    let interrupted: (String, i64, String, String) = store.connection.query_row(
+        "SELECT outcome,finished_ms,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=2",
+        [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    assert_eq!(interrupted.0, "failed");
+    assert!(interrupted.1 >= 30);
+    let failure: winwincode_network::NetworkFailure = serde_json::from_str(&interrupted.2).unwrap();
+    assert_eq!(
+        failure.kind,
+        winwincode_network::ErrorKind::TransportInterrupted
+    );
+    assert_eq!(failure.acceptance, winwincode_network::Acceptance::Unknown);
+    assert_eq!(failure.phase, winwincode_network::Phase::Stream);
+    assert_eq!(interrupted.3, "interrupted_unknown");
+    let remaining: i64 = store.connection.query_row(
+        "SELECT COUNT(*) FROM model_attempt_diagnostics WHERE exchange_id=?1 AND outcome='in_flight'",
+        [&open.model_exchange_id.0], |row| row.get(0)).unwrap();
+    assert_eq!(remaining, 0);
 }
 
 #[test]

@@ -1305,6 +1305,40 @@
         "codex-rs/exec-server/tests/common/exec_server.rs",
         "codex-rs/exec-server/tests/process.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-rollout-budget-diagnostics",
+      "file": "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "e0d724c4738ad452c697673417f7388b564d6054e9e844cd2062b39a58c0559f",
+      "targets": [
+        "codex-rs/core/tests/suite/rollout_budget.rs"
+      ]
+    },
+    {
+      "id": "codex-recover-original-turn-start-options",
+      "file": "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+      "planned": false,
+      "patchSha256": "16b12b0adfbccdb7773343f9b21f7d96f78bf6fbec9e937b30abbcddbc647201",
+      "targets": [
+        "codex-rs/core/src/codex_thread.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/session/mod.rs",
+        "codex-rs/core/src/session/turn_input.rs",
+        "codex-rs/core/src/session/turn_input_tests.rs",
+        "codex-rs/core/tests/suite/turn_input_submission.rs",
+        "codex-rs/protocol/src/protocol.rs",
+        "codex-rs/protocol/src/turn_input.rs"
+      ]
+    },
+    {
+      "id": "codex-export-mcp-server-transport-config",
+      "file": "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+      "planned": false,
+      "patchSha256": "4507fb20e3b1086e9259f5ef2f1f31322a276d90878450b8df9b6666dc8c0882",
+      "targets": [
+        "codex-rs/core-api/src/lib.rs"
+      ]
     }
   ],
   "licenseObligations": {
