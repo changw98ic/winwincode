@@ -5,6 +5,10 @@
 #[path = "support/production_code_mode.rs"]
 mod production_code_mode;
 
+#[cfg(feature = "test-support")]
+#[path = "support/z7xn_failure_diagnostics.rs"]
+mod z7xn_failure_diagnostics;
+
 #[cfg(unix)]
 #[path = "support/native_mcp_progress.rs"]
 mod native_mcp_progress;

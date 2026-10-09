@@ -5212,6 +5212,8 @@ impl std::error::Error for WorkerLaunchBundleError {}
 /// Encrypted private material must already be fsynced before this commit.
 /// The encoder receives the next downlink sequence inside the same immediate
 /// transaction, so concurrent launches each publish at their own position.
+/// A concurrent launch for the exact same live scope reuses its committed
+/// identity without allocating another credential, frame or stream position.
 /// # Errors
 /// Rejects changed authority, duplicate publication or unavailable storage.
 pub fn issue_worker_launch_bundle(
@@ -5231,12 +5233,28 @@ pub fn issue_worker_launch_bundle(
     storage
         .client_downlink_outbox()
         .map_err(|_| StorageError::adapter("downlink ledger unavailable"))?;
+    storage
+        .worker_session_slots()
+        .map_err(|_| StorageError::adapter("worker session slots unavailable"))?;
     let tx = storage
         .connection_mut()?
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| StorageError::adapter("launch transaction unavailable"))?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS worker_launch_publications (grant_id TEXT PRIMARY KEY, client_node_id TEXT NOT NULL, message_id TEXT NOT NULL, sequence INTEGER NOT NULL, frame_digest TEXT NOT NULL, created_at TEXT NOT NULL)")
         .map_err(|_|StorageError::adapter("launch publication unavailable"))?;
+    if let Some(grant) = client_launch_grant::reusable_launch_in_transaction(
+        &tx,
+        issuance,
+        predecessor,
+        credential,
+        now,
+    )
+    .map_err(WorkerLaunchBundleError::Launch)?
+    {
+        tx.commit()
+            .map_err(|_| StorageError::adapter("launch reuse commit failed"))?;
+        return Ok(grant);
+    }
     let grant = client_launch_grant::issue_launch_in_transaction(&tx, issuance, predecessor, now)
         .map_err(WorkerLaunchBundleError::Launch)?;
     let sequence = client_downlink::next_sequence_in_transaction(&tx, &grant.client_node_id)

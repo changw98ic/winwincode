@@ -12,6 +12,8 @@ mod adapter;
 pub mod candidate_artifact_outbox;
 mod contract;
 pub mod diagnostic_artifact_outbox;
+mod failure_diagnostic;
+pub use failure_diagnostic::CodexFailureDiagnostic;
 mod durable_fusion;
 pub use durable_fusion::FusionPanelFuture;
 pub mod fusion_provider;

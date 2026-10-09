@@ -1792,6 +1792,13 @@ async fn manage_managed_app(
 
 /// Maps one launch flow failure onto the central launch wire error code.
 fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>) -> Response {
+    if let (Some(stage), Some(code)) = (error.failure_stage(), error.failure_code()) {
+        let request_id = next_diagnostic_request_id();
+        eprintln!(
+            "client_session_launch_failure requestId={} stage={stage} code={code}",
+            request_id.0
+        );
+    }
     let (status, code, message) = match error.kind() {
         ClientSessionsErrorKind::InvalidRequest => (
             StatusCode::BAD_REQUEST,

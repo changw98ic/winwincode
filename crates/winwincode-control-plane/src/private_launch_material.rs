@@ -31,7 +31,14 @@ impl PrivateLaunchMaterialStore {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
         let key_path = root.join("launch-material.key");
         if !key_path.exists() {
-            if root.join("blobs").exists() && fs::read_dir(root.join("blobs"))?.next().is_some() {
+            #[cfg(test)]
+            tests::run_after_missing_key_hook();
+            // A concurrent initializer can publish its key and first blob
+            // after the missing-key observation above.
+            if root.join("blobs").exists()
+                && fs::read_dir(root.join("blobs"))?.next().is_some()
+                && !key_path.exists()
+            {
                 return Err(invalid());
             }
             let mut key = [0u8; 32];
@@ -187,5 +194,167 @@ mod tests {
         fs::copy(&path, store.path(other).unwrap()).unwrap();
         assert!(store.get(other).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    std::thread_local! {
+        static AFTER_MISSING_KEY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn run_after_missing_key_hook() {
+        let hook = AFTER_MISSING_KEY.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    struct MissingKeyHookGuard;
+
+    impl MissingKeyHookGuard {
+        fn install(hook: impl FnOnce() + 'static) -> Self {
+            AFTER_MISSING_KEY.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(slot.is_none(), "missing-key hook already installed");
+                *slot = Some(Box::new(hook));
+            });
+            Self
+        }
+    }
+
+    impl Drop for MissingKeyHookGuard {
+        fn drop(&mut self) {
+            AFTER_MISSING_KEY.with(|slot| {
+                let _ = slot.borrow_mut().take();
+            });
+        }
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let mut random = [0u8; 16];
+            getrandom::fill(&mut random).expect("test directory identity");
+            let root = std::env::temp_dir().join(format!(
+                "launch-material-{label}-{}-{:032x}",
+                std::process::id(),
+                u128::from_ne_bytes(random)
+            ));
+            fs::create_dir(&root).expect("unique test directory");
+            Self(root)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cold_open_accepts_concurrent_key_and_first_blob() {
+        let directory = TestDirectory::new("concurrent");
+        let id = "wlg_00000000000000000000000001";
+        let plain = b"public-test-fixture";
+        let timeout = std::time::Duration::from_secs(10);
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let suspended_root = directory.0.clone();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(move || {
+                let _hook = MissingKeyHookGuard::install(move || {
+                    observed_tx.send(()).expect("missing-key observation");
+                    resume_rx.recv_timeout(timeout).expect("resume cold open");
+                });
+                PrivateLaunchMaterialStore::open(&suspended_root)
+            });
+            observed_rx
+                .recv_timeout(timeout)
+                .expect("cold open reached actual missing-key branch");
+            let winner = PrivateLaunchMaterialStore::open(&directory.0)
+                .expect("concurrent initializer publishes its key");
+            winner.put(id, plain).expect("publish first real blob");
+            assert_eq!(winner.get(id).expect("winner reads its blob"), plain);
+            let key_path = directory
+                .0
+                .join("private-launch-material/launch-material.key");
+            let key_before = fs::read(&key_path).expect("published winning key");
+            assert_eq!(key_before.len(), 32);
+            #[cfg(unix)]
+            assert_eq!(
+                fs::symlink_metadata(&key_path)
+                    .expect("winning key metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            let blob_path = winner.path(id).expect("retained blob path");
+            let blob_before = fs::read(&blob_path).expect("retained encrypted blob");
+            resume_tx.send(()).expect("release suspended cold open");
+            let resumed = pending
+                .join()
+                .expect("cold open thread")
+                .expect("valid concurrent key and first blob must remain available");
+            assert_eq!(resumed.get(id).expect("resumed open decrypts blob"), plain);
+            assert!(key_before == fs::read(&key_path).expect("winning key remains"));
+            assert!(blob_before == fs::read(&blob_path).expect("encrypted blob remains"));
+            let restarted = PrivateLaunchMaterialStore::open(&directory.0)
+                .expect("fresh reopen after the interleaving");
+            assert_eq!(restarted.get(id).expect("restart decrypts blob"), plain);
+        });
+    }
+
+    #[test]
+    fn cold_open_rejects_existing_blob_without_key() {
+        let directory = TestDirectory::new("missing-key");
+        let id = "wlg_00000000000000000000000001";
+        let store = PrivateLaunchMaterialStore::open(&directory.0).expect("initial store");
+        store
+            .put(id, b"public-test-fixture")
+            .expect("real retained blob");
+        let blob_path = store.path(id).expect("retained blob path");
+        let blob_before = fs::read(&blob_path).expect("retained encrypted blob");
+        drop(store);
+        let key_path = directory
+            .0
+            .join("private-launch-material/launch-material.key");
+        fs::remove_file(&key_path).expect("simulate missing retained key");
+        assert!(PrivateLaunchMaterialStore::open(&directory.0).is_err());
+        assert!(
+            !key_path.exists(),
+            "retained blobs must not cause key rotation"
+        );
+        assert!(blob_before == fs::read(&blob_path).expect("retained blob remains"));
+    }
+
+    #[test]
+    fn cold_open_rejects_concurrent_malformed_key_without_rotation() {
+        for length in [0, 31, 33] {
+            let directory = TestDirectory::new("malformed-key");
+            let concurrent_root = directory.0.clone();
+            let malformed = vec![0xA5; length];
+            let published = malformed.clone();
+            let _hook = MissingKeyHookGuard::install(move || {
+                let store = PrivateLaunchMaterialStore::open(&concurrent_root)
+                    .expect("concurrent initializer");
+                store
+                    .put("wlg_00000000000000000000000001", b"public-test-fixture")
+                    .expect("real retained blob");
+                fs::write(
+                    concurrent_root.join("private-launch-material/launch-material.key"),
+                    published,
+                )
+                .expect("simulate malformed concurrent key");
+            });
+            assert!(PrivateLaunchMaterialStore::open(&directory.0).is_err());
+            let retained = fs::read(
+                directory
+                    .0
+                    .join("private-launch-material/launch-material.key"),
+            )
+            .expect("malformed key must remain unchanged");
+            assert!(retained == malformed, "malformed key must not be rotated");
+        }
     }
 }
