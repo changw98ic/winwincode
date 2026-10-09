@@ -5931,8 +5931,23 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             set_retained_terminal(&mut run.record, StoredTerminal::Cancelled { artifacts });
         }
         self.persist_run(&run_key)?;
-        let _ = self.retain_performance_baseline_trace(&run_key);
-        let _ = self.retain_terminal_trace(&run_key, "embedded Codex turn cancelled");
+        let baseline = self.retain_performance_baseline_trace(&run_key).ok();
+        let terminal = self
+            .retain_terminal_trace(&run_key, "embedded Codex turn cancelled")
+            .ok();
+        // Cancellation retains these frames outside poll. Surface their
+        // original sequence identities before poll allocates newer Core facts,
+        // even when the bounded transport flush cannot deliver the outbox yet.
+        let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+        for message in [baseline, terminal].into_iter().flatten() {
+            if !run
+                .replay
+                .iter()
+                .any(|frame| frame.event.event_id == message.event.event_id)
+            {
+                run.replay.push_back(*message);
+            }
+        }
         Ok(())
     }
 
@@ -8722,6 +8737,27 @@ mod tests {
         let now = Instant("2026-08-28T00:00:02.000Z".into());
         if cancelled {
             adapter.interrupt(&session.thread_id, &now).await.unwrap();
+            let retained: Vec<_> = adapter
+                .outbox
+                .pending()
+                .unwrap()
+                .into_iter()
+                .filter_map(|delivery| match delivery.message {
+                    ExecutionPortMessage::RuntimeEventMessage(message) => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(retained.len(), 2);
+            for original in retained {
+                let CodexPoll::RuntimeTrace(message) =
+                    Box::pin(adapter.poll(&session.thread_id, &now))
+                        .await
+                        .unwrap()
+                else {
+                    panic!("cancellation must surface its original retained traces first");
+                };
+                assert_eq!(*message, original);
+            }
         } else {
             // Exercise the real terminal acceptance boundary. Provider generation
             // and Worker candidate verification are covered by production_vertical.
