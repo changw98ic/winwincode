@@ -651,6 +651,12 @@ export async function runDeviceTaskVertical({
     report.errorCode = error?.code ?? null
     report.errorStatus = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599
       ? error.status : null
+    report.errorPhase = typeof error?.phase === 'string' && /^[a-z][a-z0-9_]{0,127}$/u.test(error.phase)
+      ? error.phase : null
+    report.errorRequestId = typeof error?.requestId === 'string' && /^[A-Za-z0-9_-]{8,200}$/u.test(error.requestId)
+      ? error.requestId : null
+    if (Array.isArray(error?.networkAttempts)) report.networkAttempts = error.networkAttempts
+    if (typeof error?.networkStopReason === 'string') report.networkStopReason = error.networkStopReason
     for (const secret of deviceSecrets) {
       if (secret) report.error = report.error.replaceAll(secret, '<redacted>')
     }
@@ -718,7 +724,7 @@ async function driveRegisteredDeviceTask({ api, devicePath, report, supervisor, 
       strictLaunchAnchor: true,
       pendingDeviceWorkRunIds: () => [...new Set([...anchored.keys(),
         ...pendingDeviceTaskWorkRuns(directory, deliveryId)])],
-      assertRunning: devicePath.assertBenchmarkRunning,
+      assertRunning: () => supervisor.assertActive(),
       onProjection: ({ detail, workRunAggregate }) => {
         if (report.delivery?.detail?.readCursor?.token === detail.readCursor?.token) return
         report.delivery = { detail, workRunAggregate }
@@ -731,7 +737,6 @@ async function driveRegisteredDeviceTask({ api, devicePath, report, supervisor, 
         save()
       },
       onActiveWorkRuns: async runs => {
-        devicePath.assertBenchmarkRunning(runs)
         report.workRuns = runs
         save()
         for (const run of runs) checkDispatchFailure(run.id)

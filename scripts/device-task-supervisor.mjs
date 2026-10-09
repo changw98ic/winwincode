@@ -65,13 +65,16 @@ export function acquireDeviceTaskSupervisor({ directory, identity }) {
     lastProgressAt: previous?.lastProgressAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() }
   let closed = false
   let heartbeatFailure = null
-  const checkpoint = (phase, details = {}) => {
+  const assertActive = () => {
     if (closed) fail('DEVICE_TASK_SUPERVISOR_CLOSED')
     if (heartbeatFailure) throw heartbeatFailure
     let current
     try { current = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) }
     catch { fail('DEVICE_TASK_SUPERVISOR_FENCED') }
     if (current.id !== owner.id || current.startedAt !== owner.startedAt) fail('DEVICE_TASK_SUPERVISOR_FENCED')
+  }
+  const checkpoint = (phase, details = {}) => {
+    assertActive()
     if (details.workRunId && state.workRunId && details.workRunId !== state.workRunId) {
       fail('DEVICE_TASK_SUPERVISOR_IDENTITY_MISMATCH')
     }
@@ -96,6 +99,7 @@ export function acquireDeviceTaskSupervisor({ directory, identity }) {
   }, 5_000)
   heartbeat.unref()
   return {
+    assertActive,
     checkpoint,
     snapshot: () => structuredClone(state),
     async drive(action, { terminalError = () => false, retryMillis = 1_000, recoveryLimit = 3 } = {}) {

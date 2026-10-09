@@ -24,6 +24,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/device-diagnostics-export.test.mjs',
   'tests/device-agent-environment.test.mjs',
   'tests/device-task-runtime-unified.test.mjs',
+  'tests/device-extension-mutation.test.mjs',
   'tests/approval-settlement-export.test.mjs',
   'tests/approval-settlement-runtime.test.mjs',
   'tests/benchmark-supervisor.test.mjs',

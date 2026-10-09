@@ -13,11 +13,18 @@ export class NetworkError extends Error {
 
 // HTTP callers keep their domain error while retaining the request's retry facts.
 export function withResponseFailure(error, response) {
-  if (error !== null && typeof error === 'object' && error.cause === undefined && Object.isExtensible(error)) {
-    Object.defineProperty(error, 'cause', {
-      value: response.networkError instanceof NetworkError ? response.networkError : new NetworkError(httpFailure(response.status)),
-      configurable: true,
+  if (error !== null && typeof error === 'object' && Object.isExtensible(error)) {
+    const failure = response.networkError instanceof NetworkError
+      ? response.networkError : new NetworkError(httpFailure(response.status))
+    if (error.cause === undefined) Object.defineProperty(error, 'cause', {
+      value: failure, configurable: true,
     })
+    if (error.networkAttempts === undefined && Array.isArray(failure.networkAttempts)) {
+      Object.defineProperty(error, 'networkAttempts', { value: failure.networkAttempts, configurable: true })
+    }
+    if (error.networkStopReason === undefined && typeof failure.networkStopReason === 'string') {
+      Object.defineProperty(error, 'networkStopReason', { value: failure.networkStopReason, configurable: true })
+    }
   }
   return error
 }

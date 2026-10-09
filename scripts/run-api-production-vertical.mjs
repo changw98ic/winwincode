@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter } from '../packages/network-request/src/index.mjs'
+import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter, withResponseFailure } from '../packages/network-request/src/index.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   createHash,
@@ -841,8 +841,15 @@ export async function requestJson(url, options = {}) {
   // Occupancy replays for the same signed-in holder and client return the
   // existing lease or wait for its original offer acknowledgement.
   const occupancyClaim = method === 'POST' && target.pathname === '/api/v1/clients/occupancy'
-  const exact = method === 'GET' || occupancyClaim || ['/api/v1/queries', '/api/v1/commands'].includes(target.pathname)
   const prepared = { ...options, serializedBody: options.body === undefined ? null : JSON.stringify(options.body) }
+  // These three relays persist the request identity with the entire encrypted
+  // envelope and reject identity reuse with different bytes. Freeze the body
+  // first, then admit only a complete envelope to the shared exact-replay path.
+  const configurationApply = method === 'POST'
+    && /^\/api\/v1\/clients\/[^/]+\/(?:providers|extensions|repositories)$/u.test(target.pathname)
+    && retainedDeviceConfigurationEnvelope(prepared.serializedBody)
+  const exact = method === 'GET' || occupancyClaim || configurationApply
+    || ['/api/v1/queries', '/api/v1/commands'].includes(target.pathname)
   const deadline = performance.now() + (options.timeoutMillis ?? (occupancyClaim ? 120_000 : 30_000))
   try {
     return await executeRequest(async ({ signal }) => {
@@ -851,9 +858,22 @@ export async function requestJson(url, options = {}) {
       return response
     }, { replay: exact ? 'replay_exact' : 'reconcile_first', deadline })
   } catch (error) {
-    if (error instanceof NetworkError && error.response !== undefined) return error.response
+    if (error instanceof NetworkError && error.response !== undefined) {
+      Object.defineProperty(error.response, 'networkError', { value: error, configurable: true })
+      return error.response
+    }
     throw error
   }
+}
+
+function retainedDeviceConfigurationEnvelope(serialized) {
+  if (typeof serialized !== 'string') return false
+  const body = JSON.parse(serialized)
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
+    && typeof body.requestId === 'string' && /^[A-Za-z0-9_-]{8,200}$/u.test(body.requestId)
+    && Number.isSafeInteger(body.expectedRevision) && body.expectedRevision >= 0
+    && ['clientNodeId', 'nonce', 'publicKey', 'ciphertext']
+      .every(key => typeof body[key] === 'string' && body[key].length > 0)
 }
 
 // Queries and commands use the same executor and their retained request identity.
@@ -861,7 +881,16 @@ async function requestReadOnlyJson(url, options) {
   return requestJson(url, options)
 }
 
-class ApiClient {
+function controlHttpError(response, phase, requestId) {
+  const receivedCode = response.json?.error?.code
+  const code = typeof receivedCode === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(receivedCode)
+    ? receivedCode : 'HTTP_ERROR'
+  return withResponseFailure(Object.assign(new Error('Control Plane request was rejected'), {
+    code, status: response.status, phase, requestId,
+  }), response)
+}
+
+export class ApiClient {
   constructor(baseUrl, origin, nextRequest = 1, ca = undefined) {
     assert.equal(Number.isSafeInteger(nextRequest) && nextRequest > 0, true)
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
@@ -936,12 +965,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${command} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_command', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${command} request correlation`)
     assert.equal(response.json?.command, command, `${command} command correlation`)
@@ -959,12 +983,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${query} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_query', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${query} request correlation`)
     assert.equal(response.json?.query, query, `${query} query correlation`)

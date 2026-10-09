@@ -55,6 +55,24 @@ These endpoint and Lite requirements follow the provider's
 [Codex configuration](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
 and [Responses API](https://mimo.mi.com/docs/en-US/api/chat/responses).
 
+## Device task supervision and configuration requests
+
+Each Delivery poll checks its durable supervisor owner and process identity.
+The check reads the owner record without advancing the supervision journal.
+Active WorkRuns still pass through their exact launch anchors, execution lease
+checks and approval projections. An obsolete owner stops before the next poll.
+
+Device Provider, extension and repository configuration relays bind a request ID
+to the complete encrypted envelope. The HTTP executor freezes that envelope
+before sending and retries transient failures with the same bytes and request ID.
+Incomplete envelopes and unrelated mutations require reconciliation. Permanent
+HTTP failures stop through the shared network policy.
+
+Rejected Device configuration applies and Control Plane commands or queries
+retain the HTTP status, safe server error code, phase, request ID and network
+attempt history through the shared response-failure wrapper. Task reports retain
+those safe facts. Response messages and configuration plaintext stay private.
+
 ## Device Provider credential admission
 
 OpenCode configuration may contain [environment and file references](https://opencode.ai/docs/config/#env-vars)

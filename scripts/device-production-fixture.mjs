@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { withResponseFailure } from '../packages/network-request/src/index.mjs'
 import {
   createCipheriv,
   createECDH,
@@ -750,6 +751,15 @@ export function startDeterministicDeviceModelServer({
 // execute concurrently; only this short configuration transaction is serialized.
 const deviceExtensionMutations = new WeakMap()
 
+function deviceConfigurationApplyError(response, requestId) {
+  const receivedCode = response.json?.error?.code
+  const code = typeof receivedCode === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(receivedCode)
+    ? receivedCode : 'DEVICE_CONFIGURATION_HTTP_ERROR'
+  return withResponseFailure(Object.assign(new Error('Device configuration apply was rejected'), {
+    code, status: response.status, phase: 'device_configuration_apply', requestId,
+  }), response)
+}
+
 async function mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis) {
   let clients = deviceExtensionMutations.get(api)
   if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
@@ -764,7 +774,7 @@ async function mutateDeviceExtension(api, publicClientId, mutation, expected, ti
       'winwincode.device-extensions.v1', current.json.snapshot, requestId, mutation,
     )
     const applied = await api.request(base, { method: 'POST', body: envelope })
-    assert.equal(applied.status, 202, 'Device extension apply was rejected')
+    if (applied.status !== 202) throw deviceConfigurationApplyError(applied, requestId)
     const completed = await waitFor(async () => {
       const response = await api.request(`${base}/receipts/${requestId}`)
       if (!response.json?.receipt) return false
@@ -924,7 +934,7 @@ export async function seedDeviceLocalProvider({
     ...(customHeaders === undefined ? {} : { customHeaders }),
   })
   const applied = await api.request(providerPath, { method: 'POST', body: encrypted })
-  assert.equal(applied.status, 202, `Device Provider apply failed: ${applied.text}`)
+  if (applied.status !== 202) throw deviceConfigurationApplyError(applied, requestId)
   const saved = await waitFor(async () => {
     const response = await api.request(`${providerPath}/receipts/${encodeURIComponent(requestId)}`)
     if (response.json?.receipt && response.json.receipt.outcome !== 'saved') {

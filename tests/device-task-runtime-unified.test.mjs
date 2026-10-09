@@ -127,7 +127,7 @@ test('registered recovery observes the existing terminal task without submitting
       },
       async command(kind) { calls.push(kind); throw new Error(`Recovery must not submit ${kind}`) },
     },
-    devicePath: { forProductSession: () => ({}), assertBenchmarkRunning() {},
+    devicePath: { forProductSession: () => ({}),
       async launchAnchor() { throw new Error('terminal WorkRun cannot require a new anchor') } },
   }
   const result = await resumeRegisteredDeviceTask({ launch: { ...identity, directory }, runtime })
@@ -154,6 +154,156 @@ test('execution-port approval ownership exposes pending approvals without a seco
     approvalOwner: 'execution_port', onPending: value => pending.push(...value) })
   assert.equal(pending.length, 1)
   assert.equal(decisions.length, 0)
+})
+
+test('registered active recovery uses the factory contract and drives anchors and approvals', async t => {
+  const directory = fixture(t)
+  writeRecoveryReport(directory)
+  const secondRunId = 'wrn_01J00000000000000000000002'
+  const calls = [], anchors = []
+  const runs = [workRunId, secondRunId].map((id, index) => ({ id, state: 'running',
+    workItemId: `wit_fixture_${index}`, executionJobId: `job_fixture_${index}`,
+    productSessionId: identity.productSessionId, codexThreadId: `thread-${index}`,
+    workerSessionId: `wsn_fixture_${index}` }))
+  let approvalObserved = false
+  const launchAnchor = async ({ workRunId: id }) => {
+    anchors.push(id)
+    return { workerSessionId: runs.find(run => run.id === id).workerSessionId }
+  }
+  // This is the actual factory's public task contract. No obsolete repeat guard
+  // is installed by the fixture or its ProductSession view.
+  const devicePath = { launchAnchor,
+    forProductSession: () => ({ launchAnchor }) }
+  const api = {
+    async query(kind) {
+      calls.push(kind)
+      if (kind === 'delivery.get') {
+        if (approvalObserved) assert.equal(journal(directory).phase, 'waiting_approval')
+        return { result: { status: approvalObserved ? 'done' : 'running', deliveryRevision: 1,
+          readCursor: { token: 'fixture-cursor' }, attention: [],
+          currentCandidate: approvalObserved ? { candidateRef: 'fixture-candidate' } : null,
+          verdict: approvalObserved ? { status: 'pass', criteria: [{ verdict: 'pass' }] } : null,
+          evidence: approvalObserved ? [{}] : [] } }
+      }
+      if (kind === 'workrun.get') return { result: { items: [{ state: approvalObserved ? 'done' : 'in_progress' }], runs: approvalObserved
+        ? runs.map(run => ({ ...run, state: 'completed' })) : runs } }
+      if (kind === 'approval.list') {
+        approvalObserved = true
+        return { page: { hasMore: false }, result: { items: [{ id: 'apr_fixture', state: 'pending',
+          category: 'shell', binding: { productSessionId: identity.productSessionId,
+            workerSessionId: runs[1].workerSessionId, executionJobId: runs[1].executionJobId,
+            sessionIdentity: { workRunId: secondRunId, codexThreadId: runs[1].codexThreadId,
+              productSessionId: identity.productSessionId, workerSessionId: runs[1].workerSessionId } } }] } }
+      }
+      throw new Error(`Unexpected query ${kind}`)
+    },
+    async command() { assert.fail('Recovery cannot submit a new WorkRun or approval decision') },
+  }
+  const result = await resumeRegisteredDeviceTask({ launch: { ...identity, directory },
+    runtime: { api, devicePath }, automaticTaskActions: true })
+  assert.equal(result.detail.status, 'done')
+  assert.deepEqual(anchors, [workRunId, secondRunId])
+  assert.equal(calls.filter(kind => kind === 'approval.list').length, 1)
+  assert.equal(journal(directory).phase, 'completed')
+  assert.deepEqual(journal(directory).pendingApprovalIds, ['apr_fixture'])
+  assert.equal(journal(directory).failures.length, 0)
+})
+
+test('registered active recovery keeps the original execution lease expiry check', async t => {
+  const directory = fixture(t)
+  const workerSessionId = 'wsn_fixture'
+  writeRecoveryReport(directory, { workerSessionId })
+  mkdirSync(join(directory, 'server-data'))
+  mkdirSync(join(directory, 'device-data'))
+  const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'))
+  server.exec(`CREATE TABLE scheduler_execution_jobs (work_run_id TEXT, delivery_id TEXT,
+    updated_at TEXT, attempt INTEGER, revision INTEGER, job_id TEXT, state TEXT,
+    submitted_at TEXT, dispatch_payload BLOB);
+    CREATE TABLE execution_leases (worker_id TEXT, worker_instance_id TEXT, job_id TEXT,
+      lease_id TEXT, expires_at TEXT, issued_at TEXT);
+    CREATE TABLE execution_lease_terminals (lease_id TEXT);`)
+  server.prepare('INSERT INTO execution_leases VALUES (?, ?, ?, ?, ?, ?)')
+    .run('worker-fixture', 'instance-fixture', 'job_fixture', 'lease-fixture',
+      '2000-01-01T00:00:00.000Z', '1999-12-31T23:45:00.000Z')
+  server.close()
+  const device = new DatabaseSync(join(directory, 'device-data', 'device-client.sqlite3'))
+  device.exec(`CREATE TABLE worker_process_registry (worker_session_id TEXT, worker_id TEXT,
+    worker_instance_id TEXT, state TEXT, exit_code INTEGER, last_observed_at TEXT)`)
+  device.prepare('INSERT INTO worker_process_registry VALUES (?, ?, ?, ?, ?, ?)')
+    .run(workerSessionId, 'worker-fixture', 'instance-fixture', 'running', null, '2000-01-01T00:00:01.000Z')
+  device.close()
+  let approvalQueries = 0
+  const api = { async query(kind) {
+    if (kind === 'delivery.get') return { result: { status: 'running', deliveryRevision: 1,
+      readCursor: { token: 'fixture-cursor' }, attention: [] } }
+    if (kind === 'workrun.get') return { result: { runs: [{ id: workRunId, state: 'running',
+      executionJobId: 'job_fixture', workerSessionId, productSessionId: identity.productSessionId,
+      codexThreadId: 'thread-fixture' }] } }
+    if (kind === 'approval.list') approvalQueries++
+    assert.fail(`Unexpected query ${kind}`)
+  }, async command() { assert.fail('Expired authority cannot issue a command') } }
+  const launchAnchor = async () => assert.fail('The registered anchor must be reused')
+  await assert.rejects(resumeRegisteredDeviceTask({ launch: { ...identity, directory },
+    runtime: { api, devicePath: { launchAnchor, forProductSession: () => ({ launchAnchor }) } } }),
+  { code: 'DEVICE_EXECUTION_LEASE_EXPIRED' })
+  assert.equal(approvalQueries, 0)
+  assert.equal(journal(directory).failures.length, 1)
+})
+
+test('registered active recovery stops before its next poll after ownership is fenced', async t => {
+  const directory = fixture(t)
+  writeRecoveryReport(directory)
+  const calls = [], anchors = []
+  const run = { id: workRunId, state: 'running', executionJobId: 'job_fixture',
+    productSessionId: identity.productSessionId, codexThreadId: 'thread-fixture', workerSessionId: 'wsn_fixture' }
+  const ownerPath = join(directory, 'task-supervision.owner', 'owner.json')
+  let fenced = false
+  const api = { async query(kind) {
+    assert.equal(fenced, false, 'Fenced supervision cannot make another API observation')
+    calls.push(kind)
+    if (kind === 'delivery.get') return { result: { status: 'running', deliveryRevision: 1,
+      readCursor: { token: 'fixture-cursor' }, attention: [] } }
+    if (kind === 'workrun.get') return { result: { runs: [run] } }
+    if (kind === 'approval.list') {
+      const owner = JSON.parse(readFileSync(ownerPath))
+      setTimeout(() => {
+        writeFileSync(ownerPath, JSON.stringify({ ...owner, id: 'successor-owner' }))
+        fenced = true
+      }, 0)
+      return { page: { hasMore: false }, result: { items: [] } }
+    }
+    assert.fail(`Unexpected query ${kind}`)
+  }, async command() { assert.fail('Fenced supervision cannot send commands') } }
+  const launchAnchor = async ({ workRunId: id }) => {
+    anchors.push(id)
+    return { workerSessionId: run.workerSessionId }
+  }
+  await assert.rejects(resumeRegisteredDeviceTask({ launch: { ...identity, directory },
+    runtime: { api, devicePath: { launchAnchor, forProductSession: () => ({ launchAnchor }) } },
+    automaticTaskActions: true }), { code: 'DEVICE_TASK_SUPERVISOR_FENCED' })
+  assert.deepEqual(calls, ['delivery.get', 'workrun.get', 'approval.list'])
+  assert.deepEqual(anchors, [workRunId])
+  assert.equal(JSON.parse(readFileSync(ownerPath)).id, 'successor-owner')
+})
+
+test('supervisor authority observations preserve its journal and detect changed ownership', t => {
+  const directory = fixture(t)
+  const supervisor = acquireDeviceTaskSupervisor({ directory, identity })
+  const ownerPath = join(directory, 'task-supervision.owner', 'owner.json')
+  const original = readFileSync(ownerPath, 'utf8')
+  try {
+    supervisor.checkpoint('executing', { workRunId })
+    const before = readFileSync(join(directory, 'task-supervision.json'), 'utf8')
+    for (let poll = 0; poll < 10; poll++) supervisor.assertActive()
+    assert.equal(readFileSync(join(directory, 'task-supervision.json'), 'utf8'), before)
+    writeFileSync(ownerPath, JSON.stringify({ ...JSON.parse(original), id: 'successor-owner' }))
+    assert.throws(() => supervisor.assertActive(), { code: 'DEVICE_TASK_SUPERVISOR_FENCED' })
+    assert.equal(readFileSync(join(directory, 'task-supervision.json'), 'utf8'), before)
+  } finally {
+    writeFileSync(ownerPath, original)
+    supervisor.close()
+  }
+  assert.throws(() => supervisor.assertActive(), { code: 'DEVICE_TASK_SUPERVISOR_CLOSED' })
 })
 
 const benchmarkCells = () => Array.from({ length: 35 }, (_, index) => ({
@@ -263,7 +413,7 @@ function terminalRecoveryRuntime(calls, launchAnchor) {
       throw new Error(`Unexpected query ${kind}`)
     },
     async command(kind) { calls.push(kind); throw new Error(`Recovery must not submit ${kind}`) },
-  }, devicePath: { forProductSession: () => ({}), assertBenchmarkRunning() {}, launchAnchor } }
+  }, devicePath: { forProductSession: () => ({}), launchAnchor } }
 }
 
 function writeRecoveryReport(directory, extra = {}) {
