@@ -76,6 +76,25 @@ keep their body and do not acquire invented conversation identities.
 
 ## Native Provider failure diagnostics
 
+External usage receipts allow additive metadata. OpenAI Chat, Responses, and
+Anthropic adapters validate the counters they consume instead of requiring an
+exact list of upstream usage fields. Optional audio, image, prediction, and
+future metadata do not invalidate an otherwise complete response. Canonical
+request and generated product contracts keep their strict validation.
+
+OpenAI Chat maps `prompt_tokens_details.cache_write_tokens` into the existing
+cache-write input counter. Cached reads and writes are subsets of input tokens,
+so they are not added to the total again. Consumed counters must be unsigned
+safe integers, agree with reported totals and DeepSeek cache counters, and fit
+within their input or output totals. Missing cache-read usage remains unknown.
+These details follow the [OpenAI SDK usage contract](https://github.com/openai/openai-python/blob/main/src/openai/types/completion_usage.py).
+
+The same decoder supplies completed-stream and observed-attempt accounting.
+Usage retained from a response that later fails does not establish successful
+stream completion or a known monetary cost. Historical failed attempts are
+preserved; an offline replay verifies a repaired decoder without rewriting
+their paid ledger or issuing another upstream request.
+
 The native Provider transport retains non-2xx response bodies through the same
 private log channel as failed SSE conversion. Public diagnostics contain the
 original HTTP classification and the opaque `responseLog` / `responseLogStatus`

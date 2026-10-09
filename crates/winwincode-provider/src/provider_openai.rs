@@ -27,6 +27,10 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 #[path = "provider_media_tests.rs"]
 mod media_tests;
 
+#[cfg(test)]
+#[path = "provider_openai_usage_tests.rs"]
+mod usage_tests;
+
 /// Translates one Codex `ModelStreamRequest` payload into an `OpenAI` chat body.
 ///
 /// # Errors
@@ -839,84 +843,117 @@ fn tool_arguments_error(reason: ProviderFinishReason) -> AnthropicCodecError {
 }
 
 fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError> {
-    let value = object(value)?;
-    exact_keys(
-        value,
-        &[
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "prompt_tokens_details",
-            "completion_tokens_details",
-            "prompt_cache_hit_tokens",
-            "prompt_cache_miss_tokens",
-        ],
-    )?;
-    let prompt = usage_number(value, "prompt_tokens")?;
-    let completion = usage_number(value, "completion_tokens")?;
+    // External usage metadata is additive. Validate consumed counters, not
+    // an exact upstream field list, for both stream and attempt accounting.
+    let value = object(value).map_err(|_| usage_error("$.usage"))?;
+    let prompt = usage_number(value, "prompt_tokens", "$.usage.prompt_tokens")?;
+    let completion = usage_number(value, "completion_tokens", "$.usage.completion_tokens")?;
     let mut cached = None;
+    let mut cache_write = 0;
     if let Some(details) = value.get("prompt_tokens_details")
         && !details.is_null()
     {
-        let details = object(details)?;
-        exact_keys(details, &["cached_tokens"])?;
-        cached = details
-            .get("cached_tokens")
-            .filter(|value| !value.is_null())
-            .map(|value| value.as_u64().ok_or_else(AnthropicCodecError::protocol))
-            .transpose()?;
+        let details = object(details).map_err(|_| usage_error("$.usage.prompt_tokens_details"))?;
+        cached = optional_usage_number(
+            details,
+            "cached_tokens",
+            "$.usage.prompt_tokens_details.cached_tokens",
+        )?;
+        cache_write = optional_usage_number(
+            details,
+            "cache_write_tokens",
+            "$.usage.prompt_tokens_details.cache_write_tokens",
+        )?
+        .unwrap_or(0);
     }
     match (
         value.get("prompt_cache_hit_tokens"),
         value.get("prompt_cache_miss_tokens"),
     ) {
         (Some(hit), Some(miss)) => {
-            let hit = hit.as_u64().ok_or_else(AnthropicCodecError::protocol)?;
-            let miss = miss.as_u64().ok_or_else(AnthropicCodecError::protocol)?;
+            let hit = hit
+                .as_u64()
+                .ok_or_else(|| usage_error("$.usage.prompt_cache_hit_tokens"))?;
+            let miss = miss
+                .as_u64()
+                .ok_or_else(|| usage_error("$.usage.prompt_cache_miss_tokens"))?;
             if hit.checked_add(miss) != Some(prompt) || cached.is_some_and(|cached| cached != hit) {
-                return Err(AnthropicCodecError::protocol());
+                return Err(usage_error("$.usage.prompt_cache_hit_tokens"));
             }
             cached = Some(hit);
         }
         (None, None) => {}
-        _ => return Err(AnthropicCodecError::protocol()),
+        _ => return Err(usage_error("$.usage.prompt_cache_hit_tokens")),
     }
     if let Some(total) = value.get("total_tokens")
         && total.as_u64() != prompt.checked_add(completion)
     {
-        return Err(AnthropicCodecError::protocol());
+        return Err(usage_error("$.usage.total_tokens"));
     }
     let mut reasoning = 0_u64;
     if let Some(details) = value.get("completion_tokens_details")
         && !details.is_null()
     {
-        let details = object(details)?;
-        if let Some(value) = details.get("reasoning_tokens")
-            && !value.is_null()
-        {
-            reasoning = value.as_u64().ok_or_else(AnthropicCodecError::protocol)?;
-        }
+        let details =
+            object(details).map_err(|_| usage_error("$.usage.completion_tokens_details"))?;
+        reasoning = optional_usage_number(
+            details,
+            "reasoning_tokens",
+            "$.usage.completion_tokens_details.reasoning_tokens",
+        )?
+        .unwrap_or(0);
     }
-    if prompt > MAX_SAFE_INTEGER
-        || completion > MAX_SAFE_INTEGER
-        || cached.is_some_and(|cached| cached > prompt)
+    if prompt
+        .checked_sub(cached.unwrap_or(0))
+        .and_then(|standard| standard.checked_sub(cache_write))
+        .is_none()
         || reasoning > completion
+        || prompt
+            .checked_add(completion)
+            .is_none_or(|total| total > MAX_SAFE_INTEGER)
     {
-        return Err(AnthropicCodecError::protocol());
+        return Err(usage_error("$.usage"));
     }
     Ok(ProviderTokenUsage {
         input_tokens: prompt,
         cached_input_tokens: cached,
-        cache_write_input_tokens: 0,
+        cache_write_input_tokens: cache_write,
         output_tokens: completion,
         reasoning_output_tokens: reasoning,
     })
 }
 
-fn usage_number(object: &Map<String, Value>, key: &str) -> Result<u64, AnthropicCodecError> {
-    required(object, key)?
-        .as_u64()
-        .ok_or_else(AnthropicCodecError::protocol)
+fn usage_error(field_path: &'static str) -> AnthropicCodecError {
+    AnthropicCodecError::protocol().with_diagnostic(
+        "response_fields",
+        "chat.completion.chunk",
+        field_path,
+    )
+}
+
+fn usage_number(
+    object: &Map<String, Value>,
+    key: &str,
+    field_path: &'static str,
+) -> Result<u64, AnthropicCodecError> {
+    optional_usage_number(object, key, field_path)?.ok_or_else(|| usage_error(field_path))
+}
+
+fn optional_usage_number(
+    object: &Map<String, Value>,
+    key: &str,
+    field_path: &'static str,
+) -> Result<Option<u64>, AnthropicCodecError> {
+    object
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value <= MAX_SAFE_INTEGER)
+                .ok_or_else(|| usage_error(field_path))
+        })
+        .transpose()
 }
 
 #[cfg(test)]

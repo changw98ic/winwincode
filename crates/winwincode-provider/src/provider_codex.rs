@@ -947,6 +947,35 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, None);
         assert_eq!(actual_cost_micros, None);
     }
+
+    #[test]
+    fn responses_usage_extensions_preserve_accounting_and_terminal() {
+        let mut events = response_events();
+        let usage = &mut events.last_mut().unwrap()["response"]["usage"];
+        usage["input_tokens_details"]["cache_write_tokens"] = json!(3);
+        let expected = parse_response(&wire(&events), &receipt(), 4096, 100).unwrap();
+        let usage = &mut events.last_mut().unwrap()["response"]["usage"];
+        usage["vendor_metadata"] = json!({"version": 2});
+        usage["input_tokens_details"]["audio_tokens"] = json!(0);
+        usage["input_tokens_details"]["future_detail"] = json!([1, 2]);
+        usage["output_tokens_details"]["future_detail"] = json!({"opaque": true});
+        let bytes = wire(&events);
+        let actual = parse_response(&bytes, &receipt(), 4096, 100).unwrap();
+        assert!(actual.frames == expected.frames);
+        assert_eq!(actual.terminal, expected.terminal);
+        let ProviderGatewayTerminal::Completed {
+            usage,
+            actual_cost_micros,
+        } = actual.terminal
+        else {
+            panic!("expected completed response");
+        };
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.cached_input_tokens, Some(2));
+        assert_eq!(usage.cache_write_input_tokens, 3);
+        assert_eq!(actual_cost_micros, None);
+        assert_eq!(observed_receipt(&bytes, 4096, 100).unwrap().1, usage);
+    }
     #[test]
     fn observed_responses_usage_does_not_require_a_successful_terminal() {
         let events = vec![
