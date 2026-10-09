@@ -42,6 +42,7 @@ function intakeFailures(path) {
     'device_models:accept_chunk:MODEL_CHUNK_ACCEPT_FAILED',
     'device_models:poll_codex:FOREIGN_OR_UNOWNED_EXCHANGE',
     'device_models:recover_skip:FOREIGN_EXCHANGE',
+    'worker:drive_core_poll:CodexPollFailed',
     ...['admission', 'collect_effects', 'flush_before_poll', 'device_read', 'device_intake',
       'prepared_turn', 'delegated_state', 'observation_open', 'core_poll', 'collect_poll_effects',
       'core_fact', 'flush_after_poll'].map(stage => `worker:drive_${stage}:UnexpectedMessage`),
@@ -72,7 +73,7 @@ function intakeFailures(path) {
       }
       totals.set(key, row)
     }
-    return [...totals.values()].slice(-28)
+    return [...totals.values()].slice(-29)
   } catch { return { unavailable: 'read-failed' } }
   finally { if (descriptor !== undefined) closeSync(descriptor) }
 }
@@ -100,6 +101,10 @@ export function cancellationEvidence(deviceData) {
             json_extract(record_json, '$.coreToolCursor') AS coreToolCursor,
             json_extract(record_json, '$.coreToolFinalCursor') AS coreToolFinalCursor,
             json_type(record_json, '$.coreToolPending') AS pendingToolFact,
+            CASE WHEN json_type(record_json, '$.coreToolPending.event.sequence') = 'integer'
+              AND json_extract(record_json, '$.coreToolPending.event.sequence') BETWEEN 1 AND 9007199254740991
+              THEN json_extract(record_json, '$.coreToolPending.event.sequence')
+              END AS pendingCoreRuntimeSequence,
             json_extract(record_json, '$.terminalTrace.sequence') AS terminalTraceSequence,
             json_extract(record_json, '$.terminalTrace.retained') AS terminalTraceRetained
             FROM codex_run ORDER BY run_key LIMIT 16`).all(),
@@ -108,6 +113,24 @@ export function cancellationEvidence(deviceData) {
           pendingRuntime: adapter.prepare(`SELECT
             CASE WHEN json_valid(frame_json) THEN json_extract(frame_json, '$.event.sequence') END AS executionSequence
             FROM execution_outbox WHERE family = 'runtime' AND state = 'pending' LIMIT 16`).all(),
+          pendingTransport: adapter.prepare(`WITH pending AS (SELECT
+            CASE WHEN json_valid(frame_json) THEN json_extract(frame_json, '$.kind') END AS raw_kind,
+            CASE WHEN json_valid(frame_json) THEN json_extract(frame_json, '$.outcome.status') END AS raw_status
+            FROM execution_outbox WHERE family = 'transport' AND state = 'pending' LIMIT 16)
+            SELECT CASE WHEN raw_kind IN ('job.outcome', 'worker.heartbeat', 'job.cancel_ack')
+              THEN raw_kind ELSE 'other' END AS kind,
+            CASE WHEN raw_kind = 'job.outcome' AND raw_status IN ('cancelled', 'failed', 'infrastructure_error', 'succeeded')
+              THEN raw_status END AS outcomeStatus FROM pending`).all(),
+          runtimeReplay: adapter.prepare(`SELECT
+            CASE WHEN json_type(snapshot_json, '$.ackSequence') = 'integer'
+              AND json_extract(snapshot_json, '$.ackSequence') BETWEEN 0 AND 9007199254740991
+              THEN json_extract(snapshot_json, '$.ackSequence') END AS ackSequence,
+            CASE WHEN json_type(snapshot_json, '$.highestSequence') = 'integer'
+              AND json_extract(snapshot_json, '$.highestSequence') BETWEEN 0 AND 9007199254740991
+              THEN json_extract(snapshot_json, '$.highestSequence') END AS highestSequence,
+            CASE WHEN json_type(snapshot_json, '$.events') = 'array'
+              THEN json_array_length(snapshot_json, '$.events') END AS retainedCount
+            FROM runtime_replay ORDER BY stream_key LIMIT 16`).all(),
         })),
         core: existsSync(home) ? readdirSync(home).filter(name => /^state_\d+\.sqlite$/u.test(name))
           .sort().slice(0, 4).map(name => readDatabase(join(home, name), core => ({

@@ -1310,6 +1310,8 @@ where
             }
             *stage = DriveStage::CorePoll;
             let Ok(polled) = self.codex.poll(&thread_id, &now).await else {
+                self.drive_diagnostics
+                    .record_core_poll_failure(self.intake_log_path.as_deref());
                 self.finish_unavailable_codex_job(&job_id, now.clone())
                     .await?;
                 continue;
