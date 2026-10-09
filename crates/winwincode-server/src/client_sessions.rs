@@ -273,7 +273,7 @@ impl fmt::Debug for ClientSessionsError {
             .field("message", &self.message)
             .field("failure_stage", &self.failure_stage())
             .field("failure_code", &self.failure_code())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
