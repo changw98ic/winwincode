@@ -1628,7 +1628,7 @@ mod tests {
     #[test]
     fn the_mirror_revision_view_stops_init_busy_at_its_deadline() {
         let (directory, writer) = mirror_writer_fixture("real-busy-deadline");
-        let retries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_retries = retries.clone();
         let worker_directory = directory.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
