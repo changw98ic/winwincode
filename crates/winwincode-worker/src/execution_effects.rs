@@ -383,7 +383,12 @@ where
         let mut sent_bytes = 0;
         let mut deferred = None;
         for delivery in deliveries {
-            if self.port.has_pending_controls() || tokio::time::Instant::now() >= deadline {
+            // Yield to pending controls only after this batch made progress;
+            // checking before the first frame starves the durable outbox
+            // whenever any control is still queued.
+            if (sent_bytes > 0 && self.port.has_pending_controls())
+                || tokio::time::Instant::now() >= deadline
+            {
                 break;
             }
             let previous_cursor = self.outbox_flush_cursor.clone();
