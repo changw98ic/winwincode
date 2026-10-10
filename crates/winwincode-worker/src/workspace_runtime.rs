@@ -3024,6 +3024,19 @@ fn load_validation_configuration(
         .map_err(|_| change_batch_error("validation configuration is invalid"))
 }
 
+/// Resolves symlinks and `..` on both sides before the prefix check: a
+/// lexical `starts_with` lets a symlinked directory inside the checkout point
+/// anywhere. A directory that cannot be resolved fails closed.
+fn working_directory_within(checkout: &Path, working_directory: &Path) -> bool {
+    match (
+        fs::canonicalize(checkout),
+        fs::canonicalize(working_directory),
+    ) {
+        (Ok(root), Ok(resolved)) => resolved.starts_with(root),
+        _ => false,
+    }
+}
+
 /// Executes one read-only validation command inside the checkout.
 ///
 /// The command runs in its own process group without a shell, with an
@@ -3049,7 +3062,7 @@ async fn run_validation_command(
     } else {
         checkout.join(&command.working_directory)
     };
-    if !working_directory.starts_with(checkout) {
+    if !working_directory_within(checkout, &working_directory) {
         return Err(change_batch_error(
             "validation command working directory leaves the checkout",
         ));
@@ -4299,9 +4312,41 @@ fn retain_validation_diagnostic_evaluation(
 
 #[cfg(test)]
 mod validation_rerun_tests {
+    #[test]
+    fn validation_working_directory_rejects_symlink_and_dotdot_escapes() {
+        let base = std::env::temp_dir().join(format!(
+            "wwc-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkout = base.join("checkout");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, checkout.join("escape")).unwrap();
+        assert!(working_directory_within(&checkout, &checkout));
+        assert!(working_directory_within(&checkout, &checkout.join("src")));
+        assert!(!working_directory_within(
+            &checkout,
+            &checkout.join("escape")
+        ));
+        assert!(!working_directory_within(
+            &checkout,
+            &checkout.join("../outside")
+        ));
+        assert!(!working_directory_within(
+            &checkout,
+            &checkout.join("missing")
+        ));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     use super::{
         IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
-        exact_validation_commands, validation_receipt_status,
+        exact_validation_commands, validation_receipt_status, working_directory_within,
     };
     use winwincode_execution_port::{
         generated::{ValidationCheckStatus, ValidationReceiptStatus},
