@@ -2,6 +2,9 @@
 
 #![cfg(feature = "test-support")]
 
+#[path = "support/test_helper_path.rs"]
+mod test_helper_path;
+
 #[path = "support/canonical_code_mode.rs"]
 mod canonical_code_mode;
 
@@ -120,27 +123,7 @@ impl Fixture {
         hosted: bool,
         mode: winwincode_codex::ExecutionMode,
     ) -> ProductionCodexAdapter {
-        let helper = std::env::var_os("WWC_TEST_HELPER").map_or_else(
-            || {
-                // Same resolution as production_vertical: default to
-                // <workspace>/target when CARGO_TARGET_DIR is unset.
-                let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-                std::env::var_os("CARGO_TARGET_DIR")
-                    .map_or_else(
-                        || workspace.join("target"),
-                        |value| {
-                            let value = PathBuf::from(value);
-                            if value.is_absolute() {
-                                value
-                            } else {
-                                workspace.join(value)
-                            }
-                        },
-                    )
-                    .join("debug/winwincode-kernel-helper")
-            },
-            PathBuf::from,
-        );
+        let helper = test_helper_path::kernel_helper_path();
         let configuration = ProductionCodexConfig::try_new(ProductionCodexOptions {
             data_directory: self.0.join("worker"),
             helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(),
