@@ -3026,14 +3026,16 @@ fn load_validation_configuration(
 
 /// Resolves symlinks and `..` on both sides before the prefix check: a
 /// lexical `starts_with` lets a symlinked directory inside the checkout point
-/// anywhere. A directory that cannot be resolved fails closed.
-fn working_directory_within(checkout: &Path, working_directory: &Path) -> bool {
+/// anywhere. A directory that cannot be resolved fails closed. Returns the
+/// resolved path so the command runs in exactly the directory that was
+/// checked rather than re-resolving the lexical path later.
+fn working_directory_within(checkout: &Path, working_directory: &Path) -> Option<PathBuf> {
     match (
         fs::canonicalize(checkout),
         fs::canonicalize(working_directory),
     ) {
-        (Ok(root), Ok(resolved)) => resolved.starts_with(root),
-        _ => false,
+        (Ok(root), Ok(resolved)) if resolved.starts_with(&root) => Some(resolved),
+        _ => None,
     }
 }
 
@@ -3062,11 +3064,11 @@ async fn run_validation_command(
     } else {
         checkout.join(&command.working_directory)
     };
-    if !working_directory_within(checkout, &working_directory) {
+    let Some(working_directory) = working_directory_within(checkout, &working_directory) else {
         return Err(change_batch_error(
             "validation command working directory leaves the checkout",
         ));
-    }
+    };
     let mut environment = HashMap::new();
     environment.insert("PATH".to_owned(), std::env::var("PATH").unwrap_or_default());
     for variable in &command.environment {
@@ -4312,6 +4314,15 @@ fn retain_validation_diagnostic_evaluation(
 
 #[cfg(test)]
 mod validation_rerun_tests {
+    use super::{
+        IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
+        exact_validation_commands, validation_receipt_status, working_directory_within,
+    };
+    use winwincode_execution_port::{
+        generated::{ValidationCheckStatus, ValidationReceiptStatus},
+        validation_config::{parse_validation_configuration, resolve_validation_profile},
+    };
+
     #[test]
     fn validation_working_directory_rejects_symlink_and_dotdot_escapes() {
         let base = std::env::temp_dir().join(format!(
@@ -4327,31 +4338,19 @@ mod validation_rerun_tests {
         std::fs::create_dir_all(checkout.join("src")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, checkout.join("escape")).unwrap();
-        assert!(working_directory_within(&checkout, &checkout));
-        assert!(working_directory_within(&checkout, &checkout.join("src")));
-        assert!(!working_directory_within(
-            &checkout,
-            &checkout.join("escape")
-        ));
-        assert!(!working_directory_within(
-            &checkout,
-            &checkout.join("../outside")
-        ));
-        assert!(!working_directory_within(
-            &checkout,
-            &checkout.join("missing")
-        ));
+        assert_eq!(
+            working_directory_within(&checkout, &checkout),
+            Some(std::fs::canonicalize(&checkout).unwrap())
+        );
+        assert_eq!(
+            working_directory_within(&checkout, &checkout.join("src")),
+            Some(std::fs::canonicalize(checkout.join("src")).unwrap())
+        );
+        assert!(working_directory_within(&checkout, &checkout.join("escape")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("../outside")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("missing")).is_none());
         std::fs::remove_dir_all(&base).unwrap();
     }
-
-    use super::{
-        IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
-        exact_validation_commands, validation_receipt_status, working_directory_within,
-    };
-    use winwincode_execution_port::{
-        generated::{ValidationCheckStatus, ValidationReceiptStatus},
-        validation_config::{parse_validation_configuration, resolve_validation_profile},
-    };
 
     #[test]
     fn a_passing_bounded_rerun_cannot_hide_the_original_failure() {
