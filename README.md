@@ -42,8 +42,6 @@ Server(winwincode-server)—— 唯一公开入口:认证、健康检查、API
 
 部署形态有两种:本机模式把 Control Plane 和 Worker 组装在同一进程(`winwincode-local`);远程模式由代码机器上的 Device Client 连接 Server。两种形态使用同一套合同与状态语义。
 
-组件职责、交付数据模型、身份绑定、Provider 与凭据、安全模型和实现索引见[产品架构文档](docs/architecture.md)。
-
 ## 快速开始
 
 这是仓库唯一的首次运行路径:安装依赖、构建 Client 和 Rust 运行组件,然后启动 `winwincode-server`。
@@ -86,11 +84,11 @@ corepack pnpm verify:api-production-vertical
 ```
 
 真实模型执行需要配置可用的 Provider 和 Credential 引用。
-ChatGPT 账号可按[接入说明](docs/codex-login-integration.md)直接授权，或复用设备上的 Codex 登录态。
+ChatGPT 账号可直接授权，或复用设备上的 Codex 登录态。
 
 ## 当前状态与限制
 
-- 本仓库处于 `0.1.0-alpha.2` 公开预览准备阶段,发布说明见 [docs/releases/0.1.0-alpha.2.md](docs/releases/0.1.0-alpha.2.md);
+- 本仓库处于 `0.1.0-alpha.2` 公开预览准备阶段;
 - Windows 暂不在首发平台;
 - Community 当前面向单一 Owner；代码机器使用本机 Worker 或独立 Device Client；
 - GitHub 等外部写入需要人工批准,默认先生成本地 receipt 和审核证据。
@@ -115,13 +113,9 @@ corepack pnpm verify
 
 | 主题 | 文档 |
 | --- | --- |
-| 架构、交付流程与安全模型 | [docs/architecture.md](docs/architecture.md) |
-| HTTP / WebSocket / ExecutionPort 合同 | [docs/contracts/](docs/contracts/) 与 [schema/winwincode/v1/](schema/winwincode/v1/) |
-| 架构决定(ADR) | [docs/decisions/](docs/decisions/) |
-| 发布门禁与发布流程 | [docs/release-gate.md](docs/release-gate.md)、[docs/releasing.md](docs/releasing.md) |
-| 安装、首次启动、恢复与排障 | [docs/community-operations.md](docs/community-operations.md) |
+| HTTP / WebSocket / ExecutionPort 合同 | [schema/winwincode/v1/](schema/winwincode/v1/) |
 | Server 配置 | [crates/winwincode-server/README.md](crates/winwincode-server/README.md) |
-| 上游 Codex 版本、补丁与更新流程 | [upstream/sources.lock.json](upstream/sources.lock.json)、[docs/upstream-updates.md](docs/upstream-updates.md) |
+| 上游 Codex 版本、补丁与更新流程 | [upstream/sources.lock.json](upstream/sources.lock.json) |
 
 ## 仓库结构
 
@@ -135,11 +129,9 @@ crates/helper/                    本机权限与系统操作
 packages/      跨端共享包:contracts、strongflow
 schema/        canonical schema 与生成产物,是所有合同类型的唯一来源
 tests/         Client、Server、Worker 与合同检查
-docs/          架构、合同、决定与发布文档
+docs/          发布与仓库边界脚本读取的机器可读合同(JSON)
 upstream/      固定上游身份、补丁和通知记录
 ```
-
-crate 全量清单与依赖目标图见[机器可读源码清单](docs/decisions/0028-control-plane-worker-migration.inventory.json)和[目标图](docs/decisions/0028-control-plane-worker-target-graph.json)。
 
 ## 许可证
 

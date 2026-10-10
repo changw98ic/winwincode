@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Explicit offline mechanism audit; see docs/engineering-runtime/mechanism-audit-20261010.md.
+// Explicit offline mechanism audit.
 import assert from 'node:assert/strict'
 import { createHash, X509Certificate } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, readdirSync } from 'node:fs'

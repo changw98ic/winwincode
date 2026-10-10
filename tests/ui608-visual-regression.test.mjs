@@ -561,21 +561,6 @@ test('the visual reference lanes stay outside the canonical TypeScript lane', ()
   }
 })
 
-test('the visual module and both browser suites are listed in the decision inventory', () => {
-  const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
-    'utf8',
-  ))
-  const listed = new Set(inventory.surfaces.flatMap(surface => surface.sourcePaths))
-  assert.equal(listed.has('apps/client/src/visual-regression.ts'), true)
-
-  const baselines = new Map(inventory.behaviorBaselines.map(entry => [entry.id, entry]))
-  for (const id of ['ui608-component-state-visual', 'ui608-page-visual']) {
-    assert.equal(baselines.has(id), true, `${id} must be a behaviour baseline`)
-    assert.match(baselines.get(id).testFile, /^tests\/ui608-.*\.test\.mjs$/u)
-  }
-})
-
 test('the committed baselines exist and are credential free', () => {
   for (const name of [
     'component-states.baseline.json',

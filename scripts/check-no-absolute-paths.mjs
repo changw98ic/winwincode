@@ -36,18 +36,8 @@ const scanTargets = Object.freeze([
     match: null,
   },
   {
-    path: 'docs/contracts',
-    recursive: false,
-    match: { prefix: 'client-control', suffix: '.md' },
-  },
-  {
     path: 'tests/fixtures/client-control',
     recursive: true,
-    match: null,
-  },
-  {
-    path: 'docs/decisions/0030-multi-user-client-access-and-occupancy.md',
-    recursive: false,
     match: null,
   },
 ])

@@ -114,5 +114,5 @@ case "$code" in
   *) echo "REMOTE_PROBE=http_$code — inspect /tmp/jev-typesafe-probe.json" ;;
 esac
 echo
-echo "NOTE: Remote probe ≠ Phase1 gate. Phase1 still needs real session data per docs/jev-session-replay.md."
+echo "NOTE: Remote probe ≠ Phase1 gate. Phase1 still needs real session data."
 echo "NOTE: Product Device Provider uses WWC_DEVICE_* in isolated runs; Jev remote is OpenJevRemoteSettings (separate)."

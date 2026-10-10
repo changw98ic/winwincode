@@ -313,17 +313,3 @@ test('registry publication accepts only a signed release and publishes exact arc
   ))
   assert.ok(registryWorkflow.includes('sha256sum "${downloaded}"'))
 })
-
-test('release download instructions recreate the exact aggregate evidence roots', () => {
-  const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
-  assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"',
-  ))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "community-core-worker-$TARGET" --dir "community-core-worker/$TARGET"',
-  ))
-  assert.ok(releasing.includes('release-artifacts/` 的一级目录因此精确为四个 Rust target'))
-  assert.ok(releasing.includes('release-security-reports/` 与产品 evidence root 分离'))
-  assert.ok(releasing.includes('`community-core-worker/` 每个平台只含 Worker'))
-})

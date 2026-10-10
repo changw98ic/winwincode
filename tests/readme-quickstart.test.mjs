@@ -28,7 +28,6 @@ test('README exposes the one Client/Server/Worker/Local/Helper quickstart', () =
   ]) assert.equal(readme.includes(command), true, `README is missing ${command}`)
 
   assert.equal(readme.includes(`\`${manifest.version}\``), true)
-  assert.equal(existsSync(join(root, 'docs', 'releases', `${manifest.version}.md`)), true)
   assert.equal(readme.includes(`git clone ${manifest.repository}.git`), true)
   for (const path of [
     'apps/client',

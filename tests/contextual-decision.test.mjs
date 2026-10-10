@@ -494,16 +494,4 @@ test('the card suite is registered once and its modules are inventoried', () => 
       `${path} must be registered exactly once in the canonical TypeScript lane`,
     )
   }
-  const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
-    'utf8',
-  ))
-  const listed = inventory.surfaces
-    .flatMap(surface => surface.sourcePaths)
-  for (const path of [
-    'apps/client/src/contextual-decision.ts',
-    'apps/client/src/contextual-decision-view-model.ts',
-  ]) {
-    assert.equal(listed.filter(entry => entry === path).length, 1, `${path} is inventoried once`)
-  }
 })

@@ -23,8 +23,7 @@ versions, workspace protocol for internal packages, and explicit package file
 allowlists.
 
 Keep TypeScript packages in `apps/` and `packages/`, Rust crates in `crates/`,
-tests in `tests/`, upstream pins and patch records in `upstream/`, and accepted
-architecture decisions in `docs/decisions/`. Generated dependency, build,
+tests in `tests/`, and upstream pins and patch records in `upstream/`. Generated dependency, build,
 coverage, package, credential, and log files must remain ignored.
 
 ## Commands
@@ -89,8 +88,7 @@ workspace suite. `pnpm test:rust:built` reuses the existing `target/` build.
 
 ## Architecture
 
-`docs/architecture.md` is the long form. The big picture that takes reading
-several files to recover:
+The big picture that takes reading several files to recover:
 
 ### Three ownership rules (the spine of the system)
 
@@ -172,7 +170,7 @@ convergence logic.
 
 `third_party/codex/` is built directly as the kernel. Identity, patches,
 checksums and license duties are recorded in `upstream/sources.lock.json`.
-Update one upstream source at a time following `docs/upstream-updates.md`, and
+Update one upstream source at a time, and
 never keep two versions side by side in `third_party/` or `upstream/vendor/`.
 
 ## Beads workflow

@@ -1071,13 +1071,4 @@ test('the summary suite is registered once in the canonical lane and the decisio
       `${path} must be registered exactly once in the canonical TypeScript lane`,
     )
   }
-  const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
-    'utf8',
-  ))
-  const listed = new Set(inventory.surfaces.flatMap(surface => surface.sourcePaths))
-  for (const path of [
-    'apps/client/src/usage-health-view-model.ts',
-    'apps/client/src/usage-health-page.ts',
-  ]) assert.equal(listed.has(path), true, `${path} must be listed in the decision inventory`)
 })

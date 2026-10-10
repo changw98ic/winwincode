@@ -42,9 +42,6 @@ test('public contribution, security, conduct, release, and upstream guides are l
     'CONTRIBUTING.md',
     'SECURITY.md',
     'CODE_OF_CONDUCT.md',
-    'docs/releasing.md',
-    'docs/releases/0.1.0-alpha.2.md',
-    'docs/upstream-updates.md',
     '.github/pull_request_template.md',
   ]
   for (const document of documents) assert.equal(existsSync(join(root, document)), true, document)
@@ -60,7 +57,7 @@ test('public contribution, security, conduct, release, and upstream guides are l
   }
 
   const readme = read('README.md')
-  for (const target of documents.slice(1, 7)) {
+  for (const target of documents.slice(1, 4)) {
     assert.equal(readme.includes(`](${target})`), true, `README does not link ${target}`)
   }
 })
@@ -84,61 +81,7 @@ test('contribution guide provides exact checks and one Delivery migration path',
   ]) assert.equal(guide.includes(policy), true, policy)
 })
 
-test('upstream guide has independent Codex and vendored-source checks with rollback points', () => {
-  const guide = read('docs/upstream-updates.md')
-  for (const command of [
-    'cargo metadata --locked --offline --format-version 1',
-    'cargo check --workspace --all-targets --all-features --locked --offline',
-    'cargo update --offline -p PACKAGE --precise VERSION',
-    'node --test tests/i18n-embed-fl-reproducibility.test.mjs',
-    'corepack pnpm verify',
-  ]) assert.equal(guide.includes(command), true, command)
-  assert.match(guide, /回滚点 A/gu)
-  assert.match(guide, /回滚点 B/gu)
-  assert.match(guide, /回滚点 C/gu)
-  for (const path of [
-    'third_party/codex/',
-    'third_party/codex.UPSTREAM.json',
-    'upstream/vendor/PACKAGE-VERSION/',
-    'upstream/patches/PACKAGE/',
-    'Cargo.lock',
-    'upstream/sources.lock.json',
-  ]) assert.equal(guide.includes(path), true, path)
-
-  for (const obsolete of [
-    'apps/host',
-    'packages/dsh-profile',
-    'packages/native',
-    'verify:installed-host',
-    '--dsh-root',
-    'N-API',
-  ]) assert.equal(guide.includes(obsolete), false, obsolete)
-})
-
-test('release guide fixes one version, four target artifacts, and rollback', () => {
-  const guide = read('docs/releasing.md')
-  for (const marker of [
-    'corepack pnpm version:set 0.1.0-alpha.2',
-    'aarch64-apple-darwin',
-    'x86_64-apple-darwin',
-    'aarch64-unknown-linux-gnu',
-    'x86_64-unknown-linux-gnu',
-    'pnpm verify:release-artifacts',
-    'pnpm verify:release-artifact-security',
-    'winwincode-server',
-    'winwincode-worker',
-    'winwincode-kernel-helper',
-    'winwincode-local',
-    'SOURCE_DATE_EPOCH',
-    '新的 SemVer',
-  ]) assert.equal(guide.includes(marker), true, marker)
-})
-
 test('documented pnpm release commands forward script options without a separator token', () => {
-  assert.doesNotMatch(
-    read('docs/release-gate.md'),
-    /pnpm (?:release:artifact|verify:release-artifacts|verify:release-artifact-security) --/gu,
-  )
   const commands = [
     {
       script: 'release:artifact',
@@ -196,23 +139,6 @@ test('documented pnpm release commands forward script options without a separato
     assert.equal(output.includes('unexpected argument: --'), false, output)
     assert.equal(output.includes(command.parsedFailure), true, output)
   }
-})
-
-test('current release notes match the package version and public alpha scope', () => {
-  const manifest = JSON.parse(read('package.json'))
-  const path = `docs/releases/${manifest.version}.md`
-  assert.equal(existsSync(join(root, path)), true)
-  const notes = read(path)
-  for (const marker of [
-    `# WinWinCode ${manifest.version}`,
-    'Delivery 数据结构版本为 3',
-    'aarch64-apple-darwin',
-    'x86_64-apple-darwin',
-    'aarch64-unknown-linux-gnu',
-    'x86_64-unknown-linux-gnu',
-    'SOURCE_DATE_EPOCH',
-    'ExecutionPort v1',
-  ]) assert.equal(notes.includes(marker), true, marker)
 })
 
 test('security policy directs reports to the enabled private advisory channel', () => {
@@ -284,8 +210,6 @@ test('upstream records distinguish current dependencies from historical attribut
 
   for (const document of [
     'CONTRIBUTING.md',
-    'docs/decisions/0001-upstream-integration.md',
-    'docs/upstream-updates.md',
   ]) {
     const text = read(document)
     for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {

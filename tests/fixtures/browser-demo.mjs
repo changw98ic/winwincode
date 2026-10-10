@@ -1,6 +1,5 @@
 // Community-UI demo fixture: mounts the one browser shell over a deterministic
-// Control Plane facade whose sample data matches the design mockups
-// (docs/design/community-ui-geometric).  The 执行设备/项目 pages read the real
+// Control Plane facade whose sample data matches the community UI design.  The 执行设备/项目 pages read the real
 // `/api/v1/clients` and `/api/v1/repositories` endpoints, which the local demo
 // server serves with the same design sample devices and repositories.
 //

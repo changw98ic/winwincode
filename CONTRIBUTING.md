@@ -1,6 +1,6 @@
 # 参与 WinWinCode
 
-感谢你改进 WinWinCode。本仓库包含 TypeScript Client 和 Rust Server、Control Plane、Worker、Local、Kernel。提交前请先阅读[产品架构、交付流程与安全模型](docs/architecture.md)：Codex Core 负责执行事实，Control Plane 负责产品状态，Worker 负责受租约约束的执行，Client 只负责页面和请求。
+感谢你改进 WinWinCode。本仓库包含 TypeScript Client 和 Rust Server、Control Plane、Worker、Local、Kernel。提交前请先了解：Codex Core 负责执行事实，Control Plane 负责产品状态，Worker 负责受租约约束的执行，Client 只负责页面和请求。
 
 ## 准备开发环境
 
@@ -44,7 +44,7 @@ corepack pnpm build
 corepack pnpm verify
 ```
 
-`corepack pnpm verify` 会依次执行源码格式与边界、TypeScript 构建与测试，以及 Rust 构建、Clippy、全 workspace 测试、产品检查和生产纵向。TypeScript 构建同时完成严格类型检查；Rust 产品先构建一次，后续测试和生产纵向复用同一目录。普通 CI 对同一提交并行执行这三组检查，最后汇总成一个 `Canonical workspace verification` 结果。feature 分支只通过 pull request 触发，默认分支只通过 push 触发，避免同一提交重复跑两遍。平台发布证据另按[发布流程](docs/releasing.md)生成。
+`corepack pnpm verify` 会依次执行源码格式与边界、TypeScript 构建与测试，以及 Rust 构建、Clippy、全 workspace 测试、产品检查和生产纵向。TypeScript 构建同时完成严格类型检查；Rust 产品先构建一次，后续测试和生产纵向复用同一目录。普通 CI 对同一提交并行执行这三组检查，最后汇总成一个 `Canonical workspace verification` 结果。feature 分支只通过 pull request 触发，默认分支只通过 push 触发，避免同一提交重复跑两遍。平台发布证据由发布工作流(`.github/workflows/native-release.yml`)生成。
 
 ## 修改 Delivery 数据结构
 
@@ -62,7 +62,7 @@ corepack pnpm verify
 
 ## 更新 Codex 或 vendored Cargo source
 
-每次只更新一个上游来源。候选源码、固定身份、生产闭包、补丁、许可通知、检查命令和回滚点见[上游更新手册](docs/upstream-updates.md)。上游身份或行为发生变化时，必须同时更新 `upstream/sources.lock.json` 和直接受影响的 manifest、lock、测试、通知或决策记录。
+每次只更新一个上游来源。候选源码、固定身份、生产闭包、补丁和许可通知记录在 `upstream/sources.lock.json`。上游身份或行为发生变化时，必须同时更新 `upstream/sources.lock.json` 和直接受影响的 manifest、lock、测试、通知或决策记录。
 
 ## 准备 Pull Request
 

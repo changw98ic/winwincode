@@ -43,10 +43,6 @@ import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.
 
 const root = resolve(import.meta.dirname, '..')
 const artifactDirectory = resolve(root, 'test-results/browser-chat-production')
-const rules = JSON.parse(readFileSync(
-  resolve(root, 'docs/contracts/browser-chat-production.rules.json'),
-  'utf8',
-))
 const expectedBrowserRule = 'Chrome DevTools Protocol over a real headless Chrome or Chromium process'
 const expectedClientRule = 'apps/client production-built modules and production CSS served from a standalone HTTPS origin with one browser-gate entry module'
 const expectedServerRule = 'winwincode-server production binary served from a separate HTTPS origin'
@@ -66,16 +62,20 @@ const expectedArtifacts = [
   'test-results/browser-chat-production/chat-terminal.png',
   'test-results/browser-chat-production/trace.json',
 ]
-assert.equal(rules.browser, expectedBrowserRule)
-assert.equal(rules.client, expectedClientRule)
-assert.equal(rules.server, expectedServerRule)
-assert.equal(rules.schemaVersion, 'winwincode.browser-chat-production.v1')
-assert.deepEqual(rules.assertions, expectedAssertions)
-assert.deepEqual(rules.artifacts, expectedArtifacts)
-assert.deepEqual(rules.forbiddenRequestPathPatterns, [
-  '(?:/dsh(?:/|$))',
-  '(?:/host(?:/|$))',
-])
+// The gate rules formerly lived in docs/contracts/browser-chat-production.rules.json;
+// they are inlined here so the browser gate keeps the same frozen values.
+const rules = Object.freeze({
+  schemaVersion: 'winwincode.browser-chat-production.v1',
+  browser: expectedBrowserRule,
+  client: expectedClientRule,
+  server: expectedServerRule,
+  assertions: expectedAssertions,
+  forbiddenRequestPathPatterns: [
+    '(?:/dsh(?:/|$))',
+    '(?:/host(?:/|$))',
+  ],
+  artifacts: expectedArtifacts,
+})
 const forbiddenRequestPaths = rules.forbiddenRequestPathPatterns.map(pattern => new RegExp(pattern, 'u'))
 const artifactFiles = rules.artifacts.map(path => resolve(root, path))
 const MAX_CAPTURED_REQUESTS = 512
