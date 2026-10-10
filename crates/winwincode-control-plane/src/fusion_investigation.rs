@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//!
-//! ADR-0037 P6–P11: cross review, evidence-only JEV verdict, tool providers,
-//! per-claim budget, dynamic rounds, metrics, and replayable UI trace.
-
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -16,18 +11,12 @@ use crate::fusion_planner::{
     InvestigationPlan, ProviderCapability, plan_investigation,
 };
 
-// ---------------------------------------------------------------------------
-// P6 Cross Review
-// ---------------------------------------------------------------------------
-
-/// Blind review of one evidence item. Reviewer never sees the source model name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CrossReviewRequest {
     pub claim_display_key: String,
     pub claim_summary: String,
     pub evidence: Vec<FusionEvidenceRecord>,
-    /// Must not include model/provider brand priors beyond evidence.provider id.
     pub hide_provider_names: bool,
 }
 
@@ -55,7 +44,6 @@ pub trait CrossReviewer: Send + Sync + std::fmt::Debug {
     ) -> BoxFuture<'static, Result<CrossReviewResult, String>>;
 }
 
-/// Default policy: accept DIRECT verified facts; escalate weak/speculative items.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ConservativeCrossReviewer;
 
@@ -104,11 +92,6 @@ impl CrossReviewer for ConservativeCrossReviewer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P7 JEV evidence-only verifier
-// ---------------------------------------------------------------------------
-
-/// JEV sees evidence packs only — never vote counts or model brand names.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceOnlyVerdictRequest {
@@ -147,7 +130,6 @@ pub trait EvidenceVerifier: Send + Sync + std::fmt::Debug {
     ) -> BoxFuture<'static, Result<EvidenceOnlyVerdict, String>>;
 }
 
-/// Policy verifier implementing ADR-0037 hard rules (no LLM required).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PolicyEvidenceVerifier;
 
@@ -157,7 +139,6 @@ impl EvidenceVerifier for PolicyEvidenceVerifier {
         request: EvidenceOnlyVerdictRequest,
     ) -> BoxFuture<'static, Result<EvidenceOnlyVerdict, String>> {
         Box::pin(async move {
-            // REFUTED requires verified counter-evidence (never vote counts).
             if !request.verified_counter.is_empty() && request.verified_support.is_empty() {
                 return Ok(EvidenceOnlyVerdict {
                     verdict: EvidenceVerdict::Refuted,
@@ -197,7 +178,6 @@ impl EvidenceVerifier for PolicyEvidenceVerifier {
     }
 }
 
-/// Strip brand/model names before verifier sees the pack (ADR-0037 §R4).
 #[must_use]
 pub fn build_evidence_only_request(
     claim: &ClaimNode,
@@ -231,10 +211,6 @@ pub fn build_evidence_only_request(
     }
 }
 
-// ---------------------------------------------------------------------------
-// P8 additional providers (git / test / ast stubs behind one trait)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 pub struct GitEvidenceProvider;
 #[derive(Debug, Clone, Copy)]
@@ -258,7 +234,6 @@ impl EvidenceProvider for GitEvidenceProvider {
         let claim_id = claim.id.clone();
         let independence_group = format!("ig:git:{capability}");
         Box::pin(async move {
-            // Host backends can replace this placeholder via a custom provider.
             Ok(vec![FusionEvidenceRecord {
                 id: format!("ev_git_{claim_id}_{capability}"),
                 claim_id,
@@ -342,10 +317,6 @@ impl EvidenceProvider for AstEvidenceProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P9 Budget + dynamic rounds
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationBudget {
@@ -360,7 +331,6 @@ impl InvestigationBudget {
     }
 }
 
-/// Priority ∝ importance × uncertainty × `expected_information_gain` (ordinal).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum ClaimPriority {
     Low,
@@ -402,7 +372,6 @@ pub struct ClaimRoundTrace {
     pub state_after: ClaimState,
 }
 
-/// Non-destructive JEV or verifier outage retained in the investigation report.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevUnavailableRecord {
@@ -411,7 +380,6 @@ pub struct JevUnavailableRecord {
     pub detail: String,
 }
 
-/// Terminal condition of one investigation (P0-7) — not the strategy name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TerminalReason {
@@ -440,10 +408,6 @@ impl std::fmt::Display for TerminalReason {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P10 metrics + P11 UI trace
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FusionMetrics {
@@ -459,7 +423,6 @@ pub struct FusionMetrics {
 }
 
 impl FusionMetrics {
-    /// Ratio for report display only; sub-ULP precision on counts is irrelevant.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn oracle_capture_rate(&self) -> Option<f64> {
@@ -477,13 +440,11 @@ impl FusionMetrics {
 
     #[must_use]
     pub fn fusion_regret(&self) -> i64 {
-        // Errors Fusion introduced beyond the best fixed single baseline.
         let gain = self.fusion_gain();
         if gain < 0 { -gain } else { 0 }
     }
 }
 
-/// Replayable claim trace for UI (ADR-0037 §UI Trace).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimTrace {
@@ -518,10 +479,6 @@ pub fn build_ui_trace(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dynamic investigation loop (P9 + P4–P8 glue)
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationRunReport {
@@ -535,12 +492,6 @@ pub struct InvestigationRunReport {
     pub jev_unavailable: Vec<JevUnavailableRecord>,
 }
 
-/// One claim-level dynamic loop: plan → acquire → cross-review → verify → recompute.
-/// Runs one plan step and merges its evidence (additive by default).
-///
-/// Returns the recorded outcome, any provider failure, and whether the store
-/// grew. An empty `find_sync` search is still recorded as verified evidence:
-/// absence of synchronization is itself a fact (`NEGATIVE_FINDING`).
 async fn acquire_step_evidence(
     claim: &mut ClaimNode,
     store: &mut Vec<FusionEvidenceRecord>,
@@ -555,7 +506,6 @@ async fn acquire_step_evidence(
 
     let before = store.len();
     let mut failure_reason = None;
-    // Bound from the match so every path yields an outcome (no dead default).
     let outcome = match crate::fusion_planner::execute_plan_step(providers, action, claim).await {
         Ok(incoming) => {
             let produced = !incoming.is_empty();
@@ -601,7 +551,6 @@ async fn acquire_step_evidence(
     (outcome, failure_reason, store.len() > before)
 }
 
-/// P6 blind cross review; rejected evidence is marked invalidated in place.
 async fn cross_review_and_invalidate(
     claim: &ClaimNode,
     store: &mut [FusionEvidenceRecord],
@@ -634,10 +583,6 @@ async fn cross_review_and_invalidate(
     review
 }
 
-/// P7 evidence-only verification (no votes, no model names).
-///
-/// Returns the terminal marker when the ladder settles. `Refuted` is only
-/// reachable with a verified counter (ADR-0037 hard rule).
 enum VerificationSettlement {
     Settled(&'static str, EvidenceVerdict),
     Insufficient,
@@ -806,8 +751,6 @@ pub async fn investigate_claim(
             VerificationSettlement::Insufficient => {}
         }
 
-        // A no-increment round never adds weight or stops the investigation.
-        // The planner's next source/tool/reproduction action is still meaningful.
         let _ = review.outcome;
     }
 
@@ -841,7 +784,6 @@ pub async fn investigate_claim(
     }
 }
 
-/// Convenience: plan-only helper used by hosts before spending budget.
 #[must_use]
 pub fn plan_for_claim(claim: &ClaimNode) -> InvestigationPlan {
     plan_investigation(claim, &[])
@@ -891,8 +833,6 @@ mod tests {
             },
         ))
         .expect("verdict");
-        // verified_counter alone is not enough if there is also unverified support?
-        // Policy: verified_counter && verified_support empty → Refuted.
         assert_eq!(insufficient.verdict, EvidenceVerdict::Refuted);
 
         let no_counter = futures::executor::block_on(PolicyEvidenceVerifier.verify(

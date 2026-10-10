@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 export type ErrorKind = 'connection_unavailable' | 'transport_interrupted' | 'timeout' | 'rate_limited' | 'server_transient' | 'authentication' | 'authorization' | 'request_invalid' | 'protocol_invalid' | 'integrity_invalid' | 'tls_invalid' | 'stream_incomplete' | 'empty_response' | 'cancelled' | 'authority_expired' | 'storage_unavailable'
 export type Replay = 'retry_inference' | 'replay_exact' | 'reconcile_first'
 export interface NetworkDiagnostic { readonly code: string; readonly field?: string; readonly ioKind?: string; readonly osCode?: number; readonly line?: number; readonly column?: number }

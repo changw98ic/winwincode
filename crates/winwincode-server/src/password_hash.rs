@@ -1,21 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Argon2id password hashing for the single local Owner login surface.
-//!
-//! Plaintext passwords exist only as call arguments. The stored form is the
-//! opaque PHC string produced by Argon2id, which is also the only form the
-//! `UserAccount` domain model accepts as `passwordHash`.
-
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 
 const SALT_BYTES: usize = 16;
 
-/// Hash one plaintext password into its Argon2id PHC form.
-///
-/// # Errors
-///
-/// Reports entropy or encoding failures without exposing the password.
 pub fn hash_password(password: &str) -> Result<String, ()> {
     let mut salt_material = [0_u8; SALT_BYTES];
     getrandom::fill(&mut salt_material).map_err(|_| ())?;
@@ -26,7 +13,6 @@ pub fn hash_password(password: &str) -> Result<String, ()> {
     Ok(hash.to_string())
 }
 
-/// Verify one plaintext password against its stored Argon2id PHC form.
 #[must_use]
 pub fn verify_password(password: &str, password_hash: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(password_hash) else {

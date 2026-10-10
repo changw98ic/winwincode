@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable collaboration responsibility assignments.
-//!
-//! This module owns only who is currently responsible for a `ProductSession`,
-//! Delivery, `WorkItem`, or review. Identity/RBAC and target lifecycle
-//! remain external authorities and contribute revision guards to every write.
-
 use std::{
     collections::BTreeMap,
     fmt,
@@ -39,7 +31,6 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ASSIGNMENTS_PER_SCOPE: usize = 10_000;
 const MAX_COMMIT_ATTEMPTS: usize = 32;
 
-/// Stable assignment operation failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponsibilityAssignmentErrorKind {
     InvalidRequest,
@@ -60,7 +51,6 @@ pub enum ResponsibilityAssignmentErrorKind {
     ClockUnavailable,
 }
 
-/// Secret-free assignment operation failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsibilityAssignmentError {
     kind: ResponsibilityAssignmentErrorKind,
@@ -86,21 +76,13 @@ impl fmt::Display for ResponsibilityAssignmentError {
 
 impl std::error::Error for ResponsibilityAssignmentError {}
 
-/// Trusted clock failure without environment details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponsibilityAssignmentClockError;
 
-/// Time authority used for acceptance and expiry decisions.
 pub trait ResponsibilityAssignmentClock: Send {
-    /// Returns Unix epoch milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when current time cannot be resolved.
     fn now_millis(&mut self) -> Result<u64, ResponsibilityAssignmentClockError>;
 }
 
-/// Production wall clock.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemResponsibilityAssignmentClock;
 
@@ -114,7 +96,6 @@ impl ResponsibilityAssignmentClock for SystemResponsibilityAssignmentClock {
     }
 }
 
-/// One closed collaboration responsibility.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsibilityRole {
@@ -123,7 +104,6 @@ pub enum ResponsibilityRole {
     Approver,
 }
 
-/// Review responsibility owned by collaboration rather than Delivery state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsibilityReviewKind {
@@ -131,7 +111,6 @@ pub enum ResponsibilityReviewKind {
     Delivery,
 }
 
-/// Stable business object whose responsibility is being assigned.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponsibilityTarget {
@@ -151,7 +130,6 @@ pub enum ResponsibilityTarget {
     },
 }
 
-/// Durable lifecycle of one responsibility record.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsibilityAssignmentState {
@@ -161,11 +139,9 @@ pub enum ResponsibilityAssignmentState {
     Revoked,
 }
 
-/// Deterministic identity for one target/role pair.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ResponsibilityAssignmentId(pub String);
 
-/// Current collaboration-owned assignment state.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResponsibilityAssignment {
@@ -188,8 +164,6 @@ pub struct ResponsibilityAssignment {
 }
 
 impl ResponsibilityAssignment {
-    /// Returns the lifecycle visible at a given trusted time without writing a
-    /// second derived state.
     #[must_use]
     pub fn effective_state(&self, now_millis: u64) -> ResponsibilityAssignmentState {
         if matches!(
@@ -207,7 +181,6 @@ impl ResponsibilityAssignment {
     }
 }
 
-/// Mutation requested against one assignment revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponsibilityAssignmentAction {
@@ -237,7 +210,6 @@ impl ResponsibilityAssignmentAction {
     }
 }
 
-/// Closed authorization operation passed to Identity/RBAC.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsibilityAssignmentOperation {
@@ -249,7 +221,6 @@ pub enum ResponsibilityAssignmentOperation {
     List,
 }
 
-/// Authenticated command context. Authentication material has no representation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityAssignmentContext {
     pub actor: Actor,
@@ -259,7 +230,6 @@ pub struct ResponsibilityAssignmentContext {
     pub expected_revision: u64,
 }
 
-/// One assignment mutation request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityAssignmentCommand {
     pub context: ResponsibilityAssignmentContext,
@@ -268,7 +238,6 @@ pub struct ResponsibilityAssignmentCommand {
     pub action: ResponsibilityAssignmentAction,
 }
 
-/// Read request isolated to one repository scope.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityAssignmentListRequest {
     pub actor: Actor,
@@ -280,7 +249,6 @@ pub struct ResponsibilityAssignmentListRequest {
     pub include_ended: bool,
 }
 
-/// Immutable replay-safe mutation result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResponsibilityAssignmentReceipt {
@@ -290,7 +258,6 @@ pub struct ResponsibilityAssignmentReceipt {
     pub replayed: bool,
 }
 
-/// Current principal facts resolved by Identity/RBAC.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponsibilityPrincipalAuthority {
     pub user_id: UserId,
@@ -298,7 +265,6 @@ pub struct ResponsibilityPrincipalAuthority {
     pub role_eligible: bool,
 }
 
-/// Exact authority facts consumed by one assignment command.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityCommandAuthority {
     pub actor: Actor,
@@ -318,7 +284,6 @@ pub struct ResponsibilityCommandAuthority {
     pub rbac_guard: StateRevisionGuard,
 }
 
-/// Exact current authorization for one scoped list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityListAuthority {
     pub actor: Actor,
@@ -329,7 +294,6 @@ pub struct ResponsibilityListAuthority {
     pub rbac_sha256: Sha256Digest,
 }
 
-/// Sealed current authority used by the rebuildable collaboration Inbox.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityInboxAuthority {
     pub actor: Actor,
@@ -341,7 +305,6 @@ pub struct ResponsibilityInboxAuthority {
     pub rbac_guard: StateRevisionGuard,
 }
 
-/// Current active assignment cut plus the exact RBAC and catalog guards.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsibilityInboxSnapshot {
     pub assignments: Vec<ResponsibilityAssignment>,
@@ -350,7 +313,6 @@ pub struct ResponsibilityInboxSnapshot {
     pub state_guards: Vec<StateRevisionGuard>,
 }
 
-/// Read-only request offered to the composite Identity/RBAC/target authority.
 pub struct ResponsibilityAuthorityRequest<'request> {
     command: &'request ResponsibilityAssignmentCommand,
     current: Option<&'request ResponsibilityAssignment>,
@@ -385,41 +347,23 @@ impl<'request> ResponsibilityAuthorityRequest<'request> {
     }
 }
 
-/// Trusted authority failure. Denials remain distinct from source unavailability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponsibilityAuthorityError {
     Denied,
     Unavailable,
 }
 
-/// Composite read boundary over current Identity/RBAC and
-/// `ProductSession`/Delivery facts.
 pub trait ResponsibilityAuthorityPort: Send {
-    /// Resolves exact current command authority and state guards.
-    ///
-    /// # Errors
-    ///
-    /// Returns denial or source unavailability without assignment state writes.
     fn command_authority(
         &mut self,
         request: ResponsibilityAuthorityRequest<'_>,
     ) -> Result<ResponsibilityCommandAuthority, ResponsibilityAuthorityError>;
 
-    /// Resolves current permission for one scoped list.
-    ///
-    /// # Errors
-    ///
-    /// Returns denial or source unavailability before assignment data is read.
     fn list_authority(
         &mut self,
         request: &ResponsibilityAssignmentListRequest,
     ) -> Result<ResponsibilityListAuthority, ResponsibilityAuthorityError>;
 
-    /// Resolves least-privilege collaboration-read authority and its exact guard.
-    ///
-    /// # Errors
-    ///
-    /// Returns denial or source unavailability before assignment data is read.
     fn inbox_authority(
         &mut self,
         _request: &ResponsibilityAssignmentListRequest,
@@ -428,7 +372,6 @@ pub trait ResponsibilityAuthorityPort: Send {
     }
 }
 
-/// Durable assignment application service.
 pub struct ResponsibilityAssignmentService {
     inner: Mutex<ResponsibilityAssignmentInner>,
 }
@@ -482,12 +425,6 @@ impl ResponsibilityAssignmentService {
         }
     }
 
-    /// Applies one replay-safe responsibility mutation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid, unauthorized, stale, cross-tenant, conflicting,
-    /// separated-duty, expired, or unavailable authority before state changes.
     pub fn apply(
         &self,
         command: &ResponsibilityAssignmentCommand,
@@ -498,12 +435,6 @@ impl ResponsibilityAssignmentService {
             .apply(command)
     }
 
-    /// Lists one currently authorized repository scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/unauthorized scope, corrupt state, unavailable time, or
-    /// authority/storage failure.
     pub fn list(
         &self,
         request: &ResponsibilityAssignmentListRequest,
@@ -514,15 +445,6 @@ impl ResponsibilityAssignmentService {
             .list(request)
     }
 
-    /// Reads current active assignments under collaboration-read RBAC authority.
-    ///
-    /// The returned guards can be attached to a claim or annotation commit, so a
-    /// concurrent membership, role or assignment change rejects that write.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/unauthorized scope, changed authority, corrupt state,
-    /// unavailable time, or storage failure.
     pub fn inbox_snapshot(
         &self,
         request: &ResponsibilityAssignmentListRequest,

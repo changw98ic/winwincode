@@ -2574,8 +2574,6 @@ function rustSharedDefinitionNamesForExecutionPort(context) {
       .map(entry => entry.name),
   )
   const pending = [...context.registry.values()].filter(isExecutionPortDefinition)
-  // Public engineering-runtime objects are database-neutral domain values. Keep
-  // their single Rust ownership in winwincode-domain; API only references them.
   for (const name of [
     'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'Snapshot', 'VerificationSession', 'VerifierResult', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
     'WorkItemState', 'WorkRunState', 'WorkContract', 'WorkItem', 'WorkRun',

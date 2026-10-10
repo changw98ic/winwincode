@@ -70,8 +70,6 @@ impl ReplayStore for FakeStore {
 
     fn load(&mut self, stream: &ReplayStreamKey) -> Result<Option<ReplaySnapshot>, Self::Error> {
         self.loads += 1;
-        // This fake intentionally keeps rows in a cloneable durable map; a real
-        // adapter must implement the same operations in one SQLite transaction.
         Ok(self.durable.0.get(stream).cloned())
     }
 
@@ -279,8 +277,6 @@ fn temporary_replay_path(stream_label: &str) -> PathBuf {
     ))
 }
 
-// The tests exercise only the public replay seam. The fake store is cloneable
-// to model a process restart while keeping the same durable rows.
 #[test]
 fn disconnect_then_resume_replays_only_events_after_the_highest_acknowledged_sequence() {
     let machine = ReplayStateMachine::new();

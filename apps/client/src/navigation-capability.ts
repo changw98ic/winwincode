@@ -1,35 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { AuthSessionViewModelState } from './auth-view-model.js'
 import { CLIENT_SURFACES, type ClientSurface } from './client-surface.js'
 import type { Scope } from './generated/contracts.js'
 
-/**
- * Read-only navigation capability projection.
- *
- * One of four user-visible states, derived from the current AuthSession,
- * its authorized Scopes, and optional read-only query/deployment facts:
- * - `hidden`: the deployment or session shape can never use the entry.
- * - `disabled`: the entry exists for this deployment but the current
- *   identity is known to lack permission.
- * - `read-only`: the identity may enter but mutation remains unavailable.
- * - `available`: the identity may enter; page and Server authorization
- *   still decide what is readable or writable inside.
- *
- * This module owns no business state. It never mutates the session and
- * never replaces Server-side authorization; hiding an entry is an
- * experience decision, not an access decision.
- */
 export type NavigationCapability = 'hidden' | 'disabled' | 'read-only' | 'available'
 
 export type NavigationDeployment = 'unknown' | 'personal' | 'enterprise'
 
 export type NavigationSurfaceAccess = 'denied' | 'read-only' | 'write'
 
-/**
- * Optional read-only facts from deployment configuration or Control Plane query projections.
- * Missing facts never grant access; Scope remains the minimum route requirement.
- */
 export interface NavigationCapabilityFacts {
   readonly deployment?: Exclude<NavigationDeployment, 'unknown'>
   readonly surfaceAccess?: Readonly<Partial<Record<ClientSurface['id'], NavigationSurfaceAccess>>>
@@ -54,24 +32,12 @@ export interface NavigationCapabilityProjection {
   readonly surfaces: readonly SurfaceCapability[]
 }
 
-/**
- * Deployment-management queries require an organization-hierarchy Scope.
- * Those scope kinds remain protocol keys. WinWinCode Community product identity
- * is LocalDefaultScope; the community client exposes no organization/member
- * management surface for hierarchy values.
- */
 function hasHierarchyScope(scopes: readonly Scope[]): boolean {
   return scopes.some(scope => scope.kind === 'organization'
     || scope.kind === 'workspace'
     || scope.kind === 'project')
 }
 
-/**
- * Project the current browser session onto the canonical surface list.
- * Scope is always the minimum route requirement. Optional facts refine a
- * scoped entry into denied, read-only, or writable presentation without
- * becoming a second authorization boundary.
- */
 export function projectionForSession(
   state: Pick<AuthSessionViewModelState, 'status' | 'session'>,
   facts: Readonly<NavigationCapabilityFacts> = {},
@@ -130,7 +96,6 @@ function reasonForSurface(
   return 'authorized-scope'
 }
 
-/** Resolve the surface a hash URL will enter and its capability together. */
 export function surfaceCapabilityForHash(
   hash: string,
   state: Pick<AuthSessionViewModelState, 'status' | 'session'>,

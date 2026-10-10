@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 use std::{
     io::{Read, Write},
@@ -80,7 +78,6 @@ impl LocalProxy {
                     .unwrap_or(0);
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).unwrap();
-                // Only the request line is retained. Synthetic grant bytes remain in memory.
                 let index = {
                     let mut requests = captured.lock().unwrap();
                     requests.push(request.lines().next().unwrap().to_owned());

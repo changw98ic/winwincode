@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic recovery planning for browser reconnects, Control Plane
-//! restarts, and Worker replacement.
-//!
-//! This module plans exact mutations from the existing Worker-slot and
-//! runtime-replay authority types. The caller persists
-//! [`RecoveryRouterSnapshot`] with its recovery transaction and then dispatches
-//! the returned replay command.
-
 use std::collections::HashMap;
 use std::fmt;
 
@@ -30,7 +20,6 @@ use crate::RuntimeReplayRequestCommand;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Lease, Worker process, `WorkerSession`, and `CodexThread` authority for one attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryExecutionAuthority {
     pub slot: WorkerSlotAuthority,
@@ -38,16 +27,12 @@ pub struct RecoveryExecutionAuthority {
     pub expires_at: Instant,
 }
 
-/// Whether the Codex thread has state that a replacement Worker can resume.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ThreadRecoveryCapability {
-    /// The checkpoint is durable and the same `CodexThread` may continue.
     TransferableCheckpoint { checkpoint_sha256: Sha256Digest },
-    /// State exists only inside the old process; a new thread is required.
     ProcessLocalOnly,
 }
 
-/// Persisted facts required to recover one active product execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecoveryState {
     pub product_session_id: ProductSessionId,
@@ -62,7 +47,6 @@ pub struct SessionRecoveryState {
     pub thread_capability: ThreadRecoveryCapability,
 }
 
-/// Replacement lease and command metadata supplied after scheduler placement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecoveryRequest {
     pub request_id: RequestId,
@@ -70,29 +54,24 @@ pub struct SessionRecoveryRequest {
     pub expected_revision: u64,
     pub replacement: RecoveryExecutionAuthority,
     pub recovered_at: Instant,
-    /// Required only for a transferable-thread replay request.
     pub replay_message_id: Option<ExecutionMessageId>,
     pub max_replay_events: u64,
 }
 
-/// Slot close/open pair applied for every replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerReplacementPlan {
     pub close_old_slot: WorkerSlotCloseRequest,
     pub open_replacement_slot: WorkerSlotOpenRequest,
 }
 
-/// Exact recovery action selected from the persisted thread capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionRecoveryPlan {
-    /// Continue the same durable thread and replay after the confirmed cursor.
     ResumeTransferableThread {
         worker: WorkerReplacementPlan,
         checkpoint_sha256: Sha256Digest,
         resume_after_sequence: u64,
         runtime_replay: RuntimeReplayRequestCommand,
     },
-    /// End the non-transferable thread and start an explicit fresh attempt.
     StartFreshAttempt {
         worker: WorkerReplacementPlan,
         ended_codex_thread_id: CodexThreadId,
@@ -100,14 +79,12 @@ pub enum SessionRecoveryPlan {
     },
 }
 
-/// Whether a recovery request was newly applied or was an exact replay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryWriteStatus {
     Applied,
     Duplicate,
 }
 
-/// Complete deterministic output of one recovery request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecoveryReceipt {
     pub status: RecoveryWriteStatus,
@@ -124,14 +101,12 @@ struct StoredRecoveryReceipt {
     receipt: SessionRecoveryReceipt,
 }
 
-/// Cloneable state persisted by the Control Plane before executing a plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryRouterSnapshot {
     sessions: Vec<SessionRecoveryState>,
     receipts: Vec<StoredRecoveryReceipt>,
 }
 
-/// Recovery planning failure. No slot or replay command is emitted on error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryRoutingError {
     InvalidField(&'static str),
@@ -194,7 +169,6 @@ impl fmt::Display for RecoveryRoutingError {
 
 impl std::error::Error for RecoveryRoutingError {}
 
-/// Authority failure returned by the shared runtime replay state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryReplayAuthorityError {
     OldWorkerFenced,
@@ -202,7 +176,6 @@ pub enum RecoveryReplayAuthorityError {
     StreamMismatch,
 }
 
-/// Exact runtime frame submitted after reconnect or Worker replacement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryRuntimeEvent {
     pub product_session_id: ProductSessionId,
@@ -210,8 +183,6 @@ pub struct RecoveryRuntimeEvent {
     pub frame: ReplayFrame,
 }
 
-/// Browser subscription identity. Authorization epoch prevents a cursor from
-/// crossing a login/session authorization change.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserRecoveryStream {
     pub product_session_id: ProductSessionId,
@@ -219,7 +190,6 @@ pub struct BrowserRecoveryStream {
     pub authorization_epoch: u64,
 }
 
-/// Persisted browser cursor used for reconnect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserReconnectRequest {
     pub stream: BrowserRecoveryStream,
@@ -227,15 +197,12 @@ pub struct BrowserReconnectRequest {
     pub max_events: usize,
 }
 
-/// Browser cursor authority failure returned through [`ReplayError`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrowserReplayAuthorityError {
     UnknownProductSession,
     ForeignStream,
 }
 
-/// Recovery aggregate. Persist [`snapshot`](Self::snapshot) atomically with an
-/// applied receipt, then execute the returned frozen plan through existing ports.
 #[derive(Default)]
 pub struct RecoveryRouter {
     sessions: HashMap<ProductSessionId, SessionRecoveryState>,
@@ -244,7 +211,6 @@ pub struct RecoveryRouter {
 
 #[allow(clippy::missing_errors_doc)]
 impl RecoveryRouter {
-    /// Registers one persisted active execution.
     pub fn register_session(
         &mut self,
         state: SessionRecoveryState,
@@ -258,7 +224,6 @@ impl RecoveryRouter {
         Ok(())
     }
 
-    /// Restores exactly the previously persisted sessions and receipts.
     pub fn restore(snapshot: RecoveryRouterSnapshot) -> Result<Self, RecoveryRoutingError> {
         let mut router = Self::default();
         for state in snapshot.sessions {
@@ -277,7 +242,6 @@ impl RecoveryRouter {
         Ok(router)
     }
 
-    /// Returns the complete durable recovery state in deterministic order.
     #[must_use]
     pub fn snapshot(&self) -> RecoveryRouterSnapshot {
         let mut sessions = self.sessions.values().cloned().collect::<Vec<_>>();
@@ -291,9 +255,6 @@ impl RecoveryRouter {
         RecoveryRouterSnapshot { sessions, receipts }
     }
 
-    /// Selects thread continuation or a fresh attempt from persisted capability.
-    /// The current authority changes before the plan is returned, fencing the
-    /// old Worker from all later runtime-event writes.
     pub fn recover_session(
         &mut self,
         request: &SessionRecoveryRequest,
@@ -390,8 +351,6 @@ impl RecoveryRouter {
         Ok(receipt)
     }
 
-    /// Accepts one runtime frame through the shared replay state machine and
-    /// the router's current lease/fencing authority.
     pub fn accept_runtime_event<S>(
         &self,
         store: &mut S,
@@ -422,7 +381,6 @@ impl RecoveryRouter {
         )
     }
 
-    /// Replays persisted browser events strictly after the confirmed cursor.
     pub fn resume_browser<S>(
         &self,
         store: &mut S,
@@ -458,7 +416,6 @@ impl RecoveryRouter {
     }
 }
 
-/// Stable public event stream key used by the browser reconnect store.
 #[must_use]
 pub fn browser_replay_stream_key(stream: &BrowserRecoveryStream) -> ReplayStreamKey {
     ReplayStreamKey::new(format!(

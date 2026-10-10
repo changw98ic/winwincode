@@ -19,8 +19,6 @@ const diagnosticPaths = new Set(['$', '$.type', '$.index', '$.id', '$.message', 
     ['', '.input_tokens', '.output_tokens', '.cache_read_input_tokens', '.cache_creation_input_tokens',
       '.service_tier', '.server_tool_use'].map(field => `${prefix}${field}`))])
 
-// HTTP metadata is retained by the trusted adapter after its credential leak
-// gate. Keep only typed fields and fixed parser locations in public evidence.
 export function retainedProviderFailureMetadata(metadata) {
   const retained = {}
   if (Number.isInteger(metadata?.status) && metadata.status >= 100 && metadata.status <= 599) {
@@ -40,7 +38,6 @@ export function retainedProviderFailureMetadata(metadata) {
   return retained
 }
 
-// Keep only authority-owned codes; upstream text is private and may contain credentials.
 export function retainedModelFailure(error, { canonical = false, metadata } = {}) {
   let code = 'MODEL_STREAM_FAILED'
   if (canonical) {
@@ -61,12 +58,9 @@ export function deviceFailureWithModelCauses(failure, evidence, jobIds) {
   const causes = evidence.calls.filter(call => jobs.has(call.jobId) && call.failure)
     .map(call => ({ exchangeId: call.exchangeId, jobId: call.jobId, ...call.failure }))
   if (causes.length === 0) return failure
-  // A call may have recovered before an unrelated terminal error. Only the
-  // authority-owned terminal establishes the final code; history is context.
   return { ...failure, observedProviderFailures: causes }
 }
 
-// Whitelist persisted diagnostics before exporting them outside Device storage.
 const networkKinds = new Set(['connection_unavailable', 'transport_interrupted', 'timeout', 'rate_limited',
   'server_transient', 'authentication', 'authorization', 'request_invalid', 'protocol_invalid',
   'integrity_invalid', 'tls_invalid', 'stream_incomplete', 'empty_response', 'cancelled', 'authority_expired', 'storage_unavailable'])
@@ -117,8 +111,6 @@ export function retainedRequestFailure(error) {
     seen.add(current)
     const fact = retainedNetworkFailure(current.networkFailure ?? current.failure)
     const factIsPrecise = fact?.diagnostic !== undefined || fact?.httpStatus != null
-    // A generic domain wrapper must not hide its exact request cause. The
-    // first precise current failure remains authoritative over older causes.
     if (fact && (network === null || (!precise && factIsPrecise))) {
       network = fact
       precise = factIsPrecise
@@ -134,8 +126,6 @@ export function retainedRequestFailure(error) {
     }
     current = current.cause
   }
-  // Socket errors can carry their classification in a nested error code.
-  // Attempt history is retained separately and never establishes the terminal.
   if (!precise && (network || attempts)) {
     const classified = retainedNetworkFailure(classifyError(error))
     if (network === null || classified?.diagnostic?.code !== 'transport_other') network = classified

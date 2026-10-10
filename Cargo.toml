@@ -71,8 +71,6 @@ http = "=1.4.0"
 httpdate = "=1.0.3"
 jiff = "=0.2.23"
 quick-xml = "=0.41.0"
-# Keep rusqlite and Codex/sqlx on the workspace's single libsqlite3-sys 0.37.x
-# native link. The path source below backports the upstream named-SAVEPOINT fix.
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
 rcgen = "=0.14.7"
 rustls = "=0.23.45"
@@ -121,8 +119,6 @@ codegen-units = 1
 lto = "thin"
 strip = "symbols"
 
-# Strip the development helper. Production composition rebuilds it in release
-# mode when it exceeds the authenticated helper's 64 MiB image boundary.
 [profile.dev.package.winwincode-kernel-helper]
 strip = "symbols"
 

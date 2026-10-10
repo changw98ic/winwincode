@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Community `SQLite` integration authority, receipts, queues, and rate limits.
-
 mod slack_rate_limit;
 
 pub use slack_rate_limit::SlackRateLimitGate;
@@ -130,19 +126,12 @@ CREATE TABLE IF NOT EXISTS integration_audit_outbox (
 );
 ";
 
-/// SQLite-backed connector authority, receipts, command outbox, retry queue,
-/// and secret-safe audit outbox.
 pub struct IntegrationStorage {
     database_path: PathBuf,
     connection: Connection,
 }
 
 impl IntegrationStorage {
-    /// Opens or creates the integration database under one data directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable storage error for directory, database, or schema failure.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         let data_directory = data_directory.as_ref();
         fs::create_dir_all(data_directory).map_err(|_| storage_error())?;
@@ -165,11 +154,6 @@ impl IntegrationStorage {
         &self.database_path
     }
 
-    /// Registers one connector or exactly replays the same authority facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed connector reuse, scope conflict, or storage failure.
     pub fn register(
         &mut self,
         registration: &ConnectorRegistration,
@@ -224,11 +208,6 @@ impl IntegrationStorage {
         Ok(ConnectorRegistrationReceipt::new(authority, false))
     }
 
-    /// Loads the exact scoped connector authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, foreign scope, or corrupt authority.
     pub fn authority(
         &self,
         scope: &IntegrationScope,
@@ -242,11 +221,6 @@ impl IntegrationStorage {
         Ok(authority)
     }
 
-    /// Atomically revokes one connector credential authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, stale revision, invalid time, or storage failure.
     pub fn revoke_credential(
         &mut self,
         scope: &IntegrationScope,
@@ -306,13 +280,6 @@ impl IntegrationStorage {
         Ok(authority)
     }
 
-    /// Persists one authenticated normalized event and, only when current,
-    /// one formal-command dispatch in the same transaction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, changed event reuse, scope mismatch, revoked
-    /// credentials, or storage failure.
     pub fn accept_inbound(
         &mut self,
         expected_authority: &ConnectorAuthority,
@@ -417,11 +384,6 @@ impl IntegrationStorage {
         Ok(receipt)
     }
 
-    /// Scans a bounded page of accepted command dispatches.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, invalid cursor/limit, corrupt data, or storage failure.
     pub fn inbound_dispatches(
         &self,
         scope: &IntegrationScope,
@@ -481,12 +443,6 @@ impl IntegrationStorage {
         .collect()
     }
 
-    /// Enqueues or exactly replays one outbound operation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked credentials, changed operation-key reuse, stale scope,
-    /// or storage failure.
     pub fn enqueue_outbound(
         &mut self,
         request: &OutboundRequest,
@@ -549,12 +505,6 @@ impl IntegrationStorage {
         Ok(OutboundEnqueueReceipt::new(operation, false))
     }
 
-    /// Claims the next due request for one active connector. Expired leases
-    /// retain the same operation key and payload on the next attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked/foreign connector, invalid lease, corrupt state, or storage failure.
     pub fn claim_due(
         &mut self,
         scope: &IntegrationScope,
@@ -622,11 +572,6 @@ impl IntegrationStorage {
         Ok(Some(claim))
     }
 
-    /// Records exact successful delivery or replays the same attempt receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed outcome reuse, stale claims, scope mismatch, or storage failure.
     pub fn record_success(
         &mut self,
         scope: &IntegrationScope,
@@ -695,11 +640,6 @@ impl IntegrationStorage {
         Ok(receipt)
     }
 
-    /// Records an exact retry/permanent/revoked failure or replays that attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed failure reuse, stale claims, scope mismatch, or storage failure.
     pub fn record_failure(
         &mut self,
         scope: &IntegrationScope,
@@ -809,11 +749,6 @@ impl IntegrationStorage {
         Ok(result)
     }
 
-    /// Reads current outbound state within one scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, missing operation, corrupt state, or storage failure.
     pub fn outbound_operation(
         &self,
         scope: &IntegrationScope,
@@ -825,11 +760,6 @@ impl IntegrationStorage {
             .ok_or_else(not_found_error)
     }
 
-    /// Scans a bounded secret-safe audit-outbox page for one scoped connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, invalid cursor/limit, corrupt facts, or storage failure.
     pub fn audit_facts(
         &self,
         scope: &IntegrationScope,
@@ -1375,7 +1305,6 @@ fn load_attempt_failure(
     ))
 }
 
-// Audit attempt numbers stay monotone. Proven offline attempts have their own budget.
 fn verify_network_failure_replay(
     transaction: &Transaction<'_>,
     claim: &OutboundClaim,
@@ -1455,8 +1384,6 @@ fn outbound_retry_at(
         claim.attempt(),
     )?;
     let delay = if let Some(facts) = failure.network_failure() {
-        // The next delivery first performs marker reconciliation. It may issue a
-        // new create only when the persisted unknown-write fence permits it.
         match winwincode_network::decide(
             facts,
             winwincode_network::Replay::ReplayExact,

@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Pure, replayable reducer for the canonical `DebugProbe` hypothesis Ledger.
-//!
-//! D3 evidence projections stay neutral. The model explicitly supplies an
-//! evidence polarity and proposed state/confidence, while this module owns all
-//! authority, provenance, transition, monotonicity, digest and replay checks.
-//! Stale evidence is rejected before an event is built; callers may retain it
-//! in a separate audit journal, but it never advances this Ledger chain.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -41,7 +31,6 @@ const RECIPE_STEP_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-probe.reproduction-s
 const RECIPE_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-probe.reproduction-recipe.v1\0";
 const QUESTION_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-probe.question.v1\0";
 
-/// Stable failure categories exposed without echoing model or Artifact text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DebugHypothesisLedgerErrorKind {
     InvalidInput,
@@ -56,7 +45,6 @@ pub enum DebugHypothesisLedgerErrorKind {
     Serialization,
 }
 
-/// One bounded, secret-safe Ledger failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DebugHypothesisLedgerError {
     kind: DebugHypothesisLedgerErrorKind,
@@ -64,13 +52,11 @@ pub struct DebugHypothesisLedgerError {
 }
 
 impl DebugHypothesisLedgerError {
-    /// Returns the stable failure category.
     #[must_use]
     pub const fn kind(&self) -> DebugHypothesisLedgerErrorKind {
         self.kind
     }
 
-    /// Returns a bounded message that never includes model or Artifact text.
     #[must_use]
     pub const fn message(&self) -> &'static str {
         self.message
@@ -85,26 +71,22 @@ impl fmt::Display for DebugHypothesisLedgerError {
 
 impl std::error::Error for DebugHypothesisLedgerError {}
 
-/// A terminal round receipt and its exact D3 projections, sealed by the host.
 #[derive(Clone, Debug)]
 pub struct ValidatedDebugHypothesisRoundEvidence {
     cut: DebugHypothesisRoundEvidence,
 }
 
 impl ValidatedDebugHypothesisRoundEvidence {
-    /// Returns the validated terminal round receipt.
     #[must_use]
     pub const fn receipt(&self) -> &ProbeRoundReceipt {
         &self.cut.receipt
     }
 
-    /// Returns the authority-bound durable receipt reference.
     #[must_use]
     pub const fn receipt_reference(&self) -> &ProbeRoundReceiptReference {
         &self.cut.source_round_receipt
     }
 
-    /// Returns the canonical D3 evidence cut retained for replay.
     #[must_use]
     pub const fn cut(&self) -> &DebugHypothesisRoundEvidence {
         &self.cut
@@ -131,36 +113,30 @@ impl ValidatedDebugHypothesisRoundEvidence {
     }
 }
 
-/// A Ledger projection that can only be created by initialization or replay.
 #[derive(Clone, Debug)]
 pub struct ValidatedDebugHypothesisLedger {
     ledger: DebugHypothesisLedger,
 }
 
 impl ValidatedDebugHypothesisLedger {
-    /// Returns the current canonical Ledger projection.
     #[must_use]
     pub const fn ledger(&self) -> &DebugHypothesisLedger {
         &self.ledger
     }
 }
 
-/// One applied, hash-chained Ledger event.
 #[derive(Clone, Debug)]
 pub struct ValidatedDebugHypothesisLedgerEvent {
     event: DebugHypothesisLedgerEvent,
 }
 
 impl ValidatedDebugHypothesisLedgerEvent {
-    /// Returns the canonical hash-chained event.
     #[must_use]
     pub const fn event(&self) -> &DebugHypothesisLedgerEvent {
         &self.event
     }
 }
 
-/// Result of a current-round update. A duplicate returns the original event
-/// and leaves all reducer state unchanged.
 #[derive(Clone, Debug)]
 pub enum DebugHypothesisLedgerApplyOutcome {
     Applied(ValidatedDebugHypothesisLedgerEvent),
@@ -168,7 +144,6 @@ pub enum DebugHypothesisLedgerApplyOutcome {
 }
 
 impl DebugHypothesisLedgerApplyOutcome {
-    /// Returns the original or newly applied canonical event.
     #[must_use]
     pub const fn event(&self) -> &ValidatedDebugHypothesisLedgerEvent {
         match self {
@@ -176,15 +151,12 @@ impl DebugHypothesisLedgerApplyOutcome {
         }
     }
 
-    /// Reports whether the exact receipt and request were already applied.
     #[must_use]
     pub const fn is_duplicate(&self) -> bool {
         matches!(self, Self::Duplicate(_))
     }
 }
 
-/// Stateful pure reducer. Persistence remains caller-owned; recovery replays
-/// the caller's canonical event bytes through [`Self::replay`].
 #[derive(Clone, Debug)]
 pub struct DebugHypothesisLedgerReducer {
     ledger: ValidatedDebugHypothesisLedger,
@@ -194,16 +166,6 @@ pub struct DebugHypothesisLedgerReducer {
 }
 
 impl DebugHypothesisLedgerReducer {
-    /// Creates the only evidence-free event allowed by the contract.
-    ///
-    /// Every seed is forced to Active/0 with empty evidence. Confirmed or
-    /// rejected state and non-zero confidence therefore first become possible
-    /// only through an exact current-round update.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error when the seed authority, identity, digest,
-    /// ordering, bounds, or evidence-free state is not canonical.
     pub fn initialize(
         mut seed: DebugHypothesisLedgerSeed,
     ) -> Result<Self, DebugHypothesisLedgerError> {
@@ -294,13 +256,6 @@ impl DebugHypothesisLedgerReducer {
         })
     }
 
-    /// Rebuilds a reducer from canonical applied facts. Stale audit records are
-    /// not accepted by this API because they are outside the current chain.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error when an event, evidence cut, sequence, digest,
-    /// or replayed projection is missing or non-canonical.
     pub fn replay(
         events: &[DebugHypothesisLedgerEvent],
         round_evidence: &[ValidatedDebugHypothesisRoundEvidence],
@@ -339,16 +294,6 @@ impl DebugHypothesisLedgerReducer {
         Ok(reducer)
     }
 
-    /// Applies one model-proposed update against exact current-round evidence.
-    ///
-    /// The expected authority must come from the caller's Prepared operation
-    /// journal and is checked again at commit. A mismatch returns
-    /// `StaleAuthority` before any reducer field is changed.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error when authority, replay identity, current
-    /// evidence, a transition, a digest, or a collection bound is invalid.
     pub fn apply_round(
         &mut self,
         mut update: DebugHypothesisLedgerUpdate,
@@ -490,13 +435,11 @@ impl DebugHypothesisLedgerReducer {
         Ok(DebugHypothesisLedgerApplyOutcome::Applied(event))
     }
 
-    /// Returns the current validated Ledger projection.
     #[must_use]
     pub const fn ledger(&self) -> &ValidatedDebugHypothesisLedger {
         &self.ledger
     }
 
-    /// Returns every canonical current-chain event in sequence order.
     #[must_use]
     pub fn events(&self) -> &[ValidatedDebugHypothesisLedgerEvent] {
         &self.events
@@ -532,12 +475,6 @@ fn round_event_from_update(
     }
 }
 
-/// Seals one terminal round and the exact D3 projections used by the model.
-///
-/// # Errors
-///
-/// Returns a bounded error when the receipt, Artifact binding, projection
-/// coverage, candidate derivation, authority, or semantic digest is invalid.
 pub fn seal_debug_hypothesis_round_evidence(
     plan: &ValidatedDebugProbePlan,
     receipt: &ProbeRoundReceipt,
@@ -633,12 +570,6 @@ pub fn seal_debug_hypothesis_round_evidence(
     Ok(ValidatedDebugHypothesisRoundEvidence { cut })
 }
 
-/// Returns the exact canonical bytes persisted with a Prepared context.
-///
-/// # Panics
-///
-/// Generated wire values contain no map keys or custom serializers, so JSON
-/// serialization is infallible. A panic indicates a generated-contract bug.
 #[must_use]
 pub fn canonical_debug_hypothesis_round_evidence_bytes(
     evidence: &ValidatedDebugHypothesisRoundEvidence,
@@ -647,13 +578,6 @@ pub fn canonical_debug_hypothesis_round_evidence_bytes(
         .expect("generated hypothesis round evidence serialization is infallible")
 }
 
-/// Reopens one durable current-round evidence cut without rerunning a probe or
-/// D3 normalizer. The exact sealed plan is required to revalidate its receipt.
-///
-/// # Errors
-///
-/// Returns a bounded error when bytes are malformed or non-canonical, the
-/// Prepared digest differs, or any receipt/projection invariant fails.
 pub fn reopen_debug_hypothesis_round_evidence(
     bytes: &[u8],
     plan: &ValidatedDebugProbePlan,
@@ -676,12 +600,6 @@ pub fn reopen_debug_hypothesis_round_evidence(
     Ok(ValidatedDebugHypothesisRoundEvidence { cut })
 }
 
-/// Derives the semantic digest of a durable evidence cut, excluding only its
-/// own `evidenceCutDigest` field.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated field cannot be encoded.
 pub fn derive_debug_hypothesis_round_evidence_digest(
     cut: &DebugHypothesisRoundEvidence,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -694,11 +612,6 @@ pub fn derive_debug_hypothesis_round_evidence_digest(
     Ok(digest.finish())
 }
 
-/// Returns the exact generated JSON bytes used by the receipt Artifact.
-///
-/// # Errors
-///
-/// Returns a serialization error if the generated receipt cannot be encoded.
 pub fn canonical_probe_round_receipt_bytes(
     receipt: &ProbeRoundReceipt,
 ) -> Result<Vec<u8>, DebugHypothesisLedgerError> {
@@ -706,11 +619,6 @@ pub fn canonical_probe_round_receipt_bytes(
         .map_err(|_| serialization("Probe round receipt serialization failed"))
 }
 
-/// Derives the semantic digest for one validated terminal round receipt.
-///
-/// # Errors
-///
-/// Returns a serialization error if the generated receipt cannot be encoded.
 pub fn derive_probe_round_receipt_digest(
     receipt: &ProbeRoundReceipt,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -719,13 +627,6 @@ pub fn derive_probe_round_receipt_digest(
     Ok(digest.finish())
 }
 
-/// Derives the canonical projection digest. `ledgerDigest` and
-/// `lastEventDigest` are excluded to avoid a circular event/snapshot hash.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated projection field cannot be
-/// encoded.
 pub fn derive_debug_hypothesis_ledger_digest(
     ledger: &DebugHypothesisLedger,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -746,11 +647,6 @@ pub fn derive_debug_hypothesis_ledger_digest(
     Ok(digest.finish())
 }
 
-/// Derives the canonical applied-event digest, excluding only `eventDigest`.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated event field cannot be encoded.
 pub fn derive_debug_hypothesis_ledger_event_digest(
     event: &DebugHypothesisLedgerEvent,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -778,23 +674,11 @@ pub fn derive_debug_hypothesis_ledger_event_digest(
     Ok(digest.finish())
 }
 
-/// Returns the exact canonical JSON bytes of a validated Ledger projection.
-///
-/// # Panics
-///
-/// Generated wire values contain no map keys or custom serializers, so JSON
-/// serialization is infallible. A panic indicates a generated-contract bug.
 #[must_use]
 pub fn canonical_debug_hypothesis_ledger_bytes(ledger: &ValidatedDebugHypothesisLedger) -> Vec<u8> {
     serde_json::to_vec(ledger.ledger()).expect("generated Ledger serialization is infallible")
 }
 
-/// Returns the exact canonical JSON bytes of a validated Ledger event.
-///
-/// # Panics
-///
-/// Generated wire values contain no map keys or custom serializers, so JSON
-/// serialization is infallible. A panic indicates a generated-contract bug.
 #[must_use]
 pub fn canonical_debug_hypothesis_ledger_event_bytes(
     event: &ValidatedDebugHypothesisLedgerEvent,
@@ -802,13 +686,6 @@ pub fn canonical_debug_hypothesis_ledger_event_bytes(
     serde_json::to_vec(event.event()).expect("generated Ledger event serialization is infallible")
 }
 
-/// Decodes exact canonical bytes for later replay. Semantic validation still
-/// occurs only when the event is passed to [`DebugHypothesisLedgerReducer::replay`].
-///
-/// # Errors
-///
-/// Returns a bounded error when bytes are malformed or not the one canonical
-/// JSON encoding of the event.
 pub fn decode_canonical_debug_hypothesis_ledger_event(
     bytes: &[u8],
 ) -> Result<DebugHypothesisLedgerEvent, DebugHypothesisLedgerError> {
@@ -822,11 +699,6 @@ pub fn decode_canonical_debug_hypothesis_ledger_event(
     Ok(event)
 }
 
-/// Derives a content digest for one confirmed fact.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated fact field cannot be encoded.
 pub fn derive_debug_confirmed_fact_digest(
     fact: &DebugConfirmedFact,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -839,11 +711,6 @@ pub fn derive_debug_confirmed_fact_digest(
     Ok(digest.finish())
 }
 
-/// Derives a content digest for one reproduction step.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated step field cannot be encoded.
 pub fn derive_debug_reproduction_recipe_step_digest(
     step: &DebugReproductionRecipeStep,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -853,11 +720,6 @@ pub fn derive_debug_reproduction_recipe_step_digest(
     Ok(digest.finish())
 }
 
-/// Derives a content digest for one ordered reproduction recipe.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated recipe field cannot be encoded.
 pub fn derive_debug_reproduction_recipe_digest(
     recipe: &DebugReproductionRecipe,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {
@@ -870,11 +732,6 @@ pub fn derive_debug_reproduction_recipe_digest(
     Ok(digest.finish())
 }
 
-/// Derives a content digest for one unresolved question.
-///
-/// # Errors
-///
-/// Returns a serialization error if a generated question cannot be encoded.
 pub fn derive_debug_unresolved_question_digest(
     question: &DebugUnresolvedQuestion,
 ) -> Result<Sha256Digest, DebugHypothesisLedgerError> {

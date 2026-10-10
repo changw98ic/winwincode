@@ -10,8 +10,6 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [features]
-# Exposes deterministic trusted-authority fixture builders only to Rust tests.
-# The production Control Plane keeps Delivery command facts opaque by default.
 test-support = ["winwincode-publication/test-support"]
 
 [dependencies]

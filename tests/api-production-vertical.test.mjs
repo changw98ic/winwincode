@@ -14,19 +14,6 @@ import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
 import { cancellationEvidence } from './fixtures/code-mode-cancellation-evidence.mjs'
 
-/**
- * Production vertical acceptance coverage is retained: Chat, StrongFlow,
- * cancel, restart. The path is Device Worker only.
- *
- * Live execution requires:
- * - built winwincode-server / winwincode-kernel-helper / wwc CLI
- * - Device enrollment + occupancy + repository binding
- * - Device-local Provider (deterministic test Provider or real Device GLM config)
- *
- * Server-local model execution is not a fallback. When the Device CLI or
- * Device Provider runtime is unavailable, this test fails with that exact
- * runtime gap instead of fabricating success.
- */
 test('a scenario propagates its Device cleanup failure', async () => {
   await assert.rejects(runApiProductionVertical({
     devicePrerequisites: true,
@@ -271,10 +258,7 @@ test('the actual task entry completes parallel Sessions in one Server and Device
         assert.equal(task.delivery.workRunAggregate.runs.length, 3)
         assert.equal(task.delivery.workRunAggregate.runs.every(run => run.state === 'settled'), true)
       }
-      // Seed retained, drained history from a Worker which completed the real
-      // task entry. On reopen, the new anchor sorts beyond the first 200 rows.
       const registry = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
-      // The live Server continues heartbeats while this fixture adds history.
       registry.exec('PRAGMA busy_timeout = 5000')
       try {
         const template = registry.prepare('SELECT * FROM execution_workers WHERE worker_id = ?').get(first.sourceAnchor.workerId)

@@ -1,40 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable `DeviceExecutionBinding` facts and the per-node execution
-//! reservation capacity ledger.
-//!
-//! The execution authority chain is: one `ProductSession` owns `WorkRuns`,
-//! the scheduler reserves one execution Job per `WorkRun`, and the
-//! worker that executes the Job is bound — durably, before any dispatch — to
-//! one `WorkerLaunchGrant` with its client node, occupancy lease, fencing
-//! token, and repository binding (plan 7.8, 14, 17.2). This ledger is the
-//! join point: it stores the binding of one `worker_session_id` to the
-//! `clientNodeId`/`bindingId`/`leaseId` facts of its live launch grant, and
-//! the companion device facts of one execution admission reservation.
-//!
-//! Authoritative source rule: every binding field is copied from the stored
-//! `worker_launch_grants` row inside the same immediate transaction, and the
-//! binding command must echo the grant exactly. A later projection that
-//! guesses any field is refused with a field mismatch — bindings are written
-//! from the authority, never reconstructed.
-//!
-//! CAS/replay rules (fixed): every mutating command carries one canonical
-//! `req_` request identity. A repeated request with a byte-identical command
-//! replays the stored receipt as an accepted idempotent no-op; the same
-//! request identity with any different body is a conflict. Binding rows are
-//! created at revision 1 and advance only through the compare-and-swap
-//! `expected_revision` release transition. At most one `bound` binding may
-//! exist per worker session and at most one binding per launch grant; the
-//! partial unique indexes are the durable backstops.
-//!
-//! Capacity ledger: the occupancy claim gate and the launch grant issue gate
-//! must judge capacity against the same durable numbers. `reserved` counts
-//! the non-terminal (`issued` plus `consumed`) launch grants of the node —
-//! the reservation-driven persistent slot count that replaces the former
-//! claim-time placeholder — and `in_flight` is the device-reported running
-//! count and the durable reservation count reconciled by taking the maximum,
-//! so neither claim nor launch can oversell a slot the other already holds.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -47,13 +10,6 @@ use crate::{SqliteStorage, StorageError};
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ID_BYTES: usize = 96;
 
-/// FLOW-100.4: the durable device-dispatch ownership marker. One row names
-/// the exact Device `WorkerSession` an execution reservation must execute
-/// on. The repository scheduler executes this fragment before its queue
-/// selection so the local-claim exclusion predicate cannot miss its table
-/// on a database that never opened the binding ledger; the full binding
-/// schema below embeds the same fragment, so both appliers create exactly
-/// one table.
 pub(crate) const DEVICE_EXECUTION_RESERVATION_FACTS_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS device_execution_reservation_facts (
     job_id TEXT PRIMARY KEY NOT NULL,
@@ -158,8 +114,6 @@ CREATE TABLE IF NOT EXISTS device_execution_binding_receipts (
 );
 ";
 
-/// The full binding ledger schema: the binding lifecycle, the embedded
-/// reservation-facts fragment, and the receipt namespace.
 fn binding_schema() -> String {
     format!(
         "{DEVICE_EXECUTION_BINDINGS_SCHEMA}\
@@ -168,18 +122,13 @@ fn binding_schema() -> String {
     )
 }
 
-/// Scope partition of the bind/release receipt namespace.
 const BINDING_SCOPE_KEY: &str = "device_execution_binding";
-/// Scope partition of the reservation-facts receipt namespace.
 const FACTS_SCOPE_KEY: &str = "device_execution_reservation_facts";
 
-/// Lifecycle state of one `DeviceExecutionBinding`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceExecutionBindingState {
-    /// The worker session is durably bound to its launch facts.
     Bound,
-    /// Terminal: the binding ended with its worker session.
     Released,
 }
 
@@ -203,8 +152,6 @@ impl DeviceExecutionBindingState {
         }
     }
 
-    /// True while the binding still names the worker session's execution
-    /// authority.
     #[must_use]
     pub const fn is_bound(self) -> bool {
         matches!(self, Self::Bound)
@@ -217,8 +164,6 @@ impl fmt::Display for DeviceExecutionBindingState {
     }
 }
 
-/// Validated bind command. Every `expected_` field must echo the stored
-/// launch grant exactly; any divergence refuses the binding.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionBindingIssuance {
@@ -237,12 +182,6 @@ pub struct DeviceExecutionBindingIssuance {
 }
 
 impl DeviceExecutionBindingIssuance {
-    /// Builds one validated bind command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or a fencing token outside the
-    /// durable range before any durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         device_execution_binding_id: impl Into<String>,
@@ -292,8 +231,6 @@ impl DeviceExecutionBindingIssuance {
     }
 }
 
-/// Validated release command; the fixed CAS rule requires the bound row's
-/// current revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionBindingRelease {
     pub worker_session_id: String,
@@ -303,12 +240,6 @@ pub struct DeviceExecutionBindingRelease {
 }
 
 impl DeviceExecutionBindingRelease {
-    /// Builds one validated release command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a zero revision, or a
-    /// non-canonical instant.
     pub fn try_new(
         worker_session_id: impl Into<String>,
         request_id: impl Into<String>,
@@ -329,25 +260,16 @@ impl DeviceExecutionBindingRelease {
     }
 }
 
-/// Validated attachment of one execution reservation to its device facts.
-/// The facts themselves are read from the stored launch grant.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionFactsAttachment {
     pub request_id: String,
     pub job_id: String,
     pub worker_launch_grant_id: String,
-    /// `FLOW-100.5`: the `StrongFlow` execution role the job dispatches as
-    /// (`planner`, `executor`, ...). `None` for role-less Quick dispatches.
     #[serde(default)]
     pub role: Option<String>,
 }
 
 impl DeviceExecutionFactsAttachment {
-    /// Builds one validated attachment command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities.
     pub fn try_new(
         request_id: impl Into<String>,
         job_id: impl Into<String>,
@@ -356,12 +278,6 @@ impl DeviceExecutionFactsAttachment {
         Self::try_new_with_role(request_id, job_id, worker_launch_grant_id, None)
     }
 
-    /// Builds one validated attachment command carrying the `StrongFlow`
-    /// execution role of the dispatched job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or an out-of-bounds role label.
     pub fn try_new_with_role(
         request_id: impl Into<String>,
         job_id: impl Into<String>,
@@ -384,8 +300,6 @@ impl DeviceExecutionFactsAttachment {
     }
 }
 
-/// Durable `DeviceExecutionBinding` row: one worker session bound to the
-/// client, occupancy, and repository identities of its live launch grant.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionBindingRecord {
@@ -406,10 +320,6 @@ pub struct DeviceExecutionBindingRecord {
     pub revision: u64,
 }
 
-/// Companion device facts of one execution admission reservation. Every
-/// field is copied verbatim from the backing launch grant, so the Job stays
-/// traceable to the client node, occupancy lease, repository binding,
-/// worker, and (when stamped) the `ProductSession`/`WorkRun` pair.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionReservationFacts {
@@ -427,14 +337,10 @@ pub struct DeviceExecutionReservationFacts {
     pub product_session_id: Option<String>,
     pub work_run_id: Option<String>,
     pub attached_at: Instant,
-    /// `FLOW-100.5`: the `StrongFlow` execution role stamped on the dispatch,
-    /// or `None` for the role-less Quick Chat dispatches.
     #[serde(default)]
     pub role: Option<String>,
 }
 
-/// Secret-free device identity joined from the scheduler-sealed reservation
-/// facts and the authoritative Client registry for one execution Job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkRunDeviceBindingFacts {
     pub public_client_id: String,
@@ -445,27 +351,18 @@ pub struct WorkRunDeviceBindingFacts {
     pub work_run_id: Option<String>,
 }
 
-/// Replay-safe response for the bind and release transitions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceBindingReceipt {
     pub binding: DeviceExecutionBindingRecord,
     pub replayed: bool,
 }
 
-/// Replay-safe response for the reservation-facts attachment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceFactsReceipt {
     pub facts: DeviceExecutionReservationFacts,
     pub replayed: bool,
 }
 
-/// Transactionally consistent worker-session capacity of one client node.
-///
-/// `reserved_worker_sessions` is the durable ledger: the non-terminal launch
-/// grants of the node. `in_flight_worker_sessions` reconciles the
-/// device-reported running count with the durable reservation count by
-/// taking the maximum, and `free_worker_sessions` is what claim and launch
-/// gates may still allocate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceExecutionCapacitySnapshot {
     pub client_node_id: String,
@@ -477,39 +374,23 @@ pub struct DeviceExecutionCapacitySnapshot {
     pub free_worker_sessions: u64,
 }
 
-/// Stable device-execution-binding failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceExecutionBindingStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// No launch grant matches the requested identity.
     UnknownLaunchGrant,
-    /// The launch grant is not live (`issued` or `consumed`).
     LaunchGrantNotLive,
-    /// An echoed binding or attachment field differs from the authority.
     FieldMismatch,
-    /// The worker session or grant already carries a binding, or the binding
-    /// identity is already used.
     BindingConflict,
-    /// No bound binding matches the requested worker session.
     UnknownBinding,
-    /// The execution Job does not exist.
     UnknownExecutionJob,
-    /// The execution Job already carries device facts.
     FactsAlreadyAttached,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race.
     RevisionConflict,
-    /// A request identity was reused with a different body.
     RequestConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free device-execution-binding error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceExecutionBindingStoreError {
     kind: DeviceExecutionBindingStoreErrorKind,
@@ -531,20 +412,11 @@ impl fmt::Display for DeviceExecutionBindingStoreError {
 
 impl std::error::Error for DeviceExecutionBindingStoreError {}
 
-/// Device execution binding ledger borrowing the sole product-state
-/// `SQLite` authority.
 pub struct DeviceExecutionBindingLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable device execution binding ledger on this same
-    /// product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection, an incompatible existing schema,
-    /// or a missing authoritative identity ledger.
     pub fn device_execution_binding_ledger(
         &mut self,
     ) -> Result<DeviceExecutionBindingLedger<'_>, DeviceExecutionBindingStoreError> {
@@ -553,11 +425,6 @@ impl SqliteStorage {
 }
 
 impl<'storage> DeviceExecutionBindingLedger<'storage> {
-    /// Lists the active reservations that a recovery report must account for.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid node identity, corrupt binding, or storage failure.
     pub fn active_for_node(
         &self,
         client_node_id: &str,
@@ -573,10 +440,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
             .collect()
     }
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, DeviceExecutionBindingStoreError> {
-        // The binding ledger consumes authoritative identity facts: client
-        // nodes, worker launch grants, and execution admission reservations.
-        // Opening each ensures its schema exists before the FK-enforcing
-        // statements below run.
         storage.client_node_registry().map_err(dependency_error)?;
         storage
             .worker_launch_grant_ledger()
@@ -593,19 +456,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Atomically binds one worker session to the client, occupancy, and
-    /// repository identities of its live launch grant.
-    ///
-    /// Inside one immediate transaction the gate requires: the grant exists
-    /// and is non-terminal (`issued` or `consumed`), every echoed field
-    /// matches the grant exactly, no binding exists for the grant, and the
-    /// worker session carries no other `bound` binding. On success the
-    /// `bound` binding commits with its replay receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or terminal grant, any field mismatch, a reused
-    /// binding identity, a conflicting replay, or storage failure.
     #[allow(clippy::too_many_lines)]
     pub fn bind(
         &mut self,
@@ -681,13 +531,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         Ok(receipt)
     }
 
-    /// Releases the `bound` binding of one worker session through the fixed
-    /// compare-and-swap transition (`bound -> released`).
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown bound binding, a lost revision race, a conflicting
-    /// replay, or storage failure.
     pub fn release(
         &mut self,
         command: &DeviceExecutionBindingRelease,
@@ -741,24 +584,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         Ok(receipt)
     }
 
-    /// Atomically attaches the device facts of one execution admission
-    /// reservation.
-    ///
-    /// Inside one immediate transaction the gate requires: the launch grant
-    /// exists and is live, the reservation exists and is non-terminal
-    /// (`queued` or `running`), the reservation's user is the grant holder,
-    /// and the grant's worker session carries the `bound` binding of this
-    /// grant. The stored facts are copied verbatim from the grant, so a later
-    /// projection reads the authority instead of guessing. Traceability to
-    /// the `ProductSession`/`WorkRun` pair is durable on both sides: the
-    /// facts carry the grant's stamps, and the reservation scope carries the
-    /// session identity it was reserved under.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant or Job, a terminal grant or reservation, any
-    /// field mismatch, a missing binding, an already attached Job, a
-    /// conflicting replay, or storage failure.
     #[allow(clippy::too_many_lines)]
     pub fn attach_facts(
         &mut self,
@@ -895,13 +720,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         Ok(receipt)
     }
 
-    /// Returns the newest binding of a worker session: the `bound` binding
-    /// when one exists, otherwise the most recently bound row.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity, corrupt stored rows,
-    /// or storage failure.
     pub fn snapshot(
         &self,
         worker_session_id: &str,
@@ -910,12 +728,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         load_session_binding(self.connection()?, worker_session_id)
     }
 
-    /// Returns one binding by its own identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical binding identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot_by_binding_id(
         &self,
         device_execution_binding_id: &str,
@@ -924,12 +736,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         load_binding(self.connection()?, device_execution_binding_id)
     }
 
-    /// Returns the durable device facts of one execution reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Job identity, corrupt stored rows, or storage
-    /// failure.
     pub fn facts(
         &self,
         job_id: &str,
@@ -938,17 +744,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         load_facts(self.connection()?, job_id)
     }
 
-    /// Reads the durable worker-session capacity ledger of one client node.
-    ///
-    /// Returns `None` when the node does not exist. Both the occupancy claim
-    /// gate and the launch grant issue gate judge capacity against this one
-    /// durable view: `reserved_worker_sessions` counts the non-terminal
-    /// launch grants, and `in_flight_worker_sessions` reconciles the
-    /// device-reported running count with the durable reservations.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn capacity_snapshot(
         &self,
         client_node_id: &str,
@@ -992,13 +787,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         }))
     }
 
-    /// Counts the durable reservation view of one client node: its
-    /// non-terminal (`issued` plus `consumed`) launch grants. This is the
-    /// persistent slot count that replaces the former claim-time placeholder.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn reserved_worker_sessions_for_node(
         &self,
         client_node_id: &str,
@@ -1025,8 +813,6 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
     }
 }
 
-/// Authoritative launch-grant projection the binding gate judges. Only the
-/// columns the binding and attachment gates read are selected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LaunchGrantFact {
     worker_launch_grant_id: String,
@@ -1117,8 +903,6 @@ fn require_launch_grant(
     })
 }
 
-/// Judges the echoed binding fields against the stored grant; any divergence
-/// refuses the binding without a durable change.
 fn ensure_binding_matches_grant(
     grant: &LaunchGrantFact,
     command: &DeviceExecutionBindingIssuance,
@@ -1469,8 +1253,6 @@ fn project_binding_facts(
     }))
 }
 
-/// Replays a stored receipt when the request identity and body digest match;
-/// a reused identity with a different body is a fixed conflict.
 fn stored_receipt(
     connection: &Connection,
     scope_key: &str,
@@ -1533,8 +1315,6 @@ fn insert_receipt<R: Serialize>(
     Ok(())
 }
 
-/// Canonical request body digest: the SHA-256 of the command's canonical
-/// JSON encoding.
 fn command_digest(command: &impl Serialize) -> Result<String, DeviceExecutionBindingStoreError> {
     let encoded = serde_json::to_vec(command).map_err(|_| {
         error(
@@ -1728,10 +1508,6 @@ fn validate_worker_launch_grant_id(value: &str) -> Result<(), DeviceExecutionBin
 }
 
 fn validate_product_session_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
-    // A binding echoes its launch grant verbatim, and a launch may bind
-    // either a launch-minted device session (`ps_`) or a chat-surface
-    // session (`psn_`) — the same dual rule the launch grant ledger uses,
-    // which is what lets a Chat session anchor to device execution.
     if validate_crockford_id(value, "ps_", "product session id").is_ok() {
         return Ok(());
     }
@@ -1750,10 +1526,6 @@ fn validate_job_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> 
     validate_crockford_id(value, "job_", "execution job id")
 }
 
-/// `FLOW-100.5`: the `StrongFlow` execution role stamped on reservation facts.
-/// It is a portable execution-profile label (the same shape the generated
-/// `ExecutionJob.executionProfile` uses), bounded like the Delivery
-/// execution profile and free of secret material.
 fn validate_role(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
     let bounded = !value.is_empty()
         && value.len() <= 100
@@ -1790,7 +1562,6 @@ fn validate_fencing_token(value: u64) -> Result<(), DeviceExecutionBindingStoreE
     Ok(())
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), DeviceExecutionBindingStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1881,10 +1652,6 @@ fn map_binding_insert_sql(sql: &rusqlite::Error) -> DeviceExecutionBindingStoreE
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violations are the one-bound-binding-per-
-            // session partial index and the one-binding-per-grant index; a
-            // binding id reuse shares the extended code family and fails
-            // closed as a conflict too.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 DeviceExecutionBindingStoreErrorKind::BindingConflict,
                 "the worker session or launch grant already carries a device execution binding",

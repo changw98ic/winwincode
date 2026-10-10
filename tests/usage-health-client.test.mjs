@@ -62,8 +62,6 @@ const productSessionOutside = 'psn_00000000000000000000000009'
 const workRunOne = 'wrn_00000000000000000000000001'
 const workRunTwo = 'wrn_00000000000000000000000002'
 const workRunThree = 'wrn_00000000000000000000000003'
-// Planted marker: if any secret-unsafe field reaches the panel this string becomes
-// readable page text and the assertion below fails.
 const SECRET_MARKER = 'vault-locator-secret-marker'
 const FRESH = '2026-09-03T08:29:30.000Z'
 const STALE = '2026-09-03T07:00:00.000Z'
@@ -251,10 +249,6 @@ function worker(overrides = {}) {
   }
 }
 
-/**
- * Full projection fixture. Every field the summary reads is present so the
- * deterministic suite observes the same facts the Control Plane publishes.
- */
 function baselineFixtures() {
   return {
     'settings.get': { revision: 4, defaultModelRoute: null, workerConcurrencyLimit: 4 },
@@ -549,8 +543,6 @@ function descendants(node) {
   return [node, ...node.children.flatMap(child => descendants(child))]
 }
 
-// Real DOM class matching is token based, so one node can carry the shared row
-// class and its dimension class at the same time.
 function hasClass(node, className) {
   return typeof node.className === 'string' && node.className.split(/\s+/u).includes(className)
 }
@@ -867,7 +859,6 @@ test('cost is never presented as an exact amount without a price source', async 
 
 test('the summary opens no second live region and reuses row identity across equivalent reads', async () => {
   const { model, rootElement } = await started()
-  // The host page owns the one polite channel, so this panel must stay silent.
   const liveRegions = descendants(rootElement)
     .filter(node => node.getAttribute('aria-live') !== null)
   assert.deepEqual(liveRegions, [])

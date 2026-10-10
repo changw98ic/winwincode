@@ -1,7 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-/* Menu and option styling adapted from DSH ModelSelect.module.css,
-   Copyright (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md. */
-
 .wwc-shell select:not([multiple]) {
   appearance: none;
   min-width: 0;
@@ -44,7 +40,6 @@
   background-color: var(--wwc-color-surface-subtle);
 }
 
-/* Native selection keeps keyboard, labels and form behavior in one control. */
 @supports (appearance: base-select) {
   .wwc-shell select:not([multiple]),
   .wwc-shell select:not([multiple])::picker(select) {

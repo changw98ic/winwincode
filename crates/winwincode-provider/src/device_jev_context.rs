@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device-owned JEV inference receipts, claimed durably before paid work.
-
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use winwincode_execution_port::jev_decision::{JevPolicy, validate_policy};
@@ -11,25 +7,17 @@ use crate::{
     JevExecutionOptions, JevRun, JevRuntime,
 };
 
-// The remote semantic service rejects large premises before returning usage.
-// Skip optional scoring before a paid request; the original Core input remains
-// intact and no unknown-usage receipt is created for an unissued request.
 pub(crate) const MAX_JEV_REMOTE_REQUEST_BYTES: usize = 90_000;
 
-/// Recovery never treats an unknown paid inference outcome as permission to retry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredJevContext {
     Completed {
         run: Box<JevRun<JevContextEvaluation>>,
         replayed: bool,
     },
-    /// The original caller may still be running, or may have been interrupted.
-    /// Retain the existing context; usage is unknown until a receipt is available.
     Incomplete,
 }
 
-/// Secret-free receipt bound to one exact Device model exchange.
-/// An absent run is an interrupted or still-running operation, never zero usage.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeviceJevReceipt<T = JevContextEvaluation> {
@@ -39,10 +27,6 @@ pub struct DeviceJevReceipt<T = JevContextEvaluation> {
 }
 
 impl DeviceProviderStore {
-    /// Retrieves an evaluated context item from its immutable original request.
-    ///
-    /// # Errors
-    /// Rejects foreign receipts, changed request bytes, and missing source items.
     pub fn model_jev_source_item(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -74,8 +58,6 @@ impl DeviceProviderStore {
             [operation_id],
             |row| row.get(0),
         )?;
-        // Old receipts remain readable for accounting, but absent scoring input
-        // cannot authorize removing or restoring a particular source item.
         let scored: serde_json::Value =
             serde_json::from_str(&scored_request.ok_or(DeviceProviderError)?)?;
         let candidate: serde_json::Value = serde_json::from_str(
@@ -90,11 +72,6 @@ impl DeviceProviderStore {
         Ok(source)
     }
 
-    /// Reads JEV receipts for an already retained, byte-identical model request.
-    /// This never invokes a provider or exposes its transport configuration.
-    ///
-    /// # Errors
-    /// Rejects missing or conflicting model identities and corrupt receipts.
     pub fn model_jev_receipts(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -149,11 +126,6 @@ impl DeviceProviderStore {
         .collect()
     }
 
-    /// Saves JEV transport settings in the same private database as Device LLM credentials.
-    /// Only the Device host may call this; no settings or secrets enter public projections.
-    ///
-    /// # Errors
-    /// Rejects invalid transport settings before changing the saved configuration.
     pub fn save_jev_settings(
         &self,
         settings: &crate::OpenJevRemoteSettings,
@@ -166,10 +138,6 @@ impl DeviceProviderStore {
         Ok(())
     }
 
-    /// Imports a private regular TOML file into the existing Device credential store.
-    ///
-    /// # Errors
-    /// Rejects unsafe files, invalid settings, and a provider different from the sealed profile.
     pub fn import_jev_settings(
         &self,
         path: &std::path::Path,
@@ -203,10 +171,6 @@ impl DeviceProviderStore {
         self.save_jev_settings(&settings)
     }
 
-    /// Resolves a Device-local JEV route; callers must never publish this credential-bearing value.
-    ///
-    /// # Errors
-    /// Rejects absent, corrupt or mismatched configuration.
     pub fn resolve_jev_settings(
         &self,
         provider: &str,
@@ -223,13 +187,6 @@ impl DeviceProviderStore {
         validated_system_one_settings(settings)
     }
 
-    /// Runs the configured `SystemOne` provider with the session's sealed policy.
-    /// Credentials remain in the Device transport; only configuration hashes and
-    /// inference receipts enter the replay ledger.
-    ///
-    /// # Errors
-    /// Rejects altered session settings, provider mismatches and invalid transport
-    /// configuration before claiming or charging an inference.
     pub async fn evaluate_configured_context_once(
         &self,
         operation_id: &str,
@@ -289,9 +246,6 @@ impl DeviceProviderStore {
         .await
     }
 
-    /// Only old assistant commentary is eligible. User/developer instructions,
-    /// calls, tool results, final answers and the latest commentary stay verbatim.
-    /// The original exchange payload is the durable archive of removed text.
     pub(crate) async fn prepare_jev_model_request(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -364,10 +318,6 @@ impl DeviceProviderStore {
             .and_then(serde_json::Value::as_array_mut)
             .ok_or(DeviceProviderError)?;
         let last_commentary = input.iter().rposition(is_assistant_commentary);
-        // Archive only plain older commentary. The original Core request and
-        // exact scored input remain durable; source lookup recovers them verbatim.
-        // Every later Core request is evaluated afresh, so this is not a tombstone.
-        // Canonical/tool records and unsupported TRUNCATE decisions stay intact.
         for index in (0..input.len()).rev() {
             if Some(index) == last_commentary || !is_assistant_commentary(&input[index]) {
                 continue;
@@ -424,14 +374,6 @@ impl DeviceProviderStore {
         Ok(())
     }
 
-    /// Executes one context scoring operation, or replays its persisted receipt.
-    /// `operation_id` binds the model exchange and candidate identity. The frozen
-    /// configuration digest binds provider routing, retry policy and model settings.
-    /// The exact task/candidate input is retained in this Device-private ledger.
-    /// Provider credentials are represented only by the configuration digest.
-    ///
-    /// # Errors
-    /// Rejects invalid inputs, reuse with changed inputs, and storage failures.
     pub async fn evaluate_context_once(
         &self,
         operation_id: &str,
@@ -538,8 +480,6 @@ impl DeviceProviderStore {
     }
 }
 
-// Preserve authoritative task requirements and current instruction messages in
-// the scoring premise. Assistant text cannot promote itself to an instruction.
 fn context_task_text(
     job: &winwincode_execution_port::generated::ExecutionJob,
     request: &serde_json::Value,
@@ -583,8 +523,6 @@ fn context_task_text(
     }))?)
 }
 
-// Keep Core tool records verbatim: a proposed plan or a failed tool response
-// must not become an accepted plan merely because it appeared in model text.
 fn execution_plan_history(input: &[serde_json::Value]) -> Vec<&serde_json::Value> {
     let plan_calls: std::collections::BTreeSet<_> = input
         .iter()
@@ -638,7 +576,6 @@ fn is_assistant_commentary(item: &serde_json::Value) -> bool {
             })
 }
 
-// Device JEV uses SystemOne. Self-hosted NLI keeps its separate hardware defaults.
 fn validated_system_one_settings(
     mut settings: crate::OpenJevRemoteSettings,
 ) -> Result<crate::OpenJevRemoteSettings, DeviceProviderError> {
@@ -995,7 +932,6 @@ mod tests {
                 {"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"current progress"}]}
             ]}
         });
-        // A provider without a phase marker is never reclassified as commentary.
         original["request"]["input"].as_array_mut().unwrap().push(
             serde_json::json!({"type":"message","role":"assistant","content":"unknown phase"}),
         );
@@ -1161,7 +1097,6 @@ mod tests {
                     });
                     assert!(store.prepare_jev_model_request(&open, &mut changed, &|| true).await.is_err());
                 }
-                // A saved score cannot be reused after instruction context changes.
                 for pointer in ["/request/instructions", "/request/input/0/content"] {
                     let mut changed = original.clone();
                     *changed.pointer_mut(pointer).unwrap() = serde_json::json!("new requirement");
@@ -1213,7 +1148,6 @@ mod tests {
                     Some(8)
                 );
 
-                // A valid hash for a different scored candidate is not proof for this source.
                 let mut foreign_score = saved.clone();
                 foreign_score[2]["candidate"] = serde_json::json!("{\"foreign\":true}");
                 let foreign_score = serde_json::to_string(&foreign_score).unwrap();
@@ -1236,8 +1170,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(replay, expected);
                 assert_eq!(reopened.model_jev_receipts(&open).unwrap(), receipts);
-                // Simulate an interrupted paid operation in this isolated fixture:
-                // unknown scores must keep every input item and must not be reissued.
                 reopened
                     .connection
                     .execute("UPDATE jev_context_exchanges SET result=NULL", [])

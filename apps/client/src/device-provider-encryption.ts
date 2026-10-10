@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { DeviceProviderConfig, DeviceConfigurationEnvelope, DeviceProviderSnapshot } from './generated/contracts.js'
 
 export interface DeviceProviderMutation {
@@ -30,7 +28,6 @@ export function encryptDeviceRepository(snapshot: ConfigurationSnapshot, request
 const encode = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes))
 const decode = (value: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(value), character => character.charCodeAt(0))
 
-/** Encrypt the complete configuration for the selected Device before sending HTTP. */
 async function encryptConfiguration(
   context: string,
   snapshot: ConfigurationSnapshot,

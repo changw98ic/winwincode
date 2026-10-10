@@ -1,87 +1,28 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The durable sender-outbox seam and its in-memory reference
-//! implementation.
-//!
-//! One outbox owns one sender stream: the frames retained for delivery and
-//! the durable acknowledgement cursor of the peer. `append` is the atomic
-//! persist-before-send boundary (`先持久化再发送`); `record_acknowledgement`
-//! persists the peer's contiguous acknowledgement so confirmed frames may
-//! then be compacted (`发送方在持久化 ackSequence 后可以压缩已确认 frame`).
-//!
-//! `SQLite` and other durable adapters implement [`FrameOutbox`] in their own
-//! lanes; this module ships the trait plus the in-memory reference
-//! implementation. The state machine ([`OutboxSession`]) validates every
-//! snapshot it loads: a retained range with a missing contiguous frame is a
-//! corrupt state and recovery is refused (`缺失即按损坏状态拒绝恢复`).
-
 use std::collections::HashSet;
 
 use crate::exchange::frame::StoredFrame;
 
-/// Durable rows of one sender stream, loaded from the outbox adapter.
-///
-/// Frames are contiguous and ordered. Retained frames may start after
-/// sequence one only when every omitted prefix frame is covered by
-/// `ack_sequence`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboxSnapshot {
-    /// Highest sequence the receiving peer confirmed as accepted.
     pub ack_sequence: u64,
-    /// Highest contiguous sequence retained (or already compacted) by the
-    /// sender. This is a durable high-water mark, not the peer's
-    /// acknowledgement.
     pub highest_sequence: u64,
-    /// Retained original frames, ordered by sequence.
     pub frames: Vec<StoredFrame>,
 }
 
-/// Validation failures found in a durable outbox snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxStateError {
-    /// Sequence zero does not exist; sequences start at 1.
     ZeroSequence,
-    /// A retained frame carries no message id.
     EmptyMessageId,
-    /// A retained frame carries no payload digest.
     EmptyDigest,
-    /// A retained frame carries no encoded bytes.
     EmptyFrame,
-    /// The same message id was retained twice.
     DuplicateMessageId(String),
-    /// The retained frames are not contiguous.
-    NonContiguous {
-        /// The sequence the stream required.
-        expected: u64,
-        /// The sequence the snapshot carried.
-        found: u64,
-    },
-    /// The stored high-water mark disagrees with the retained frames.
-    HighestMismatch {
-        /// The persisted high-water mark.
-        stored: u64,
-        /// The high-water mark derived from the frames.
-        derived: u64,
-    },
-    /// The acknowledgement exceeds the retained high-water mark.
-    AckExceedsHighest {
-        /// The persisted acknowledgement.
-        acknowledged: u64,
-        /// The persisted high-water mark.
-        highest: u64,
-    },
-    /// The sequence space is exhausted at [`u64::MAX`].
+    NonContiguous { expected: u64, found: u64 },
+    HighestMismatch { stored: u64, derived: u64 },
+    AckExceedsHighest { acknowledged: u64, highest: u64 },
     SequenceOverflow,
 }
 
 impl OutboxSnapshot {
-    /// Checks the invariants a durable adapter must preserve.
-    ///
-    /// # Errors
-    ///
-    /// Returns the precise invariant violation when retained frames carry
-    /// invalid fields, are duplicated or non-contiguous, or disagree with the
-    /// stored acknowledgement or high-water mark.
     pub fn validate(&self) -> Result<(), OutboxStateError> {
         if self.ack_sequence > self.highest_sequence {
             return Err(OutboxStateError::AckExceedsHighest {
@@ -148,42 +89,17 @@ impl OutboxSnapshot {
     }
 }
 
-/// Durable persistence seam for one sender stream.
-///
-/// `append` must atomically verify `expected_highest_sequence`, persist
-/// `frame`, and advance the retained high-water mark to
-/// `expected_highest_sequence + 1`: a `SQLite` adapter does this in one
-/// transaction. The state machine never treats its local snapshot as durable
-/// truth.
 pub trait FrameOutbox {
-    /// Persistence error of the adapter.
     type Error;
 
-    /// Loads the complete durable snapshot of the stream, or `None` when the
-    /// stream has no rows yet.
-    ///
-    /// # Errors
-    ///
-    /// Returns the persistence implementation's read error.
     fn load(&mut self) -> Result<Option<OutboxSnapshot>, Self::Error>;
 
-    /// Atomically persists one frame when the durable high-water mark still
-    /// equals `expected_highest_sequence`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the persistence implementation's transaction or race error.
     fn append(
         &mut self,
         expected_highest_sequence: u64,
         frame: &StoredFrame,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically advances the peer acknowledgement watermark.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's transaction or acknowledgement-race error.
     fn record_acknowledgement(
         &mut self,
         expected_ack_sequence: u64,
@@ -191,107 +107,48 @@ pub trait FrameOutbox {
     ) -> Result<(), Self::Error>;
 }
 
-/// Optional compaction capability of an outbox adapter.
-///
-/// Compaction drops frames the persisted acknowledgement already covers; the
-/// acknowledgement cursor and the high-water mark must survive it.
 pub trait CompactingOutbox: FrameOutbox {
-    /// Drops retained frames at or below `ack_sequence` and returns how many
-    /// frames were dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns the persistence implementation's transaction error.
     fn compact_through(&mut self, ack_sequence: u64) -> Result<usize, Self::Error>;
 }
 
-/// Invalid caller input detected before any durable mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxInputError {
-    /// A frame carries no message id.
     EmptyMessageId,
-    /// A frame carries sequence zero.
     ZeroSequence,
-    /// A frame carries no payload digest.
     EmptyDigest,
-    /// A frame carries no encoded bytes.
     EmptyFrame,
-    /// The message id is already retained by the stream.
     DuplicateMessageId(String),
-    /// A delivery batch requested zero frames.
     ZeroMaxFrames,
 }
 
-/// Failure from persistence, invalid input, a corrupt snapshot, or a rejected
-/// cursor.
 #[derive(Debug, PartialEq, Eq)]
 pub enum OutboxError<E> {
-    /// The adapter failed.
     Store(E),
-    /// Caller input was invalid.
     InvalidInput(OutboxInputError),
-    /// The loaded durable snapshot violated its invariants.
     CorruptState(OutboxStateError),
-    /// The frame did not carry the sequence the stream required.
-    SequenceMismatch {
-        /// The sequence the stream required.
-        expected: u64,
-        /// The sequence the frame carried.
-        found: u64,
-    },
-    /// The sequence space is exhausted at [`u64::MAX`].
+    SequenceMismatch { expected: u64, found: u64 },
     SequenceExhausted,
-    /// The requested delivery cursor is beyond the retained high-water mark.
-    CursorAhead {
-        /// The requested cursor.
-        requested: u64,
-        /// The retained high-water mark.
-        highest: u64,
-    },
-    /// The peer acknowledged more than the sender ever retained.
-    AckAhead {
-        /// The requested acknowledgement.
-        requested: u64,
-        /// The retained high-water mark.
-        highest: u64,
-    },
-    /// The peer acknowledgement moved backwards.
-    AckRegression {
-        /// The requested acknowledgement.
-        requested: u64,
-        /// The currently persisted acknowledgement.
-        acknowledged: u64,
-    },
+    CursorAhead { requested: u64, highest: u64 },
+    AckAhead { requested: u64, highest: u64 },
+    AckRegression { requested: u64, acknowledged: u64 },
 }
 
-/// One bounded delivery batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxBatch {
-    /// Highest sequence the peer has acknowledged so far.
     pub ack_sequence: u64,
-    /// Highest contiguous sequence retained by the sender.
     pub highest_sequence: u64,
-    /// The frames to deliver; the remainder stays for later exchanges.
     pub frames: Vec<StoredFrame>,
 }
 
-/// Stateless outbox state machine backed by a caller-provided adapter.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OutboxSession;
 
 impl OutboxSession {
-    /// Creates a state machine. All accepted state remains in the adapter.
     #[must_use]
     pub const fn new() -> Self {
         Self
     }
 
-    /// Returns the sequence the next appended frame must carry.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error, a corrupt snapshot, or sequence-space
-    /// exhaustion at [`u64::MAX`].
     pub fn next_sequence<S>(&self, store: &mut S) -> Result<u64, OutboxError<S::Error>>
     where
         S: FrameOutbox,
@@ -303,17 +160,6 @@ impl OutboxSession {
             .ok_or(OutboxError::SequenceExhausted)
     }
 
-    /// Persists one frame at the sequence [`OutboxSession::next_sequence`]
-    /// handed out (persist-before-send) and returns the frame's sequence.
-    ///
-    /// The adapter receives the compare-and-append base internally, so
-    /// callers only deal with the sequence the next frame must carry.
-    ///
-    /// # Errors
-    ///
-    /// Returns invalid frame input, a sequence that disagrees with the
-    /// caller's expectation or the stream's cursor, an adapter error, or a
-    /// corrupt snapshot.
     pub fn enqueue<S>(
         &self,
         store: &mut S,
@@ -358,13 +204,6 @@ impl OutboxSession {
         Ok(frame.sequence)
     }
 
-    /// Returns at most `max_frames` frames strictly after `after_sequence`.
-    /// Undelivered remainders stay in the outbox for later exchanges.
-    ///
-    /// # Errors
-    ///
-    /// Returns a zero page size, a cursor beyond the retained high-water
-    /// mark, an adapter error, or a corrupt snapshot.
     pub fn deliverable<S>(
         &self,
         store: &mut S,
@@ -398,13 +237,6 @@ impl OutboxSession {
         })
     }
 
-    /// Records the peer's contiguous acknowledgement watermark without
-    /// changing the retained frames.
-    ///
-    /// # Errors
-    ///
-    /// Returns a watermark ahead of the retained range, a regressing
-    /// watermark, an adapter error, or a corrupt snapshot.
     pub fn acknowledge<S>(
         &self,
         store: &mut S,
@@ -435,12 +267,6 @@ impl OutboxSession {
         Ok(ack_sequence)
     }
 
-    /// Drops frames the persisted acknowledgement already covers and returns
-    /// how many frames were dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error or a corrupt snapshot.
     pub fn compact_confirmed<C>(&self, store: &mut C) -> Result<usize, OutboxError<C::Error>>
     where
         C: CompactingOutbox,
@@ -452,28 +278,17 @@ impl OutboxSession {
     }
 }
 
-/// In-memory reference implementation of [`FrameOutbox`].
-///
-/// It trusts the state machine's pre-validation and keeps the whole snapshot
-/// in memory; durable adapters must enforce the compare-and-append and
-/// acknowledgement watermarks atomically themselves.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InMemoryOutbox {
     state: Option<OutboxSnapshot>,
 }
 
 impl InMemoryOutbox {
-    /// Creates an empty outbox.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builds an outbox from a previously persisted snapshot.
-    ///
-    /// The snapshot is kept verbatim so a corrupt persisted state surfaces
-    /// through the state machine's validation instead of being silently
-    /// repaired here.
     #[must_use]
     pub fn from_snapshot(snapshot: OutboxSnapshot) -> Self {
         Self {
@@ -481,7 +296,6 @@ impl InMemoryOutbox {
         }
     }
 
-    /// Returns the current snapshot, if the stream has rows.
     #[must_use]
     pub fn snapshot(&self) -> Option<&OutboxSnapshot> {
         self.state.as_ref()

@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable model retry/fallback orchestration and request-level Usage facts.
-//!
-//! Retry decisions accept only closed Provider failure categories plus an
-//! explicit execution-certainty fact. Usage entries are immutable source facts
-//! for the separate organization billing ledger; this module does not own
-//! organization quota or cost allocation.
-
 use winwincode_provider::{ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,38 +38,21 @@ const MAX_COMMIT_RETRIES: usize = 64;
 const MAX_USAGE_SOURCE_PAGE_SIZE: u64 = 200;
 const MAX_USAGE_SOURCE_SCAN_ROWS: u64 = 1_000;
 
-/// Immutable attribution dimensions attached to every request Usage fact.
-/// Immutable Provider settlement source stored in catalog sequence order.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelUsageAttribution {
-    /// Owning organization.
     pub organization_id: OrganizationId,
-    /// Exact owning workspace frozen with the request.
     pub workspace_id: WorkspaceId,
-    /// Owning project.
     pub project_id: ProjectId,
-    /// Exact repository frozen with the request.
     pub repository_id: RepositoryId,
-    /// Exact Product Session.
     pub product_session_id: ProductSessionId,
-    /// Exact execution job used as the task-cost boundary.
     pub execution_job_id: ExecutionJobId,
-    /// Execution role used to keep verifier cost separate.
     pub execution_profile: String,
-    /// Optional exact Delivery when the model request belongs to one.
     pub delivery_id: Option<DeliveryId>,
-    /// Original authenticated user responsible for the request.
     pub user_id: UserId,
 }
 
 impl ModelUsageAttribution {
-    /// Builds attribution from the frozen request target, trusted Delivery, and
-    /// original authenticated user.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed Delivery identity.
     pub fn from_request_authority(
         authority: &FrozenModelRouteAuthority,
         delivery_id: Option<DeliveryId>,
@@ -134,7 +108,6 @@ impl ModelUsageAttribution {
     }
 }
 
-/// One route slot in a frozen retry/fallback plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelRetryStep {
     authority: FrozenModelRouteAuthority,
@@ -142,11 +115,6 @@ pub struct ModelRetryStep {
 }
 
 impl ModelRetryStep {
-    /// Builds one route step with a hard attempt bound.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or unsafe attempt counts.
     pub fn try_new(
         authority: FrozenModelRouteAuthority,
         max_attempts: u64,
@@ -160,20 +128,17 @@ impl ModelRetryStep {
         })
     }
 
-    /// Returns the exact route authority for this step.
     #[must_use]
     pub const fn authority(&self) -> &FrozenModelRouteAuthority {
         &self.authority
     }
 
-    /// Returns the hard attempt bound for this exact route.
     #[must_use]
     pub const fn max_attempts(&self) -> u64 {
         self.max_attempts
     }
 }
 
-/// Auditable finite retry plan. Later steps are explicit fallback routes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrozenModelRetryPlan {
     policy_id: String,
@@ -183,7 +148,6 @@ pub struct FrozenModelRetryPlan {
     fingerprint: String,
 }
 
-/// Why a new or replacement Session selected its actual first route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRouteResolutionReason {
@@ -193,7 +157,6 @@ pub enum ModelRouteResolutionReason {
     ReplacementReselected,
 }
 
-/// Secret-free route-resolution trace frozen into the retry plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRouteResolutionTrace {
@@ -204,11 +167,6 @@ pub struct ModelRouteResolutionTrace {
 }
 
 impl FrozenModelRetryPlan {
-    /// Freezes one bounded route sequence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, duplicate, cross-scope, oversized, or malformed plans.
     pub fn freeze(
         policy_id: String,
         policy_revision: u64,
@@ -228,11 +186,6 @@ impl FrozenModelRetryPlan {
         Self::freeze_resolved(policy_id, policy_revision, resolution, steps)
     }
 
-    /// Freezes a bounded route sequence with its exact Session-resolution trace.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, duplicate, cross-scope, or oversized plans.
     pub fn freeze_resolved(
         policy_id: String,
         policy_revision: u64,
@@ -283,76 +236,57 @@ impl FrozenModelRetryPlan {
         })
     }
 
-    /// Returns the stable policy fingerprint.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
-    /// Returns the frozen retry policy identity.
     #[must_use]
     pub fn policy_id(&self) -> &str {
         &self.policy_id
     }
 
-    /// Returns the frozen retry policy revision.
     #[must_use]
     pub const fn policy_revision(&self) -> u64 {
         self.policy_revision
     }
 
-    /// Returns the primary route followed by explicit fallback routes.
     #[must_use]
     pub fn steps(&self) -> &[ModelRetryStep] {
         &self.steps
     }
 
-    /// Returns the immutable reason and source for the selected first route.
     #[must_use]
     pub const fn resolution(&self) -> &ModelRouteResolutionTrace {
         &self.resolution
     }
 }
 
-/// One logical model request and its frozen attribution/plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelRetryUsageRequest {
-    /// Logical request identity shared by every attempt.
     pub request_id: RequestId,
-    /// Immutable Usage attribution.
     pub attribution: ModelUsageAttribution,
-    /// Finite retry/fallback policy.
     pub plan: FrozenModelRetryPlan,
 }
 
-/// Starts the primary or one previously authorized retry attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAttemptStartCommand {
-    /// Idempotency identity for this state mutation.
     pub command_request_id: RequestId,
-    /// Admitted exchange receipt for the new attempt.
     pub admission: ModelReservationReceipt,
 }
 
-/// Terminal failed/cancelled attempt facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAttemptFailureCommand {
-    /// Idempotency identity for this terminal mutation.
     pub command_request_id: RequestId,
-    /// Gateway terminal identity and route facts.
     pub gateway: ProviderGatewaySettlement,
 }
 
-/// Successful terminal Usage facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAttemptCompletionCommand {
-    /// Idempotency identity for this terminal mutation.
     pub command_request_id: RequestId,
-    /// Gateway successful terminal identity and route facts.
     pub gateway: ProviderGatewaySettlement,
 }
 
-/// Next action after a durable failed attempt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRetryAction {
@@ -361,7 +295,6 @@ pub enum ModelRetryAction {
     Stop,
 }
 
-/// Durable attempt-start result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelAttemptStartReceipt {
@@ -376,7 +309,6 @@ pub struct ModelAttemptStartReceipt {
     pub idempotent_replay: bool,
 }
 
-/// Durable failed-attempt result and next authorized route.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRetryDecisionReceipt {
@@ -392,7 +324,6 @@ pub struct ModelRetryDecisionReceipt {
     pub idempotent_replay: bool,
 }
 
-/// One immutable, normalized Provider Usage entry.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettledModelUsage {
@@ -409,7 +340,6 @@ pub struct SettledModelUsage {
     pub cost_micros: Option<u64>,
 }
 
-/// Durable successful settlement result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelUsageSettlementReceipt {
@@ -420,7 +350,6 @@ pub struct ModelUsageSettlementReceipt {
     pub idempotent_replay: bool,
 }
 
-/// Optional reconciliation filters. Every populated dimension is exact.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelUsageFilter {
@@ -436,7 +365,6 @@ pub struct ModelUsageFilter {
     pub provider_id: Option<String>,
 }
 
-/// Stable cursor bound to one exact filter and immutable catalog snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelUsageSourceCursor {
     filter_digest: String,
@@ -461,7 +389,6 @@ impl ModelUsageSourceCursor {
     }
 }
 
-/// One bounded page of immutable Provider settlement source facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelUsageSourcePage {
     pub snapshot_sequence: u64,
@@ -469,7 +396,6 @@ pub struct ModelUsageSourcePage {
     pub next: Option<ModelUsageSourceCursor>,
 }
 
-/// Summed immutable Usage facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelUsageTotals {
     pub entries: u64,
@@ -479,14 +405,12 @@ pub struct ModelUsageTotals {
     pub cost_micros: Option<u64>,
 }
 
-/// Reconciliation result plus exact Provider subtotals.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModelUsageReconciliation {
     pub totals: ModelUsageTotals,
     pub by_provider: BTreeMap<String, ModelUsageTotals>,
 }
 
-/// Stable retry/Usage ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRetryUsageErrorKind {
     InvalidRequest,
@@ -500,7 +424,6 @@ pub enum ModelRetryUsageErrorKind {
     Storage,
 }
 
-/// Bounded retry/Usage ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRetryUsageError {
     kind: ModelRetryUsageErrorKind,
@@ -679,7 +602,6 @@ enum RetryCommandDigest<'a> {
     },
 }
 
-/// Durable retry/fallback and request-level Usage service.
 pub struct ModelRetryUsageService<'a> {
     storage: &'a mut dyn ProductStateStorage,
 }
@@ -690,12 +612,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Self { storage }
     }
 
-    /// Starts the primary or one previously authorized retry attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects denied admission, route/sequence mismatch, replay conflict,
-    /// corrupt state, or storage failure.
     pub fn start_attempt(
         &mut self,
         request: &ModelRetryUsageRequest,
@@ -791,13 +707,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Err(storage_retry_exhausted())
     }
 
-    /// Records one failed/cancelled attempt and returns the only authorized
-    /// same-route retry, fallback, or stop decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects ambiguous identities, terminal conflicts, duplicate Usage ids,
-    /// corrupt state, changed replay, or storage failure.
     pub fn fail_attempt(
         &mut self,
         request: &ModelRetryUsageRequest,
@@ -895,12 +804,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Err(storage_retry_exhausted())
     }
 
-    /// Settles one successful attempt and one globally unique Provider Usage fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects identity/Usage mismatch, duplicate Usage ids, another terminal,
-    /// corrupt state, changed replay, or storage failure.
     pub fn complete_attempt(
         &mut self,
         request: &ModelRetryUsageRequest,
@@ -1004,11 +907,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Err(storage_retry_exhausted())
     }
 
-    /// Scans immutable request Usage facts and reconciles exact dimensions.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed filters, corrupt rows, or unavailable bounded scans.
     pub fn reconcile(
         &self,
         filter: &ModelUsageFilter,
@@ -1037,11 +935,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Ok(result)
     }
 
-    /// Loads the immutable catalog entry owned by one Provider usage receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, corrupt source rows, or storage failures.
     pub fn usage_source(
         &self,
         provider_usage_id: &str,
@@ -1062,15 +955,6 @@ impl<'a> ModelRetryUsageService<'a> {
         Ok(Some(entry))
     }
 
-    /// Reads one bounded page from a fixed immutable source-catalog snapshot.
-    ///
-    /// Each call inspects at most 1,000 source rows. A selective filter may
-    /// therefore return an empty page with a continuation cursor.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid filters, limits, changed cursors, corrupt rows, or
-    /// storage failures.
     pub fn scan_usage_sources(
         &self,
         filter: &ModelUsageFilter,

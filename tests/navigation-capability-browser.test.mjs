@@ -84,8 +84,6 @@ test('real Chrome projects personal, organization, disabled, and read-only navig
   assert.deepEqual(Object.keys(personal.entries).sort(), [
     'chat', 'extensions', 'home', 'projects', 'settings',
   ])
-  // An organization-hierarchy Scope projects the enterprise deployment fact;
-  // the community client still renders no management surface for it.
   const organization = await navigate('enterprise')
   assert.equal(organization.deployment, 'enterprise')
   assert.deepEqual(Object.keys(organization.entries).sort(), [
@@ -93,8 +91,6 @@ test('real Chrome projects personal, organization, disabled, and read-only navig
   ])
   assert.equal(organization.entries.enterprise, undefined)
 
-  // Design shell: denied/read-only entries render their capability instead of
-  // pretending the area is usable; the unit lane covers the reason mapping.
   const disabled = await navigate('disabled')
   assert.equal(disabled.deployment, 'enterprise')
   assert.equal(disabled.entries.home.capability, 'disabled')

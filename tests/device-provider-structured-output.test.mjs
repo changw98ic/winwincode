@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'

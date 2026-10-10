@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![cfg(feature = "test-support")]
 
 #[path = "support/test_helper_path.rs"]
@@ -686,7 +684,6 @@ async fn prepare_restart_input(root: &Fixture) {
         .unwrap(),
     )
     .unwrap();
-    // Deliberately bypass Drop: emulate loss of the Worker process, not graceful Core cancellation.
     std::process::exit(73);
 }
 

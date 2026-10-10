@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { attentionTitle } from './display-labels.js'
 
 import {
@@ -89,11 +87,6 @@ export interface AttentionCenterItem {
   readonly revision: number
 }
 
-/**
- * UI-506 execution origin of one decision: the Delivery summary already loaded
- * for this Scope names the WorkRun that is currently waiting or running, so a
- * decision can return to the exact WorkItem/WorkRun context that raised it.
- */
 export interface AttentionCenterOrigin {
   readonly deliveryId: DeliveryId
   readonly deliveryTitle: string
@@ -216,7 +209,6 @@ function expired(expiresAt: string, nowMillis: number): boolean {
   return !Number.isFinite(instant) || instant <= nowMillis
 }
 
-/** Complete ProductSession binding check, shared with the local decision surface. */
 function bindingIsComplete(binding: {
   readonly productSessionId: ProductSessionId
   readonly sessionIdentity: { readonly productSessionId: ProductSessionId; readonly workerSessionId: string }
@@ -244,7 +236,6 @@ const URGENCY_RANK: Readonly<Record<AttentionCenterUrgency, number>> = Object.fr
   'binding-invalid': 3,
 })
 
-/** Canonical browsing order: blocking first, soonest expiry next, stable by identity. */
 export function orderedAttentionCenterItems(
   items: readonly AttentionCenterItem[],
 ): readonly AttentionCenterItem[] {
@@ -334,8 +325,6 @@ interface AttentionSource {
   readonly candidateBound: boolean
 }
 
-/** Generic fail-closed placeholder for a Delivery whose ownership left the selected Scope:
-    no foreign title, identifier, or link enters the rendered card. */
 function bindingInvalidAttention(summary: DeliveryProjection): AttentionCenterItem {
   const item: AttentionCenterItem = {
     kind: 'attention',
@@ -403,7 +392,6 @@ interface AttentionCenterSnapshot {
   readonly origins: readonly AttentionCenterOrigin[]
 }
 
-/** Build the task board's pending decisions from authoritative Control Plane projections only. */
 export function createAttentionCenterViewModel(
   options: AttentionCenterViewModelOptions,
 ): AttentionCenterViewModel {
@@ -595,8 +583,6 @@ export function createAttentionCenterViewModel(
       deliverySummaries(signal),
     ])
     const clock = nowMillis()
-    // Exact Scope check: a joined ProductSession outside the selected repository
-    // never contributes titles, inputs, or interaction queries.
     const scopedSessions = sessionValues.filter(session =>
       session.projectId === options.scope.projectId
       && session.repositoryId === options.scope.repositoryId)
@@ -667,7 +653,6 @@ export function createAttentionCenterViewModel(
     }
   }
 
-  /** One fail-closed settlement for lost authentication or authorization. */
   function revokeAccess(error: ControlPlaneClientError): void {
     generation += 1
     abortRequests()

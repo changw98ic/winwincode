@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { ControlPlaneDeviceSummary } from './community-control-plane-client.js'
 import {
   deviceRecoveryDeadlineText,
@@ -14,22 +12,17 @@ import {
 
 export interface ClientOccupancyControlsOptions {
   readonly document: Document
-  /** The card action row that receives the occupancy buttons. */
   readonly actions: HTMLElement
-  /** The card notice row that receives the confirmation and failure copy. */
   readonly notice: HTMLElement
   readonly model: ClientOccupancyViewModel
-  /** Epoch-milliseconds clock for the recovery-deadline text; defaults to now. */
   readonly now?: () => number
 }
 
 export interface ClientOccupancyControls {
-  /** Re-render the occupancy controls for the card's current device. */
   update(device: ControlPlaneDeviceSummary): void
   close(): void
 }
 
-/** Why the destructive entry frees the device, and what confirming means. */
 const DANGER_COPY: Readonly<Record<ClientOccupancyDangerAction, string>> = Object.freeze({
   release: '释放后将停止接收新任务，并在当前任务完成后解除占用。',
   'cancel-and-release': '停止后将取消正在运行的任务，并立即释放设备。',
@@ -42,12 +35,6 @@ const CONFIRM_ACCEPT_TEXT: Readonly<Record<ClientOccupancyDangerAction, string>>
   'force-release': '强制释放',
 })
 
-/**
- * The one copy per occupancy failure; every entry also reaches the screen
- * reader through the alert role of the failure line. The failure union is the
- * card's translation of the facade's stable error categories, so no raw
- * server text and no other user's identity can reach the card.
- */
 function failureText(failure: ClientOccupancyFailure): string {
   switch (failure) {
     case 'occupied-by-other': return '其他用户已先占用该设备。'
@@ -69,13 +56,6 @@ function failureText(failure: ClientOccupancyFailure): string {
   }
 }
 
-/**
- * Mount the occupancy controls of one device card: the connect entry, the
- * holder's release and cancel-and-release entries, the Owner's force-release
- * entry for a recovery-pending device, and the explicit confirmation, recovery
- * deadline, and failure copy for the dangerous paths. The module owns DOM and
- * ARIA only; every click translates into one view-model intent.
- */
 export function mountClientOccupancyControls(
   options: ClientOccupancyControlsOptions,
 ): ClientOccupancyControls {
@@ -103,8 +83,6 @@ export function mountClientOccupancyControls(
   force.type = 'button'
   force.textContent = '强制释放'
 
-  // UI-100.3: the §12.4 recovery window of an interrupted lease. A plain
-  // paragraph keeps the card's one alert channel reserved for real failures.
   const recovery = document.createElement('p')
   recovery.className = 'wwc-clients-card-recovery'
   recovery.hidden = true
@@ -181,10 +159,6 @@ export function mountClientOccupancyControls(
       cancel.textContent = busyAction === 'cancel-and-release' ? '正在停止…' : '取消任务并释放'
       cancel.disabled = busy || !cancelApplies
 
-      // UI-100.3: the Owner force-release entry exists only for an interrupted
-      // lease, and only when the composed facade exposes the seam. The Server
-      // stays the one authority on who an Owner is; a denial keeps the entry
-      // with honest copy instead of second-guessing the Server here.
       const forceApplies = deviceSupportsForceRelease(device)
         && options.model.supportsForceRelease()
       force.hidden = !forceApplies
@@ -200,8 +174,6 @@ export function mountClientOccupancyControls(
       }
 
       const failureLine = interaction.kind === 'failed' ? interaction.failure : null
-      // A failed dangerous action keeps its armed confirmation: the draft
-      // survives so the same explicit accept can retry the request.
       const armedAction = interaction.kind === 'confirming'
         ? interaction.action
         : (interaction.kind === 'failed' && interaction.action !== 'claim'

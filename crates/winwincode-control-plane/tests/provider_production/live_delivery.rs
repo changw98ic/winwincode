@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 use std::process::Command;
 #[path = "../../../../tests/support/git_candidate.rs"]

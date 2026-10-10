@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::{BTreeMap, VecDeque};
 
 use sha2::{Digest, Sha256};

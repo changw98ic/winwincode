@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 
 #[path = "support/production_code_mode.rs"]
@@ -330,15 +328,9 @@ impl DirectorySnapshot {
                 fs::create_dir_all(parent).expect("restore snapshot file parent");
             }
             fs::write(&path, bytes).expect("restore durable crash snapshot file");
-            // `fs::write` creates a fresh file with the process umask.  Keep
-            // executable sealed helpers executable across a crash snapshot;
-            // ProductionCodexAdapter intentionally validates that bit before
-            // accepting the helper on restart.
             fs::set_permissions(path, permissions.clone())
                 .expect("restore durable crash snapshot permissions");
         }
-        // A crash preserves inode relationships, including the sealed Linux
-        // helper's sandbox alias. Equal bytes alone are not that identity.
         for (path, original) in &self.hard_links {
             fs::hard_link(root.join(original), root.join(path))
                 .expect("restore durable crash snapshot hard link");
@@ -545,10 +537,6 @@ fn commit_execution_queue(storage: &mut SqliteStorage, job: &ExecutionJob) {
             occurred_at: at("2030-01-01T00:00:00.000Z"),
         })
         .expect("lease canonical execution queue Job");
-    // The production scheduler commits ProductSession and Delivery dispatch
-    // intents atomically with their queue row.  This fixture writes the queue
-    // directly, so retain the same immutable internal intent before the
-    // embedded Provider runtime authorizes its first ModelOpen.
     let event_id = format!("execution-job:{}", job.job_id.0);
     if storage
         .load_outbox_event(&event_id)
@@ -1795,8 +1783,6 @@ commandIds = ["check", "rust", "python"]
                     .starts_with("code-mode:")
             );
         }
-        // Drive B through the real workspace intake and patch/validation store;
-        // A still returns through the original Worker and ProductionAdapter.
         let active = worker.active_jobs()[0].clone();
         let checkout = worker
             .workspace_runtime_for_test()
@@ -3138,7 +3124,6 @@ async fn register(
         .expect("accept Worker registration");
 }
 
-// Shared lifecycle assertion for every real Worker + SQLite control entry.
 async fn consume_without_dispatch(
     worker: &mut winwincode_worker::WorkerMain<
         RecordedPort,
@@ -4015,10 +4000,6 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         .as_ref()
         .expect("verification work input");
     let evidence_call_id = production_code_mode::source_id(&second_open, "exec_command");
-    // The adapter accepts only the exact field order emitted by the
-    // canonical verification-result serializer.  serde_json::json! stores
-    // object keys in sorted order in this build, so build the fixture with
-    // escaped scalar values while retaining the protocol's field order.
     let final_message = format!(
         "{{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":{},\"delivery_spec_revision\":{},\"candidate_ref\":{},\"findings\":[{{\"finding_id\":{},\"criterion_id\":{},\"verdict\":\"pass\",\"explanation\":{},\"evidence_sources\":[{{\"source_id\":{}}}]}}]}}",
         serde_json::to_string(&input.delivery_spec_id).expect("verification spec JSON"),
@@ -4501,8 +4482,6 @@ async fn capture_rollout_before_adapter_terminal<'root>(
         Some("submission_intent" | "runtime_started")
     ));
     assert!(run["terminal"].is_null());
-    // A crash preserves the writer checkout and Git worktree registration;
-    // graceful shutdown removes them, so restore all three durable roots.
     let crash_snapshot = DirectorySnapshot::capture(&root.worker());
     let workspace_snapshot = DirectorySnapshot::capture(&root.workspaces());
     let source_snapshot = DirectorySnapshot::capture(&root.sources());
@@ -6070,11 +6049,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                 .await
                 .expect("deliver request_user_input provider response");
         }
-        // Persist the Provider-side terminal batch in the local Control Plane
-        // fixture as well.  The Worker receives the equivalent hand-authored
-        // frames above; this closes the Provider reservation before the crash
-        // so the replacement exchange can be admitted with the same route
-        // authority.
         first_app
             .complete_loopback_before_product_session_projection_for_test(
                 &first_gateway,
@@ -6154,10 +6128,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             .await
             .expect_err("expired input response must be rejected");
 
-        // Snapshot before the CP response is accepted.  The input request is
-        // already in the durable outbox, while Core is blocked on its exact
-        // one-shot request.  Reopening the adapter must replay that frame and
-        // accept the same response exactly once.
         let input_before_restart = stored_input_operation_json(&root, &request.input_request_id.0);
         assert_eq!(input_before_restart["state"], "pending");
         assert!(!input_before_restart["turnId"].as_str().unwrap().is_empty());
@@ -6255,8 +6225,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
         )
         .await
         .expect("resolve exact input response through embedded Kernel");
-        // A lost ACK causes the CP to retry the exact response.  The durable
-        // input operation and outbox both treat that replay as idempotent.
         consume_without_dispatch(
             &mut replay,
             &replay_port,
@@ -6279,11 +6247,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             .await
             .expect_err("changed duplicate input response must be rejected");
 
-        // The resumed turn first emits a fresh ModelOpen on the restarted
-        // Worker port while it reconstructs the interrupted provider
-        // exchange. The original ModelOpen was recorded by the predecessor
-        // port, so this is the first message on the replacement port rather
-        // than the post-input continuation.
         let recovery_open = poll_until_message(
             &mut replay,
             &replay_port,
@@ -6331,9 +6294,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             Some("functions".to_owned()),
         )
         .expect("canonical recovery request_user_input tool");
-        // The resumed provider exchange replays the same call identity. Core
-        // consumes the already accepted response from its recovery waiter;
-        // the adapter must not expose a second host prompt for that call.
         let recovery_call_id = call_id.clone();
         for chunk in provider_chunks(
             &recovery_open,
@@ -6385,10 +6345,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             .flush_durable_outbox()
             .await
             .expect("drive retained recovery ACKs");
-        // The replacement Worker acknowledges each recovered provider frame.
-        // Apply those ACKs to the same local Control Plane instance before
-        // opening the continuation, so durable admission can retire the
-        // completed recovery exchange rather than treating it as active.
         let recovery_acks = replay_port
             .messages()
             .into_iter()
@@ -6411,9 +6367,6 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                 .expect("accept recovered provider ACK");
         }
 
-        // The `.nth(1)` is intentional: only this second restarted-port
-        // ModelOpen is evidence that the accepted InputResponse resumed the
-        // same turn after the recovery exchange completed.
         let second_open = poll_until_message(
             &mut replay,
             &replay_port,

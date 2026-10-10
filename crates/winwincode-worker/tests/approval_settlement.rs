@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![cfg(feature = "test-support")]
 
 #[path = "support/test_helper_path.rs"]
@@ -1829,8 +1827,6 @@ fn renewed_restart_rejects_a_foreign_lease_without_reusing_the_old_run() {
             root.workspace_runtime(),
         );
         register_at(&mut worker, &port, &config, at("00:15:02")).await;
-        // Worker startup legitimately records original interaction deadlines
-        // before any dispatch. Measure only changes caused by the foreign one.
         let before = stored_run(&root);
         worker
             .accept_control(

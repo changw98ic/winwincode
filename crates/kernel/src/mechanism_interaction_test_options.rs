@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! An isolated subprocess may select an existing Core collaboration mode. This
-//! hook is compiled only by `WinWinCode`'s explicit test-support feature.
-
 pub(super) fn apply(
     mut request: codex_core_api::TurnInputRequest,
 ) -> codex_core_api::TurnInputRequest {

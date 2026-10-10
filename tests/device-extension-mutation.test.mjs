@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createECDH } from 'node:crypto'
@@ -148,8 +146,6 @@ test('encrypted apply continues beyond four failures and admits the server reque
     response.writeHead(attempts <= 5 ? 503 : 202)
     response.end('{"status":"waiting"}')
   })
-  // The executor and TLS transport remain real. Its public waiter seam removes
-  // wall-clock backoff from this six-attempt policy regression in a child only.
   const child = `
     import assert from 'node:assert/strict';
     import { mock } from 'node:test';

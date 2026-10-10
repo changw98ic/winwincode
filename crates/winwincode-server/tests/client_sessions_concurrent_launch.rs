@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Independent native launch regressions. These tests use the real application,
-//! credential publication and `SQLite` transaction. They start no HTTP server,
-//! Worker process or model request. A retained launch frame is a launch intent,
-//! not evidence that a Worker process started.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
@@ -138,8 +131,6 @@ impl Fixture {
         drop(storage);
         device_provider::stage_chat(&directory, NODE, HOLDER, 100);
         device_provider::stage_chat(&directory, NODE, HOLDER, 101);
-        // Initialize the real private store once. Its first-key creation is a
-        // separate boundary from concurrent launch admission under test.
         PrivateLaunchMaterialStore::open(&directory).expect("private material store");
         Self { directory }
     }
@@ -212,9 +203,6 @@ impl Drop for Fixture {
     }
 }
 
-// Two bounded gates ensure both production prepare calls passed the prior
-// grant lookup and completed real private publication before either commits.
-// Timeout causes an assertion instead of leaving a test thread blocked.
 #[derive(Default)]
 struct Gate {
     arrivals: Mutex<usize>,
@@ -306,8 +294,6 @@ fn concurrent_launches(fixture: &Fixture, sessions: [u64; 2]) -> Vec<ClientSessi
         let threads: Vec<_> = sessions
             .into_iter()
             .map(|session| {
-                // Separate application instances prevent an application-local
-                // mutex from masquerading as durable launch admission.
                 let app = fixture.application(exchange.clone());
                 scope.spawn(move || launch(&app, &request(session)))
             })
@@ -434,8 +420,6 @@ fn credential_publication_failure_keeps_safe_stage_and_no_public_grant() {
         !diagnostic.contains("adxi-fixture-secret")
             && !diagnostic.contains(private.to_string_lossy().as_ref())
     );
-    // The pre-fix type already supports Debug, so this is an executable
-    // behavioral red, not a compilation failure for a proposed accessor.
     assert!(
         diagnostic.contains("credential_publication"),
         "unavailable launch must retain its safe internal stage: {diagnostic}"
@@ -525,8 +509,6 @@ fn forced_sqlite_writer_contention_preserves_stage_and_rolls_back_launch() {
     assert_eq!(error.failure_code(), Some("storage_adapter"));
     assert!(!format!("{error:?}").contains(fixture.directory.to_string_lossy().as_ref()));
 
-    // The failed transaction did not reserve half a grant. A fresh native
-    // application may submit the original request, then reuse its exact facts.
     let retry = fixture.application(Arc::new(fixture.real_exchange()));
     assert_eq!(
         launch(&retry, &request(100)).expect_err("no ack").kind(),

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 use super::super::ExecutionPortActionGate;
 use super::super::tests::{binding, catalog, signing_key};
 use winwincode_domain::Instant;

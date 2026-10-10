@@ -1,11 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::{ActionBridgeError, ActionGateState, current_binding_and_time, current_generation};
 use sha2::{Digest, Sha256};
 use winwincode_kernel::{KernelActionAuthorization, KernelToolResultReadRequest};
 
-/// A live root `WorkRun` may read its own Core thread's historical receipts.
-/// Delegated reads require a separately scoped result-read policy.
 pub(super) fn authorize(
     state: &ActionGateState,
     request: &KernelToolResultReadRequest,

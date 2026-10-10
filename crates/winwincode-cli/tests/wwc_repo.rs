@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Coverage for the `wwc repo add|list|remove` Device Client registry
-//! surface (plan §13.1, §16.8): the registration check chain drives the
-//! canonical device-client library, a non-Git directory needs the explicit
-//! `--init` confirmation, list shows the local bindings, remove reports the
-//! removal, and every server-bound frame stays path-free.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,8 +62,6 @@ impl Fixture {
         )
     }
 
-    /// Creates the device identity and adopts the enrollment, the state the
-    /// Device Client reaches after its first accepted exchange.
     fn enroll(&self) {
         let mut store = DeviceStore::open(&self.data_directory).expect("device store opens");
         ensure_device_identity(&mut store, &seed(), STAMP).expect("identity loads");
@@ -101,7 +91,6 @@ impl Fixture {
         store.close().expect("store closes");
     }
 
-    /// Creates a real Git repository with one baseline commit.
     fn git_repository(&self, name: &str) -> PathBuf {
         let root = self.workspace.join(name);
         fs::create_dir_all(&root).expect("repository directory");
@@ -140,7 +129,6 @@ fn seed() -> winwincode_device_client::DeviceIdentitySeed {
     }
 }
 
-/// Runs one git command with an isolated configuration and fails on error.
 fn git(root: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
         .args(["-C"])
@@ -179,7 +167,6 @@ fn repo_add_list_remove_round_trip_reports_frames() {
             .current_instance_id()
             .to_owned();
 
-    // add: JSON outcome carries the binding view.
     let repository_text = repository.to_str().expect("UTF-8 repository path");
     let exit = fixture.cli(&["add", repository_text, "--json"]);
     assert_eq!(exit.code, 0, "add failed: {} {}", exit.stdout, exit.stderr);
@@ -213,7 +200,6 @@ fn repo_add_list_remove_round_trip_reports_frames() {
         instance
     );
 
-    // The upsert frame is durable and path-free.
     let kinds = fixture.pending_kinds();
     assert_eq!(kinds, vec!["client.repository.upsert".to_owned()]);
     {
@@ -224,7 +210,6 @@ fn repo_add_list_remove_round_trip_reports_frames() {
         store.close().expect("store closes");
     }
 
-    // list: the binding appears with its availability.
     let exit = fixture.cli(&["list", "--json"]);
     assert_eq!(exit.code, 0, "list failed: {} {}", exit.stdout, exit.stderr);
     let listed: Value = serde_json::from_str(&exit.stdout).expect("list JSON");
@@ -237,7 +222,6 @@ fn repo_add_list_remove_round_trip_reports_frames() {
     );
     assert_eq!(repositories[0]["availability"], "available");
 
-    // remove: the removal is reported and the binding disappears.
     let exit = fixture.cli(&["remove", &binding_id, "--json"]);
     assert_eq!(
         exit.code, 0,
@@ -279,10 +263,8 @@ fn repo_add_refuses_non_git_directory_until_confirmed() {
         exit.stderr
     );
 
-    // Nothing persisted, nothing reported.
     assert!(fixture.pending_kinds().is_empty());
 
-    // With --init the directory initializes and registers.
     let exit = fixture.cli(&["add", plain_text, "--init"]);
     assert_eq!(
         exit.code, 0,
@@ -305,11 +287,9 @@ fn repo_commands_require_enrollment_and_data_dir() {
     let repository = fixture.git_repository("unenrolled-repo");
     let repository_text = repository.to_str().expect("UTF-8 repository path");
 
-    // A data directory without a device identity is not initialized.
     let exit = fixture.cli(&["add", repository_text]);
     assert_eq!(exit.code, 3, "expected action-required: {exit:?}");
 
-    // After first boot but before enrollment, frames are refused.
     {
         let mut store = DeviceStore::open(&fixture.data_directory).expect("store opens");
         ensure_device_identity(&mut store, &seed(), STAMP).expect("identity loads");
@@ -323,7 +303,6 @@ fn repo_commands_require_enrollment_and_data_dir() {
         exit.stdout
     );
 
-    // Missing --data-dir is a usage error.
     let exit = run_cli(
         &["repo".to_owned(), "list".to_owned()],
         &SystemLocalLauncher::new(std::env::temp_dir()),
@@ -364,8 +343,6 @@ fn repo_list_outcome_renders_bindings() {
         panic!("expected a list");
     };
     assert_eq!(repositories.len(), 1);
-    // The list view is built from the durable rows: the default branch is
-    // not persisted, everything else matches the registration view.
     let listed = &repositories[0];
     assert_eq!(listed.repository_binding_id, view.repository_binding_id);
     assert_eq!(listed.canonical_path, view.canonical_path);

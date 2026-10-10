@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Fixed-snapshot, bounded, offline-verifiable Audit Ledger exports.
-//!
-//! An export contains the immutable headers needed to walk the canonical
-//! organization hash chain. Retained matching events remain the already
-//! secret-safe [`AuditEvent`] shape; pruned payloads become sealed
-//! [`AuditDeletionProof`] values. Artifact and evidence content is never
-//! copied: only digest references already committed by the event are exposed.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +22,6 @@ const QUERY_DOMAIN: &[u8] = b"winwincode.audit-export-query.v1";
 const CHAIN_DOMAIN: &[u8] = b"winwincode.audit-chain.v1";
 const GOVERNANCE_DECISION_DOMAIN: &[u8] = b"winwincode.data-governance-decision.v1";
 
-/// Inclusive event-time bounds for one export query.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportTimeRange {
     from_millis: u64,
@@ -40,11 +29,6 @@ pub struct AuditExportTimeRange {
 }
 
 impl AuditExportTimeRange {
-    /// Builds an ordered, exact-range time window.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero, reversed, or non-exact JSON timestamps.
     pub fn try_new(from_millis: u64, through_millis: u64) -> Result<Self, AuditExportError> {
         if from_millis == 0 || from_millis > through_millis || through_millis > MAX_SAFE_INTEGER {
             return Err(AuditExportError::invalid(
@@ -72,8 +56,6 @@ impl AuditExportTimeRange {
     }
 }
 
-/// Hard page bounds. Every page advances through at most `scan_records`
-/// canonical headers and contains at most `max_record_bytes` encoded records.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportLimits {
     scan_records: usize,
@@ -81,11 +63,6 @@ pub struct AuditExportLimits {
 }
 
 impl AuditExportLimits {
-    /// Builds bounded page limits.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or limits above the canonical hard bounds.
     pub fn try_new(scan_records: usize, max_record_bytes: usize) -> Result<Self, AuditExportError> {
         if !(1..=MAX_SCAN_RECORDS).contains(&scan_records)
             || !(1..=MAX_RECORD_BYTES).contains(&max_record_bytes)
@@ -111,7 +88,6 @@ impl AuditExportLimits {
     }
 }
 
-/// Stable subject identity used by the optional exact subject filter.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 enum SubjectIdentity {
@@ -124,71 +100,34 @@ enum SubjectIdentity {
     Worker(WorkerId),
 }
 
-/// Validated exact subject filter. Fields remain sealed so a cursor cannot
-/// introduce an unvalidated product identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditSubjectFilter(SubjectIdentity);
 
 impl AuditSubjectFilter {
-    /// Builds an exact Delivery filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Delivery identity.
     pub fn delivery(id: DeliveryId) -> Result<Self, AuditExportError> {
         Self::typed("dlv", SubjectIdentity::Delivery(id))
     }
 
-    /// Builds an exact `ProductSession` filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `ProductSession` identity.
     pub fn product_session(id: ProductSessionId) -> Result<Self, AuditExportError> {
         Self::typed("psn", SubjectIdentity::ProductSession(id))
     }
 
-    /// Builds an exact Lease filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Lease identity.
     pub fn lease(id: LeaseId) -> Result<Self, AuditExportError> {
         Self::typed("lse", SubjectIdentity::Lease(id))
     }
 
-    /// Builds an exact Publication filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Publication identity.
     pub fn publication(id: PublicationId) -> Result<Self, AuditExportError> {
         Self::typed("pub", SubjectIdentity::Publication(id))
     }
 
-    /// Builds an exact `ExecutionJob` filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `ExecutionJob` identity.
     pub fn execution_job(id: ExecutionJobId) -> Result<Self, AuditExportError> {
         Self::typed("job", SubjectIdentity::ExecutionJob(id))
     }
 
-    /// Builds an exact `WorkRun` filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `WorkRun` identity.
     pub fn work_run(id: WorkRunId) -> Result<Self, AuditExportError> {
         Self::typed("run", SubjectIdentity::WorkRun(id))
     }
 
-    /// Builds an exact Worker filter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Worker identity.
     pub fn worker(id: WorkerId) -> Result<Self, AuditExportError> {
         Self::typed("wrk", SubjectIdentity::Worker(id))
     }
@@ -271,9 +210,6 @@ impl AuditSubjectFilter {
     }
 }
 
-/// Governance proof attached to the export. The source and policy digests
-/// allow an auditor to identify the exact redaction decision without copying
-/// the governed source content.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportPolicyProof {
     audit_event_id: AuditEventId,
@@ -342,7 +278,6 @@ impl AuditExportPolicyProof {
     }
 }
 
-/// Serializable query facts committed by every cursor and export page.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportManifest {
     scope: AuditScope,
@@ -446,8 +381,6 @@ impl AuditExportManifest {
     }
 }
 
-/// Authorized export query. The access value is retained separately because
-/// a serializable manifest is evidence, not authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditExportQuery {
     access: AuditAccess,
@@ -456,12 +389,6 @@ pub struct AuditExportQuery {
 }
 
 impl AuditExportQuery {
-    /// Builds a fixed-shape export query bound to one governance redaction
-    /// decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid time/page bounds or policy proof encoding.
     pub fn try_new(
         access: AuditAccess,
         time_range: AuditExportTimeRange,
@@ -487,11 +414,6 @@ impl AuditExportQuery {
         })
     }
 
-    /// Adds one exact subject filter and rebinds the query digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns an encoding error if the canonical manifest cannot be encoded.
     pub fn with_subject(mut self, subject: AuditSubjectFilter) -> Result<Self, AuditExportError> {
         self.manifest.subject = Some(subject);
         self.query_digest = self.manifest.digest()?;
@@ -509,7 +431,6 @@ impl AuditExportQuery {
     }
 }
 
-/// Cursor sealed to an exact query and immutable organization checkpoint.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportCursor {
     query_digest: Sha256Digest,
@@ -530,7 +451,6 @@ impl AuditExportCursor {
     }
 }
 
-/// Immutable header fields required to recompute one organization chain link.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportHeader {
     sequence: u64,
@@ -575,7 +495,6 @@ impl AuditExportHeader {
     }
 }
 
-/// Digest-only references already committed by a canonical audit event.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditArtifactDigestKind {
@@ -604,8 +523,6 @@ impl AuditArtifactDigestReference {
     }
 }
 
-/// Immutable proof that a finite-retention payload was deleted only after its
-/// deadline while its chain header remained.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditDeletionProof {
     pruned_at_millis: u64,
@@ -624,20 +541,14 @@ impl AuditDeletionProof {
     }
 }
 
-/// Payload state for one chain witness.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditExportContent {
-    /// Header-only witness outside the requested scope/time window.
     Witness,
-    /// Retained canonical event. This type cannot represent raw commands,
-    /// prompts, responses, credentials, or Artifact bodies.
     Event { event: Box<AuditEvent> },
-    /// Immutable retention tombstone for a deleted event payload.
     DeletionProof { proof: AuditDeletionProof },
 }
 
-/// One bounded export record plus its filter result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportRecord {
     header: AuditExportHeader,
@@ -668,8 +579,6 @@ impl AuditExportRecord {
     }
 }
 
-/// One fixed-snapshot page. Every record is a contiguous chain witness;
-/// `included_records` selects the requested scope/time/subject results.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExportPage {
     manifest: AuditExportManifest,
@@ -713,7 +622,6 @@ impl AuditExportPage {
     }
 }
 
-/// State carried by an offline verifier across consecutive pages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditExportVerificationState {
     query_digest: Sha256Digest,
@@ -737,14 +645,6 @@ impl AuditExportVerificationState {
 }
 
 impl AuditStore {
-    /// Reads one bounded page from a fixed, fully verified organization
-    /// snapshot. Appends after the first page do not enter later cursor pages.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a cursor from another query/snapshot, oversized individual
-    /// records, unprovable subject matches after payload deletion, or any
-    /// canonical Audit Ledger corruption.
     pub fn export_page(
         &self,
         query: &AuditExportQuery,
@@ -848,19 +748,9 @@ impl AuditStore {
     }
 }
 
-/// Stateless offline verifier for serialized export pages.
 pub struct AuditExportVerifier;
 
 impl AuditExportVerifier {
-    /// Verifies one page and advances the caller-owned chain state.
-    ///
-    /// The first page requires `previous = None`; later pages require the exact
-    /// state returned by the preceding call.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed manifests, filters, headers, payloads, tombstones,
-    /// digest references, page bounds, gaps, or snapshot tails.
     pub fn verify_page(
         page: &AuditExportPage,
         previous: Option<&AuditExportVerificationState>,
@@ -959,11 +849,6 @@ impl AuditExportVerifier {
         })
     }
 
-    /// Decodes and verifies a JSON page.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical JSON or any verification failure.
     pub fn verify_json(
         encoded: &[u8],
         previous: Option<&AuditExportVerificationState>,
@@ -1493,7 +1378,6 @@ fn frame_optional(hash: &mut Sha256, value: Option<&[u8]>) {
     }
 }
 
-/// Stable export failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditExportErrorKind {
     InvalidInput,
@@ -1502,7 +1386,6 @@ pub enum AuditExportErrorKind {
     Store,
 }
 
-/// Secret-safe export failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditExportError {
     kind: AuditExportErrorKind,

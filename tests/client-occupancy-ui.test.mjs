@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/client-occupancy-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -72,7 +70,6 @@ function occupancyError(code, kind = 'server') {
   })
 }
 
-/** One deterministic occupancy port: every call records and waits for a settle. */
 function portFake() {
   const calls = []
   const pending = []
@@ -92,7 +89,6 @@ function portFake() {
   }
 }
 
-/** The holder-only shape of the fake: no Owner force-release seam. */
 function holderPortFake() {
   const port = portFake()
   return {
@@ -345,8 +341,6 @@ test('connect submits one deduplicated claim and re-reads the Server snapshot', 
   connect.emit('click')
   assert.equal(port.calls.length, 1, 'a second click during flight is never repeated')
 
-  // The holder fact arrives through the next Server snapshot, never from the
-  // port result: the refreshed list drives the card copy.
   client.devices = [device({ occupancy: 'occupied-by-me' })]
   port.pending[0].resolve()
   await waitFor(
@@ -661,7 +655,6 @@ test('the facade-backed classifier maps the stable categories per action', () =>
     'protocol drift stays honestly unavailable',
   )
 
-  // The holder/Owner denial category is resolved per attempted action.
   assert.equal(clientOccupancyFailure(occupancyError('PERMISSION_DENIED')), 'not-holder')
   assert.equal(clientOccupancyFailure(occupancyError('PERMISSION_DENIED'), 'release'), 'not-holder')
   assert.equal(
@@ -682,7 +675,6 @@ test('a snapshot that moves past the armed draft drops it without submitting', a
   findOne(card, 'wwc-clients-card-release').emit('click')
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
 
-  // The Server hands the device to another user while the draft is armed.
   await showDevices(fixture, [device({ occupancy: 'occupied-by-other' })])
   assert.equal(
     occupancyModel.interaction('123456789012').kind,
@@ -740,9 +732,6 @@ test('a port-less composition reports the honest unavailable failure', async () 
 
 test('the facade adapter separates the holder stop from the Owner force-release and rejects incomplete facades', async () => {
   const calls = []
-  // UI-100.3: the landed facade seam — the holder's cancel-and-release goes
-  // through releaseOccupancy with the explicit mode, and the Owner recovery
-  // cleanup goes through the dedicated force-release entry.
   const completeFacade = {
     claimOccupancy: input => { calls.push(['claim', input.clientId]); return Promise.resolve() },
     releaseOccupancy: input => {
@@ -765,7 +754,6 @@ test('the facade adapter separates the holder stop from the Owner force-release 
     ['forceRelease', '123456789012'],
   ])
 
-  // A facade without the force-release seam still serves the holder paths.
   const holderOnly = clientOccupancyPortFromFacade({
     claim: completeFacade.claimOccupancy,
     releaseOccupancy: completeFacade.releaseOccupancy,

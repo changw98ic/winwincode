@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The user-facing Client connection flow over real HTTP: the three
-//! `/api/v1/clients` routes wired to `ClientConnectionsApplication` and the
-//! real client exchange, covering the §16.3 error taxonomy, the bounded
-//! authorization without a Device response, the atomic
-//! consume-and-grant with idempotent retries, the device directory shape,
-//! and immediate revocation.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -59,8 +50,6 @@ use winwincode_storage::{
 const BOOTSTRAP_PROOF: &str = "client-connections-test-bootstrap";
 const ORIGIN: &str = "https://client.example";
 const OWNER_PASSWORD: &str = "initial-owner-password";
-/// Placeholder client node id a fresh device sends before the server assigns
-/// the canonical `cnd_` identity.
 const FRESH_NODE: &str = "device-local-pending";
 const INSTANCE: &str = "cix_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const SCHEMA_VERSION: &str = "winwincode/v1";
@@ -269,8 +258,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// Initializes the Owner with a password, then signs in; returns
-/// (cookie, userId).
 async fn initialize_and_login_owner(address: std::net::SocketAddr) -> (String, String) {
     let response = http_request(
         address,
@@ -298,8 +285,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
         .to_owned();
     (session_cookie_from_response(&response), user_id)
 }
-
-// ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
     address: std::net::SocketAddr,
@@ -361,9 +346,6 @@ fn capacity() -> ClientCapacityReport {
     }
 }
 
-/// Enrolls a fresh device over the exchange; returns (nodeId, publicClientId,
-/// credential, next client-to-server sequence). The node stays
-/// `pending_enrollment`.
 async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
@@ -404,7 +386,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     (node, public_client_id, credential, 2)
 }
 
-/// Walks the announcement hello so the node projects `online`.
 async fn walk_hello(
     address: std::net::SocketAddr,
     node: &str,
@@ -432,15 +413,12 @@ async fn walk_hello(
     );
 }
 
-/// Enrolls and walks hello: the node is `online` with a credential.
 async fn enroll_online_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
     let (node, public_client_id, credential, next) = enroll_device(address).await;
     walk_hello(address, &node, INSTANCE, &credential, next).await;
     (node, public_client_id, credential, next + 1)
 }
 
-/// Publishes one connect code digest the way the Device Client would, and
-/// returns the 8-digit code the user will type.
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -460,8 +438,6 @@ fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String
     code.to_owned()
 }
 
-/// Consumes one published code directly, staging a grant another user (or a
-/// concurrent winner) would have taken.
 fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -500,8 +476,6 @@ fn set_presence(data_directory: &Path, node: &str, presence: ClientPresenceState
         .expect("presence transition");
 }
 
-/// Rewrites one registry column of a node directly (test staging for device
-/// local facts no public API mutates).
 fn set_node_column(data_directory: &Path, node: &str, assignment: &str) {
     let connection =
         Connection::open(data_directory.join("control-plane.sqlite3")).expect("open database");
@@ -599,8 +573,6 @@ fn wire_code(response: &str) -> String {
         .to_owned()
 }
 
-// ---- tests ----------------------------------------------------------------
-
 #[tokio::test]
 async fn connect_and_directory_require_a_signed_in_session() {
     let data_directory = test_directory("client-connect-auth");
@@ -656,7 +628,6 @@ async fn device_reported_policy_controls_access_across_heartbeats_and_restart() 
     let mut daemon = start_policy_device(address, &device_directory);
     let mut tick_at = std::time::Instant::now();
 
-    // A lock set before enrollment must reach the Server in the first hello.
     daemon.lock_client().unwrap();
     exchange_device_reports(&mut daemon, &mut tick_at);
     exchange_device_reports(&mut daemon, &mut tick_at);
@@ -684,7 +655,6 @@ async fn device_reported_policy_controls_access_across_heartbeats_and_restart() 
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "CLIENT_CONNECTIONS_FORBIDDEN");
 
-    // Ordinary heartbeat reports persist a changed policy and repeated reports.
     daemon.unlock_client().unwrap();
     daemon.set_accepting_connections(false).unwrap();
     for _ in 0..2 {
@@ -698,7 +668,6 @@ async fn device_reported_policy_controls_access_across_heartbeats_and_restart() 
         assert_eq!(wire_code(&response), "CLIENT_CONNECTIONS_FORBIDDEN");
     }
 
-    // The lock is independent of accepting_connections.
     daemon.lock_client().unwrap();
     daemon.set_accepting_connections(true).unwrap();
     exchange_device_reports(&mut daemon, &mut tick_at);
@@ -712,7 +681,6 @@ async fn device_reported_policy_controls_access_across_heartbeats_and_restart() 
     daemon.into_store().close().unwrap();
     running.shutdown().await.unwrap();
 
-    // Both stores reopen with the reported policy; a fresh hello preserves it.
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     assert_eq!(
@@ -738,7 +706,6 @@ async fn device_reported_policy_controls_access_across_heartbeats_and_restart() 
     );
     drop(storage);
 
-    // Rejections did not consume the code; an unlocked heartbeat permits it.
     daemon.unlock_client().unwrap();
     exchange_device_reports(&mut daemon, &mut tick_at);
     assert_eq!(
@@ -771,7 +738,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     let address = running.local_address();
     let (cookie, _user_id) = initialize_and_login_owner(address).await;
 
-    // Unknown Client ID.
     let response = http_request(
         address,
         &cookie_post(
@@ -784,7 +750,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "404", "{response}");
     assert_eq!(wire_code(&response), "CLIENT_NOT_FOUND");
 
-    // A pending-enrollment device is not a connectable Client yet.
     let (node, public_client_id, credential, next) = enroll_device(address).await;
     let response = http_request(
         address,
@@ -798,7 +763,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "404", "{response}");
     assert_eq!(wire_code(&response), "CLIENT_NOT_FOUND");
 
-    // A malformed input is a request failure, not a domain error.
     let response = http_request(
         address,
         &cookie_post(
@@ -811,10 +775,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "400", "{response}");
     assert_eq!(wire_code(&response), "INVALID_REQUEST");
 
-    // The device walks hello and goes online; a wrong code is invalid
-    // (attempt 1 of the fixed window).
-    // A hello from a fresh launch instance takes the device projection over
-    // and carries the reported capacity (4 worker sessions).
     walk_hello(
         address,
         &node,
@@ -836,7 +796,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "CONNECT_CODE_INVALID");
 
-    // An expired code reads as the expiry category (attempt 2).
     let expiring = publish_connect_code(&data_directory, &node, "22223333");
     expire_all_connect_codes(&data_directory);
     let response = http_request(
@@ -851,7 +810,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "CONNECT_CODE_EXPIRED");
 
-    // A consumed code is exhausted (attempt 3).
     let consumed = publish_connect_code(&data_directory, &node, "33334444");
     consume_code_as(
         &data_directory,
@@ -873,7 +831,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
 
     let usable_code = publish_connect_code(&data_directory, &node, "44445555");
 
-    // A Client that no longer accepts connections.
     set_node_column(&data_directory, &node, "accepting_connections = 0");
     let response = http_request(
         address,
@@ -888,7 +845,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(wire_code(&response), "CLIENT_CONNECTIONS_FORBIDDEN");
     set_node_column(&data_directory, &node, "accepting_connections = 1");
 
-    // A locked Client, by presence and by the machine-level lock switch.
     set_presence(&data_directory, &node, ClientPresenceState::Locked);
     let response = http_request(
         address,
@@ -916,8 +872,6 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(wire_code(&response), "CLIENT_LOCKED");
     set_node_column(&data_directory, &node, "lock_state = 'unlocked'");
 
-    // Rate limiting: the three earlier code failures plus two more burn the
-    // fixed window; then even the fully valid attempt is throttled.
     for _ in 0..2 {
         let response = http_request(
             address,
@@ -979,8 +933,6 @@ async fn server_connect_completes_without_device_traffic_and_stays_idempotent() 
     assert_eq!(clients[0]["presence"], json!("online"));
     assert_eq!(clients[0]["occupancy"], json!("available"));
 
-    // Durable facts: exactly one active grant with the first-user permission
-    // set, the code consumed, and no authorization traffic sent to Device.
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let mut grants = AccessGrantService::new(&mut storage);
@@ -1020,8 +972,6 @@ async fn server_connect_completes_without_device_traffic_and_stays_idempotent() 
         assert_eq!(audits, 1, "the grant authorization is audited");
     }
 
-    // Idempotent retry: the same request returns the same device list without
-    // a second grant.
     let response = http_request(
         address,
         &cookie_post(
@@ -1213,7 +1163,6 @@ async fn downlink_outbox_retains_by_acknowledgement_cursor_and_purges() {
             json!({"kind": "test", "sequence": 1}).to_string()
         );
         assert_eq!(outbox.high_water(node).expect("high water"), 2);
-        // A sequence that is not the next stream position is rejected.
         let stale = outbox.append(
             &ClientDownlinkAppend::try_new(node, format!("msg_{:020}", 9), 9, "{}".to_owned())
                 .expect("command"),
@@ -1222,7 +1171,6 @@ async fn downlink_outbox_retains_by_acknowledgement_cursor_and_purges() {
         assert!(stale.is_err(), "sequence 9 is not the next position");
     }
     {
-        // Acknowledging the first frame trims only the acked prefix.
         let mut outbox = storage.client_downlink_outbox().expect("outbox");
         assert_eq!(outbox.retain_through(node, 1).expect("retain"), 1);
         let remaining = outbox.deliverable(node, 0, 10).expect("deliverable");
@@ -1235,9 +1183,6 @@ async fn downlink_outbox_retains_by_acknowledgement_cursor_and_purges() {
         );
     }
     {
-        // After full acknowledgement the table retains nothing and the next
-        // append continues above the acknowledgement cursor: this test never
-        // advanced the cursor, so the stream restarts at one above it.
         let mut outbox = storage.client_downlink_outbox().expect("outbox");
         assert_eq!(outbox.retain_through(node, 5).expect("retain"), 1);
         assert_eq!(outbox.high_water(node).expect("high water"), 0);

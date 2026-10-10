@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Cross-implementation conformance for `winwincode-export/v1`.
-//!
-//! The published vectors are executed by this crate and by the non-Rust strict gate
-//! (`schema/winwincode-export/v1/validate.js`). Both implementations must return the same
-//! verdict for every vector and, for a rejection, the same category.
-
 use std::collections::BTreeSet;
 
 use serde::Deserialize;

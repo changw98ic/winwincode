@@ -1,41 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control-plane composition seam for FUSION-01 blind panel and FUSION-02
-//! parallel runner answers into the existing Fusion host chain.
-//!
-//! Composition path (one-way, no delivery → control-plane cycle):
-//!
-//! ```text
-//! application question + canonical context + providerCandidates
-//!   → FusionInput
-//!   → FUSION-01 run_blind_panel  and/or  FUSION-02 independent answers
-//!   → ComposedFusionAnswer (isolated per candidate)
-//!   → FusionCandidateClaims
-//!   → analyze_fusion (FUSION-03)
-//!   → FusionAnalysisFixture mapping (fusion_adjudication_host)
-//!   → adjudicate_canonical_decision_from_analysis (FUSION-04)
-//!   → CanonicalDecision (read-only projection)
-//! ```
-//!
-//! Isolation and invincible-verifier rules held by this seam:
-//! - Each candidate answer is extracted into claims independently. Sibling
-//!   answers never cross a candidate boundary here or in the panel runner.
-//! - Compose never raises mapped model claims above the model-claim tier.
-//! - Compose never writes Canonical State and never invents a verifier pass.
-//! - Failed panel candidates and failed FUSION-02 targets are omitted from
-//!   claims; they never cancel successful siblings.
-//!
-//! Live `ModelPort` / Provider Runtime plug-in later:
-//! - FUSION-01 adapter: `winwincode_codex::FusionModelPortProvider` implements
-//!   [`winwincode_fusion::FusionProvider`] over the execution's durable `ModelPort`.
-//!   Production host registration remains required; this seam owns no credentials.
-//! - FUSION-02 production: run `winwincode_codex::ParallelModelRunner` over
-//!   kernel `ModelPort`, then feed succeeded `(target_id, frames)` rows into
-//!   [`answers_from_parallel_model_frames`] or implement
-//!   [`FusionRunnerAnswerPort`] with that runner. `target_id` must equal the
-//!   Fusion `candidate_id`.
-//! - Tests inject mock Providers / mock runner ports only.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -65,30 +27,19 @@ use crate::fusion_analysis::{
     FusionEvidence, FusionRound, FusionStopReason, analyze_fusion,
 };
 
-/// One independently collected model answer consumed by the compose seam.
-///
-/// `candidate_id` is the Fusion panel candidate id and the FUSION-02
-/// `ParallelModelTarget::target_id`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComposedFusionAnswer {
     pub candidate_id: String,
     pub answer: Value,
 }
 
-/// One FUSION-02 runner seat accepted by the portable runner port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionRunnerSeat {
     pub candidate_id: String,
-    /// Ordered Provider Runtime routes. First is primary; later routes fall back.
     pub routes: Vec<String>,
 }
 
-/// Portable host-side port for FUSION-02 independent answers.
-///
-/// Production wraps `winwincode_codex::ParallelModelRunner` over kernel
-/// `ModelPort`. Tests inject mock ports that never open Provider connections.
 pub trait FusionRunnerAnswerPort: fmt::Debug + Send + Sync {
-    /// Runs blind independent answers for every seat.
     fn run_blind_answers(
         &self,
         input: &FusionInput,
@@ -96,23 +47,16 @@ pub trait FusionRunnerAnswerPort: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'static, Result<Vec<ComposedFusionAnswer>, FusionComposeError>>;
 }
 
-/// Compose-seam failure before host adjudication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FusionComposeError {
-    /// FUSION-01 rejected the canonical panel input.
     Panel(winwincode_fusion::FusionPanelError),
-    /// FUSION-03 rejected the extracted claim fixture.
     Analysis(FusionAnalysisError),
-    /// An answer could not be converted into independent claims.
     ClaimExtraction {
         candidate_id: String,
         message: String,
     },
-    /// No successful independent answer remained for analysis.
     NoSuccessfulAnswers,
-    /// The portable runner port failed.
     Runner(String),
-    /// Multi-round investigation / judge port failed (ADR-0036).
     MultiRound(String),
 }
 
@@ -139,21 +83,14 @@ impl fmt::Display for FusionComposeError {
 
 impl std::error::Error for FusionComposeError {}
 
-/// Full compose product handed to the existing host adjudication path.
 #[derive(Clone, Debug)]
 pub struct ComposedFusionOutcome {
-    /// Panel record when the FUSION-01 blind panel path ran.
     pub panel: Option<FusionPanelResult>,
-    /// Independent answers that contributed claims (panel successes and/or
-    /// FUSION-02 runner successes).
     pub answers: Vec<ComposedFusionAnswer>,
-    /// Isolated per-candidate claims used for analysis.
     pub claims: Vec<FusionCandidateClaims>,
-    /// FUSION-03 pure analysis.
     pub analysis: FusionAnalysis,
 }
 
-/// Builds the canonical FUSION-01/02 panel input from application facts.
 #[must_use]
 pub fn build_fusion_input(
     question: impl Into<String>,
@@ -175,10 +112,6 @@ pub fn build_fusion_input(
 
 pub use winwincode_fusion::claims::default_claim_output_schema;
 
-/// Extracts one isolated answer using the shared Fusion parser.
-///
-/// # Errors
-/// Rejects invalid model claims; model assertions never become verified facts.
 pub fn extract_claims_from_answer(
     candidate_id: &str,
     answer: &Value,
@@ -191,7 +124,6 @@ pub fn extract_claims_from_answer(
     })
 }
 
-/// Converts isolated answers into claim rows and runs FUSION-03 analysis.
 fn claims_and_analysis(
     answers: &[ComposedFusionAnswer],
 ) -> Result<(Vec<FusionCandidateClaims>, FusionAnalysis), FusionComposeError> {
@@ -209,13 +141,6 @@ fn claims_and_analysis(
     Ok((claims, analysis))
 }
 
-/// FUSION-01 path: build-independent panel answers → claims → analysis.
-///
-/// # Errors
-///
-/// Returns panel-input rejection, claim-extraction failure, or analyzer
-/// rejection. Provider timeouts/failures stay isolated panel failure rows and
-/// are not treated as compose errors when at least one sibling succeeds.
 pub async fn compose_blind_panel(
     panel_id: &str,
     input: FusionInput,
@@ -227,11 +152,6 @@ pub async fn compose_blind_panel(
     compose_collected_panel(panel_id, &input, panel)
 }
 
-/// Consumes a retained execution panel without issuing new member requests.
-/// Model claims remain subordinate to independently verified Evidence.
-///
-/// # Errors
-/// Rejects a mismatched or incomplete panel, invalid claims or invalid analysis.
 pub fn compose_collected_panel(
     panel_id: &str,
     input: &FusionInput,
@@ -248,7 +168,6 @@ pub fn compose_collected_panel(
     })
 }
 
-/// Maps successful panel candidates onto independent compose answers.
 #[must_use]
 pub fn answers_from_panel_candidates(candidates: &[FusionCandidate]) -> Vec<ComposedFusionAnswer> {
     candidates
@@ -260,12 +179,6 @@ pub fn answers_from_panel_candidates(candidates: &[FusionCandidate]) -> Vec<Comp
         .collect()
 }
 
-/// FUSION-02 portable path: already-collected independent answers → claims → analysis.
-///
-/// # Errors
-///
-/// Returns claim-extraction or analyzer rejection. Failed runner targets must
-/// simply be omitted from `answers`.
 pub fn compose_independent_answers(
     answers: Vec<ComposedFusionAnswer>,
 ) -> Result<ComposedFusionOutcome, FusionComposeError> {
@@ -278,7 +191,6 @@ pub fn compose_independent_answers(
     })
 }
 
-/// One R3 targeted-investigation request (ADR-0036).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvestigationRequest {
     pub claim_key: String,
@@ -290,7 +202,6 @@ pub struct InvestigationRequest {
     pub oppose_evidence: Vec<Value>,
 }
 
-/// R3 must contribute NEW evidence; empty `new_evidence` adds no weight.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvestigationAnswer {
     pub seat_id: String,
@@ -303,9 +214,7 @@ pub struct InvestigationEvidenceItem {
     pub kind: String,
     pub detail: String,
     pub side: FusionClaimPosition,
-    /// Runtime-produced machine source. Model prose cannot fill this field.
     pub source_receipt: SourceReceipt,
-    /// Independent verification of the exact claim target cited by the receipt.
     pub claim_verification: ClaimVerification,
 }
 
@@ -326,7 +235,6 @@ pub enum JudgeClaimOutcome {
     Unresolved,
 }
 
-/// Host-side R3 port. Production may call seats or tools; tests inject fixtures.
 pub trait FusionInvestigationPort: fmt::Debug + Send + Sync {
     fn investigate(
         &self,
@@ -334,7 +242,6 @@ pub trait FusionInvestigationPort: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'static, Result<Vec<InvestigationAnswer>, FusionComposeError>>;
 }
 
-/// Host-side R4 verification port (JEV / Verifier).
 pub trait FusionJudgePort: fmt::Debug + Send + Sync {
     fn judge(
         &self,
@@ -342,9 +249,6 @@ pub trait FusionJudgePort: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'static, Result<JevRun<JudgeAnswer>, FusionComposeError>>;
 }
 
-/// Provider-backed semantic judge. Its answer still requires independent
-/// receipt-backed verification in `run_verification` before it can settle a
-/// claim. Provider identities and telemetry never enter the judge premise.
 #[derive(Debug)]
 pub struct RuntimeFusionJudge {
     runtime: Arc<winwincode_provider::JevRuntime>,
@@ -415,7 +319,6 @@ impl FusionJudgePort for RuntimeFusionJudge {
     }
 }
 
-/// Host accounting only; never included in the blinded judge request or evidence.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevJudgeCall {
@@ -424,7 +327,6 @@ pub struct JevJudgeCall {
     pub failures: Vec<JevAttemptFailure>,
 }
 
-/// Terminal reason and per-round audit for multi-round Fusion (ADR-0036).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiRoundReport {
     pub stop_reason: FusionStopReason,
@@ -441,18 +343,11 @@ pub struct MultiRoundStep {
     pub produced_new_evidence: bool,
 }
 
-/// Control flow for one multi-round loop iteration (ADR-0036).
 enum RoundControl {
-    /// Start the next round.
     Continue,
-    /// Leave the loop with this terminal reason.
     Stop(FusionStopReason),
 }
 
-/// Builds the anonymous R4 request sent to the judge port.
-///
-/// Candidate identity remains in the composition audit, while the serialized
-/// request contains only claim semantics and canonical evidence content.
 #[must_use]
 pub fn build_blind_judge_request(
     composed: &ComposedFusionOutcome,
@@ -488,9 +383,6 @@ fn evidence_type_for_receipt(kind: SourceReceiptKind) -> EvidenceRefType {
     }
 }
 
-/// Resolve one R3 proposal through the runtime evidence ledger. The item's
-/// `detail` remains model explanation; only its runtime receipt and independent
-/// claim verification can create an increment.
 fn admit_investigation_item(
     ledger: &mut EvidenceLedger,
     claim_key: &str,
@@ -530,8 +422,6 @@ fn admit_investigation_item(
     admission.produced_new_evidence
 }
 
-/// Re-opens analysis with R3 rows that carry only NEW evidence (ADR-0036:
-/// knowledge is additive, and one candidate per claim key avoids `DuplicateClaim`).
 fn recompose_with_round3(
     composed: &mut ComposedFusionOutcome,
     extra_answers: &mut Vec<ComposedFusionAnswer>,
@@ -540,8 +430,6 @@ fn recompose_with_round3(
 ) -> Result<(), FusionComposeError> {
     let mut investigation_claims = Vec::new();
     for item in pack_items {
-        // Rows are keyed by claim via `claim_keys`: the R3 pack shape carries
-        // kind/detail/side, so the lookup falls through to the disputed set.
         let claim_key = item
             .get("claimKey")
             .and_then(Value::as_str)
@@ -625,7 +513,6 @@ fn recompose_with_round3(
     Ok(())
 }
 
-/// R3: targeted investigation on disputed claims only; must contribute NEW evidence.
 #[allow(
     clippy::too_many_arguments,
     reason = "Pass the existing round state and evidence authorities explicitly"
@@ -725,16 +612,12 @@ async fn run_targeted_investigation(
         step.produced_new_evidence = produced_new_evidence;
     }
     if !produced_new_evidence {
-        // No increment does not add weight or finish the investigation. The
-        // next planner action may still provide a source, tool observation,
-        // reproduction or independent verification result.
         return Ok(RoundControl::Continue);
     }
     recompose_with_round3(composed, extra_answers, &pack_items, claim_keys)?;
     Ok(RoundControl::Continue)
 }
 
-/// R4: judge disputed claims over the R1+R3 evidence pack (never vote counts).
 #[allow(
     clippy::too_many_arguments,
     reason = "Keep judge output separate from independent verification authority"
@@ -844,16 +727,6 @@ async fn run_verification(
     ))
 }
 
-/// Product multi-round Fusion: Discovery → Conflict Detection → Targeted
-/// Investigation → Verification → Synthesis (ADR-0036).
-///
-/// R1 disputes never go straight to JEV. R3 without new evidence does not
-/// gain weight and leaves claims disputed.
-///
-/// # Errors
-///
-/// Returns panel, composition and investigation failures. JEV verifier outages
-/// are non-destructive and remain in [`MultiRoundReport::jev_unavailable`].
 pub async fn compose_multiround(
     panel_id: &str,
     input: FusionInput,
@@ -872,8 +745,6 @@ pub async fn compose_multiround(
     let mut jev_unavailable: Vec<crate::fusion_investigation::JevUnavailableRecord> = Vec::new();
 
     let mut investigation_rounds = 0u8;
-    // Every exit does `break <reason>`, so the terminal reason is assigned
-    // exactly once and there is no unobserved initial value (ADR-0036).
     let stop_reason = loop {
         let produced_new_evidence = rounds
             .iter()
@@ -964,12 +835,6 @@ pub async fn compose_multiround(
     ))
 }
 
-/// Product ADR-0037 loop: disputed claims run `investigate_claim` with real
-/// `EvidenceProvider`s (CodeGraph/Git/Test/...) after compose.
-///
-/// # Errors
-///
-/// Returns compose failure only. Investigation failures leave claims unresolved.
 pub async fn compose_multiround_with_evidence(
     panel_id: &str,
     input: FusionInput,
@@ -1010,12 +875,6 @@ pub async fn compose_multiround_with_evidence(
     Ok((composed, graph, reports))
 }
 
-/// FUSION-02 host path through a portable runner port (mock `ModelPort` ok).
-///
-/// # Errors
-///
-/// Returns runner-port failure, claim-extraction failure, analyzer rejection,
-/// or [`FusionComposeError::NoSuccessfulAnswers`] when every seat failed.
 pub async fn compose_via_runner_port(
     input: FusionInput,
     seats: Vec<FusionRunnerSeat>,
@@ -1025,17 +884,6 @@ pub async fn compose_via_runner_port(
     compose_independent_answers(answers)
 }
 
-/// Converts FUSION-02 `(target_id, frames)` rows into compose answers.
-///
-/// Production callers pass `ParallelModelRunner` succeeded-target frames.
-/// Final assistant message items carry the JSON answer; the terminal frame only
-/// carries completion and usage. Progress, deltas and reasoning are not answers.
-/// `target_id` remains the Fusion `candidate_id`.
-///
-/// # Errors
-///
-/// Returns [`FusionComposeError::ClaimExtraction`] when a row has no usable
-/// answer frame.
 pub fn answers_from_parallel_model_frames(
     rows: impl IntoIterator<Item = (String, Vec<String>)>,
 ) -> Result<Vec<ComposedFusionAnswer>, FusionComposeError> {
@@ -1054,16 +902,6 @@ pub fn answers_from_parallel_model_frames(
     Ok(answers)
 }
 
-/// Host adjudication for a composed Fusion outcome.
-///
-/// Maps composed analysis through the existing FUSION-03 → fixture → FUSION-04
-/// host path. Verifier real results remain invincible. This function adds no
-/// Canonical State write power.
-///
-/// # Errors
-///
-/// Returns the same stale repository, canonical, verifier, or Evidence
-/// rejection as the delivery adjudicator.
 pub fn adjudicate_composed_fusion(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -1080,10 +918,6 @@ pub fn adjudicate_composed_fusion(
     )
 }
 
-/// Default [`FusionRunnerAnswerPort`] adapter over independent answers.
-///
-/// Production replaces this with a `ParallelModelRunner` + kernel `ModelPort`
-/// adapter; tests inject mock answers or mock ports only.
 #[derive(Debug)]
 pub struct FunctionFusionRunnerAnswerPort {
     answers: Vec<ComposedFusionAnswer>,
@@ -1107,12 +941,6 @@ impl FusionRunnerAnswerPort for FunctionFusionRunnerAnswerPort {
     }
 }
 
-/// Documents the live `ModelPort` plug-in point without importing kernel types.
-///
-/// Production shape:
-/// `ParallelModelRunner::new(Arc<dyn ModelPort>)` → `run(targets, budget, cancel)`
-/// → succeeded `ParallelModelResult { target_id, frames }` →
-/// [`answers_from_parallel_model_frames`] → [`compose_independent_answers`].
 pub const LIVE_MODEL_PORT_PLUG_IN_NOTE: &str =
     "winwincode_codex::ParallelModelRunner over kernel ModelPort; target_id == candidate_id";
 
@@ -1252,12 +1080,9 @@ mod tests {
         ])
     }
 
-    /// Stand-in for kernel `ModelPort` used only to document the FUSION-02
-    /// frame shape that `answers_from_parallel_model_frames` consumes.
     #[derive(Debug)]
     struct MockParallelModelSource;
 
-    /// Multi-round fixture seat that always claims `claim:tests-pass`.
     #[derive(Debug)]
     struct Seat {
         position: &'static str,
@@ -1312,7 +1137,6 @@ mod tests {
         }
     }
 
-    /// Investigation port that contributes no new evidence (ADR-0036 R3).
     #[derive(Debug)]
     struct NoNewEvidence;
     impl FusionInvestigationPort for NoNewEvidence {
@@ -1330,7 +1154,6 @@ mod tests {
         }
     }
 
-    /// Judge that fails the test if JEV runs before new evidence exists.
     #[derive(Debug)]
     struct MustNotJudge;
     impl FusionJudgePort for MustNotJudge {
@@ -1589,7 +1412,6 @@ mod tests {
     #[tokio::test]
     async fn blind_panel_compose_keeps_isolation_partial_failure_and_host_analysis() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        // Rebuild router with shared request log for isolation assertions.
         let barrier = Arc::new(Barrier::new(3));
         let mut map = MapFusionProviderRouter::new();
         for (name, behavior) in [
@@ -1630,7 +1452,6 @@ mod tests {
         assert_eq!(composed.claims.len(), 2);
         assert!(composed.claims.iter().all(|row| row.claims.len() == 1));
 
-        // Isolation: every Provider request saw only the blind prompt fields.
         let captured = requests.lock().expect("request log");
         assert_eq!(captured.len(), 3);
         let prompt_keys: Vec<Vec<String>> = captured
@@ -1663,7 +1484,6 @@ mod tests {
         assert_eq!(request_ids.len(), 3);
         drop(captured);
 
-        // Analyzer sees two independent Supports claims on the same key.
         assert_eq!(composed.analysis.consensus.len(), 1);
         assert_eq!(
             composed.analysis.consensus[0].candidate_ids,
@@ -1690,7 +1510,6 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_runner_frame_rows_compose_into_host_chain() {
-        // FUSION-02 stand-in: frames shaped like ParallelModelRunner successes.
         let rows = MockParallelModelSource::frame_rows();
         let answers = answers_from_parallel_model_frames(rows).expect("frames convert to answers");
         assert_eq!(answers.len(), 3);
@@ -1713,7 +1532,6 @@ mod tests {
         assert_eq!(composed.claims.len(), 3);
         assert_eq!(composed.analysis.consensus.len(), 1);
 
-        // Model-only consensus stays at ModelConsensus and does not write Canonical State.
         let fixture = verdict_fixture(
             &DeliveryId("dlv_01J00000000000000000000002".to_owned()),
             VerdictFixtureOutcome::Pass,

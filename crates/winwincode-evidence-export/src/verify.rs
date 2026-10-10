@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek};
@@ -14,11 +12,6 @@ use crate::secret::{SecretScanner, reject_secret_bytes};
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Verify every manifest binding and reject unlisted package files.
-///
-/// # Errors
-///
-/// Returns corruption, secret-detection, or I/O errors for any mismatch.
 pub fn verify_evidence_package(package: &Path) -> Result<EvidenceManifest, EvidenceError> {
     let manifest_path = package.join(MANIFEST_FILE_NAME);
     if fs::metadata(&manifest_path)
@@ -57,12 +50,6 @@ pub fn verify_evidence_package(package: &Path) -> Result<EvidenceManifest, Evide
     Ok(manifest)
 }
 
-/// Verify the deterministic archive without extracting it.
-///
-/// # Errors
-///
-/// Returns corruption, secret-detection, or I/O errors for malformed headers,
-/// duplicate paths, content mismatches, or an incomplete manifest.
 pub fn verify_evidence_archive(archive: &Path) -> Result<EvidenceManifest, EvidenceError> {
     let mut file =
         File::open(archive).map_err(|error| EvidenceError::io("open evidence archive", &error))?;

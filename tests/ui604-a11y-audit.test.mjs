@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
-// UI-604 keyboard, focus, and semantics findings that can be pinned with a
-// deterministic DOM.  The shell-level findings (surface slot live region,
-// repeated navigation bypass, one heading per page, and the collection live
-// regions) are covered by the real-browser suite in
-// tests/ui604-shell-a11y-browser.test.mjs because they need real focus order
-// and real layout.
-
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -189,8 +180,6 @@ function findAllByClass(node, className, matches = []) {
   for (const child of node.children) findAllByClass(child, className, matches)
   return matches
 }
-
-// --- Chat conversion dialog focus and Escape (audit finding A4) --------------
 
 const scopeSelection = {
   organizationId: 'org_00000000000000000000000001',
@@ -404,8 +393,6 @@ test('A4 Escape closes the conversion dialog and returns focus to the trigger', 
   )
   page.close()
 })
-
-// --- Panel heading level (audit finding A6) ----------------------------------
 
 test('A6 panels can nest one level below the single page heading', () => {
   const document = new FakeDocument()

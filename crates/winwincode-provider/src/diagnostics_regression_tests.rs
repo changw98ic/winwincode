@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     DeviceProviderStore, HttpsSseProviderAdapter, HttpsSseProviderConfig, HttpsSseProviderLimits,
     HttpsSseProviderTimeouts,
@@ -139,7 +137,6 @@ fn version_10_migration_preserves_native_invocation_attempts_and_adds_no_evidenc
 fn legacy_version_12_migration_preserves_paid_rows_without_replaying_them() {
     let directory = TestDirectory::new("legacy-migration");
     let store = DeviceProviderStore::open(&directory.0).unwrap();
-    // Legacy schema12 used a separate paid-attempt table. Its recorded facts remain immutable.
     store.connection.execute_batch("DROP TABLE model_invocation_attempts;
         CREATE TABLE model_open_attempts (exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
             attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 4), outcome TEXT NOT NULL,

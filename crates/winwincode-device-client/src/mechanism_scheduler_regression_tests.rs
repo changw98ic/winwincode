@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//! Offline mechanism regression fixtures. Execution belongs to regression_runner.
 use super::*;
 use crate::identity::{DeviceIdentitySeed, ensure_device_identity};
 use crate::store::WorkerProcessRecord;
@@ -137,8 +135,6 @@ fn daemon(path: &Path, transport: Arc<LocalTransport>) -> DeviceDaemon {
         &identity,
     )
     .unwrap();
-    // Test-only boot phase injection. Registry, supervision, frames, fencing,
-    // outbox, ingest and tick methods below are the actual production methods.
     daemon.enrolled = true;
     daemon.hello_announced = true;
     daemon.node_id = "cnd_00000000000000000000000001".to_owned();
@@ -197,8 +193,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
         let supervisor = supervisor(&device, None);
         daemon.set_worker_supervisor(supervisor.clone());
         daemon.set_worker_capacity_source(Arc::new(supervisor.clone()));
-        // Mark only exit notifications as previously sent. Reconcile history
-        // has no equivalent cursor, so every heartbeat includes it again.
         daemon.reported_worker_exits = supervisor
             .worker_processes()
             .unwrap()
@@ -240,8 +234,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
             "SessionSupervisor.worker_capacity", "DeviceDaemon.ensure_pending_reports"],
         "measurements": measurements, "classification": "confirmed historical work growth; formal lease causality unproved" }),
     );
-    // A desired incremental reconciliation must not resend unchanged terminal
-    // history in its second heartbeat. This intentional regression is red.
     assert_eq!(
         measurements[0]["reconciliationWorkerCounts"][1], 0,
         "unchanged terminal registry history is repeated in the next heartbeat"
@@ -249,7 +241,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
 }
 
 fn kill_fixture_group(pid: u32, script: &Path) {
-    // Verify the unique owned script before signalling. Never signal by PID alone.
     let output = Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output();
@@ -372,8 +363,6 @@ fn sc05_five_owned_term_ignoring_workers_block_actual_device_tick() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // A bounded watchdog cleans only the five verified fixture groups if a
-    // production stop/join unexpectedly hangs. No running batch is touched.
     let owned_pids = cleanup.pids.clone();
     let owned_script = script.clone();
     let (finished_tx, finished_rx) = mpsc::channel();

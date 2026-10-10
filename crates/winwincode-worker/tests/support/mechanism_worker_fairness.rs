@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//! Isolated behavior regression. No production fixes and no external model calls.
 use super::*;
 use winwincode_worker::control_driver::WorkerControlSource;
 

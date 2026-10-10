@@ -598,7 +598,6 @@ fn remote_confirmation_survives_cleanup_failure_and_restart_without_repeated_ack
         )
         .expect("proofs");
     assert_eq!(proofs, 0);
-    // Additive migration also opens a pre-proof database without fabricating ACKs.
     fault
         .execute_batch("DROP TABLE internal_worker_outbound_confirmations")
         .expect("old schema");

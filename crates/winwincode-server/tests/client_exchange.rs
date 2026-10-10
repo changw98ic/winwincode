@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Server-side `POST /internal/v1/client/exchange` integration tests:
-//! enrollment with Device Credential issuance, credential enforcement,
-//! gap/replay and duplicate settlement, and the hello/heartbeat projections.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -42,10 +36,7 @@ use winwincode_storage::{
 };
 
 const BOOTSTRAP_PROOF: &str = "client-exchange-test-bootstrap";
-/// Placeholder client node id a fresh device sends before the server assigns
-/// the canonical `cnd_` identity.
 const FRESH_NODE: &str = "device-local-pending";
-/// Canonical 26 character Crockford suffix (`cix_` + 26).
 const INSTANCE: &str = "cix_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const RESTARTED_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const SCHEMA_VERSION: &str = "winwincode/v1";
@@ -302,8 +293,6 @@ fn cursors(data_directory: &Path, node_id: &str) -> ClientExchangeCursors {
         .expect("cursor row")
 }
 
-/// Enrolls a fresh node and returns the address, the assigned node id, and
-/// the issued credential material.
 async fn enroll_device(address: std::net::SocketAddr) -> (String, String) {
     let (status, body) =
         post_exchange(address, &exchange_request(&[enroll_frame(1)], 0), None).await;
@@ -400,7 +389,6 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
     assert_eq!(record.device_credential_digest.as_deref(), Some(digest));
     assert_eq!(record.current_instance_id.as_deref(), Some(INSTANCE));
 
-    // The authenticated hello takes presence online on the same stream.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 0),
@@ -440,22 +428,18 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
 
     let wrong_hex: String = "ab".repeat(32);
     let attempts = vec![
-        // A non-enroll exchange without any credential.
         (
             exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             None,
         ),
-        // A malformed credential.
         (
             exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some("not-hex"),
         ),
-        // A well-formed but wrong credential.
         (
             exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some(wrong_hex.as_str()),
         ),
-        // A plausible credential against a node that does not exist.
         (
             exchange_request(
                 &[heartbeat_frame(
@@ -481,7 +465,6 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
         "every credential failure is byte-identical and discloses nothing"
     );
 
-    // The real credential still authenticates: the failures changed nothing.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
@@ -517,7 +500,6 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
         2
     );
 
-    // Sequence 4 arrives while the cursor sits at 2: gap with a replay hint.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 0),
@@ -538,7 +520,6 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
         "a gapped frame never executes its effect"
     );
 
-    // The replay closes the gap and both frames settle.
     let (status, body) = post_exchange(
         address,
         &exchange_request(
@@ -583,8 +564,6 @@ async fn duplicate_frames_confirm_without_reexecution() {
     let first = node_snapshot(&data_directory, &node_id).expect("node");
     assert_eq!(first.presence_state, ClientPresenceState::Online);
 
-    // The exact same frame replays: it is confirmed, the cursor stays, and
-    // the presence projection does not execute a second time.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
@@ -652,8 +631,6 @@ async fn a_pending_enrollment_heartbeat_is_refused() {
     let address = running.local_address();
     let (node_id, credential) = enroll_device(address).await;
 
-    // The frame settles on the stream, but the heartbeat projection refuses
-    // the `pending_enrollment` node: no heartbeat instant, no presence move.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 0),
@@ -685,9 +662,6 @@ async fn a_second_enroll_after_enrollment_is_refused() {
     let (node_id, credential) = enroll_device(address).await;
     let before = node_snapshot(&data_directory, &node_id).expect("node");
 
-    // Unauthenticated re-enroll of an enrolled node: one uniform rejection,
-    // no second credential, no state change. The replay targets the assigned
-    // node id; a placeholder id would only ever create a fresh node.
     let (status, parsed) = post_exchange(
         address,
         &exchange_request(
@@ -720,8 +694,6 @@ async fn a_second_enroll_after_enrollment_is_refused() {
         "no credential re-issue"
     );
 
-    // The original credential still authenticates, and an enroll frame
-    // inside an authenticated batch is refused at the conflict outcome.
     let (status, _) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
@@ -788,8 +760,6 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
 
-    // The restarted device announces a new instance: the old one is
-    // superseded and the stream continues under the new instance.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 0),
@@ -808,8 +778,6 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     );
     assert_eq!(record.presence_state, ClientPresenceState::Online);
 
-    // A frame still claiming the superseded instance is refused and the
-    // cursor does not move.
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 0),
@@ -836,7 +804,6 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
 
-    // Version mismatch rejects the whole batch.
     let bad_version = serde_json::json!({
         "schemaVersion": "winwincode/v0",
         "frames": [],
@@ -847,7 +814,6 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
     assert!(status.starts_with("HTTP/1.1 400 Bad Request"), "{status}");
     assert!(parsed.is_none());
 
-    // A frame larger than the codec bound rejects the batch.
     let oversized = serde_json::to_value(ClientToServerEnvelope {
         schema_version: SCHEMA_VERSION.to_owned(),
         message_id: "msg_oversized".to_owned(),
@@ -871,7 +837,6 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
     assert!(status.starts_with("HTTP/1.1 400 Bad Request"), "{status}");
     assert!(parsed.is_none());
 
-    // Without the exchange application attached the route stays closed.
     let sessions = auth_sessions();
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
     let bare = start_server_with_remote_worker(

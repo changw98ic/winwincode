@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Provider-neutral hypothesis scoring used by the context runtime.
-//!
-//! `OpenJev` adapters sit behind [`JevProvider`] only. Runtime callers never see
-//! `OpenJev` or `TypeSafe` types, and Jev outage fail-opens so Coding Agent Worker
-//! continues without a decision.
-
 use std::{
     fmt,
     io::Read as _,
@@ -23,26 +15,16 @@ use ureq::unversioned::transport::{Connector, RustlsConnector};
 
 use crate::canonical_https_endpoint;
 
-/// Documented local `OpenJev` runtime gap for JEV-01.
-///
-/// `WinWinCode` does not embed `OpenJev` weights, CUDA/MPS kernels, or a second
-/// model wire protocol. Local scoring is available only when a host injects
-/// [`OpenJevLocalRuntime`]. Without that injection the local provider stays on
-/// the portable contract, reports [`JevHealth::Unavailable`], and
-/// [`JevRuntime`] fail-opens to Remote/Mock providers or skips Jev.
 pub const OPENJEV_LOCAL_RUNTIME_GAP: &str = "OpenJev local model runtime is not embedded in winwincode-provider; inject OpenJevLocalRuntime when a pinned model/runtime is available.";
 
-/// Preferred `OpenJev` model identity used when hosts do not override it.
 pub const OPENJEV_DEFAULT_MODEL_ID: &str = "openjev-4b-v2";
 
-/// One natural-language inference request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JevHypothesis {
     pub premise: String,
     pub hypothesis: String,
 }
 
-/// Provider-neutral NLI probabilities.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JevScores {
     pub entailment: f32,
@@ -51,11 +33,6 @@ pub struct JevScores {
 }
 
 impl JevScores {
-    /// Builds normalized finite probabilities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects values outside `[0, 1]` or totals outside a small rounding tolerance.
     pub fn try_new(
         entailment: f32,
         contradiction: f32,
@@ -86,7 +63,6 @@ impl JevScores {
     }
 }
 
-/// Portable inference device selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JevDevice {
@@ -94,11 +70,9 @@ pub enum JevDevice {
     Cuda,
     Mps,
     Cpu,
-    /// Remote service; accelerator placement is not disclosed by the provider.
     Remote,
 }
 
-/// Portable inference numeric representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum JevDtype {
     Auto,
@@ -109,40 +83,30 @@ pub enum JevDtype {
     Int4,
 }
 
-/// Settings passed unchanged to each replaceable Provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct JevExecutionOptions {
     pub device: JevDevice,
     pub dtype: JevDtype,
 }
 
-/// One scored hypothesis and its Provider-reported accounting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JevEvaluation {
     pub scores: JevScores,
     pub input_tokens: u64,
-    /// Provider-reported output usage; absent means unknown, not zero.
     pub output_tokens: Option<u64>,
-    /// Actual response model, distinct from the configured model alias.
     pub resolved_model_id: Option<String>,
-    /// Resolved device. Providers must not return [`JevDevice::Auto`].
     pub device: JevDevice,
 }
 
-/// One batch result and its Provider-reported accounting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JevBatchEvaluation {
     pub evaluations: Vec<JevScores>,
     pub input_tokens: u64,
-    /// Provider-reported output usage; absent means unknown, not zero.
     pub output_tokens: Option<u64>,
-    /// Actual response model, distinct from the configured model alias.
     pub resolved_model_id: Option<String>,
-    /// Resolved device. Providers must not return [`JevDevice::Auto`].
     pub device: JevDevice,
 }
 
-/// Stable Provider health state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JevHealth {
     Healthy,
@@ -150,7 +114,6 @@ pub enum JevHealth {
     Unavailable,
 }
 
-/// Provider-neutral discovery facts used before an inference call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JevProviderCapabilities {
     pub provider_id: String,
@@ -169,7 +132,6 @@ impl JevProviderCapabilities {
     }
 }
 
-/// Stable failure categories safe for fallback policy and telemetry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JevProviderErrorKind {
@@ -181,7 +143,6 @@ pub enum JevProviderErrorKind {
     InvalidResponse,
 }
 
-/// Provider error that never carries an upstream response body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JevProviderError {
     kind: JevProviderErrorKind,
@@ -339,11 +300,6 @@ impl fmt::Display for JevProviderError {
 
 impl std::error::Error for JevProviderError {}
 
-/// Replaceable hypothesis-scoring Provider boundary.
-///
-/// Like the Kernel's `ModelPort`, calls return owned futures and expose only
-/// portable host types. Local `OpenJev`, remote services, and tests implement the
-/// same boundary without adding another model wire protocol.
 pub trait JevProvider: fmt::Debug + Send + Sync {
     fn evaluate(
         &self,
@@ -362,15 +318,12 @@ pub trait JevProvider: fmt::Debug + Send + Sync {
     fn capabilities(&self) -> JevProviderCapabilities;
 }
 
-/// Retry and timeout policy shared by ordered Local/Remote Provider choices.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JevRuntimeConfig {
     pub timeout: Duration,
-    /// Retries after the initial call. Only transient failures are retried.
     pub retries: u8,
 }
 
-/// Safe facts emitted after a successful inference.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevObservation {
@@ -378,16 +331,13 @@ pub struct JevObservation {
     pub model_id: String,
     pub latency: Duration,
     pub input_tokens: u64,
-    /// Provider-reported output usage; absent means unknown, not zero.
     pub output_tokens: Option<u64>,
-    /// Actual response model, distinct from the configured model alias.
     pub resolved_model_id: Option<String>,
     pub batch_size: usize,
     pub device: JevDevice,
     pub confidence: f32,
 }
 
-/// One failed attempt retained without Provider payloads.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevAttemptFailure {
@@ -402,8 +352,6 @@ pub struct JevAttemptFailure {
     pub connection_wait: bool,
 }
 
-/// Fail-open inference result. `value == None` means the caller continues
-/// without a Jev decision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevRun<T> {
@@ -482,8 +430,6 @@ impl MeasuredJevResult for JevBatchEvaluation {
     }
 }
 
-/// Ordered, dependency-injected Provider runner with retry, timeout, fallback,
-/// and final skip behavior.
 #[derive(Clone, Debug)]
 pub struct JevRuntime {
     providers: Vec<Arc<dyn JevProvider>>,
@@ -513,7 +459,6 @@ impl JevRuntime {
         self
     }
 
-    // Persist safe attempt facts before retry or fallback can issue another paid call.
     fn retain_attempt(
         &self,
         failure: &JevAttemptFailure,
@@ -598,7 +543,6 @@ impl JevRuntime {
         use winwincode_network::{
             DiagnosticCode, ErrorKind, NetworkDiagnostic, NetworkFailure, Phase,
         };
-        // This is an execution-authority event, not another inference attempt.
         failures.push(JevAttemptFailure {
             provider_id: provider_id.to_owned(),
             kind: JevProviderErrorKind::Unavailable,
@@ -667,7 +611,6 @@ impl JevRuntime {
         {
             return true;
         }
-        // A failed journal must fence further network effects.
         failures.push(JevAttemptFailure {
             provider_id: provider_id.to_owned(),
             kind: JevProviderErrorKind::Unavailable,
@@ -726,9 +669,6 @@ impl JevRuntime {
             .state();
             loop {
                 let started = Instant::now();
-                // Check the live execution authority immediately before each
-                // new side effect, including retries and provider fallback. A
-                // completed attempt remains recoverable after authority expires.
                 if self.cancelled() || !can_start() {
                     return self.stopped_run(
                         failures,
@@ -800,27 +740,16 @@ impl JevRuntime {
     }
 }
 
-/// Fallback ordering policy for Local/Remote `OpenJev` providers.
-///
-/// The runtime itself always fail-opens: exhausted providers skip Jev rather
-/// than aborting Coding Agent Worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JevFallbackPolicy {
-    /// Only the Local provider is attempted.
     LocalOnly,
-    /// Only the Remote provider is attempted.
     RemoteOnly,
-    /// Local first, then Remote.
     LocalFirst,
-    /// Remote first, then Local.
     RemoteFirst,
-    /// Explicit fallback chain (currently Local then Remote).
     Fallback,
-    /// No providers; every call skips Jev.
     Skip,
 }
 
-/// Builds the ordered provider list for one policy.
 #[must_use]
 pub fn jev_provider_order(
     policy: JevFallbackPolicy,
@@ -838,10 +767,6 @@ pub fn jev_provider_order(
     }
 }
 
-/// Injectable local `OpenJev` runtime used when a pinned model is available.
-///
-/// The host owns weights, device kernels, and batching. This boundary stays
-/// provider-neutral so Runtime code never imports `OpenJev` types.
 pub trait OpenJevLocalRuntime: fmt::Debug + Send + Sync {
     fn score(
         &self,
@@ -854,8 +779,6 @@ pub trait OpenJevLocalRuntime: fmt::Debug + Send + Sync {
     fn capabilities(&self) -> JevProviderCapabilities;
 }
 
-/// Local `OpenJev` adapter. Without an injected runtime it reports the
-/// documented gap instead of inventing scores.
 #[derive(Clone, Debug)]
 pub struct OpenJevLocalProvider {
     runtime: Option<Arc<dyn OpenJevLocalRuntime>>,
@@ -863,13 +786,11 @@ pub struct OpenJevLocalProvider {
 }
 
 impl OpenJevLocalProvider {
-    /// Builds the documented-gap local provider.
     #[must_use]
     pub fn with_runtime_gap() -> Self {
         Self::with_runtime_gap_model(OPENJEV_DEFAULT_MODEL_ID)
     }
 
-    /// Builds a gap provider that still advertises expected `OpenJev` capabilities.
     #[must_use]
     pub fn with_runtime_gap_model(model_id: impl Into<String>) -> Self {
         Self {
@@ -878,7 +799,6 @@ impl OpenJevLocalProvider {
         }
     }
 
-    /// Builds a local provider backed by an injected `OpenJev` runtime.
     #[must_use]
     pub fn with_runtime(runtime: Arc<dyn OpenJevLocalRuntime>) -> Self {
         let fallback_capabilities = runtime.capabilities();
@@ -888,7 +808,6 @@ impl OpenJevLocalProvider {
         }
     }
 
-    /// Returns true when a local runtime is present.
     #[must_use]
     pub const fn has_runtime(&self) -> bool {
         self.runtime.is_some()
@@ -952,7 +871,6 @@ impl JevProvider for OpenJevLocalProvider {
     }
 }
 
-/// Construction input for [`OpenJevRemoteConfig::try_new`].
 #[derive(Clone)]
 pub struct OpenJevRemoteConfigRequest {
     pub provider_id: String,
@@ -977,10 +895,6 @@ impl fmt::Debug for OpenJevRemoteConfigRequest {
     }
 }
 
-/// Bounded remote OpenJev/NLI endpoint configuration.
-///
-/// Secrets are never printed. Endpoint validation reuses the Device Provider
-/// HTTPS rule so Jev Remote cannot invent a second transport protocol.
 #[derive(Clone)]
 pub struct OpenJevRemoteConfig {
     provider_id: String,
@@ -994,12 +908,6 @@ pub struct OpenJevRemoteConfig {
 }
 
 impl OpenJevRemoteConfig {
-    /// Validates one remote NLI endpoint configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-HTTPS endpoints, empty identities, empty capability lists,
-    /// non-positive batch sizes, and unsafe timeouts.
     pub fn try_new(request: OpenJevRemoteConfigRequest) -> Result<Self, JevProviderError> {
         let OpenJevRemoteConfigRequest {
             provider_id,
@@ -1090,10 +998,6 @@ impl fmt::Debug for OpenJevRemoteConfig {
     }
 }
 
-/// Remote settings shape shared by YAML/TOML/JSON host configuration.
-///
-/// Field names match the JEV design notes: `provider`/`endpoint`/`api_key`/
-/// `timeout`/`retries`. Hosts deserialize this struct from their config file.
 #[derive(Clone, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenJevRemoteSettings {
@@ -1121,21 +1025,11 @@ impl fmt::Debug for OpenJevRemoteSettings {
 }
 
 impl OpenJevRemoteSettings {
-    /// Parses settings from TOML (workspace already pins `toml`).
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed TOML and fields that fail [`OpenJevRemoteConfig::try_new`].
     pub fn from_toml(input: &str) -> Result<Self, JevProviderError> {
         toml::from_str(input)
             .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))
     }
 
-    /// Converts host settings into a validated remote Provider config plus runtime retry policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identities, endpoints, devices, dtypes, or timeouts.
     pub fn to_config_and_runtime(
         &self,
     ) -> Result<(OpenJevRemoteConfig, JevRuntimeConfig), JevProviderError> {
@@ -1184,8 +1078,6 @@ impl OpenJevRemoteSettings {
     }
 }
 
-/// Transport used by the remote `OpenJev` adapter. Production uses HTTPS;
-/// tests inject portable fakes without changing Provider-neutral types.
 pub trait JevRemoteTransport: fmt::Debug + Send + Sync {
     fn score(
         &self,
@@ -1195,19 +1087,15 @@ pub trait JevRemoteTransport: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'static, Result<RemoteJevScoreBatch, JevProviderError>>;
 }
 
-/// Provider-neutral remote scoring payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteJevScoreBatch {
     pub evaluations: Vec<JevScores>,
     pub input_tokens: u64,
-    /// Provider-reported output usage; absent means unknown, not zero.
     pub output_tokens: Option<u64>,
-    /// Actual response model, distinct from the configured model alias.
     pub resolved_model_id: Option<String>,
     pub device: JevDevice,
 }
 
-/// Remote OpenJev/NLI adapter over an injected transport.
 #[derive(Clone, Debug)]
 pub struct OpenJevRemoteProvider {
     config: OpenJevRemoteConfig,
@@ -1276,11 +1164,6 @@ impl JevProvider for OpenJevRemoteProvider {
     }
 }
 
-/// HTTPS transport for remote NLI scoring.
-///
-/// Request/response stay provider-neutral JSON. The adapter does not force one
-/// `OpenJev` output schema: labeled NLI probabilities and direct score objects
-/// are both accepted.
 #[derive(Clone)]
 pub struct HttpsJevRemoteTransport {
     agent: ureq::Agent,
@@ -1303,11 +1186,6 @@ impl fmt::Debug for HttpsJevRemoteTransport {
 }
 
 impl HttpsJevRemoteTransport {
-    /// Builds a verified HTTPS transport from one remote configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-HTTPS or otherwise invalid endpoints.
     pub fn try_new(config: &OpenJevRemoteConfig) -> Result<Self, JevProviderError> {
         if !canonical_https_endpoint(config.endpoint()) {
             return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
@@ -1347,10 +1225,6 @@ impl HttpsJevRemoteTransport {
         self
     }
 
-    /// Selects the `TypeSafe` `SystemOne` wire protocol instead of self-hosted NLI.
-    ///
-    /// # Errors
-    /// Rejects invalid HTTPS configuration or hardware settings the service cannot honor.
     pub fn try_new_system_one(config: &OpenJevRemoteConfig) -> Result<Self, JevProviderError> {
         if config.devices != [JevDevice::Remote] || config.dtypes != [JevDtype::Auto] {
             return Err(JevProviderError::new(JevProviderErrorKind::Unsupported));
@@ -1666,8 +1540,6 @@ impl JevRemoteTransport for HttpsJevRemoteTransport {
     }
 }
 
-/// Scripted remote transport for tests and local gates that need
-/// [`OpenJevRemoteProvider`] without a live endpoint.
 #[derive(Clone, Debug)]
 pub struct MockJevRemoteTransport {
     evaluations: Vec<JevScores>,
@@ -1726,7 +1598,6 @@ impl JevRemoteTransport for MockJevRemoteTransport {
     }
 }
 
-/// Scripted Provider used by contract tests and local fallback gates.
 #[derive(Clone, Debug)]
 pub struct MockJevProvider {
     capabilities: JevProviderCapabilities,
@@ -1742,7 +1613,6 @@ pub struct MockJevProvider {
 }
 
 impl MockJevProvider {
-    /// Healthy mock with default CPU/float32 capabilities.
     #[must_use]
     pub fn healthy(provider_id: impl Into<String>) -> Self {
         let provider_id = provider_id.into();
@@ -1766,7 +1636,6 @@ impl MockJevProvider {
         }
     }
 
-    /// Unavailable mock used for fail-open and fallback tests.
     #[must_use]
     pub fn unavailable(provider_id: impl Into<String>) -> Self {
         Self {
@@ -1887,7 +1756,6 @@ impl JevProvider for MockJevProvider {
     }
 }
 
-/// Three capability-distinct mocks used by the Provider contract gate.
 #[must_use]
 pub fn contract_capability_mocks() -> Vec<MockJevProvider> {
     vec![
@@ -1920,7 +1788,6 @@ pub fn contract_capability_mocks() -> Vec<MockJevProvider> {
     ]
 }
 
-/// Builds already-validated portable scores for mocks and parsers.
 #[must_use]
 pub fn portable_scores(entailment: f32, contradiction: f32, neutral: f32) -> JevScores {
     JevScores::try_new(entailment, contradiction, neutral).unwrap_or(JevScores {
@@ -1938,16 +1805,6 @@ fn narrow_score(value: f64) -> f32 {
     value as f32
 }
 
-/// Parses Provider-neutral NLI scores without forcing one model JSON schema.
-///
-/// Accepted shapes:
-/// - direct `{entailment, contradiction, neutral}`
-/// - `{scores: {...}}` / `{scores: [{...}, ...]}`
-/// - `{results: [{scores: {...}} | {labels: [{label, score}, ...]}, ...]}`
-///
-/// # Errors
-///
-/// Rejects missing labels, non-finite values, or unnormalized totals.
 pub fn parse_jev_scores(value: &serde_json::Value) -> Result<JevScores, JevProviderError> {
     parse_jev_scores_at_depth(value, 3)
 }
@@ -1980,11 +1837,6 @@ fn parse_jev_scores_at_depth(
     ))
 }
 
-/// Parses a batch of Provider-neutral NLI scores.
-///
-/// # Errors
-///
-/// Rejects non-array payloads and any invalid item.
 pub fn parse_jev_score_list(value: &serde_json::Value) -> Result<Vec<JevScores>, JevProviderError> {
     if let Some(list) = value.as_array() {
         return list.iter().map(parse_jev_scores).collect();
@@ -2163,7 +2015,6 @@ fn valid_identity(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-/// Serialized remote scoring request used by hosts that proxy Jev themselves.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevRemoteScoreRequest {
@@ -2173,7 +2024,6 @@ pub struct JevRemoteScoreRequest {
     pub items: Vec<JevRemoteScoreItem>,
 }
 
-/// One premise/hypothesis pair in a remote scoring request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevRemoteScoreItem {
@@ -2702,7 +2552,6 @@ retries = 0
                 .await;
             assert!(outcome.value.is_none());
             assert!(outcome.observation.is_none());
-            // Worker step still completes; Jev is optional context, not a gate.
             let worker_continued = outcome.value.is_none();
             assert!(worker_continued);
         });

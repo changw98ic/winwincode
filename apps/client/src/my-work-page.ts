@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   devicePresenceText,
   deviceStateText,
@@ -19,11 +17,6 @@ import type {
   MyWorkViewModel,
 } from './my-work-view-model.js'
 
-/**
- * The fixed copy of the converged My Work first screen.  The section headings
- * carry the §16.2 semantics, and every deep link is scope-complete so the
- * post-login landing always continues an exact task.
- */
 export interface MyWorkPresentation {
   readonly startLabel: string
   readonly startTaskEntryLabel: string
@@ -64,13 +57,8 @@ export function myWorkPresentation(): MyWorkPresentation {
 export interface MyWorkPageOptions {
   readonly root: HTMLElement
   readonly model: MyWorkViewModel
-  /** The exact Scope path prefixed onto the start-task entry links. */
   readonly scopeSelection: ScopeRouteSelection
   readonly nowMillis?: () => number
-  /**
-   * Lifecycle ownership: `true` (the default) lets the page close the composed
-   * model it mounted; a host that shares this model passes `false`.
-   */
   readonly ownsModel?: boolean
 }
 
@@ -96,12 +84,6 @@ interface DeviceRowParts {
   readonly detail: HTMLElement
 }
 
-/**
- * Mount the converged My Work first screen: the §16.2 start-task entry, the
- * existing Attention-first work sections, and the Clients status zone.  The
- * work sections are the existing Home dashboard page itself, so the surface
- * keeps exactly one polite live region and every deep link it guarantees.
- */
 export function mountMyWorkPage(
   options: MyWorkPageOptions,
 ): MyWorkPage {
@@ -109,15 +91,11 @@ export function mountMyWorkPage(
   const presentation = PRESENTATION
   const nowMillis = options.nowMillis ?? Date.now
 
-  // The layout carries the Home page hook for the shell styles, while its own
-  // class keeps the work dashboard the one `.wwc-home` element on the surface.
   const layout = element(document, 'section', 'wwc-my-work')
   layout.dataset.wwcPage = 'home'
 
   const startLabel = element(document, 'p', 'wwc-my-work-start-label')
   startLabel.textContent = presentation.startLabel
-  // UI-100.2: the §16.6 new-task form deep link reuses the scope-complete
-  // start-entry pattern of the Chat and Delivery links.
   const startTaskEntry = element(document, 'a', 'wwc-my-work-start-task-entry')
   startTaskEntry.href = surfaceHash('/home/new-task', options.scopeSelection)
   startTaskEntry.textContent = presentation.startTaskEntryLabel
@@ -126,13 +104,8 @@ export function mountMyWorkPage(
   startChat.textContent = presentation.startChatLabel
   const start = element(document, 'div', 'wwc-my-work-start')
   start.append(startLabel, startTaskEntry, startChat)
-  // Design page 04 keeps the first screen to the task board alone: the
-  // task-start entries stay composed (tests and deep links keep working) but
-  // render nowhere; new tasks start from the board's 新建任务 entry.
   start.hidden = true
 
-  // The work sections are the existing Home dashboard page; this composition
-  // reuses its live region, deep links, and first-use entry instead of a copy.
   const workRoot = element(document, 'div', 'wwc-my-work-work')
   const workPage: HomeDashboardPage = mountHomeDashboardPage({
     root: workRoot,
@@ -168,8 +141,6 @@ export function mountMyWorkPage(
     deviceList,
     clientsHint,
   )
-  // Design page 08 owns device presentation (执行设备 page); the composed
-  // Clients zone stays mounted for its shared model but renders nowhere.
   clientsZone.hidden = true
 
   layout.append(start, workRoot, clientsZone)
@@ -218,7 +189,6 @@ export function mountMyWorkPage(
     if (closed) return
     devices.update(zone.devices)
     clientsCount.textContent = presentation.clientsCountLabel(zone.summary.total)
-    // A failed read marks the zone; the served device rows survive it.
     clientsUnavailable.hidden = zone.status !== 'unavailable'
     clientsEmpty.hidden = !(zone.status === 'loaded' && zone.devices.length === 0)
   }

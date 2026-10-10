@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! `ClientNode` registry application service vertical tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -77,7 +73,6 @@ fn service_registers_projects_heartbeats_and_recovers_cursors() {
     assert_eq!(snapshot.revision, 1);
     assert!(snapshot.accepting_connections);
 
-    // Cursor facts are durable before any exchange happens.
     let cursors = service
         .exchange_cursors(&node)
         .expect("cursors")
@@ -85,7 +80,6 @@ fn service_registers_projects_heartbeats_and_recovers_cursors() {
     assert_eq!(cursors.client_to_server_ack_sequence, 0);
     assert_eq!(cursors.server_to_client_ack_sequence, 0);
 
-    // pending_enrollment -> online on enrollment acceptance, then heartbeat.
     let online = service
         .update_presence(&node, ClientPresenceState::Online, snapshot.revision)
         .expect("accept enrollment");
@@ -96,7 +90,6 @@ fn service_registers_projects_heartbeats_and_recovers_cursors() {
     assert_eq!(beat.reported_running_worker_sessions, 1);
     assert_eq!(beat.last_heartbeat_at, Some(instant(T1)));
 
-    // Device-reported projection refresh under the live revision.
     let refreshed = winwincode_storage::ClientNodeRegistration::try_new(
         node.clone(),
         registration(1).public_client_id().to_owned(),
@@ -117,7 +110,6 @@ fn service_registers_projects_heartbeats_and_recovers_cursors() {
     assert_eq!(refreshed.record.client_version, "1.1.0");
     assert_eq!(refreshed.record.presence_state, ClientPresenceState::Online);
 
-    // Exchange acknowledgements persist monotonically for restart recovery.
     let advanced = service
         .advance_exchange_cursors(&node, 7, 11)
         .expect("advance cursors");
@@ -164,7 +156,6 @@ fn service_maps_revision_conflicts_and_offline_projection_errors() {
     let offline = service.snapshot(&node).expect("snapshot").expect("record");
     assert_eq!(offline.presence_state, ClientPresenceState::Offline);
 
-    // Reconnect heartbeats project offline back to online.
     let reconnected = service
         .heartbeat(&node, 0, &instant(T3), offline.revision)
         .expect("reconnect heartbeat");

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -14,8 +12,6 @@ const processIdentity = pid => {
 const codeOf = error => /^[A-Z][A-Z0-9_]{0,127}$/u.test(error?.code ?? '') ? error.code : 'DEVICE_DRIVER_FAILED'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 
-// This journal owns supervision, not execution. Recovery observes the same
-// registered Job and never submits a replacement model/task operation.
 export function acquireDeviceTaskSupervisor({ directory, identity }) {
   identity = structuredClone(identity)
   const path = join(directory, 'task-supervision.json')
@@ -36,8 +32,6 @@ export function acquireDeviceTaskSupervisor({ directory, identity }) {
   if (previous) assert.deepEqual(previous.identity, identity, 'supervision identity changed')
   let ownsTakeoverGuard = false
   try {
-    // Serialize inspection through replacement, including first acquisition.
-    // An unconfirmed guard remains blocked for explicit recovery.
     try { mkdirSync(takeoverGuard, { mode: 0o700 }); ownsTakeoverGuard = true } catch (guardError) {
       if (guardError.code !== 'EEXIST') throw guardError
       fail('DEVICE_TASK_SUPERVISOR_OWNER_UNCONFIRMED')
@@ -126,11 +120,10 @@ export function acquireDeviceTaskSupervisor({ directory, identity }) {
       } catch (failure) {
         state = { ...state, phase: 'blocked', blockedReason: codeOf(failure) }
       } finally { closed = true }
-      // A fenced owner cannot write or delete its successor's authority.
       try {
         const current = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8'))
         if (current.id === owner.id && current.startedAt === owner.startedAt) rmSync(lock, { recursive: true })
-      } catch { /* No provable ownership: leave the lock for explicit recovery. */ }
+      } catch { }
     },
   }
 }

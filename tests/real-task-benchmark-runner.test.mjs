@@ -112,8 +112,6 @@ test('current exact cancelled lease remains a product cancellation during recove
   ]) {
     db.exec(mutation)
     assert.equal(failedDeviceDispatch(directory, 'run', 'delivery')?.jobId, 'job', mutation)
-    // The production helper opens its own read-only connection, so each
-    // mutation and restoration must be committed before observing it.
     db.exec(`DELETE FROM execution_leases; DELETE FROM execution_lease_terminals;
       INSERT INTO execution_leases VALUES ('job','lease','payload','worker','instance',2,'2');
       INSERT INTO execution_lease_terminals VALUES ('lease','job','worker','instance',2,'2','cancelled');`)
@@ -1751,7 +1749,7 @@ test('launch persistence failure stops the batch even when an adapter catches th
     try {
       registerLaunch({ callId: 'one:model', directory,
         productSessionId: 'psn_01J00000000000000000000001', deliveryId: 'dlv_01J00000000000000000000001' })
-    } catch { /* An adapter cannot turn a storage failure into a task result. */ }
+    } catch { }
     return { status: 'completed', score: 1 }
   } }), /disk failure fixture/u)
   assert.deepEqual(calls, ['one'])

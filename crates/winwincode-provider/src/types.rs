@@ -1,14 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Provider transport values shared by the device runtime and control-plane projections.
-
 use crate::{CredentialLeakGate, ProviderStreamFailureKind, ProviderTokenUsage};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use winwincode_api::generated::ModelRoute;
 use winwincode_domain::{ModelExchangeId, RequestId};
 
-/// Stable Provider Gateway failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderGatewayErrorKind {
     InvalidRequest,
@@ -45,9 +40,6 @@ pub enum ProviderGatewayErrorKind {
     Storage,
 }
 
-/// Provider-neutral request exposed to exactly one selected adapter.
-///
-/// Serialization is intentionally absent and Debug always redacts the body.
 pub struct ProviderAdapterInvocation<'a> {
     pub model_exchange_id: &'a ModelExchangeId,
     pub request_id: &'a RequestId,
@@ -68,7 +60,6 @@ impl ProviderAdapterInvocation<'_> {
         self.request_id
     }
 
-    /// Returns the precommitted Provider idempotency identity.
     #[must_use]
     pub const fn adapter_request_id(&self) -> &str {
         self.adapter_request_id
@@ -84,7 +75,6 @@ impl ProviderAdapterInvocation<'_> {
         self.content_type
     }
 
-    /// Borrows the opaque request only for the adapter call.
     #[must_use]
     pub const fn payload(&self) -> &[u8] {
         self.payload
@@ -105,7 +95,6 @@ impl fmt::Debug for ProviderAdapterInvocation<'_> {
     }
 }
 
-/// Stable Provider adapter failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderAdapterErrorKind {
     RequestInvalid,
@@ -121,7 +110,6 @@ pub enum ProviderAdapterErrorKind {
     Protocol,
 }
 
-/// Provider adapter error which cannot copy upstream response text.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderAdapterError {
     kind: ProviderAdapterErrorKind,
@@ -130,7 +118,6 @@ pub struct ProviderAdapterError {
     network: Option<Box<winwincode_network::NetworkFailure>>,
 }
 
-/// Validated transport facts; response bodies and arbitrary header values are absent.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderFailureMetadata {
@@ -144,7 +131,6 @@ pub struct ProviderFailureMetadata {
     pub diagnostic: Option<ProviderFailureDiagnostic>,
 }
 
-/// Static parser locations, never copied from a response field or value.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderFailureDiagnostic {
@@ -396,18 +382,12 @@ impl fmt::Display for ProviderAdapterError {
 
 impl std::error::Error for ProviderAdapterError {}
 
-/// Secret-free acknowledgement returned after the adapter accepts a request.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderAdapterOpenReceipt {
     adapter_request_id: String,
 }
 
 impl ProviderAdapterOpenReceipt {
-    /// Constructs a bounded opaque upstream request identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, or control-character-containing values.
     pub fn try_new(adapter_request_id: String) -> Result<Self, ProviderAdapterError> {
         if adapter_request_id.is_empty()
             || adapter_request_id.len() > 200
@@ -434,29 +414,15 @@ impl fmt::Debug for ProviderAdapterOpenReceipt {
     }
 }
 
-/// One Provider implementation selected by an exact catalog identifier.
 pub trait ProviderAdapterPort: Send + Sync {
-    /// Exact catalog Provider identifier owned by this adapter.
     fn provider_id(&self) -> &str;
 
-    /// Opens an exchange. The Credential is borrowed only during this call.
-    /// `adapter_request_id` is the mandatory upstream idempotency key: exact
-    /// retries must recover the first request rather than start another.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable category without exposing Provider response text.
     fn open(
         &self,
         invocation: &ProviderAdapterInvocation<'_>,
         credential: &ResolvedSecret,
     ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError>;
 
-    /// Opens a logical request under one recovery owner. HTTP adapters override
-    /// this to retain complete-response retries before exposing a stream.
-    ///
-    /// # Errors
-    /// Returns a safe adapter or expired-authority failure.
     fn open_recovering(
         &self,
         invocation: &ProviderAdapterInvocation<'_>,
@@ -470,16 +436,6 @@ pub trait ProviderAdapterPort: Send + Sync {
         self.open(invocation, credential)
     }
 
-    /// Applies one transport-level stream control transition. The tuple
-    /// (`model_exchange_id`, `adapter_request_id`, `action`) is the mandatory
-    /// idempotency identity: exact repeats must return the original result
-    /// without applying the Provider effect twice. Cancel and Release for a
-    /// precommitted identity whose open side effect has not happened are
-    /// successful no-ops that fence any later open using that identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable adapter category without Provider response text.
     fn control(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -488,7 +444,6 @@ pub trait ProviderAdapterPort: Send + Sync {
     ) -> Result<(), ProviderAdapterError>;
 }
 
-/// Provider transport action owned by the selected adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamControlAction {
     Pause,
@@ -497,7 +452,6 @@ pub enum ProviderStreamControlAction {
     Release,
 }
 
-/// Provider-neutral terminal outcome.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderGatewayTerminalOutcome {
@@ -506,7 +460,6 @@ pub enum ProviderGatewayTerminalOutcome {
     Cancelled,
 }
 
-/// Secret-free result of opening an exchange.
 pub struct ProviderGatewayOpenReceipt {
     pub model_exchange_id: ModelExchangeId,
     pub request_id: RequestId,
@@ -560,14 +513,12 @@ impl PartialEq for ProviderGatewayOpenReceipt {
 
 impl Eq for ProviderGatewayOpenReceipt {}
 
-/// Trusted terminal command used by the unique stream coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayTerminalCharge {
     pub usage: ProviderTokenUsage,
     pub actual_cost_micros: Option<u64>,
 }
 
-/// Trusted terminal command used by the unique stream coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderGatewayTerminal {
     Failed {
@@ -606,21 +557,15 @@ impl ProviderGatewayTerminal {
     }
 }
 
-/// Whether Provider acceptance or output can be ruled out.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelExecutionCertainty {
-    /// The request was proven not sent to a Provider.
     NotSent,
-    /// The Provider explicitly rejected it before acceptance.
     RejectedBeforeAcceptance,
-    /// Acceptance is unknown, so retry may duplicate work or cost.
     AcceptanceUnknown,
-    /// At least one output fragment was observed.
     OutputObserved,
 }
 
-/// Closed failure class used by retry policy.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAttemptFailureKind {
@@ -638,18 +583,14 @@ pub enum ModelAttemptFailureKind {
     Unknown,
 }
 
-/// Secret-free failure fact for one terminal attempt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelAttemptFailureFact {
-    /// Stable failure category.
     pub kind: ModelAttemptFailureKind,
-    /// Explicit Provider execution certainty.
     pub certainty: ModelExecutionCertainty,
 }
 
 impl ModelAttemptFailureFact {
-    /// Maps a stable Gateway category without copying Provider diagnostics.
     #[must_use]
     pub const fn from_gateway(
         kind: ProviderGatewayErrorKind,
@@ -696,7 +637,6 @@ impl ModelAttemptFailureFact {
         Self { kind, certainty }
     }
 
-    /// Maps a stable stream failure without copying Provider text or ids.
     #[must_use]
     pub const fn from_stream(
         kind: ProviderStreamFailureKind,
@@ -733,31 +673,18 @@ impl ModelAttemptFailureFact {
     }
 }
 
-/// Exact normalized charge attached to one Provider attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAttemptCharge {
-    /// Stable Provider usage identity, unique across every logical request.
     pub provider_usage_id: String,
-    /// Provider-normalized token usage.
     pub usage: ProviderTokenUsage,
-    /// Actual cost in micros.
     pub cost_micros: Option<u64>,
 }
 
-/// Opaque secret bytes returned only across the `SecretStore` boundary.
-///
-/// Debug output is always redacted, serialization is intentionally absent,
-/// cloning is intentionally absent, and the owned buffer is cleared on drop.
 pub struct ResolvedSecret {
     bytes: Vec<u8>,
 }
 
 impl ResolvedSecret {
-    /// Takes ownership of non-empty bytes loaded by a `SecretStore` adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty secret without retaining it in an error.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, SecretStoreError> {
         if bytes.is_empty() {
             return Err(SecretStoreError::corrupt());
@@ -765,7 +692,6 @@ impl ResolvedSecret {
         Ok(Self { bytes })
     }
 
-    /// Exposes bytes only at the provider-call boundary.
     #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.bytes
@@ -784,8 +710,6 @@ impl Drop for ResolvedSecret {
     }
 }
 
-/// Stable `SecretStore` failure categories. No adapter diagnostic or remote
-/// response is accepted into this public error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecretStoreErrorKind {
     Missing,
@@ -794,7 +718,6 @@ pub enum SecretStoreErrorKind {
     Corrupt,
 }
 
-/// Secret-safe failure returned by a [`SecretStorePort`] implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecretStoreError {
     kind: SecretStoreErrorKind,

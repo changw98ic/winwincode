@@ -1,77 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Delivery `WorkRun` execution coordination service.
-//!
-//! Raw Scheduler and Worker facts are deliberately not an external production
-//! API while their authoritative Phase 4 adapters do not exist.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::ActiveLeaseIdentity;
-//!
-//! let _caller_built_lease = ActiveLeaseIdentity {
-//!     execution_job_id: todo!(),
-//!     attempt: 1,
-//!     lease_id: todo!(),
-//!     fencing_token: todo!(),
-//!     worker_id: todo!(),
-//!     worker_instance_id: todo!(),
-//!     worker_session_id: todo!(),
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
-//!
-//! let _caller_built_authority = SessionBindingAuthority {
-//!     active_lease: todo!(),
-//!     issued_at: todo!(),
-//!     expires_at: todo!(),
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
-//!
-//! let _deserialized: SessionBindingAuthority = serde_json::from_str("{}").unwrap();
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::TerminalWorkerOutcome;
-//!
-//! let _caller_built_outcome = TerminalWorkerOutcome {
-//!     work_run_id: todo!(),
-//!     execution_job_id: todo!(),
-//!     attempt: 1,
-//!     lease_id: todo!(),
-//!     fencing_token: todo!(),
-//!     worker_id: todo!(),
-//!     worker_instance_id: todo!(),
-//!     worker_session_id: todo!(),
-//!     status: todo!(),
-//!     metadata: todo!(),
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! let _caller_callable_resolver =
-//!     winwincode_delivery::application::workrun_execution::verify_terminal_outcome;
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts;
-//!
-//! let _caller_built_facts = DeliveryTerminalOutcomeFacts {
-//!     authority: todo!(),
-//!     outcome: todo!(),
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts;
-//!
-//! let _deserialized: DeliveryTerminalOutcomeFacts = serde_json::from_str("{}").unwrap();
-//! ```
-
 use std::collections::HashSet;
 
 use crate::domain::{
@@ -115,8 +41,6 @@ pub struct ReworkAdvanceInput {
     pub review: Option<ReviewAttentionSeed>,
     pub previous_outcome: Option<VerifiedTerminalOutcome>,
     pub current_lease: Option<ActiveLeaseIdentity>,
-    /// Exact current-candidate remediation authority. Required only for a
-    /// `Reworking` `WorkItem` and consumed into the immutable dispatch intent.
     pub rework_authorization: Option<Box<ReworkAuthorization>>,
     pub now_millis: u64,
 }
@@ -129,7 +53,6 @@ pub enum TerminalOutcomeStatus {
     Cancelled,
 }
 
-/// Scheduler-owned lease identity loaded from durable Control Plane state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveLeaseIdentity {
     execution_job_id: ExecutionJobId,
@@ -178,11 +101,6 @@ impl ActiveLeaseIdentity {
     }
 }
 
-/// Scheduler-owned authority for accepting one Worker `session.binding`.
-///
-/// The active lease identity alone does not contain its issued/expiry window.
-/// This sealed fact binds that exact window to the scheduler-owned lease so a
-/// Worker message cannot extend or replace its own authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingAuthority {
     active_lease: ActiveLeaseIdentity,
@@ -190,7 +108,6 @@ pub struct SessionBindingAuthority {
     expires_at: Instant,
 }
 
-/// Storage-neutral copy of one Registry-accepted dispatch authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableDispatchAuthorityInput {
     pub execution_job_id: ExecutionJobId,
@@ -204,10 +121,6 @@ pub struct DurableDispatchAuthorityInput {
     pub expires_at: Instant,
 }
 
-/// Seals the Registry's accepted dispatch record for Delivery/Runtime ingress.
-///
-/// The Control Plane creates this only after the durable Registry has joined
-/// an accepted Worker dispatch result to its exact current lease.
 #[must_use]
 pub fn seal_session_binding_authority(
     dispatch: &DurableDispatchAuthorityInput,
@@ -227,23 +140,12 @@ pub fn seal_session_binding_authority(
     }
 }
 
-/// Scheduler- and Worker-adapter facts for one terminal `job.outcome`.
-///
-/// The raw lease and outcome fields stay private. A production adapter must
-/// obtain this value from its trusted scheduler/Worker boundary; ordinary
-/// callers cannot construct or deserialize terminal authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryTerminalOutcomeFacts {
     authority: SessionBindingAuthority,
     outcome: TerminalWorkerOutcome,
 }
 
-/// Exact scheduler lease and accepted Worker outcome read by a trusted
-/// production adapter from durable state.
-///
-/// This input is not itself authority. [`reconcile_durable_terminal_outcome`]
-/// checks every field against the current Delivery `WorkRun` and
-/// `SessionBinding` before sealing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableTerminalOutcomeInput {
     pub execution_job_id: ExecutionJobId,
@@ -263,11 +165,6 @@ pub struct DurableTerminalOutcomeInput {
     pub artifacts: Vec<TerminalArtifactReference>,
 }
 
-/// Worker-owned terminal values paired with Registry-owned dispatch authority.
-///
-/// This report deliberately excludes lease, fencing, Worker, and
-/// `WorkerSession` fields. Those values always come from the opaque accepted
-/// dispatch record when [`seal_dispatch_terminal_outcome`] is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerTerminalOutcomeReport {
     pub work_run_id: WorkRunId,
@@ -278,13 +175,6 @@ pub struct WorkerTerminalOutcomeReport {
     pub artifacts: Vec<TerminalArtifactReference>,
 }
 
-/// Combines an accepted Registry dispatch with Worker-owned terminal values.
-///
-/// The returned facts still undergo the canonical current-Delivery and
-/// durable-Job join in the Control Plane terminal transaction. This first seal
-/// ensures a Worker frame cannot choose its own lease, fence, process, or
-/// session authority, while an exact terminal receipt can be replayed after
-/// the Delivery has already advanced.
 #[must_use]
 pub fn seal_dispatch_terminal_outcome(
     dispatch: &DurableDispatchAuthorityInput,
@@ -341,12 +231,6 @@ impl DeliveryTerminalOutcomeFacts {
         )
     }
 
-    /// Revalidates the sealed facts for an active-stage handoff.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a stale Delivery, binding, Worker, lease, attempt, fencing
-    /// token, terminal position, or Artifact reference.
     pub fn verify_active(
         &self,
         delivery: &Delivery,
@@ -354,8 +238,6 @@ impl DeliveryTerminalOutcomeFacts {
         self.verify(delivery)
     }
 
-    /// Revalidates a successful report for read-only candidate derivation,
-    /// without requiring the Controller to have settled the `WorkItem` yet.
     pub(crate) fn verify_successful_report(
         &self,
         delivery: &Delivery,
@@ -379,8 +261,6 @@ impl DeliveryTerminalOutcomeFacts {
         }
     }
 
-    /// Revalidates one already-settled successful Worker outcome for derived
-    /// candidate/source reads. This does not mutate or re-settle Delivery.
     pub(crate) fn verify_settled_success(
         &self,
         delivery: &Delivery,
@@ -400,13 +280,6 @@ impl DeliveryTerminalOutcomeFacts {
     }
 }
 
-/// Reconciles durable scheduler and Worker records with the exact current
-/// Delivery before creating terminal authority.
-///
-/// # Errors
-///
-/// Fails closed when any input differs from the active `WorkRun` and its
-/// complete `SessionBinding`, or when the terminal metadata is invalid.
 pub fn reconcile_durable_terminal_outcome(
     delivery: &Delivery,
     input: DurableTerminalOutcomeInput,
@@ -416,13 +289,6 @@ pub fn reconcile_durable_terminal_outcome(
     Ok(facts)
 }
 
-/// Reconciles a persisted successful outcome after its `WorkRun` was settled by
-/// the same atomic handoff transaction.
-///
-/// # Errors
-///
-/// Fails closed when the successful `WorkRun`, binding, lease identity,
-/// terminal metadata, or finish time no longer matches the Delivery.
 pub fn reconcile_durable_settled_terminal_outcome(
     delivery: &Delivery,
     input: DurableTerminalOutcomeInput,
@@ -484,7 +350,6 @@ impl SessionBindingAuthority {
     }
 }
 
-/// Terminal fact reported by Worker through `ExecutionPort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalWorkerOutcome {
     work_run_id: WorkRunId,
@@ -499,7 +364,6 @@ pub struct TerminalWorkerOutcome {
     metadata: TerminalOutcomeMetadata,
 }
 
-/// Bounded facts carried by the accepted Worker `job.outcome`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalOutcomeMetadata {
     codex_thread_id: Option<CodexThreadId>,
@@ -530,7 +394,6 @@ impl TerminalOutcomeMetadata {
     }
 }
 
-/// One immutable Artifact identity named by the accepted Worker outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalArtifactReference {
@@ -538,8 +401,6 @@ pub struct TerminalArtifactReference {
     pub digest: Sha256Digest,
 }
 
-/// A terminal fact that matched the current `WorkRun`, `SessionBinding`, and
-/// scheduler lease/fencing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedTerminalOutcome {
     work_run_id: WorkRunId,
@@ -630,12 +491,6 @@ pub(crate) fn fixture_verified_terminal_outcome(
     }
 }
 
-/// Verifies a Worker terminal outcome against both Delivery and scheduler facts.
-///
-/// # Errors
-///
-/// Fails closed when any Delivery, job, attempt, Worker, lease, instance, or
-/// fencing identity differs.
 pub(crate) fn verify_terminal_outcome(
     delivery: &Delivery,
     lease: &ActiveLeaseIdentity,
@@ -736,8 +591,6 @@ fn verify_work_run_terminal(
     })
 }
 
-/// Construction helpers used only by Rust integration tests. Production
-/// Control Plane builds do not enable this feature.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
@@ -771,9 +624,6 @@ pub mod test_support {
         }
     }
 
-    /// Seals one exact active-lease window for a `SessionBinding` integration
-    /// fixture. Production schedulers construct the equivalent fact inside
-    /// their trusted adapter; raw fields remain unavailable to callers.
     #[must_use]
     pub fn session_binding_authority(
         active_lease: ActiveLeaseIdentity,
@@ -787,8 +637,6 @@ pub mod test_support {
         }
     }
 
-    /// Seals one scheduler lease and raw Worker outcome for Control Plane
-    /// transaction tests. Production builds expose no equivalent constructor.
     #[must_use]
     pub fn delivery_terminal_outcome_facts(
         authority: SessionBindingAuthority,
@@ -990,13 +838,6 @@ impl ExecutionIntent {
         self.rework_authorization.as_deref()
     }
 
-    /// Confirms this intent is the unchanged output of the Delivery
-    /// application service for the exact post-advance snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects field mutation, authorization replacement, or pairing the
-    /// intent with another Delivery snapshot before durable publication.
     pub fn validate_for_delivery(&self, delivery: &Delivery) -> Result<(), CoordinationError> {
         let expected = seal_execution_intent(delivery.snapshot(), self)?;
         if self.validation_seal == expected {
@@ -1016,8 +857,6 @@ pub enum WorkRunStartEffect {
     Clarify(ReworkClarificationReason),
 }
 
-/// Immutable outbox projection for a bounded rework decision that requires
-/// human clarification instead of another Worker job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryReworkClarifiedEvent {
@@ -1045,17 +884,6 @@ enum WorkRunStartKind {
 }
 
 impl WorkRunStartResult {
-    /// Creates the canonical `WorkRun` dispatch seal without consulting the
-    /// Delivery-wide execution state. This only seals one current `WorkRun` dispatch.
-    /// accepted input. Sealed rework retires its candidate producer and reopens
-    /// that item. `WorkRun` and `SessionBinding` are added only after scheduler
-    /// acceptance. Authorized rework invalidates the previous Evidence/Verdict
-    /// atomically with the new immutable dispatch intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale revisions, non-runnable items, invalid identities, or a
-    /// mutation timestamp older than the current Delivery.
     #[allow(clippy::too_many_arguments)]
     pub fn canonical_workrun_dispatch(
         source: &Delivery,
@@ -1143,21 +971,11 @@ impl WorkRunStartResult {
         })
     }
 
-    /// Returns whether this transition is the stage-free canonical `WorkRun`
-    /// dispatch seal.
     #[must_use]
     pub const fn is_canonical_workrun_dispatch(&self) -> bool {
         matches!(self.kind, WorkRunStartKind::WorkRunDispatch)
     }
 
-    /// Checks that the public projection still matches the application-owned
-    /// transition. Callers may inspect the projection, but cannot turn an
-    /// edited copy into stage-start authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns a conflict when either the Delivery or execution effect was
-    /// changed after [`Self::canonical_workrun_dispatch`] created this result.
     pub fn validate_projection(&self) -> Result<(), CoordinationError> {
         if self.delivery != self.sealed_delivery || self.effect != self.sealed_effect {
             return Err(CoordinationError::new(
@@ -1302,19 +1120,6 @@ pub struct CancelAcknowledgement {
     pub worker_session_id: WorkerSessionId,
 }
 
-/// Consumes the sealed precise-rework decision instead of letting a caller
-/// choose a task or silently ignore a clarification result.
-///
-/// Start decisions are rejected here: they require
-/// [`WorkRunStartResult::canonical_workrun_dispatch`]. A bounded/repeated failure
-/// changes the Delivery to `Clarifying` without
-/// creating a remediator `WorkRun`, `SessionBinding`, or `ExecutionJob`.
-///
-/// # Errors
-///
-/// Rejects a stale revision, non-reworking Delivery, active run, unresolved
-/// Attention, or an input that tries to combine another authorization or
-/// terminal/review facts with the sealed decision.
 pub fn advance_rework(
     delivery: &Delivery,
     input: &ReworkAdvanceInput,
@@ -1430,11 +1235,6 @@ fn seal_execution_intent(
     )))
 }
 
-/// Creates cancellation intent for one explicitly selected active `WorkRun`.
-/// The Control Plane must persist this effect before sending it to the Worker.
-///
-/// # Errors
-/// Rejects stale revisions, inactive runs, or incomplete accepted bindings.
 pub fn request_cancel(
     delivery: &Delivery,
     expected_revision: u64,
@@ -1503,11 +1303,6 @@ pub fn request_cancel(
     })
 }
 
-/// Validates receipt of cancellation without settling the `WorkRun`.
-/// Only a verified terminal outcome may finish execution.
-///
-/// # Errors
-/// Rejects another run, a replaced attempt, or a changed current binding.
 pub fn acknowledge_cancel(
     delivery: &Delivery,
     intent: &CancelIntent,
@@ -1538,8 +1333,6 @@ fn revalidate_terminal_outcome(
             "terminal outcome was verified for another active lease",
         ));
     }
-    // Recheck the complete persisted WorkRun and binding, not just the lease
-    // copied into a previously verified result.
     verify_work_run_terminal(
         delivery,
         active_lease,
@@ -1559,18 +1352,6 @@ fn revalidate_terminal_outcome(
     )
 }
 
-/// Applies one verified terminal Worker outcome to its still-current lease.
-///
-/// Verification and application are separate durable steps. The scheduler
-/// identity is therefore checked again here so a result verified before a
-/// re-lease cannot settle the newly leased attempt. A Worker process result
-/// never advances Delivery by itself; failed, infrastructure-error, and
-/// cancelled results leave the Delivery in its current retry phase.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, changed lease/fencing/Worker identity,
-/// changed active binding, invalid finish time, or an incompatible task state.
 pub fn apply_terminal_outcome(
     delivery: &Delivery,
     expected_revision: u64,

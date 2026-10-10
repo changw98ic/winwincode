@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Bounded schema subset for explicitly configured Responses JSON-object compatibility.
-//! Unsupported schema semantics fail before the request is sent.
-//! Supported keywords are type, properties, required, additionalProperties (boolean),
-//! items, enum (scalar safe integers/string/boolean/null), minItems, maxItems and
-//! the project's fixed ASCII token pattern. Type unions are basic type plus null.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, de};
@@ -305,8 +297,6 @@ fn safe_integer(value: &Value) -> Option<i64> {
         .then_some(value)
 }
 
-// Normalize the original decimal representation without f64 rounding. This
-// also handles arbitrary_precision, enabled by the embedded Core dependency.
 fn integer_parts(number: &serde_json::Number) -> Option<(bool, String, usize)> {
     let text = number.to_string();
     let (mantissa, exponent) =
@@ -379,8 +369,6 @@ fn bounded(value: &Value, depth: usize, nodes: &mut usize) -> bool {
     }
 }
 
-// First validate key uniqueness without interpreting serde's synthetic numeric
-// maps. The second Value parse retains the dependency's exact numeric semantics.
 struct UniqueKeys;
 
 impl<'de> Deserialize<'de> for UniqueKeys {
@@ -436,9 +424,6 @@ fn reserved_key(key: &str) -> bool {
     key.starts_with("$serde_json::private::")
 }
 
-// Value's arbitrary_precision/raw_value decoders treat certain real object keys
-// as private scalar markers. Inspect the original JSON tokens so synthetic maps
-// produced for legitimate numbers cannot be confused with input object maps.
 pub(crate) fn reserved_object_key(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut index = 0;

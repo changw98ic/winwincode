@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +16,6 @@ const DATABASE_FILE_NAME: &str = "audit.sqlite3";
 const SCHEMA_VERSION: i64 = 1;
 const CHAIN_DOMAIN: &[u8] = b"winwincode.audit-chain.v1";
 
-/// Stable audit error categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditErrorKind {
     InvalidInput,
@@ -28,7 +25,6 @@ pub enum AuditErrorKind {
     Closed,
 }
 
-/// Adapter-neutral audit failure without remote or credential-bearing text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditError {
     kind: AuditErrorKind,
@@ -71,7 +67,6 @@ impl AuditError {
         }
     }
 
-    /// Builds the stable error returned when an application has no live audit store.
     #[must_use]
     pub fn unavailable() -> Self {
         Self {
@@ -94,8 +89,6 @@ impl fmt::Display for AuditError {
 
 impl std::error::Error for AuditError {}
 
-/// One ordered audit record. `event` is absent only after its finite retained
-/// payload has expired; the immutable header and chain digest remain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditRecord {
     sequence: u64,
@@ -104,11 +97,6 @@ pub struct AuditRecord {
     event: Option<AuditEvent>,
 }
 
-/// Verified tail of one complete organization audit chain.
-///
-/// A checkpoint is derived by reading and validating every immutable header
-/// and every retained payload. It can be persisted by an export boundary as a
-/// compact completeness proof without copying any event payload.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditChainCheckpoint {
     organization_id: OrganizationId,
@@ -155,7 +143,6 @@ impl AuditRecord {
     }
 }
 
-/// One bounded, scope-filtered audit page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditPage {
     records: Vec<AuditRecord>,
@@ -174,19 +161,12 @@ impl AuditPage {
     }
 }
 
-/// Local `SQLite` adapter for immutable organization audit chains.
 pub struct AuditStore {
     connection: Option<Connection>,
     database_path: PathBuf,
 }
 
 impl AuditStore {
-    /// Opens the local audit database and applies its additive schema.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the directory, `SQLite` durability
-    /// settings, or schema cannot be prepared.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, AuditError> {
         let data_directory = data_directory.as_ref();
         fs::create_dir_all(data_directory).map_err(|error| {
@@ -222,13 +202,6 @@ impl AuditStore {
         &self.database_path
     }
 
-    /// Appends a validated event to its organization's hash chain. Exact
-    /// event-id replay returns the original record without a second sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns a request conflict for changed reuse, a corruption error for a
-    /// damaged prior chain, or an adapter error when the transaction fails.
     pub fn append(&mut self, event: &AuditEvent) -> Result<AuditRecord, AuditError> {
         event.validate()?;
         let payload = serde_json::to_vec(event).map_err(json_error)?;
@@ -310,12 +283,6 @@ impl AuditStore {
         })
     }
 
-    /// Reads one bounded page filtered by an already-authorized exact scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid limits/cursors, damaged headers or payloads, and payload
-    /// loss before a finite retention deadline.
     pub fn read(
         &self,
         access: &AuditAccess,
@@ -387,14 +354,6 @@ impl AuditStore {
         })
     }
 
-    /// Reads one immutable event by its stable identity when it is visible to
-    /// the already-authorized scope. This lookup is bounded and validates the
-    /// retained payload against the immutable header before returning it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid scope or timestamp and returns a corruption error
-    /// when the stored header, payload, or retention tombstone is damaged.
     pub fn read_exact(
         &self,
         access: &AuditAccess,
@@ -416,13 +375,6 @@ impl AuditStore {
         record_from_header(&header, as_of_millis).map(Some)
     }
 
-    /// Deletes only canonical payload bytes whose finite retention deadline
-    /// has passed. Immutable event headers and their hash chain remain.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an out-of-range timestamp and fails before deletion when an
-    /// affected organization chain is corrupt.
     pub fn prune_expired_payloads(&mut self, now_millis: u64) -> Result<usize, AuditError> {
         let now = i64::try_from(now_millis)
             .map_err(|_| AuditError::invalid("audit retention timestamp is out of range"))?;
@@ -476,13 +428,6 @@ impl AuditStore {
         Ok(deleted)
     }
 
-    /// Verifies the complete immutable header chain for one organization.
-    /// Retained payloads are also decoded and matched to their headers.
-    ///
-    /// # Errors
-    ///
-    /// Returns the verified chain checkpoint, or a corruption error at the
-    /// first missing, changed, or reordered header/payload.
     pub fn verify_organization(
         &self,
         organization_id: &OrganizationId,
@@ -556,11 +501,6 @@ impl AuditStore {
         Ok((checkpoint, headers))
     }
 
-    /// Closes the local adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when `SQLite` close fails.
     pub fn close(mut self) -> Result<(), AuditError> {
         let Some(connection) = self.connection.take() else {
             return Err(AuditError::closed());

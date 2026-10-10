@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Pure, deterministic normalization and durable validation of `DebugProbe`
-//! process evidence.
-//!
-//! Generated types own the wire shape. This module owns host-selected profile
-//! sealing, raw Artifact bindings, L0/L1 cross-field semantics, and canonical
-//! content identities. Raw process bytes are accepted only as borrowed input
-//! and are never retained in the normalized bundle or its summary projection.
-
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Component, Path};
@@ -46,7 +36,6 @@ const MAX_STACK_FRAMES: usize = 64;
 const MAX_STACK_CLUSTERS: usize = 256;
 const MAX_OCCURRENCES: i64 = 1_000_000;
 
-/// Stable, secret-safe evidence normalization failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeEvidenceError {
     code: DebugProbeErrorCode,
@@ -54,13 +43,11 @@ pub struct ProbeEvidenceError {
 }
 
 impl ProbeEvidenceError {
-    /// Returns the canonical machine-readable error category.
     #[must_use]
     pub const fn code(&self) -> &DebugProbeErrorCode {
         &self.code
     }
 
-    /// Returns a bounded message that never echoes process output.
     #[must_use]
     pub const fn message(&self) -> &'static str {
         self.message
@@ -75,17 +62,11 @@ impl fmt::Display for ProbeEvidenceError {
 
 impl std::error::Error for ProbeEvidenceError {}
 
-/// A host-selected normalizer profile whose content digest has been verified.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedProbeNormalizerProfile {
     profile: ProbeNormalizerProfile,
 }
 
-/// Host-owned baseline selection admitted before normalization.
-///
-/// Callers cannot construct an arbitrary baseline comparison. A comparable
-/// baseline is derived only from a previously sealed bundle and its exact
-/// canonical Artifact reference.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedProbeBaselineInput {
     kind: ProbeBaselineInputKind,
@@ -93,7 +74,6 @@ pub struct ValidatedProbeBaselineInput {
 }
 
 impl ValidatedProbeBaselineInput {
-    /// Returns the exact host-owned choice persisted before process execution.
     #[must_use]
     pub const fn selection(&self) -> &ProbeBaselineSelection {
         &self.selection
@@ -125,28 +105,22 @@ struct BaselineAuthorityBinding {
 }
 
 impl ValidatedProbeNormalizerProfile {
-    /// Returns the exact generated profile retained by the seal.
     #[must_use]
     pub const fn profile(&self) -> &ProbeNormalizerProfile {
         &self.profile
     }
 
-    /// Consumes the seal and returns the generated profile.
     #[must_use]
     pub fn into_profile(self) -> ProbeNormalizerProfile {
         self.profile
     }
 }
 
-/// A durable evidence bundle whose authority, derived fields, and digest have
-/// all been recomputed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedProbeEvidenceBundle {
     bundle: ProbeEvidenceBundle,
 }
 
-/// A previously stored bundle rebound to the exact semantic digest and
-/// canonical-byte Artifact reference retained by the evidence journal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedPriorProbeEvidenceBundle {
     bundle: ProbeEvidenceBundle,
@@ -154,13 +128,11 @@ pub struct ValidatedPriorProbeEvidenceBundle {
 }
 
 impl ValidatedPriorProbeEvidenceBundle {
-    /// Returns the revalidated prior bundle.
     #[must_use]
     pub const fn bundle(&self) -> &ProbeEvidenceBundle {
         &self.bundle
     }
 
-    /// Returns the journal-bound canonical bundle Artifact reference.
     #[must_use]
     pub const fn artifact_ref(&self) -> &ArtifactReference {
         &self.artifact_ref
@@ -168,21 +140,17 @@ impl ValidatedPriorProbeEvidenceBundle {
 }
 
 impl ValidatedProbeEvidenceBundle {
-    /// Returns the exact generated bundle retained by the seal.
     #[must_use]
     pub const fn bundle(&self) -> &ProbeEvidenceBundle {
         &self.bundle
     }
 
-    /// Consumes the seal and returns the generated bundle.
     #[must_use]
     pub fn into_bundle(self) -> ProbeEvidenceBundle {
         self.bundle
     }
 }
 
-/// A bounded summary and unpolarized hypothesis candidates derived from one
-/// canonical evidence bundle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbeEvidenceProjection {
     summary: ProbeEvidenceSummary,
@@ -190,26 +158,22 @@ pub struct ProbeEvidenceProjection {
 }
 
 impl ProbeEvidenceProjection {
-    /// Returns the bounded summary that may be surfaced at a round boundary.
     #[must_use]
     pub const fn summary(&self) -> &ProbeEvidenceSummary {
         &self.summary
     }
 
-    /// Returns target-bound evidence candidates without polarity or confidence.
     #[must_use]
     pub fn candidates(&self) -> &[HypothesisEvidenceCandidate] {
         &self.candidates
     }
 
-    /// Consumes the projection into its generated wire values.
     #[must_use]
     pub fn into_parts(self) -> (ProbeEvidenceSummary, Vec<HypothesisEvidenceCandidate>) {
         (self.summary, self.candidates)
     }
 }
 
-/// One borrowed raw process stream together with its content-addressed Artifact.
 #[derive(Clone, Debug)]
 pub struct ProbeRawStreamInput<'a> {
     stream: ProbeRawStream,
@@ -218,7 +182,6 @@ pub struct ProbeRawStreamInput<'a> {
 }
 
 impl<'a> ProbeRawStreamInput<'a> {
-    /// Creates a raw input. Its Artifact digest is checked during normalization.
     #[must_use]
     pub const fn new(
         stream: ProbeRawStream,
@@ -233,13 +196,6 @@ impl<'a> ProbeRawStreamInput<'a> {
     }
 }
 
-/// Derives the canonical host-selected profile digest.
-///
-/// The digest excludes `profileDigest` and uses domain-separated length frames.
-///
-/// # Errors
-///
-/// Rejects a profile that cannot be represented canonically.
 pub fn derive_probe_normalizer_profile_digest(
     profile: &ProbeNormalizerProfile,
 ) -> Result<Sha256Digest, ProbeEvidenceError> {
@@ -260,11 +216,6 @@ pub fn derive_probe_normalizer_profile_digest(
     Ok(digest.finish())
 }
 
-/// Seals one exact host-selected normalizer profile.
-///
-/// # Errors
-///
-/// Rejects a profile whose stored digest differs from its canonical fields.
 pub fn seal_probe_normalizer_profile(
     profile: ProbeNormalizerProfile,
 ) -> Result<ValidatedProbeNormalizerProfile, ProbeEvidenceError> {
@@ -276,8 +227,6 @@ pub fn seal_probe_normalizer_profile(
     Ok(ValidatedProbeNormalizerProfile { profile })
 }
 
-/// Selects the explicit no-baseline state for a profile without a diagnostic
-/// parser.
 #[must_use]
 pub const fn probe_baseline_not_applicable() -> ValidatedProbeBaselineInput {
     ValidatedProbeBaselineInput {
@@ -286,7 +235,6 @@ pub const fn probe_baseline_not_applicable() -> ValidatedProbeBaselineInput {
     }
 }
 
-/// Selects the explicit host-observed missing-baseline state.
 #[must_use]
 pub const fn probe_baseline_unavailable() -> ValidatedProbeBaselineInput {
     ValidatedProbeBaselineInput {
@@ -295,18 +243,6 @@ pub const fn probe_baseline_unavailable() -> ValidatedProbeBaselineInput {
     }
 }
 
-/// Selects a prior sealed bundle as the only source of comparable baseline
-/// evidence.
-///
-/// Matching environment, probe definition, and profile digests produce a
-/// comparable input. A mismatch is retained explicitly as incompatible. The
-/// prior bundle must be complete because an incomplete result is not a sound
-/// comparison base.
-///
-/// # Errors
-///
-/// Rejects an invalid or content-mismatched prior bundle Artifact reference,
-/// a prior bundle without a diagnostic parser, or incomplete prior evidence.
 pub fn select_probe_evidence_baseline(
     prior: &ValidatedPriorProbeEvidenceBundle,
     current_intent: &ValidatedProbeExecutionIntent,
@@ -369,13 +305,6 @@ pub fn select_probe_evidence_baseline(
     Ok(selected)
 }
 
-/// Re-seals an exact persisted baseline selection against its retained prior
-/// bundle and current host profile.
-///
-/// # Errors
-///
-/// Rejects nullable-field drift, a missing or substituted prior bundle, or a
-/// selection that is inconsistent with the current diagnostic profile.
 pub fn seal_probe_baseline_selection(
     selection: &ProbeBaselineSelection,
     prior: Option<&ValidatedPriorProbeEvidenceBundle>,
@@ -426,15 +355,6 @@ const fn empty_baseline_selection(state: ProbeBaselineSelectionState) -> ProbeBa
     }
 }
 
-/// Normalizes borrowed raw output into one durable L0/L1 evidence bundle.
-///
-/// The selected parsers come only from the already-sealed host profile. No
-/// parser is inferred from command text, probe kind, or process output.
-///
-/// # Errors
-///
-/// Rejects stale authority, receipt/raw binding drift, malformed selected
-/// parser output, invalid baseline evidence, or any non-canonical derived fact.
 pub fn normalize_probe_evidence(
     intent: &ValidatedProbeExecutionIntent,
     receipt: &ProbeExecutionReceipt,
@@ -548,14 +468,6 @@ pub fn normalize_probe_evidence(
     Ok(sealed)
 }
 
-/// Derives the semantic digest of a bundle, excluding `bundleDigest` itself.
-///
-/// Every component is serialized independently into a length frame under a
-/// domain tag, avoiding delimiter ambiguity and map-order dependence.
-///
-/// # Errors
-///
-/// Returns an error if a generated component cannot be serialized.
 pub fn derive_probe_evidence_bundle_digest(
     bundle: &ProbeEvidenceBundle,
 ) -> Result<Sha256Digest, ProbeEvidenceError> {
@@ -578,14 +490,6 @@ pub fn derive_probe_evidence_bundle_digest(
     Ok(digest.finish())
 }
 
-/// Revalidates every durable cross-field and derived-field invariant.
-///
-/// This operation requires only the stored bundle and the already-sealed
-/// intent; it does not read the workspace or rerun a parser.
-///
-/// # Errors
-///
-/// Rejects any authority, ordering, count, status, reference, or digest drift.
 pub fn validate_probe_evidence_bundle(
     bundle: &ProbeEvidenceBundle,
     intent: &ValidatedProbeExecutionIntent,
@@ -602,13 +506,6 @@ pub fn validate_probe_evidence_bundle(
     validate_target_hypotheses(&bundle.target_hypothesis_ids, intent)
 }
 
-/// Revalidates that a sealed bundle was produced from the exact profile and
-/// baseline selection persisted with the execution record.
-///
-/// # Errors
-///
-/// Rejects profile substitution, baseline-choice substitution, or prior
-/// authority drift even when the substituted bundle is otherwise valid.
 pub fn validate_probe_evidence_bundle_inputs(
     bundle: &ValidatedProbeEvidenceBundle,
     intent: &ValidatedProbeExecutionIntent,
@@ -710,11 +607,6 @@ fn validate_self_contained_bundle(bundle: &ProbeEvidenceBundle) -> Result<(), Pr
     Ok(())
 }
 
-/// Seals an owned durable bundle after recomputing every semantic invariant.
-///
-/// # Errors
-///
-/// Returns the same validation failures as [`validate_probe_evidence_bundle`].
 fn seal_probe_evidence_bundle(
     bundle: ProbeEvidenceBundle,
     intent: &ValidatedProbeExecutionIntent,
@@ -723,12 +615,6 @@ fn seal_probe_evidence_bundle(
     Ok(ValidatedProbeEvidenceBundle { bundle })
 }
 
-/// Parses and seals canonical stored bundle bytes without rerunning a parser.
-///
-/// # Errors
-///
-/// Rejects malformed JSON, non-canonical serialization, journal identity
-/// drift, or any semantic drift.
 pub fn reopen_probe_evidence_bundle_from_journal(
     bytes: &[u8],
     intent: &ValidatedProbeExecutionIntent,
@@ -750,11 +636,6 @@ pub fn reopen_probe_evidence_bundle_from_journal(
     Ok(sealed)
 }
 
-/// Returns the unique canonical JSON bytes used for bundle Artifact storage.
-///
-/// # Errors
-///
-/// Returns an error only if generated serialization fails.
 pub fn canonical_probe_evidence_bundle_bytes(
     bundle: &ValidatedProbeEvidenceBundle,
 ) -> Result<Vec<u8>, ProbeEvidenceError> {
@@ -762,13 +643,6 @@ pub fn canonical_probe_evidence_bundle_bytes(
         .map_err(|_| invalid_probe("probe evidence bundle serialization failed"))
 }
 
-/// Rebinds a freshly validated bundle to the exact canonical Artifact that is
-/// persisted in the evidence journal.
-///
-/// # Errors
-///
-/// Rejects an invalid Artifact identity or a digest that does not match the
-/// canonical bundle bytes.
 pub fn bind_prior_probe_evidence_bundle(
     bundle: &ValidatedProbeEvidenceBundle,
     artifact_ref: ArtifactReference,
@@ -786,17 +660,6 @@ pub fn bind_prior_probe_evidence_bundle(
     })
 }
 
-/// Reopens a prior canonical bundle using only its stored bytes and the two
-/// independent identities retained by the journal.
-///
-/// This restart path deliberately returns a prior-only type: it proves exact
-/// byte/semantic identity and all self-contained evidence invariants without
-/// claiming to reconstruct the original private D2 intent seal.
-///
-/// # Errors
-///
-/// Rejects malformed or non-canonical bytes, Artifact digest drift, journal
-/// semantic-digest drift, or any self-contained bundle invariant violation.
 pub fn seal_prior_probe_evidence_bundle_bytes(
     bytes: &[u8],
     expected_artifact_ref: ArtifactReference,
@@ -841,15 +704,6 @@ fn validate_prior_storage_binding(
     validate_self_contained_bundle(bundle)
 }
 
-/// Projects one sealed bundle into a bounded summary and unpolarized evidence.
-///
-/// `bundleArtifactRef` addresses the exact canonical bytes returned by
-/// [`canonical_probe_evidence_bundle_bytes`]. It is deliberately separate from
-/// the L0 receipt's raw stream Artifact references.
-///
-/// # Errors
-///
-/// Rejects an invalid Artifact identity or content digest.
 pub fn project_probe_evidence(
     bundle: &ValidatedProbeEvidenceBundle,
     bundle_artifact_ref: ArtifactReference,
@@ -917,11 +771,6 @@ pub fn project_probe_evidence(
     })
 }
 
-/// Derives the target-bound semantic evidence digest for one bundle.
-///
-/// # Errors
-///
-/// Returns an error if the generated identity cannot be serialized.
 pub fn derive_hypothesis_evidence_digest(
     identity: &DebugProbeIdentity,
     target: &DebugHypothesisId,

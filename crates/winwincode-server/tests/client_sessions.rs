@@ -1,15 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The user-facing Worker launch flow over real HTTP: the
-//! `POST /api/v1/sessions` route wired to `ClientSessionsApplication` and the
-//! real client exchange, covering the full chain (grant issued, the
-//! `client.worker.launch` frame delivered with every `C + L` field, the fake
-//! device answering `client.worker.launch_ack`, the grant consumed exactly
-//! once), the repeated-ack idempotency, the rejected acknowledgement keeping
-//! the grant `issued` with the audited reason, the occupancy preconditions
-//! (`NOT_HOLDER`, `OCCUPANCY_REQUIRED`), the binding visibility gate, the
-//! durable capacity view, and the expiry path of an unanswered grant.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 use device_provider::chat_scope;
@@ -74,11 +62,7 @@ use winwincode_storage::{
 const BOOTSTRAP_PROOF: &str = "client-sessions-test-bootstrap";
 const ORIGIN: &str = "https://client.example";
 const OWNER_PASSWORD: &str = "initial-owner-password";
-/// Placeholder client node id a fresh device sends before the server assigns
-/// the canonical `cnd_` identity.
 const FRESH_NODE: &str = "device-local-pending";
-/// Enrollment instance; a following hello from the takeover instance carries
-/// the reported capacity the flow needs.
 const ENROLL_INSTANCE: &str = "cix_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const DEVICE_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const SCHEMA_VERSION: &str = "winwincode/v1";
@@ -295,8 +279,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// Initializes the Owner with a password, then signs in; returns
-/// (cookie, userId).
 async fn initialize_and_login_owner(address: std::net::SocketAddr) -> (String, String) {
     let response = http_request(
         address,
@@ -324,8 +306,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
         .to_owned();
     (session_cookie_from_response(&response), user_id)
 }
-
-// ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
     address: std::net::SocketAddr,
@@ -387,8 +367,6 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-/// Enrolls a fresh device over the exchange; returns (nodeId, publicClientId,
-/// credential). The node stays `pending_enrollment`.
 async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
@@ -424,7 +402,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     (node, public_client_id, credential)
 }
 
-/// Walks the announcement hello so the node projects `online`.
 async fn walk_hello(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -456,9 +433,6 @@ async fn walk_hello(
     );
 }
 
-/// Enrolls and walks the takeover hello, then sends one real heartbeat: the
-/// node is `online` reporting four worker-session slots under the device
-/// instance.
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -469,8 +443,6 @@ async fn enroll_online_device(
     (node, public_client_id, credential)
 }
 
-/// Publishes one connect code digest the way the Device Client would, and
-/// returns the 8-digit code.
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -490,8 +462,6 @@ fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String
     code.to_owned()
 }
 
-/// Consumes one published code directly, staging the active `use` grant a
-/// connected user would hold.
 fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -521,8 +491,6 @@ fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str)
         .expect("atomic consume and grant");
 }
 
-/// Stages one visible repository binding with an active `use` grant for the
-/// user; returns the binding id.
 fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> String {
     let binding_id = fresh_binding_id();
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -565,8 +533,6 @@ fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> St
     binding_id
 }
 
-/// Stages one repository binding without any repository access grant: it
-/// exists on the client but is invisible to every user.
 fn stage_invisible_binding(data_directory: &Path, node: &str) -> String {
     let binding_id = fresh_binding_id();
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -593,8 +559,6 @@ fn stage_invisible_binding(data_directory: &Path, node: &str) -> String {
     binding_id
 }
 
-/// Claims occupancy directly and walks the lease to `occupied` through the
-/// shared service (no HTTP detour needed for staging).
 fn stage_occupied_lease(data_directory: &Path, node: &str, holder_user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut occupancy = ClientOccupancyService::new(&mut storage);
@@ -619,8 +583,6 @@ fn stage_occupied_lease(data_directory: &Path, node: &str, holder_user_id: &str)
     assert_eq!(occupied.state, OccupancyLeaseState::Occupied);
 }
 
-/// Rewrites one registry column of a node directly (test staging for device
-/// local facts no public API mutates).
 fn set_node_column(data_directory: &Path, node: &str, assignment: &str) {
     let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
         .expect("open database");
@@ -661,7 +623,6 @@ fn downlink_ack_cursor(data_directory: &Path, node: &str) -> u64 {
     cursors.max(high_water)
 }
 
-/// Sends one device heartbeat reporting `running` active worker sessions.
 async fn send_heartbeat(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -691,20 +652,12 @@ async fn send_heartbeat(
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
-/// How the fake device answers a `client.worker.launch` command.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LaunchVerdict {
-    /// Accept: the device persists the launch intent and spawns.
     Accept,
-    /// Reject with the stale-fencing-token status (an unused token verdict).
     Reject,
 }
 
-/// The fake device: polls the durable downlink outbox like the real daemon
-/// polls its inbox, acknowledges every frame, answers every
-/// `client.occupancy.offer` with `client.occupancy.ack`, and answers every
-/// `client.worker.launch` with a `client.worker.launch_ack` echoing the
-/// grant identities and the exact occupancy stamp.
 #[allow(clippy::too_many_lines)]
 fn spawn_device_responder(
     data_directory: PathBuf,
@@ -832,8 +785,6 @@ fn spawn_device_responder(
     })
 }
 
-// ---- launch flow helpers ---------------------------------------------------
-
 fn launch_body(client_id: &str, binding_id: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -857,7 +808,6 @@ fn managed_app_query_body() -> String {
     .to_string()
 }
 
-/// Reads the durable launch grant audit actions of one grant, oldest first.
 fn audit_actions(data_directory: &Path, grant_id: &str) -> Vec<(String, Option<String>)> {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut grants = WorkerLaunchGrantService::new(&mut storage);
@@ -881,9 +831,6 @@ fn launch_grant(
         .expect("grant exists")
 }
 
-/// Polls `predicate` until it holds or the budget elapses (the fake responder
-/// settles its acks through real exchange round trips; awaiting keeps the
-/// single-threaded test runtime responsive).
 async fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
     for _ in 0..200 {
         if predicate() {
@@ -893,8 +840,6 @@ async fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
     }
     predicate()
 }
-
-// ---- tests ----------------------------------------------------------------
 
 #[tokio::test]
 async fn launch_routes_require_a_signed_in_session() {
@@ -1017,8 +962,6 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
     assert_eq!(digest.len(), 71);
     assert!(digest.starts_with("sha256:"));
 
-    // Durable facts: the grant is consumed exactly once with its audit pair,
-    // and the acked launch frame is retained no longer.
     let grant_id = body["workerLaunchGrantId"]
         .as_str()
         .expect("grant id")
@@ -1042,8 +985,6 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         );
     }
 
-    // A replayed accepted acknowledgement is an idempotent no-op: the grant
-    // keeps its revision and the audit trail keeps exactly two entries.
     let settlement = LaunchAckSettlement::try_new(
         &grant.worker_launch_grant_id,
         &grant.occupancy_lease_id,
@@ -1092,8 +1033,6 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         body["workerSessionId"]
     );
 
-    // A terminal worker keeps its history, while the same Chat gets a fresh
-    // worker on continuation. A live launch above remains idempotent.
     {
         use winwincode_control_plane::DeviceExecutionBindingService;
         use winwincode_storage::{DeviceExecutionBindingIssuance, DeviceExecutionBindingRelease};
@@ -1165,8 +1104,6 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
 
-/// Releases every active occupancy lease of a client through durable storage
-/// (simulates an occupancy rewrite after `cancel_and_release` / abnormal exit).
 fn release_all_occupancy(data_directory: &Path) {
     let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
         .expect("open database");
@@ -1181,7 +1118,6 @@ fn release_all_occupancy(data_directory: &Path) {
         .expect("release occupancy leases");
 }
 
-/// Cancels the staged chat `ProductSession` through the durable service.
 fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: u64) {
     use winwincode_control_plane::{CancelProductSessionCommand, ProductSessionCommandContext};
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -1223,8 +1159,6 @@ fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: 
         .expect("cancel staged ProductSession");
 }
 
-/// Binds a Device execution binding and opens a running Worker session slot
-/// so launch can prove a live worker.
 fn bind_live_device_worker(
     data_directory: &Path,
     grant: &winwincode_storage::WorkerLaunchGrantRecord,
@@ -1253,8 +1187,6 @@ fn bind_live_device_worker(
         .expect("bind device worker");
 }
 
-/// Stages a terminal Worker-session slot as durable abnormal-exit evidence
-/// without walking the full admission/lease open path.
 fn mark_worker_slot_exited(
     data_directory: &Path,
     grant: &winwincode_storage::WorkerLaunchGrantRecord,
@@ -1327,8 +1259,6 @@ async fn live_worker_duplicate_start_maps_to_same_worker() {
         &data_directory,
         first["workerLaunchGrantId"].as_str().expect("grant"),
     );
-    // Device-bound under the current occupancy without a release report:
-    // duplicate start must keep mapping to the same worker.
     bind_live_device_worker(&data_directory, &grant);
 
     let repeated = http_request(
@@ -1392,8 +1322,6 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
         &data_directory,
         first["workerLaunchGrantId"].as_str().expect("grant"),
     );
-    // Bind then stage a terminal slot without a device release report:
-    // abnormal exit under the *same* occupancy.
     bind_live_device_worker(&data_directory, &grant);
     mark_worker_slot_exited(&data_directory, &grant);
 
@@ -1479,7 +1407,6 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
         "WRONG_STATE",
         "cancelled sessions must not fake-start or claim the id is merely occupied"
     );
-    // The prior grant remains the only grant; no fake replacement was issued.
     let newest = {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         WorkerLaunchGrantService::new(&mut storage)
@@ -1499,7 +1426,6 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
 
-/// Releases the prior Device execution binding so a reopen may restart.
 fn release_prior_device_worker(
     data_directory: &Path,
     grant: &winwincode_storage::WorkerLaunchGrantRecord,
@@ -1560,7 +1486,6 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
         &data_directory,
         first["workerLaunchGrantId"].as_str().expect("grant"),
     );
-    // Worker still bound; occupancy is rewritten under the same user.
     bind_live_device_worker(&data_directory, &grant);
     release_all_occupancy(&data_directory);
     stage_occupied_lease(&data_directory, &node, &user_id);
@@ -1581,8 +1506,6 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
         "a still-bound prior worker must not restart under a rewritten occupancy"
     );
 
-    // After the prior worker is proven released, the same reopen restarts
-    // with evidence under the new occupancy.
     release_prior_device_worker(&data_directory, &grant);
     close_device_worker_slot(&data_directory, &grant);
 
@@ -1631,7 +1554,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     let binding_id = stage_visible_binding(&data_directory, &node, &owner_id);
     let invisible_binding = stage_invisible_binding(&data_directory, &node);
 
-    // No occupancy at all: the launch requires the holder's occupied lease.
     let response = http_request(
         address,
         &cookie_post(
@@ -1644,7 +1566,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "OCCUPANCY_REQUIRED");
 
-    // The Owner occupies the device.
     let responder = spawn_device_responder(
         data_directory.clone(),
         address,
@@ -1667,8 +1588,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     assert_eq!(status_of(&response), "201", "{response}");
     responder.abort();
 
-    // A binding without an active repository grant is invisible to the
-    // holder, even while they occupy the client.
     let response = http_request(
         address,
         &cookie_post(
@@ -1681,7 +1600,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     assert_eq!(status_of(&response), "403", "{response}");
     assert_eq!(wire_code(&response), "BINDING_NOT_VISIBLE");
 
-    // An unknown binding reads the same way and never confirms existence.
     let response = http_request(
         address,
         &cookie_post(
@@ -1694,7 +1612,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     assert_eq!(status_of(&response), "403", "{response}");
     assert_eq!(wire_code(&response), "BINDING_NOT_VISIBLE");
 
-    // Capacity zero: the durable reservation view has no free slot.
     set_node_column(&data_directory, &node, "max_concurrent_worker_sessions = 0");
     let response = http_request(
         address,
@@ -1726,8 +1643,6 @@ async fn an_unconfirmed_occupancy_refuses_the_launch() {
     let code = publish_connect_code(&data_directory, &node, "22223333");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
-    // The offer was created but the device never confirmed it: the lease
-    // stays `reserving`, which does not authorize launches.
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let mut occupancy = ClientOccupancyService::new(&mut storage);
@@ -1810,9 +1725,6 @@ async fn a_rejected_launch_ack_keeps_the_grant_issued_and_audits_the_reason() {
             )
             .expect("newest grant")
     };
-    // The route failed fast on the settled rejection (not on the timeout)
-    // because the audit trail carries the verdict the state machine keeps
-    // implicit: the grant stayed `issued`.
     let settled = wait_until(|| {
         audit_actions(&data_directory, &grant_id)
             .iter()
@@ -1858,9 +1770,6 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
     stage_occupied_lease(&data_directory, &node, &user_id);
 
-    // No responder: the bounded wait fails, the grant stays `issued`, and
-    // the launch frame stays retained in the durable outbox with every
-    // `C + L` field.
     let application = ClientSessionsApplication::open(
         &data_directory,
         &ClientSessionsConfig {
@@ -1913,7 +1822,6 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
             .expect("launch frame retained");
         let value: Value = serde_json::from_str(&launch_frame.frame).expect("frame json");
         let payload = &value["payload"];
-        // The `C + L` command fields.
         assert_eq!(payload["occupancyLeaseId"], json!(grant.occupancy_lease_id));
         assert_eq!(
             payload["occupancyFencingToken"],
@@ -1925,7 +1833,6 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
             json!(format!("idem_launch_{}", grant.worker_launch_grant_id))
         );
         assert!(payload["expectedRevision"].is_u64());
-        // The full grant binding.
         let launch_grant_value = &payload["launchGrant"];
         assert_eq!(
             launch_grant_value["workerLaunchGrantId"],
@@ -1954,17 +1861,12 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
         assert_eq!(launch_grant_value["state"], json!("issued"));
         assert!(launch_grant_value["productSessionId"].is_string());
         assert!(launch_grant_value["workRunId"].is_null());
-        // The frame never carries the raw credential material.
         assert!(
             !value.to_string().contains("workerCredential"),
             "the raw material never goes downlink"
         );
     }
 
-    // A late accepted acknowledgement after the expiry deadline is refused
-    // and changes nothing; the sweep then terminates the grant. The late
-    // instants derive from the grant's own expiry (a far-future year), so
-    // the test never depends on the wall clock.
     let late = Instant(format!("2099{}", &grant.expires_at.0[4..]));
     let settlement = LaunchAckSettlement::try_new(
         &grant.worker_launch_grant_id,

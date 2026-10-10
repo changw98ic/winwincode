@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic, read-only analysis of candidate changes to test assets.
-//!
-//! The analyzer compares complete baseline and candidate file contents. It
-//! never executes a test, changes a file, or decides whether a delivery passes.
-//! Every finding carries the repository-relative path and the SHA-256 digest of
-//! the content that produced it so a gate or verifier can bind the result to an
-//! exact candidate.
-
 pub mod manifest;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// One repository file at the baseline and candidate revisions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangedFile<'a> {
     pub path: &'a str,
@@ -24,7 +13,6 @@ pub struct ChangedFile<'a> {
     pub candidate: Option<&'a str>,
 }
 
-/// The deterministic class assigned to a suspicious test change.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
@@ -39,7 +27,6 @@ pub enum FindingKind {
     ReviewRequired,
 }
 
-/// Whether the finding is deterministic enough to block or requires review.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingDisposition {
@@ -47,7 +34,6 @@ pub enum FindingDisposition {
     Review,
 }
 
-/// A line-level explanation tied to immutable file content.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindingEvidence {
@@ -63,7 +49,6 @@ pub enum EvidenceSide {
     Candidate,
 }
 
-/// A structured result. Raw file contents are deliberately excluded.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestManipulationFinding {
@@ -76,7 +61,6 @@ pub struct TestManipulationFinding {
     pub evidence: Vec<FindingEvidence>,
 }
 
-/// Analyze all supplied changes and return a stable, deduplicated result.
 #[must_use]
 pub fn analyze_test_changes(files: &[ChangedFile<'_>]) -> Vec<TestManipulationFinding> {
     let mut findings = Vec::new();

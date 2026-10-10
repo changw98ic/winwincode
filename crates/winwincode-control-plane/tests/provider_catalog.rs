@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{
     fs,
     path::PathBuf,
@@ -87,7 +85,6 @@ fn initial_descriptor() -> ProviderDescriptor {
         display_name: "Fixture Provider".to_owned(),
         adapter_kind: "openai-responses".to_owned(),
         credential_reference_id: CredentialReferenceId(id("crd", 1)),
-        // Deliberately reverse input order; every durable/projection boundary is sorted.
         models: vec![
             model("model-beta", 64_000, 8_000, ModelToolSupport::Serial, &[]),
             model(
@@ -115,7 +112,6 @@ fn updated_descriptor() -> ProviderDescriptor {
                 ModelToolSupport::Parallel,
                 &["low", "high"],
             ),
-            // A structured-output capability change advances the model-local version.
             ModelCapability {
                 structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
                 ..model(

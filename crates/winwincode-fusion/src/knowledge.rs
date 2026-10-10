@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//!
-//! Agent Fusion Engine knowledge core (ADR-0037 P0–P3).
-//!
-//! - P0 [`ClaimIdentity`] canonical claim id (namespace + key)
-//! - P1 claim union into [`ClaimGraph`]
-//! - P2 [`FusionEvidenceRecord`] store with independence groups
-//! - P3 [`ClaimState`] machine: disagreement investigates; only verified
-//!   contradiction subtracts; consensus is metadata, not evidence.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::evidence::{ClaimTargetLike, EvidenceLedger};
@@ -16,7 +6,6 @@ use winwincode_delivery::domain::EvidenceRefType;
 
 use crate::analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition};
 
-/// P0: canonical claim identity. Display keeps `claim:{namespace}:{key}`.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimIdentity {
@@ -25,14 +14,12 @@ pub struct ClaimIdentity {
 }
 
 impl ClaimIdentity {
-    /// Parses `claim:defect-null-unwrap`, `defect:null-unwrap`, `defect-null-unwrap`.
     #[must_use]
     pub fn parse(raw: &str) -> Self {
         let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
         let trimmed = collapsed.trim();
         let lower = trimmed.to_ascii_lowercase();
         let body = if let Some(rest) = lower.strip_prefix("claim:") {
-            // Recover original casing from the raw trimmed form.
             trimmed[trimmed.len() - rest.len()..].trim()
         } else {
             trimmed
@@ -43,7 +30,6 @@ impl ClaimIdentity {
                 key: key.trim().to_ascii_lowercase(),
             };
         }
-        // `defect-null-unwrap` → namespace=defect, key=null-unwrap when possible.
         if let Some((ns, key)) = body.split_once('-') {
             let ns_l = ns.to_ascii_lowercase();
             if matches!(ns_l.as_str(), "defect" | "root" | "claim" | "risk" | "plan") {
@@ -64,7 +50,6 @@ impl ClaimIdentity {
         format!("{}:{}", self.namespace, self.key)
     }
 
-    /// UI display is `namespace:key` — never double-prefix with `claim:`.
     #[must_use]
     pub fn display_key(&self) -> String {
         self.canonical_key()
@@ -73,7 +58,6 @@ impl ClaimIdentity {
 
 pub use crate::context::{ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord};
 
-/// P1/P3: one node of the claim graph.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimNode {
@@ -87,13 +71,11 @@ pub struct ClaimNode {
     pub evidence_ids: Vec<String>,
     pub counter_evidence_ids: Vec<String>,
     pub unknowns: Vec<String>,
-    /// Consensus count is metadata only (ADR-0037 principle 5).
     pub supporter_count: usize,
     pub opponent_count: usize,
     pub has_verified_counter: bool,
 }
 
-/// Full claim graph after union + conflict detection.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimGraph {
@@ -107,7 +89,6 @@ impl ClaimGraph {
         self.claims.iter().find(|claim| claim.id == id)
     }
 
-    /// Minority / unique claims that still need investigation (not conflict-only).
     #[must_use]
     pub fn needs_investigation(&self) -> Vec<&ClaimNode> {
         self.claims
@@ -116,7 +97,6 @@ impl ClaimGraph {
             .collect()
     }
 
-    /// Minority / unique claims are retained (never majority-killed).
     #[must_use]
     pub fn disputed_or_investigating(&self) -> Vec<&ClaimNode> {
         self.claims
@@ -154,7 +134,6 @@ fn evidence_strength_for(claim: &FusionClaim) -> EvidenceStrength {
 }
 
 fn independence_group_for(claim: &FusionClaim) -> String {
-    // Cluster by claim identity + evidence source refs (P2 dedup).
     let mut sources: Vec<String> = claim
         .evidence
         .iter()
@@ -169,11 +148,6 @@ fn independence_group_for(claim: &FusionClaim) -> String {
     )
 }
 
-/// P1–P3: union candidate claims into a claim graph and assign states.
-///
-/// Disagreement → [`ClaimState::Disputed`] (investigate next). Unique insight
-/// without opposition → [`ClaimState::Supported`] (retain, do not drop).
-/// `Refuted` is never assigned here without verified counter-evidence.
 #[must_use]
 pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
     let mut nodes: BTreeMap<String, ClaimNode> = BTreeMap::new();
@@ -234,8 +208,6 @@ pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
                     facts: vec![item.source_ref.clone()],
                     source_refs: vec![item.source_ref.clone()],
                     independence_group: independence_group_for(claim),
-                    // Candidate evidence is a claim-side citation. Verification
-                    // facts enter only through a bound runtime/Verifier record.
                     verified: false,
                     invalidated: false,
                 };
@@ -263,7 +235,6 @@ pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
 fn classify_state(node: &ClaimNode) -> ClaimState {
     let opposed = node.opponent_count > 0;
     let supported = node.supporter_count > 0;
-    // Consensus is metadata — numbers alone never confirm or refute (ADR-0037).
     if opposed && supported {
         return ClaimState::Disputed;
     }
@@ -274,7 +245,6 @@ fn classify_state(node: &ClaimNode) -> ClaimState {
         return ClaimState::Supported;
     }
     if opposed {
-        // Unanimous "not present" without direct safety proof is not confirmed false.
         if !node.has_verified_counter && is_high_risk_absence(node) {
             return ClaimState::UnverifiedAbsence;
         }
@@ -283,7 +253,6 @@ fn classify_state(node: &ClaimNode) -> ClaimState {
     ClaimState::Discovered
 }
 
-/// High-risk defect classes where unanimous negative still needs verification.
 #[must_use]
 pub fn is_high_risk_absence(node: &ClaimNode) -> bool {
     let hay = format!(
@@ -309,14 +278,9 @@ pub fn is_high_risk_absence(node: &ClaimNode) -> bool {
     .any(|needle| hay.contains(needle))
 }
 
-/// Investigation entry is not conflict-only (false consensus / weak support / coverage).
 #[must_use]
 pub fn needs_investigation(node: &ClaimNode) -> bool {
     match node.state {
-        // `UnverifiedAbsence` joins the disputed set: unanimous "not present"
-        // without direct safety proof is a false-consensus blind spot.
-        // A citation is still a model claim. Verified support must transition
-        // the node to Confirmed before it can leave the investigation queue.
         ClaimState::Disputed
         | ClaimState::Investigating
         | ClaimState::Escalated
@@ -327,7 +291,6 @@ pub fn needs_investigation(node: &ClaimNode) -> bool {
     }
 }
 
-/// Mark a claim confirmed after evidence verification (R4 JEV / verifier).
 pub fn confirm_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {
     for claim in &mut graph.claims {
         if claim.id == claim_id {
@@ -338,15 +301,11 @@ pub fn confirm_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {
     false
 }
 
-/// Legacy unbound entry point cannot prove proposition, scope, version or
-/// source ownership. It therefore never refutes; use the ledger-bound API.
 pub fn refute_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {
     let _ = (graph, claim_id);
     false
 }
 
-/// Refute only when the ledger contains live machine receipts and a verified
-/// counter for the exact proposition, scope and version being subtracted.
 pub fn refute_claim_with_verified_counter<T: ClaimTargetLike>(
     graph: &mut ClaimGraph,
     claim_id: &str,
@@ -634,7 +593,6 @@ mod tests {
             .iter()
             .map(|e| e.independence_group.as_str())
             .collect();
-        // Same source refs → same independence group (not 2 votes).
         assert_eq!(groups.len(), 1);
     }
 }

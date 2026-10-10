@@ -1,30 +1,6 @@
 import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, DeviceResponsesStructuredOutput, type DeviceConfigurationEnvelope,
   type DeviceProviderReport, type DeviceProviderConfig } from './device-provider.generated.js'
 
-/**
- * ClientControlPort contracts for the shared device Client model.
- *
- * Authoritative source: `schema/winwincode/v1/client-control.schema.json`
- * (shared scalars come from its `domain.schema.json` sibling). This module is
- * the Phase 0 TypeScript projection of that schema: the schema inlines the
- * envelope and command fields into every message, so message fields live flat
- * on the message beside `kind` and there is no payload sub-object. Every field
- * name, enumeration, pattern, identifier prefix, and classifier is taken
- * verbatim from the schema.
- *
- * Boundary invariants enforced by this module:
- * - no field carries a local filesystem path; repository bindings resolve only
- *   inside the Device Client and the Server never sees or stores a path;
- * - `ClientConnectCode` carries only `codeDigest`, never connect-code plaintext;
- * - command-class messages carry `expectedRevision` plus `idempotencyKey`;
- *   report and acknowledgement messages reject both fields;
- * - exactly 11 command-class messages are stamped with the occupancy lease
- *   pair `occupancyLeaseId` + `occupancyFencingToken`; `schemaVersion` is the
- *   string constant "winwincode/v1"; `occupancyFencingToken` is a decimal
- *   string matching ^[1-9][0-9]{0,19}$; every timestamp is an RFC3339
- *   `Instant` string with milliseconds.
- */
-
 export const CLIENT_CONTROL_SCHEMA_VERSION = 'winwincode/v1' as const
 
 export type SchemaVersion = typeof CLIENT_CONTROL_SCHEMA_VERSION
@@ -138,13 +114,10 @@ export type GitCommitSha = BrandedText<'GitCommitSha'>
 export type GitRefName = BrandedText<'GitRefName'>
 export type CandidateRef = BrandedText<'CandidateRef'>
 
-/** `domain.schema.json` Instant: RFC3339 UTC string with milliseconds. */
 export type Instant = string
 
-/** `domain.schema.json` Revision: a non-negative safe integer. */
 export type Revision = number
 
-/** Per-client exchange stream position: a positive safe integer. */
 export type ClientExchangeSequence = number
 
 function brandedText<Name extends string>(
@@ -697,10 +670,6 @@ export const CLIENT_CONTROL_ERROR_CODES = Object.freeze([
 ] as const)
 export type ClientControlErrorCode = typeof CLIENT_CONTROL_ERROR_CODES[number]
 
-/**
- * `ClientNode`. `publicClientId` is a stable, non-secret lookup id. This
- * projection never contains local filesystem paths.
- */
 export interface ClientNode {
   readonly clientNodeId: ClientNodeId
   readonly publicClientId: PublicClientId
@@ -720,10 +689,6 @@ export interface ClientNode {
   readonly revision: Revision
 }
 
-/**
- * `ClientConnectCode`. Only `codeDigest` is stored or transported; the
- * plaintext code never appears in a contract, log, or projection.
- */
 export interface ClientConnectCode {
   readonly connectCodeId: ClientConnectCodeId
   readonly clientNodeId: ClientNodeId
@@ -736,7 +701,6 @@ export interface ClientConnectCode {
   readonly revision: Revision
 }
 
-/** `ClientAccessGrant`. Many users may hold an active grant for one Client. */
 export interface ClientAccessGrant {
   readonly clientAccessGrantId: ClientAccessGrantId
   readonly clientNodeId: ClientNodeId
@@ -751,10 +715,6 @@ export interface ClientAccessGrant {
   readonly revision: Revision
 }
 
-/**
- * `ClientOccupancyLease`. At most one active lease per ClientNode. The
- * `fencingToken` is monotonic per ClientNode; stale tokens are always rejected.
- */
 export interface ClientOccupancyLease {
   readonly clientOccupancyLeaseId: ClientOccupancyLeaseId
   readonly clientNodeId: ClientNodeId
@@ -773,11 +733,6 @@ export interface ClientOccupancyLease {
   readonly revision: Revision
 }
 
-/**
- * `RepositoryBinding`. Security metadata projection only: this object has no
- * path field by contract. The binding-to-path mapping lives exclusively in the
- * Device Client local database and is never uploaded.
- */
 export interface RepositoryBinding {
   readonly repositoryBindingId: RepositoryBindingId
   readonly clientNodeId: ClientNodeId
@@ -792,10 +747,6 @@ export interface RepositoryBinding {
   readonly revision: Revision
 }
 
-/**
- * `RepositoryBindingProjection`. The secret-safe repository metadata a Device
- * Client reports on repository.upsert; no clientNodeId, revision, or path.
- */
 export interface RepositoryBindingProjection {
   readonly repositoryBindingId: RepositoryBindingId
   readonly displayName: string
@@ -808,7 +759,6 @@ export interface RepositoryBindingProjection {
   readonly lastScannedAt: Instant
 }
 
-/** `RepositoryAccessGrant`. Visibility requires an active grant per user. */
 export interface RepositoryAccessGrant {
   readonly repositoryAccessGrantId: RepositoryAccessGrantId
   readonly repositoryBindingId: RepositoryBindingId
@@ -823,10 +773,6 @@ export interface RepositoryAccessGrant {
 export const REPOSITORY_ACCESS_GRANT_STATES = Object.freeze(['active', 'revoked'] as const)
 export type RepositoryAccessGrantState = typeof REPOSITORY_ACCESS_GRANT_STATES[number]
 
-/**
- * `WorkerLaunchGrant`. Every identity field must match on launch; a mismatch
- * is rejected. Occupancy fields bind the grant to one fenced lease.
- */
 export interface WorkerLaunchGrant {
   readonly workerLaunchGrantId: WorkerLaunchGrantId
   readonly clientNodeId: ClientNodeId
@@ -839,14 +785,12 @@ export interface WorkerLaunchGrant {
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
-  /** Digest of the short-lived worker session credential; never the credential. */
   readonly credentialDigest: Sha256Digest
   readonly expiresAt: Instant
   readonly state: WorkerLaunchGrantState
   readonly revision: Revision
 }
 
-/** `LocalCandidateReceipt`. Candidate facts survive local worktree cleanup. */
 export interface LocalCandidateReceipt {
   readonly localCandidateReceiptId: LocalCandidateReceiptId
   readonly candidateRef: CandidateRef
@@ -858,7 +802,6 @@ export interface LocalCandidateReceipt {
   readonly revision: Revision
 }
 
-/** `LocalApplyReceipt`. One audited attempt to land a Candidate locally. */
 export interface LocalApplyReceipt {
   readonly localApplyReceiptId: LocalApplyReceiptId
   readonly candidateRef: CandidateRef
@@ -873,7 +816,6 @@ export interface LocalApplyReceipt {
   readonly revision: Revision
 }
 
-/** `ClientCapacityReport`. Client-reported worker session capacity. */
 export interface ClientCapacityReport {
   readonly maxConcurrentWorkerSessions: number
   readonly runningWorkerSessions: number
@@ -881,7 +823,6 @@ export interface ClientCapacityReport {
   readonly drainingWorkerSessions: number
 }
 
-/** `ClientWorkerReconciliation`. One worker verdict after a Client restart. */
 export interface ClientWorkerReconciliation {
   readonly workerSessionId: WorkerSessionId
   readonly workerInstanceId: WorkerInstanceId
@@ -889,11 +830,6 @@ export interface ClientWorkerReconciliation {
   readonly observedAt: Instant
 }
 
-/**
- * `ClientControlError`. Machine-readable error fact whose optional details
- * reuse the public redaction rules: authority-sensitive property names are
- * rejected recursively.
- */
 export interface ClientControlError {
   readonly code: ClientControlErrorCode
   readonly message: string
@@ -1451,11 +1387,6 @@ export function parseClientWorkerReconciliation(
   })
 }
 
-/**
- * Envelope identity shared by every message. The schema inlines these fields
- * into each message; command and fencing fields are siblings of `kind`, never
- * members of a payload sub-object.
- */
 export interface ClientControlMessageEnvelopeFields {
   readonly schemaVersion: SchemaVersion
   readonly messageId: ClientControlMessageId
@@ -1465,20 +1396,11 @@ export interface ClientControlMessageEnvelopeFields {
   readonly occurredAt: Instant
 }
 
-/**
- * Command base carried by exactly the 22 command-class messages: an
- * optimistic-concurrency Revision plus a replay-safe idempotency key.
- */
 export interface ClientControlCommandFields {
   readonly expectedRevision: Revision
   readonly idempotencyKey: IdempotencyKey
 }
 
-/**
- * Occupancy stamp carried by exactly 11 command-class messages. The pair binds
- * the command to the single active lease; the Device Client must reject every
- * command whose fencing token is not the current maximum.
- */
 export interface ClientControlFencedCommandFields extends ClientControlCommandFields {
   readonly occupancyLeaseId: ClientOccupancyLeaseId
   readonly occupancyFencingToken: OccupancyFencingToken
@@ -1656,7 +1578,6 @@ export interface ClientLockMessage extends ClientControlMessageEnvelopeFields, C
 }
 
 
-/** Kind → message mapping for the Client → Server direction (16 kinds). */
 export interface ClientProviderReportMessage extends ClientControlMessageEnvelopeFields, DeviceProviderReport {
   readonly kind: 'client.provider.report'
 }
@@ -1703,7 +1624,6 @@ export interface ClientToServerMessageByKind {
   'client.command_ack': ClientCommandAckMessage
 }
 
-/** Kind → message mapping for the Server → Client direction. */
 export interface ServerToClientMessageByKind {
   'client.command_ack': ClientCommandAckMessage
   'client.repository.register': ClientRepositoryRegisterMessage
@@ -1727,7 +1647,6 @@ export type ClientToServerMessage = ClientToServerMessageByKind[ClientToServerKi
 export type ServerToClientMessage = ServerToClientMessageByKind[ServerToClientKind]
 export type ClientControlMessage = ClientToServerMessage | ServerToClientMessage
 
-/** §9.3 Client → Server message kinds, verbatim. */
 export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.enroll',
   'client.hello',
@@ -1749,7 +1668,6 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.repository.registered',
 ] as const)
 
-/** §9.4 Server → Client message kinds, verbatim. */
 export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.occupancy.offer',
   'client.occupancy.release',
@@ -1765,15 +1683,10 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.repository.register',
 ] as const)
 
-/** Every ClientControlPort message kind, in schema ClientControlMessageKind order. */
 export const CLIENT_CONTROL_MESSAGE_KINDS = Object.freeze([
   ...new Set([...CLIENT_TO_SERVER_MESSAGE_KINDS, ...SERVER_TO_CLIENT_MESSAGE_KINDS]),
 ] as const)
 
-/**
- * Exactly the 22 command-class messages per the schema `x-message-class`.
- * Each carries `expectedRevision` + `idempotencyKey` on the envelope.
- */
 export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.enroll',
   'client.connect_code.published',
@@ -1797,11 +1710,6 @@ export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.repository.register',
 ] as const)
 
-/**
- * Occupancy-stamped command kinds per direction: exactly 11 across the
- * protocol. Every one carries `occupancyLeaseId` + `occupancyFencingToken`;
- * worker.state, worker.reconcile, and the repository kinds are not stamped.
- */
 export const CLIENT_TO_SERVER_OCCUPANCY_FENCED_MESSAGE_KINDS = Object.freeze([
   'client.occupancy.ack',
   'client.occupancy.rejected',
@@ -1840,8 +1748,6 @@ type AssertListMatchesServerToClientMap = Assert<
     : false
 >
 
-// Compile-time guards: the frozen kind lists and the kind → message mappings
-// must stay exactly aligned in both directions.
 type AssertClientToServerKindList = AssertListMatchesClientToServerMap
 type AssertServerToClientKindList = AssertListMatchesServerToClientMap
 type AssertCommandKindList = Assert<
@@ -2746,7 +2652,6 @@ function parseServerToClientByKind(
   }
 }
 
-/** Parse and validate one Client → Server message (16 kinds). */
 export function parseClientToServerMessage(
   value: unknown,
   path = 'clientToServerMessage',
@@ -2756,7 +2661,6 @@ export function parseClientToServerMessage(
   return parseClientToServerByKind(kind, input, path)
 }
 
-/** Parse and validate one Server → Client message. */
 export function parseServerToClientMessage(
   value: unknown,
   path = 'serverToClientMessage',
@@ -2766,10 +2670,6 @@ export function parseServerToClientMessage(
   return parseServerToClientByKind(kind, input, path)
 }
 
-/**
- * Parse and validate one message of the full ClientControlMessage union
- * (all 27 kinds), trying the Client → Server direction first.
- */
 export function parseClientControlMessage(
   value: unknown,
   path = 'clientControlMessage',
@@ -2790,8 +2690,6 @@ export function parseClientControlMessage(
   }
 }
 
-// The kind-list asserts are compile-time only; this export keeps the check in
-// the type graph without emitting runtime code.
 export type { ClientControlKindListsCheck }
 
 function providerText(value: unknown, path: string, max: number): string {

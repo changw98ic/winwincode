@@ -1,30 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic Worker policy over revision-bound validation diagnostics.
-//!
-//! Parsing and diagnostic identity live in `winwincode-execution-port`. This
-//! module only decides whether the current batch is responsible for a failure;
-//! it never invokes a model and never treats a result-only snapshot as proof of
-//! a newly introduced diagnostic.
-
 use winwincode_execution_port::{
     diagnostic_parser::dominant_diagnostic_repair_reason,
     generated::{DiagnosticBaselineComparison, ValidationReceiptStatus},
 };
 
-/// Stable outcome of comparing one validation result with an exact accepted baseline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationDiagnosticDisposition {
-    /// No current-batch diagnostic requires deterministic repair.
     Pass,
-    /// Validation failed but no exact comparable baseline exists.
     BaselineUnavailable,
-    /// A deterministic hard rule requires repair without consulting a model.
     RepairRequired { reason_code: &'static str },
 }
 
-/// Applies hard diagnostic rules without attributing historical failures when the baseline is
-/// absent.
 #[must_use]
 pub fn decide_validation_diagnostics(
     status: &ValidationReceiptStatus,

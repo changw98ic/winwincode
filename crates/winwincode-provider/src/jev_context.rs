@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Provider scoring and deterministic retention share one auditable operation.
-
 use std::fmt;
 use std::time::Duration;
 
@@ -15,7 +11,6 @@ use crate::{
     JevRuntime, JevScores,
 };
 
-/// The host supplies protection and archive eligibility; the provider cannot change them.
 #[derive(Clone, serde::Serialize)]
 pub struct JevContextRequest {
     pub task: String,
@@ -24,7 +19,6 @@ pub struct JevContextRequest {
     pub archive_eligible: bool,
 }
 
-/// Original H1-H4 probabilities alongside the action, for deterministic replay.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevContextEvaluation {
@@ -45,12 +39,6 @@ impl fmt::Debug for JevContextRequest {
 }
 
 impl JevRuntime {
-    /// Scores H1-H4 in one batch, then applies system-owned retention policy.
-    /// An unavailable or invalid inference returns no decision and retains its
-    /// failures and usage; the caller must keep the previous context.
-    ///
-    /// # Errors
-    /// Rejects empty inputs and invalid policy before contacting a provider.
     pub async fn evaluate_context(
         &self,
         input: JevContextRequest,

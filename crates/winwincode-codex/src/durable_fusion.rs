@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Immutable panel intent and result, separate from the individual model receipts.
-
 use std::{collections::HashMap, sync::Arc};
 
 use futures::future::BoxFuture;
@@ -13,10 +9,8 @@ use winwincode_fusion::{
 
 use crate::store::AdapterStore;
 
-/// Owned work: the Worker must keep polling the execution transport while awaiting it.
 pub type FusionPanelFuture = BoxFuture<'static, Result<FusionPanelResult, FusionProviderError>>;
 
-/// A provider can host several sealed members; candidate identity selects its port.
 #[derive(Debug, Default)]
 pub(crate) struct MemberRoutes {
     pub members: HashMap<String, Arc<dyn FusionProvider>>,
@@ -138,8 +132,6 @@ fn claim_keys_from_candidates(
     Ok(grouped.into_values().collect())
 }
 
-/// Read Git objects from the exact frozen candidate, never mutable workspace files.
-/// Symlink blobs remain text and submodules remain references; neither is followed.
 pub(crate) fn candidate_context(
     workspace: &std::path::Path,
     candidate_ref: &str,
@@ -209,8 +201,6 @@ pub(crate) fn candidate_context(
     Ok(serde_json::json!({"commit":commit,"tree":tree,"files":files}))
 }
 
-// Claim is committed before polling any provider. A pending claim is never retried
-// automatically: its paid requests may have completed without a local final receipt.
 fn claim(
     store: &AdapterStore,
     run: &str,

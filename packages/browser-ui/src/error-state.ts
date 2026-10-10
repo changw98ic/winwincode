@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type ErrorStateHeadingLevel = 2 | 3 | 4
@@ -11,7 +9,6 @@ export interface ErrorStateProps {
   readonly actions?: readonly HTMLElement[]
   readonly visible?: boolean
   readonly className?: string
-  /** UI-604: follow the level of the panel the state nests inside. */
   readonly headingLevel?: ErrorStateHeadingLevel
 }
 

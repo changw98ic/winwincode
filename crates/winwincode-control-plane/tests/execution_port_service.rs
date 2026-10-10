@@ -1,11 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::drop_non_drop)]
-
-//! Black-box tests for the Control Plane's narrow `ExecutionPort` service seam.
-//!
-//! The test exercises the service's public API and the durable
-//! `ExecutionRegistry` port.
 
 use std::fs;
 use std::path::PathBuf;

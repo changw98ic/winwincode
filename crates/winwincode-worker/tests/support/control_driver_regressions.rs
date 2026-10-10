@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 use winwincode_worker::control_driver::WorkerControlSource;
 
@@ -50,8 +48,6 @@ impl WorkerExecutionPort for DriverPort {
 
     async fn send(&mut self, message: ExecutionPortMessage) -> Result<(), Self::Error> {
         self.recorded.send(message.clone()).await?;
-        // Exercise an actual suspended response boundary. The virtual clock
-        // advances independently of the timestamp passed into the driver.
         tokio::task::yield_now().await;
         let value = serde_json::to_value(&message).unwrap();
         self.controls
@@ -316,8 +312,6 @@ async fn candidate_git_failure_retains_stage_and_cause_without_private_path() {
     let active = worker.active_jobs()[0].clone();
     let workspace = codex.workspace(&active.codex_thread_id);
     std::fs::write(workspace.join("candidate.txt"), "safe fixture change\n").unwrap();
-    // A real Git index lock makes candidate staging fail, while leaving the
-    // registered checkout valid for the normal terminal cleanup.
     let path = Command::new("git")
         .arg("-C")
         .arg(&workspace)
@@ -384,14 +378,12 @@ async fn queued_control_preempts_flush_until_the_driver_consumes_it() {
         .queued
         .borrow_mut()
         .push_back((ExecutionMessageId(id("xmsg", 'N')), renewal(&active)));
-    // Controls take priority before the first frame.
     worker.flush_durable_outbox().await.unwrap();
     assert_eq!(
         sent_count(&port),
         0,
         "no frame may precede a queued control"
     );
-    // The normal driver drains the control first, then the outbox progresses.
     assert!(drive(&mut worker, &port).await.is_none());
     let trace = port.controls.trace.borrow().clone();
     assert!(
@@ -438,7 +430,6 @@ async fn shutdown_with_pending_cancel_and_backpressure_still_cleans_up_locally()
     );
     assert!(calls.iter().any(|call| call == "shutdown"), "{calls:?}");
     assert_eq!(report.cancelled_jobs.len(), 1);
-    // Un-ACKed durable facts keep their original identity for recovery.
     let pending_after = pending_delivery_ids(&codex);
     for id in &pending_before {
         assert!(pending_after.contains(id), "{id} was dropped");

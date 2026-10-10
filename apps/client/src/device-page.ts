@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   ControlPlaneClientError,
   type ControlPlaneClientDirectory,
@@ -31,19 +29,11 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-/**
- * Design page 08: 执行设备. The connected execution device card, its
- * accessible directories, and collapsed 运行中的任务 / 连接记录 rows. With no
- * device connected the page degrades to the pairing hint (design page 02
- * carries the full onboarding flow).
- */
 export function renderDevicePage(options: DevicePageOptions): DevicePage {
   const document = options.root.ownerDocument
   const layout = element(document, 'section', 'wwc-device')
   layout.dataset.wwcPage = 'management'
 
-  // Design page 08: the display title stands alone, the 更多 ∨ menu on the
-  // same row's right end.
   const pageHeader = mountPageHeader({
     document,
     props: {

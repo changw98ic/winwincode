@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_domain::Sha256Digest;
 use winwincode_execution_port::performance_comparison::{
     PerformanceV0ComparisonError, PerformanceV0ModelCallEvidence, PerformanceV0ModelKind,

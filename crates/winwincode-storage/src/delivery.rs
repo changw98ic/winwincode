@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Community storage adapters for Delivery-owned durable facts.
-
 use winwincode_delivery::{
     application::{
         session_binding::{
@@ -90,10 +86,6 @@ pub fn delivery_candidate_source(
     }
 }
 
-/// Reconstructs source-hunk origins from two validated Git diffs.
-///
-/// # Errors
-/// Rejects foreign lineage, ambiguous mappings, or changes outside a source hunk.
 pub fn delivery_rework_candidate_source(
     resolver: &dyn crate::GitSourceResolver,
     previous: &ValidatedGitSourceArtifact,

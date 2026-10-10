@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Canonical execution identities shared by the scheduler, Worker, and Codex adapter.
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -12,7 +8,6 @@ use winwincode_domain::{
 
 use crate::generated::{ExecutionLeaseStamp, JobDispatchMessage, LeaseRenewMessage};
 
-/// Secret-free failure to encode one canonical execution identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionIdentityError;
 
@@ -24,11 +19,6 @@ impl fmt::Display for ExecutionIdentityError {
 
 impl std::error::Error for ExecutionIdentityError {}
 
-/// Derives the canonical Codex thread for one execution run.
-///
-/// # Errors
-///
-/// Returns an opaque error when the identity facts cannot be encoded.
 pub fn canonical_codex_thread_id(
     job_id: &ExecutionJobId,
     attempt: i64,
@@ -47,11 +37,6 @@ pub fn canonical_codex_thread_id(
     )))
 }
 
-/// Derives the canonical digest for one execution run.
-///
-/// # Errors
-///
-/// Returns an opaque error when the identity facts cannot be encoded.
 pub fn canonical_execution_run_digest(
     job_id: &ExecutionJobId,
     attempt: i64,
@@ -69,11 +54,6 @@ pub fn canonical_execution_run_digest(
     )))
 }
 
-/// Derives the Worker session and Codex thread identities for one sealed dispatch.
-///
-/// # Errors
-///
-/// Returns an opaque error when the identity facts cannot be encoded.
 pub fn canonical_dispatch_session_identity(
     worker_id: &WorkerId,
     worker_instance_id: &WorkerInstanceId,
@@ -110,7 +90,6 @@ fn canonical_run_bytes(
         .map_err(|_| ExecutionIdentityError)
 }
 
-/// Checks canonical UTC timestamps used by execution authority comparisons.
 #[must_use]
 pub fn canonical_instant(instant: &Instant) -> bool {
     let value = instant.0.as_bytes();
@@ -141,8 +120,6 @@ fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
         })
 }
 
-/// Compares a retained stamp with independently authenticated current authority.
-/// Only the expiry may advance; this comparison does not authenticate a renewal.
 #[must_use]
 pub fn retained_lease_matches_current(
     retained: &ExecutionLeaseStamp,
@@ -162,7 +139,6 @@ pub fn retained_lease_matches_current(
         && expected == *current
 }
 
-/// Validates a live same-attempt lease extension or its unchanged replay.
 #[must_use]
 pub fn valid_lease_renewal(
     current: &ExecutionLeaseStamp,
@@ -172,8 +148,6 @@ pub fn valid_lease_renewal(
     lease_renewal_rejection(current, renewal, now).is_none()
 }
 
-/// Identifies the first rejected renewal predicate without exposing identity values.
-/// The boolean validator and diagnostics share this single set of checks.
 #[must_use]
 pub fn lease_renewal_rejection(
     current: &ExecutionLeaseStamp,

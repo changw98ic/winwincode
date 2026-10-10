@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { formatInstant } from './format-instant.js'
 
 import type {
@@ -49,7 +47,6 @@ function errorText(state: AuthSessionViewModelState): string {
   return '浏览器会话更新失败。'
 }
 
-/** Show browser-session status and sign-out; login belongs to the login page. */
 export function mountAuthSessionPage(options: AuthSessionPageOptions): AuthSessionPage {
   const document = options.root.ownerDocument
   const region = element(document, 'section', 'wwc-auth-session')

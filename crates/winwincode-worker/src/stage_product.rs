@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! `StrongFlow` candidate Artifact preparation at the Worker workspace boundary.
-//!
-//! This module freezes and re-verifies the actual detached Git checkout before
-//! it exposes canonical candidate bytes. Durable Artifact/message identity and
-//! acknowledgement remain owned by the Worker outbox.
-
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
@@ -21,7 +13,6 @@ use crate::workspace::{CandidateFreezeFact, WorkerWorkspace, WorkspaceError, Wor
 use crate::{ActiveJob, ActiveJobLifecycle};
 use winwincode_codex::RoleExecutionMode;
 
-/// Stable candidate preparation failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateProductErrorCode {
     InvalidLifecycle,
@@ -32,7 +23,6 @@ pub enum CandidateProductErrorCode {
     UnchangedCandidate,
 }
 
-/// Bounded failure which does not retain repository content.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CandidateProductError {
     code: CandidateProductErrorCode,
@@ -49,13 +39,11 @@ impl CandidateProductError {
         }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> CandidateProductErrorCode {
         self.code
     }
 
-    /// Lower-level category retained without command text or repository paths.
     #[must_use]
     pub const fn cause_code(&self) -> &'static str {
         if let Some(cause) = self.workspace_cause {
@@ -95,7 +83,6 @@ impl From<WorkspaceError> for CandidateProductError {
     }
 }
 
-/// Verified candidate bytes ready for durable Artifact identity allocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedCandidateArtifact {
     snapshot_id: Option<winwincode_domain::SnapshotId>,
@@ -113,26 +100,21 @@ pub struct PreparedCandidateArtifact {
 }
 
 impl PreparedCandidateArtifact {
-    /// Exact code and execution facts produced by the Worker freeze.
     #[must_use]
     pub const fn freeze_fact(&self) -> &CandidateFreezeFact {
         &self.freeze_fact
     }
 
-    /// Canonical candidate manifest bytes.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Digest of the canonical candidate manifest bytes.
     #[must_use]
     pub const fn digest(&self) -> &Sha256Digest {
         &self.digest
     }
 
-    /// Builds the exact descriptor after the outbox has allocated a durable
-    /// Artifact identity.
     #[must_use]
     pub fn descriptor(&self, artifact_id: ArtifactId) -> ArtifactDescriptor {
         ArtifactDescriptor {
@@ -155,7 +137,6 @@ impl PreparedCandidateArtifact {
         }
     }
 
-    /// Consumes the verified snapshot into the exact durable upload intent.
     #[must_use]
     pub fn into_upload(self, created_at: winwincode_domain::Instant) -> CandidateArtifactUpload {
         CandidateArtifactUpload {
@@ -175,17 +156,6 @@ impl PreparedCandidateArtifact {
     }
 }
 
-/// Freezes the executor/remediator checkout into one verified Git candidate.
-///
-/// The active Job and workspace authority are checked before Git is mutated.
-/// A cancelling Job is rejected, which prevents a post-cancel candidate from
-/// entering the Artifact outbox.
-///
-/// # Errors
-///
-/// Rejects another lifecycle, role or scope, a workspace from another exact
-/// attempt/session, unchanged or invalid Git state, and a manifest whose size
-/// cannot be represented by the `ExecutionPort` descriptor.
 #[allow(clippy::too_many_lines)]
 pub fn prepare_candidate_artifact(
     active: &ActiveJob,
@@ -418,16 +388,6 @@ fn candidate_path_diff(
     .map_err(CandidateProductError::from)
 }
 
-/// Captures the already-frozen candidate from a read-only verification
-/// checkout against one sealed `Snapshot`. The verifier receives its own
-/// Artifact authority and ACK, while the bytes remain the exact candidate
-/// manifest observed by that stage.
-///
-/// # Errors
-///
-/// Rejects a non-running or non-verification Job, a writable workspace, a
-/// missing sealed stage input, a dirty/foreign checkout, or invalid artifact
-/// identity facts.
 pub fn prepare_verification_artifact(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,

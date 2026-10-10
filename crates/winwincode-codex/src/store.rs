@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -33,9 +31,6 @@ pub(crate) const DATABASE_FILE: &str = "worker-codex.sqlite3";
 const MAX_MODEL_CALL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAFE_METRIC: i64 = 9_007_199_254_740_991;
 
-/// Durable hand-off state for one Core model call. `ProviderFinal` means the
-/// provider response is complete and replayable, while `CoreCommitted` means
-/// the embedded Core has observed the corresponding terminal turn boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModelCallPhase {
     InFlight,
@@ -401,8 +396,6 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
           ON s.run_key=p.run_key AND s.operation_kind=p.operation_kind AND s.operation_id=p.operation_id
           AND s.revision=(SELECT MAX(q.revision) FROM performance_usage_settlement q
             WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);").map_err(|_| AdapterStoreError::Unavailable)?;
-    // This backfill observes durable completion; it does not own completion.
-    // An optional projection write must not block opening the execution ledger.
     let _ = connection.execute_batch("UPDATE performance_jev_receipt SET completed=1,
           usage_known=CASE WHEN json_extract(receipt_json,'$.run.observation.outputTokens') IS NOT NULL
             AND json_array_length(receipt_json,'$.run.failures')=0 THEN 1 ELSE 0 END
@@ -475,10 +468,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// Applies one bounded startup migration to every durable run before the
-    /// adapter begins serving work. The marker and all rewritten records are
-    /// committed atomically, so normal run loading never needs a legacy
-    /// fallback path.
     pub(crate) fn migrate_run_records_once(
         &self,
         migration_key: &str,
@@ -557,9 +546,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// Freezes the process feature gates for one exact run. A restart must
-    /// present the same values; changing mode halfway through an attempt is a
-    /// conflict rather than a second measurement cohort.
     pub(crate) fn register_performance_run(
         &self,
         run_key: &str,
@@ -600,8 +586,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// Retains the first observation of one stable operation identity.
-    /// Duplicate Kernel or Provider delivery is an exact no-op.
     pub(crate) fn record_performance_start(
         &self,
         run_key: &str,
@@ -621,8 +605,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// Completes one stable operation at most once. A replay leaves the first
-    /// bounded counters and timing values unchanged.
     pub(crate) fn record_performance_completion(
         &self,
         run_key: &str,
@@ -641,7 +623,6 @@ impl AdapterStore {
         )
     }
 
-    /// A refused open or cancellation closes lifecycle only; a measured terminal wins.
     pub(crate) fn close_unmeasured_primary(
         &self,
         run_key: &str,
@@ -870,11 +851,6 @@ impl AdapterStore {
         tx.commit().map_err(|_| AdapterStoreError::Unavailable)
     }
 
-    /// Reads the only durable budget ledger used before a delegated follow-up
-    /// turn. Primary and Observer usage share the cumulative token and cost
-    /// budgets. Any pending model operation or completed operation without a
-    /// settled charge is reported as incomplete rather than silently counted
-    /// as zero cost.
     pub(crate) fn execution_outcome_usage(
         &self,
         run_key: &str,
@@ -909,14 +885,10 @@ impl AdapterStore {
         if totals.primary_model_calls + totals.observer_calls == 0 {
             return Ok(None);
         }
-        // Pending receipts make the total unknown; they do not erase the
-        // observations already retained for this run or its completed result.
         self.execution_outcome_usage(run_key, runtime_millis)
             .map(Some)
     }
 
-    /// Imports an immutable Device receipt separately from primary model usage.
-    /// Unknown or failed attempts keep the accounting row incomplete and cost unknown.
     pub(crate) fn retain_jev_performance<T: Serialize + DeserializeOwned>(
         &self,
         run_key: &str,
@@ -974,7 +946,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// A durable parent terminal closes pending preprocessors without inventing usage.
     #[cfg(test)]
     pub(crate) fn close_pending_jev_parent(
         &self,
@@ -1098,8 +1069,6 @@ impl AdapterStore {
             .transpose()
     }
 
-    /// Upgrade the prior required Observer completion projection into an exact
-    /// receipt. Missing or changed legacy evidence cannot authorize a settlement.
     pub(crate) fn restore_legacy_observer_settlement(
         &self,
         run_key: &str,
@@ -1157,8 +1126,6 @@ impl AdapterStore {
         })
     }
 
-    /// Counts changed files by a private path digest. Raw paths never enter
-    /// the metrics database or public report.
     pub(crate) fn record_performance_changed_file(
         &self,
         run_key: &str,
@@ -1177,7 +1144,6 @@ impl AdapterStore {
         Ok(())
     }
 
-    /// Measures the complete durable operation window at terminal time.
     pub(crate) fn performance_total_runtime(
         &self,
         run_key: &str,
@@ -1214,7 +1180,6 @@ impl AdapterStore {
         Ok(total)
     }
 
-    /// Builds the bounded aggregate used by the terminal runtime projection.
     pub(crate) fn performance_report(
         &self,
         run_key: &str,
@@ -1305,9 +1270,6 @@ execution_mode,
         Ok(report)
     }
 
-    /// Reserves the exact terminal aggregate event before its runtime frame is
-    /// appended. Repeating the reservation requires byte-for-byte report
-    /// equality.
     pub(crate) fn reserve_performance_projection(
         &self,
         run_key: &str,
@@ -1400,11 +1362,6 @@ execution_mode,
         Ok(())
     }
 
-    /// Claims one stable Core model-call identity.
-    ///
-    /// The row is keyed by `model_call_id`, while the exchange id is bound
-    /// before any Provider open. Multiple calls for one run may be in flight
-    /// at once, and a retry after a process restart resolves to the same row.
     pub(crate) fn claim_model_call(
         &self,
         run_key: &str,
@@ -1508,7 +1465,6 @@ execution_mode,
         u64::try_from(next).map_err(|_| AdapterStoreError::Conflict)
     }
 
-    /// Returns the durable phase of one stable Core model call.
     pub(crate) fn model_call_phase(
         &self,
         run_key: &str,
@@ -1541,10 +1497,6 @@ execution_mode,
             .transpose()
     }
 
-    /// Persists the exact provider frame before the call is allowed to move
-    /// past the `ProviderFinal` phase. The payload is kept only in this private
-    /// store so a restarted Core can consume the same response bytes without
-    /// opening a second provider exchange.
     pub(crate) fn retain_model_call_frame(
         &self,
         run_key: &str,
@@ -1615,8 +1567,6 @@ execution_mode,
         })
     }
 
-    /// Loads the exact response frames in sequence order and validates their
-    /// durable envelope before exposing any provider payload to Core.
     pub(crate) fn load_model_call_frames(
         &self,
         run_key: &str,
@@ -1684,14 +1634,6 @@ execution_mode,
         Ok(frames)
     }
 
-    /// Finds the durable model-call identity which owns one Provider exchange.
-    ///
-    /// The exchange id is durably bound to the Core-owned model-call id before
-    /// the Provider open is sent. Looking up that binding lets a restarted
-    /// Worker acknowledge a late response even when no response frame was
-    /// written before the crash. The caller must still load and validate the
-    /// complete frame set before using the result; this method is only an index
-    /// lookup.
     pub(crate) fn model_call_for_exchange(
         &self,
         run_key: &str,
@@ -1716,10 +1658,6 @@ execution_mode,
             }
             return Ok(Some(model_call_id));
         }
-        // Every canonical row is bound before the Provider open. A store that
-        // still contains an unbound row did not complete its one-time schema
-        // migration, so fail closed instead of treating frame contents as an
-        // identity index or retaining a compatibility lookup.
         let has_unbound = connection
             .query_row(
                 "SELECT 1 FROM model_call_ledger
@@ -1736,8 +1674,6 @@ execution_mode,
         Ok(None)
     }
 
-    /// Moves a call from an in-flight provider exchange to `ProviderFinal`.
-    /// Repeating this write for the same call is idempotent.
     pub(crate) fn mark_model_call_provider_final(
         &self,
         run_key: &str,
@@ -1746,8 +1682,6 @@ execution_mode,
         self.update_model_call_phase(run_key, model_call_id, false, None)
     }
 
-    /// Commit completion and receipt-import completeness together. A missing
-    /// Device source or partial projection is unknown, never an unused budget.
     pub(crate) fn mark_model_call_provider_final_with_accounting(
         &self,
         run_key: &str,
@@ -1757,9 +1691,6 @@ execution_mode,
         self.update_model_call_phase(run_key, model_call_id, false, Some(jev_accounting_complete))
     }
 
-    /// Records the Core-side terminal commit after the exact `ProviderFinal`
-    /// frames have been consumed. This is intentionally separate from the
-    /// provider terminal write so a restart can replay those frames first.
     #[cfg(test)]
     pub(crate) fn commit_model_call(
         &self,
@@ -1769,8 +1700,6 @@ execution_mode,
         self.update_model_call_phase(run_key, model_call_id, true, None)
     }
 
-    /// Commits every `ProviderFinal` call for one run in one transaction at the
-    /// same terminal boundary observed by the adapter.
     pub(crate) fn commit_provider_final_model_calls(
         &self,
         run_key: &str,
@@ -1950,10 +1879,6 @@ execution_mode,
         .collect()
     }
 
-    /// Rebinds pending approvals to the fresh Kernel session created while
-    /// recovering a durable Codex rollout.  A resumed Core thread has a new
-    /// in-memory session identity, but its approval operation identity and
-    /// request digest remain durable and must not change.
     pub(crate) fn rebind_pending_approval_operations(
         &self,
         run_key: &str,
@@ -2003,10 +1928,6 @@ execution_mode,
         })
     }
 
-    /// Rebinds pending input requests to the fresh Kernel session created
-    /// while recovering a durable Codex rollout.  Input request identity and
-    /// its request digest remain durable across restart; only the in-memory
-    /// Kernel session handle changes.
     pub(crate) fn rebind_pending_input_operations(
         &self,
         run_key: &str,
@@ -2174,18 +2095,6 @@ execution_mode,
         })
     }
 
-    /// Replaces the complete trusted thread lineage for one leased run.
-    ///
-    /// Root lease replacement fences every previous child in one `SQLite`
-    /// transaction.  The authority bytes are already validated by the bridge;
-    /// the store keeps them opaque so it cannot accidentally reinterpret a
-    /// lease or session identity.
-    /// Replaces a root lineage while fencing every durable attempt for the
-    /// same Job.  A successor root normally has a new canonical thread and
-    /// run key, so fencing only the row at the new thread id would leave old
-    /// child aliases recoverable after restart.  The authority is decoded
-    /// here solely to identify that Job; all other authority checks remain in
-    /// the bridge.
     pub(crate) fn replace_model_thread_lineage_for_job(
         &self,
         run_key: &str,
@@ -2210,9 +2119,6 @@ execution_mode,
             return Err(AdapterStoreError::Conflict);
         }
         self.transaction(|transaction| {
-            // Rebinding the exact same root is the normal restart path. Check
-            // it before collecting stale same-job attempts so that durable
-            // child edges for this run survive a root re-install.
             let existing_root = transaction
                 .query_row(
                     "SELECT run_key, authority_json FROM model_thread_lineage
@@ -2274,10 +2180,6 @@ execution_mode,
                 }
             }
             if let Some((existing_run_key, _)) = existing_root {
-                // Replacing a root also fences every child from the previous
-                // run.  Delete that old run before inserting the new root so
-                // the thread-id primary key cannot leave a stale lineage edge
-                // or turn a run-key change into a storage error.
                 transaction
                     .execute(
                         "DELETE FROM model_thread_lineage WHERE run_key = ?1",
@@ -2302,7 +2204,6 @@ execution_mode,
         })
     }
 
-    /// Retains one child lineage edge exactly once.
     pub(crate) fn retain_model_thread_lineage(
         &self,
         run_key: &str,
@@ -2354,12 +2255,6 @@ execution_mode,
             .map_err(|_| AdapterStoreError::Unavailable)
     }
 
-    /// Loads every durable lineage edge for one immutable run identity.
-    ///
-    /// A restarted Worker may observe a child `ModelPort` request before its
-    /// process-local root alias has been rebuilt.  Returning the complete run
-    /// set lets the bridge recover the root authority without trusting a job
-    /// id or a lease presented by the child alone.
     pub(crate) fn load_model_thread_lineage_for_run(
         &self,
         run_key: &str,
@@ -2508,8 +2403,6 @@ fn ensure_model_call_phase_columns(connection: &Connection) -> Result<(), Adapte
     }
     drop(statement);
     if !has_jev_accounting_complete {
-        // Old rows carry no proof that every Device receipt was imported.
-        // Upgrade conservatively; exact receipt reconciliation can promote them.
         connection.execute("ALTER TABLE model_call_ledger ADD COLUMN jev_accounting_complete INTEGER NOT NULL DEFAULT 0 CHECK(jev_accounting_complete IN (0,1))", [])
             .map_err(|_| AdapterStoreError::Unavailable)?;
     }
@@ -2549,10 +2442,6 @@ fn ensure_model_call_phase_columns(connection: &Connection) -> Result<(), Adapte
             [],
         )
         .map_err(|_| AdapterStoreError::Unavailable)?;
-    // Stores created before the explicit two-phase ledger used `completed`
-    // for the provider terminal write. They have no response-frame table to
-    // replay, so treat those historical rows as already CoreCommitted rather
-    // than reopening a provider call with an ambiguous response.
     connection
         .execute(
             "UPDATE model_call_ledger
@@ -2581,9 +2470,6 @@ fn ensure_input_operation_choice_identities_column(
     }
     drop(statement);
     if !has_choice_identities {
-        // Existing rows predate opaque choice identities. The empty mapping
-        // makes any option-bearing replay fail closed instead of recreating a
-        // public identity from display or private request fields.
         connection
             .execute(
                 "ALTER TABLE input_operation
@@ -2595,10 +2481,6 @@ fn ensure_input_operation_choice_identities_column(
     Ok(())
 }
 
-/// Migrates retained response frames into the canonical exchange binding once
-/// when opening a store created before `model_exchange_id` was persisted. The
-/// old frame scan is deliberately not a runtime lookup: a frame-backed row is
-/// either backfilled here or the store fails closed as corrupt.
 fn migrate_model_exchange_bindings(connection: &Connection) -> Result<(), AdapterStoreError> {
     let mut statement = connection
         .prepare(
@@ -2656,8 +2538,6 @@ fn migrate_model_exchange_bindings(connection: &Connection) -> Result<(), Adapte
         }
         drop(frames);
         let Some(exchange) = exchange else {
-            // An old in-flight row has no response witness. The next retry
-            // binds it through claim_model_call before any Provider I/O.
             continue;
         };
         let owner = connection
@@ -2763,7 +2643,6 @@ impl StoredApprovalOperationState {
     }
 }
 
-/// Secret-free durable mapping from one public approval to the exact Kernel operation.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StoredApprovalOperation {
     pub(crate) approval_id: String,
@@ -2829,7 +2708,6 @@ impl StoredInputOperationState {
     }
 }
 
-/// Secret-free durable mapping from one public input request to the exact Kernel turn/question.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoredInputOperation {
     pub(crate) input_request_id: String,
@@ -2843,7 +2721,6 @@ pub(crate) struct StoredInputOperation {
     pub(crate) state: StoredInputOperationState,
 }
 
-/// One server-allocated public choice identity and its secret-free replay key.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct StoredInputChoiceIdentity {

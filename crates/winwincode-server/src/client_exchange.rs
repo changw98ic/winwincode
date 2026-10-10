@@ -1,49 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Server-side `POST /internal/v1/client/exchange` endpoint for the
-//! `ClientControlPort` (plan 9.2, contract `client-control-port-v1.md`).
-//!
-//! One HTTP request is one exchange. The request carries a bounded batch of
-//! Client → Server frames plus the client's `ackSequence` of the Server →
-//! Client stream; the response carries the server's contiguous
-//! `ackSequence` (with `replayFromSequence` on a gap), the next bounded
-//! Server → Client batch, and — only on the exchange that accepts a fresh
-//! enrollment — the issued Device Credential material.
-//!
-//! Settlement mirrors the frozen `winwincode-client-port` exchange framework
-//! on the receiving side: every frame is judged against the durable
-//! contiguous acknowledgement cursor (`client_exchange_cursors`) producing
-//! the fixed contract outcomes (accept, duplicate, gap with replay hint,
-//! conflict, malformed, reacquire), and accepted frames execute their
-//! kind-specific effect against the `ClientNode` registry (`client.enroll`,
-//! `client.hello`, `client.heartbeat`), the occupancy ledger
-//! (`client.occupancy.ack` promotes `reserving -> occupied`,
-//! `client.occupancy.rejected` rolls the offer back, and a zero-running
-//! heartbeat completes a `draining` lease), and the candidate receipt ledger
-//! (`client.candidate.retained` records the frozen candidate idempotently;
-//! `client.candidate.apply_result` settles the device's apply receipt under
-//! the occupancy fencing judgement — a ticket stamped with a superseded
-//! lease or token is refused); the remaining kinds settle at the cursor only
-//! and are owned by later lanes.
-//!
-//! Credential model (plan 17.1): the server issues one random 32-byte
-//! Device Credential at enrollment, persists only its `sha256:` digest in
-//! `device_credential_digest`, and returns the raw material exactly once in
-//! the enrollment exchange response. Every later exchange must present the
-//! credential as `Authorization: Bearer <lowercase hex>`; the digest
-//! comparison is constant time and every failure is one uniform 401 that
-//! never discloses whether the node exists. The credential material crosses
-//! only this transport response. Enrollment emits no downlink frame.
-//!
-//! Cursor durability: the Client → Server acknowledgement cursor and the
-//! Server → Client acknowledgement cursor persist in
-//! `client_exchange_cursors`, so a Server restart never replays settled
-//! frames. Downlink frames persist in the durable `client_downlink_frames`
-//! outbox until the device acknowledges their sequence: the exchange
-//! delivers every retained frame above the acknowledgement cursor (bounded
-//! by the batch size), and acknowledged frames are retained no longer.
-//! Browser access authorization is decided by the Server.
-
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -114,20 +68,13 @@ use winwincode_storage::RepositoryGrantPermissions;
 use winwincode_storage::RepositoryScanOutcome;
 use winwincode_storage::SqliteStorage;
 
-/// Default bounds and profile values of the exchange adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientExchangeConfig {
-    /// Maximum encoded size of one frame in bytes (`FrameCodec` bound).
     pub max_frame_bytes: usize,
-    /// Maximum number of frames one exchange may carry in either direction.
     pub max_frames_per_exchange: usize,
-    /// Heartbeat interval the server profile asks device clients to use.
     pub heartbeat_interval_ms: u32,
 }
 
-/// Ephemeral Worker credential material waiting to travel beside one
-/// durable `client.worker.launch` frame. The raw value is never written to
-/// the Control Plane database or included in diagnostics.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerCredentialDelivery {
     pub client_node_id: String,
@@ -163,11 +110,6 @@ impl Default for ClientExchangeConfig {
 }
 
 impl ClientExchangeConfig {
-    /// Validates the adapter bounds; a zero bound would reject every frame.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the frame bound or the batch bound is zero.
     pub fn try_new(
         max_frame_bytes: usize,
         max_frames_per_exchange: usize,
@@ -184,18 +126,11 @@ impl ClientExchangeConfig {
     }
 }
 
-/// Stable failure categories of the exchange transport boundary. The
-/// authentication category never carries detail: every credential failure is
-/// one uniform response that does not disclose node existence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientExchangeErrorKind {
-    /// Missing, malformed, or non-matching Device Credential.
     Authentication,
-    /// The request body violated the exchange transport contract.
     InvalidRequest,
-    /// Durable state or storage failed; the exchange was not applied.
     Unavailable,
-    /// A command was rejected; persist a negative receipt before acknowledging it.
     CommandRejected {
         status: winwincode_client_port::domain::CommandAckStatus,
         code: winwincode_client_port::domain::ClientControlErrorCode,
@@ -203,7 +138,6 @@ pub enum ClientExchangeErrorKind {
     },
 }
 
-/// Secret-free exchange failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientExchangeError {
     kind: ClientExchangeErrorKind,
@@ -226,13 +160,11 @@ impl ClientExchangeError {
         Self::new(ClientExchangeErrorKind::Unavailable)
     }
 
-    /// True when the exchange failed Device Credential authentication.
     #[must_use]
     pub const fn is_authentication(&self) -> bool {
         matches!(self.kind, ClientExchangeErrorKind::Authentication)
     }
 
-    /// True when the request violated the transport contract.
     #[must_use]
     pub const fn is_invalid_request(&self) -> bool {
         matches!(self.kind, ClientExchangeErrorKind::InvalidRequest)
@@ -253,19 +185,7 @@ impl fmt::Display for ClientExchangeError {
 
 impl std::error::Error for ClientExchangeError {}
 
-/// HTTP boundary used by the server route without exposing route internals
-/// through the generated public API.
 pub trait ClientExchangePort: Send + Sync {
-    /// Applies one exchange and returns the encoded response body.
-    ///
-    /// `credential` carries the raw bearer text when an Authorization header
-    /// was present. `now` is the canonical application instant so registry
-    /// timestamps share one clock with the HTTP boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns only the stable failure categories; credential material and
-    /// frame contents never appear in diagnostics.
     fn exchange(
         &self,
         credential: Option<Vec<u8>>,
@@ -273,26 +193,12 @@ pub trait ClientExchangePort: Send + Sync {
         now: Instant,
     ) -> Result<Vec<u8>, ClientExchangeError>;
 
-    /// Authenticates one already-enrolled device for a sibling internal
-    /// transport without advancing `ClientControlPort` cursors.
-    ///
-    /// # Errors
-    ///
-    /// Returns the uniform authentication failure for an unknown, revoked,
-    /// or mismatched device and unavailable when the registry cannot open.
     fn authenticate_device(
         &self,
         credential: &[u8],
         client_node_id: &str,
     ) -> Result<(), ClientExchangeError>;
 
-    /// Places one raw Worker credential into the in-memory delivery lane.
-    /// It is returned only beside the exact matching launch frame and
-    /// expires with the launch grant.
-    ///
-    /// # Errors
-    ///
-    /// Returns unavailable when the in-memory lane cannot be locked.
     fn publish_worker_credential(
         &self,
         delivery: WorkerCredentialDelivery,
@@ -303,10 +209,6 @@ pub trait ClientExchangePort: Send + Sync {
     }
 }
 
-/// Production exchange over the Server's one product-state database
-/// directory. Like the remote Worker exchange, every request opens and
-/// closes its own connection so concurrent exchanges never share cursor
-/// state in memory.
 #[derive(Debug, Clone)]
 pub struct ClientExchangeApplication {
     data_directory: PathBuf,
@@ -315,11 +217,6 @@ pub struct ClientExchangeApplication {
 }
 
 impl ClientExchangeApplication {
-    /// Composes the exchange application over one product-state directory.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the adapter configuration violates its bounds.
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientExchangeConfig,
@@ -336,7 +233,6 @@ impl ClientExchangeApplication {
         })
     }
 
-    /// Applies one exchange against a freshly opened storage connection.
     fn apply(
         &self,
         credential: Option<&[u8]>,
@@ -350,8 +246,6 @@ impl ClientExchangeApplication {
         let request = parse_request(request_body)?;
         let codec = FrameCodec::new(self.config.max_frame_bytes);
         let envelopes = decode_frames(&codec, &request, self.config.max_frames_per_exchange)?;
-        // Fail fast before any durable access: an unauthenticated exchange
-        // may only carry enroll frames.
         if credential.is_none()
             && envelopes
                 .iter()
@@ -388,11 +282,6 @@ impl ClientExchangeApplication {
         response
     }
 
-    /// Settles the unauthenticated enrollment exchange: every frame must be
-    /// `client.enroll`, the node must be missing (fresh identity) or still
-    /// `pending_enrollment` without any issued credential (facts refresh),
-    /// and one Device Credential is issued per accepted enrollment. A node
-    /// with a credential never re-enrolls.
     #[allow(clippy::too_many_lines)]
     fn enroll_exchange(
         &self,
@@ -404,12 +293,9 @@ impl ClientExchangeApplication {
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
         for envelope in envelopes {
             if !matches!(envelope.message, ClientToServerMessage::Enroll(_)) {
-                // An unauthenticated exchange may only carry enroll frames.
                 return Err(ClientExchangeError::authentication());
             }
         }
-        // A fresh device sends its local placeholder as `clientNodeId`; only
-        // a canonical server-assigned id can name an existing row.
         let record = {
             let mut registry = ClientRegistryService::new(storage);
             if is_canonical_client_node_id(node_id) {
@@ -428,10 +314,6 @@ impl ClientExchangeApplication {
                 }
                 self.create_enrollment(storage, None, payload, envelopes, now)
             }
-            // A pending node without any credential yet may refresh its
-            // enrollment facts. Once a credential was issued, subsequent
-            // exchanges use it; unauthenticated enrollment cannot replace
-            // that identity.
             Some(record)
                 if record.presence_state == ClientPresenceState::PendingEnrollment
                     && record.device_credential_digest.is_none() =>
@@ -446,15 +328,10 @@ impl ClientExchangeApplication {
                 }
                 self.create_enrollment(storage, Some(&record), payload, envelopes, now)
             }
-            // An enrolled or revoked node never re-enrolls; the uniform
-            // failure does not disclose which of the two it is.
             Some(_) => Err(ClientExchangeError::authentication()),
         }
     }
 
-    /// Creates or refreshes the `pending_enrollment` node, issues one Device
-    /// Credential, and settles the enroll frames on the fresh per-node stream.
-    /// The response carries the issued identity directly, without a downlink message.
     #[allow(clippy::too_many_lines)]
     fn create_enrollment(
         &self,
@@ -499,9 +376,6 @@ impl ClientExchangeApplication {
                     if fresh
                         && error.kind() == ClientRegistryServiceErrorKind::IdentityConflict =>
                 {
-                    // The random public device number collided; draw a new
-                    // one. The node id itself is fresh so only this check can
-                    // repeat.
                     public_client_id = generate_public_client_id()?;
                 }
                 Err(_) => return Err(ClientExchangeError::unavailable()),
@@ -528,8 +402,6 @@ impl ClientExchangeApplication {
         }
         let ack_sequence = settler.ack_sequence();
 
-        // Enrollment only acknowledges the uplink request. It does not consume
-        // or acknowledge a position in the Server-to-Device command stream.
         ClientRegistryService::new(storage)
             .advance_exchange_cursors(&node_id, ack_sequence, 0)
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -551,10 +423,6 @@ impl ClientExchangeApplication {
         })
     }
 
-    /// Settles one authenticated exchange: constant-time credential match,
-    /// per-frame cursor judgement, `client.hello` instance takeover and
-    /// presence, `client.heartbeat` projection, repository
-    /// settlement, and the durable downlink batch.
     #[allow(clippy::too_many_lines)]
     fn authenticated_exchange(
         &self,
@@ -569,8 +437,6 @@ impl ClientExchangeApplication {
         let Some(secret) = secret else {
             return Err(ClientExchangeError::authentication());
         };
-        // A non-canonical node id cannot name an enrolled node; the uniform
-        // rejection keeps node existence undisclosed.
         if !is_canonical_client_node_id(node_id) {
             return Err(ClientExchangeError::authentication());
         }
@@ -594,9 +460,6 @@ impl ClientExchangeApplication {
             let mut registry = ClientRegistryService::new(storage);
             cursors_or_unavailable(&mut registry, node_id)?
         };
-        // An acknowledgement may only name delivered downlink positions:
-        // either the durable cursor or a frame still retained in the outbox
-        // (delivered, but not yet acknowledged).
         let outbox_high_water = outbox_high_water_or_unavailable(storage, node_id)?;
         if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
@@ -610,18 +473,12 @@ impl ClientExchangeApplication {
             BatchSettler::new(&effective_instance, cursors.client_to_server_ack_sequence);
         let mut replay_hint = None;
         for envelope in envelopes {
-            // An enrolled node never re-enrolls: the frame is refused at the
-            // conflict outcome and the batch settles no further.
             if matches!(envelope.message, ClientToServerMessage::Enroll(_)) {
                 break;
             }
             if matches!(envelope.message, ClientToServerMessage::Hello(_))
                 && envelope.client_instance_id != effective_instance
             {
-                // `client.hello` takes the instance over (the old instance is
-                // superseded) before the frame is judged, so the guard
-                // accepts the new instance and later old-instance frames are
-                // refused as reacquire-required.
                 supersede_instance(storage, &record, envelope, now)?;
                 settler.take_over_instance(&envelope.client_instance_id);
             }
@@ -702,9 +559,6 @@ impl ClientExchangeApplication {
                 .map_err(|_| ClientExchangeError::unavailable())?
         };
 
-        // Durable downlink: every frame above the acknowledged sequence is
-        // delivered until the device acknowledges it; acknowledged frames are
-        // retained no longer.
         let mut downlink = storage
             .client_downlink_outbox()
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -790,8 +644,6 @@ impl ClientExchangeApplication {
     }
 }
 
-/// Reads the durable outbox high-water of one node, or fails the exchange as
-/// unavailable.
 fn outbox_high_water_or_unavailable(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -813,29 +665,13 @@ fn cursors_or_unavailable(
         .ok_or(ClientExchangeError::unavailable())
 }
 
-/// One settled frame of an exchange batch, mirroring the fixed contract
-/// outcomes of the receive-side framework. A durable exchange starts from
-/// the persisted cursor, so the batch settler below applies the same
-/// judgement the frozen in-memory receive stream applies: every refused
-/// outcome stops the batch with an unchanged acknowledgement, and only a
-/// gap carries the replay hint upward into the response.
 enum BatchOutcome {
-    /// The frame was accepted; durable receipts decide whether to apply it.
     Accepted,
-    /// The frame replayed an already accepted position; confirm it without
-    /// executing again.
     Duplicate,
-    /// The sequence is beyond the contiguous cursor.
     Gap { replay_from_sequence: u64 },
-    /// Conflict, malformed shape, or a superseded instance: nothing was
-    /// recorded and the batch settles no further.
     Refused,
 }
 
-/// Receive-side settlement of one exchange batch over the durable
-/// per-node cursor (`client_exchange_cursors`). The acknowledgement cursor
-/// and dedup records start from durable state every exchange, mirroring the
-/// frozen receive-side judgement on the server's mirrored side.
 struct BatchSettler {
     instance: String,
     ack: AckCursor,
@@ -871,8 +707,6 @@ impl BatchSettler {
         {
             return BatchOutcome::Refused;
         }
-        // Instance guard: frames of a superseded instance are refused until a
-        // `client.hello` takes the instance over.
         if self.instance != client_instance_id {
             return BatchOutcome::Refused;
         }
@@ -977,8 +811,6 @@ impl ClientExchangePort for ClientExchangeApplication {
     }
 }
 
-/// Decoded exchange request: the bounded frame batch plus the client's
-/// contiguous acknowledgement of the Server → Client stream.
 #[derive(Debug, Deserialize)]
 struct ExchangeRequestBody {
     #[serde(rename = "schemaVersion")]
@@ -989,7 +821,6 @@ struct ExchangeRequestBody {
     ack_sequence: u64,
 }
 
-/// Encoded exchange response body.
 #[derive(Debug, Serialize)]
 struct ExchangeResponseBody {
     #[serde(rename = "schemaVersion")]
@@ -1029,17 +860,12 @@ impl fmt::Debug for WorkerCredentialResponse {
     }
 }
 
-/// One-time enrollment issuance carried only by the enrollment exchange
-/// response. The raw credential material crosses the transport exactly once
-/// and never enters a frame payload.
 #[derive(Debug, Serialize)]
 struct EnrollmentIssuance {
     #[serde(rename = "clientNodeId")]
     client_node_id: String,
     #[serde(rename = "publicClientId")]
     public_client_id: String,
-    /// Raw Device Credential material as lowercase hex of the 32 secret
-    /// bytes; the server persists only `deviceCredentialDigest`.
     #[serde(rename = "deviceCredential")]
     device_credential: String,
     #[serde(rename = "deviceCredentialDigest")]
@@ -1054,9 +880,6 @@ fn parse_request(request_body: &[u8]) -> Result<ExchangeRequestBody, ClientExcha
     serde_json::from_slice(request_body).map_err(|_| ClientExchangeError::invalid_request())
 }
 
-/// Decodes every frame under the codec byte bound and rejects the whole
-/// batch on an oversized batch, a version mismatch, or a mixed
-/// `clientNodeId` routing.
 fn decode_frames(
     codec: &FrameCodec,
     request: &ExchangeRequestBody,
@@ -1066,7 +889,6 @@ fn decode_frames(
         return Err(ClientExchangeError::invalid_request());
     }
     if request.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
-        // An unmatched contract version rejects the whole batch.
         return Err(ClientExchangeError::invalid_request());
     }
     let mut envelopes = Vec::with_capacity(request.frames.len());
@@ -1078,7 +900,6 @@ fn decode_frames(
             .decode(&bytes)
             .map_err(|_| ClientExchangeError::invalid_request())?;
         if envelope.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
-            // An unmatched contract version rejects the whole batch.
             return Err(ClientExchangeError::invalid_request());
         }
         match &node_id {
@@ -1093,8 +914,6 @@ fn decode_frames(
     Ok(envelopes)
 }
 
-/// The enroll payload of one frame, or a transport rejection for any other
-/// kind on an unauthenticated enrollment exchange.
 fn enroll_payload(
     envelope: &ClientToServerEnvelope,
 ) -> Result<&ClientEnrollPayload, ClientExchangeError> {
@@ -1104,9 +923,6 @@ fn enroll_payload(
     }
 }
 
-/// Extracts the command idempotency identity of the 10 Client → Server
-/// command kinds (`19 = 8 plain + 11 fenced` across both directions; the
-/// 6 Client → Server report kinds carry none).
 fn command_identity(
     message: &ClientToServerMessage,
     payload_digest: &str,
@@ -1144,8 +960,6 @@ fn command_identity(
     Some(CommandIdentity::new(key.clone(), payload_digest))
 }
 
-// Presence reports may race the state machine, but storage failures must
-// never be converted into a successful transport acknowledgement.
 fn require_durable_presence(
     error: &winwincode_control_plane::ClientRegistryServiceError,
 ) -> Result<(), ClientExchangeError> {
@@ -1175,7 +989,6 @@ fn apply_connection_policy(
         WireLockState::Unlocked => ClientLockState::Unlocked,
         WireLockState::Locked => ClientLockState::Locked,
     };
-    // A failed policy write must leave the report unacknowledged for retry.
     registry
         .update_connection_policy(node_id, accepting_connections, lock_state, record.revision)
         .map_err(|_| ClientExchangeError::unavailable())
@@ -1248,7 +1061,6 @@ fn apply_effect_with_status(
                 payload.lock_state,
             )?;
             let mut registry = ClientRegistryService::new(storage);
-            // `pending_enrollment` and `revoked` nodes refuse heartbeats.
             if let Err(error) = registry.heartbeat(
                 node_id,
                 payload.capacity.running_worker_sessions,
@@ -1257,9 +1069,6 @@ fn apply_effect_with_status(
             ) {
                 require_durable_presence(&error)?;
             }
-            // Drain automation (plan 12.4): a `draining` lease releases once
-            // the device reports no running worker session. A refused
-            // judgement is an ignored report fact.
             if payload.capacity.running_worker_sessions == 0 {
                 let mut occupancy = ClientOccupancyService::new(storage);
                 if let Some(lease) = occupancy
@@ -1430,9 +1239,6 @@ fn apply_effect_with_status(
             Ok(())
         }
         ClientToServerMessage::OccupancyAck(payload) => {
-            // The device persisted the occupancy mirror: the exact lease and
-            // token promote `reserving -> occupied` (plan 12.2, contract
-            // 9.3). A stale or rolled-back offer returns a durable rejection.
             require_occupancy_sender(storage, node_id, &payload.occupancy.occupancy_lease_id)?;
             crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
@@ -1452,10 +1258,6 @@ fn apply_effect_with_status(
             Ok(())
         }
         ClientToServerMessage::OccupancyRejected(payload) => {
-            // The device refused the offer: the `reserving` lease rolls back
-            // to `released` with the `client_rejected` reason (contract 4).
-            // The rejection also carries the device's current mirror
-            // revision, which re-syncs the Server view for the next offer.
             require_occupancy_sender(storage, node_id, &payload.occupancy.occupancy_lease_id)?;
             crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
@@ -1479,11 +1281,6 @@ fn apply_effect_with_status(
             Ok(())
         }
         ClientToServerMessage::CandidateRetained(payload) => {
-            // The device (or its worker) froze a candidate commit under its
-            // stable local ref and reported the retention: record it into
-            // the receipt ledger (plan 15.2, contract 6). The retention is a
-            // report fact without a fencing precondition (contract 6: the
-            // candidate production belongs to the running task itself).
             crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
@@ -1495,9 +1292,6 @@ fn apply_effect_with_status(
             Ok(())
         }
         ClientToServerMessage::CandidateApplyResult(payload) => {
-            // The device answered a `client.candidate.apply` command with
-            // its local apply receipt (plan 15.5, contract 8): settle it
-            // into the ledger behind the occupancy fencing judgement.
             crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
@@ -1524,7 +1318,6 @@ fn apply_effect_with_status(
                 .map_err(|_| ClientExchangeError::unavailable())?;
             Ok(())
         }
-        // Enrollment is accepted only by the unauthenticated enrollment lane.
         ClientToServerMessage::Enroll(_) => Err(ClientExchangeError::invalid_request()),
     }
 }
@@ -1684,8 +1477,6 @@ fn settle_worker_reconciliation(
         .device_execution_binding_ledger()
         .and_then(|ledger| ledger.active_for_node(node_id))
         .map_err(|_| ClientExchangeError::unavailable())?;
-    // Missing entries, duplicate sessions, unknown processes or foreign
-    // instances cannot prove recovery. Keep the original lease fenced.
     let mut seen = std::collections::HashSet::new();
     for report in &payload.workers {
         if !seen.insert(&report.worker_session_id)
@@ -1705,9 +1496,6 @@ fn settle_worker_reconciliation(
     }) {
         return Ok(());
     }
-    // Exit reports carry the PR's durable process-closure proof and are sent
-    // before reconciliation. A terminal/missing verdict alone cannot release
-    // an active binding or take its occupancy out of recovery.
     if payload.workers.iter().any(|report| {
         matches!(
             report.reconcile_state,
@@ -1753,8 +1541,6 @@ fn worker_reconciliation_authority_matches(
         }
         WorkerLaunchGrantService::new(storage).snapshot(&binding.worker_launch_grant_id)
     } else {
-        // Source anchors can launch and exit without ever claiming a Job.
-        // Their exact launch grant remains the process authority.
         WorkerLaunchGrantService::new(storage).active_grant_for_session(&report.worker_session_id)
     }
     .map_err(|_| ClientExchangeError::unavailable())?;
@@ -1787,7 +1573,6 @@ fn worker_reconciliation_authority_matches(
             return Ok(false);
         }
     } else if !exited {
-        // A report alone never closes a process, including an unbound anchor.
         return Ok(false);
     }
     Ok(true)
@@ -1912,8 +1697,6 @@ const fn repository_dirty_state(value: WireRepositoryDirtyState) -> RepositoryDi
     }
 }
 
-/// A release or force-fence ack reports the effective device mirror
-/// revision; keep the Server view current.
 fn observe_command_ack_revision(
     data_directory: &Path,
     node_id: &str,
@@ -1936,12 +1719,6 @@ fn observe_command_ack_revision(
     Ok(())
 }
 
-/// Settles one `client.worker.launch_ack` (plan 14.3 step 10). The
-/// acknowledged mirror revision keeps the Server stamp view current, and the
-/// verdict settles the grant exactly once: an accepted acknowledgement
-/// consumes it, a rejection keeps it `issued` with the reason in the launch
-/// audit trail. Refused settlements return a durable rejection; storage
-/// failures leave the frame unacknowledged for retry.
 fn settle_worker_launch_ack(
     storage: &mut SqliteStorage,
     data_directory: &Path,
@@ -2010,9 +1787,6 @@ fn settle_worker_launch_ack(
     Ok(())
 }
 
-/// Maps one rejected `client.worker.launch_ack` onto the stable audit
-/// reason text: the wire status name, refined by the device error code when
-/// the device supplied one.
 fn launch_rejection_reason(
     status: WorkerLaunchAckStatus,
     error: Option<&winwincode_client_port::domain::ClientControlError>,
@@ -2031,12 +1805,6 @@ fn launch_rejection_reason(
     }
 }
 
-/// Records one `client.candidate.retained` report into the receipt ledger
-/// (GIT-100.7, plan 15.2, contract 6). The ledger is the audit authority
-/// and already owns the idempotency and conflict semantics: a replayed
-/// receipt and a duplicate retention of the same candidate ref return the
-/// original row, and any fact disagreement (or an unknown binding owner)
-/// fails closed with a durable command rejection.
 fn settle_candidate_retained(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -2065,15 +1833,6 @@ fn settle_candidate_retained(
     Ok(())
 }
 
-/// Settles one `client.candidate.apply_result` report into the receipt
-/// ledger (GIT-100.7, plan 15.5, contract 8), advancing the candidate state
-/// machine and appending exactly one immutable receipt.
-///
-/// Fencing (contract 9.2): the result settles only while it names the
-/// node's one active occupancy lease with its current token — an apply
-/// ticket superseded by a higher token (a force fence or a fresh claim) is
-/// refused with a durable rejection and never reaches the ledger. Storage
-/// failures remain unacknowledged so the sender can retry.
 fn settle_candidate_apply_result(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -2095,8 +1854,6 @@ fn settle_candidate_apply_result(
     }
     let receipt = &payload.receipt;
     let mut candidates = LocalCandidateService::new(storage);
-    // The wire apply receipt names the candidate by its local ref; the
-    // ledger keys the settlement on the retained receipt identity.
     let Some(candidate) = candidates
         .candidate_for_ref(node_id, &receipt.candidate_ref)
         .map_err(|_| ClientExchangeError::unavailable())?
@@ -2130,7 +1887,6 @@ fn settle_candidate_apply_result(
     Ok(())
 }
 
-/// Maps the wire apply strategy onto the ledger's frozen strategy vocabulary.
 const fn storage_strategy(strategy: ApplyStrategy) -> LocalApplyStrategy {
     match strategy {
         ApplyStrategy::CreateBranch => LocalApplyStrategy::CreateBranch,
@@ -2140,7 +1896,6 @@ const fn storage_strategy(strategy: ApplyStrategy) -> LocalApplyStrategy {
     }
 }
 
-/// Maps the wire apply result onto the ledger's frozen ten-code vocabulary.
 const fn storage_result(result: ApplyResult) -> LocalApplyResult {
     match result {
         ApplyResult::Retained => LocalApplyResult::Retained,
@@ -2156,9 +1911,6 @@ const fn storage_result(result: ApplyResult) -> LocalApplyResult {
     }
 }
 
-/// Persists a `client.hello` instance takeover: the old instance is
-/// superseded and the hello's software facts refresh the device projection.
-/// A lost revision race only delays the takeover until the next hello.
 fn supersede_instance(
     storage: &mut SqliteStorage,
     record: &ClientNodeRecord,
@@ -2200,8 +1952,6 @@ fn supersede_instance(
     Ok(())
 }
 
-/// Maps a device-reported presence fact onto a registry transition target.
-/// `pending_enrollment` and `revoked` are never client-reportable.
 const fn presence_target(state: PresenceState) -> Option<ClientPresenceState> {
     match state {
         PresenceState::Online => Some(ClientPresenceState::Online),
@@ -2212,21 +1962,16 @@ const fn presence_target(state: PresenceState) -> Option<ClientPresenceState> {
     }
 }
 
-/// Issues one random 32-byte Device Credential and returns its lowercase hex
-/// material plus the persisted `sha256:` digest.
 fn issue_credential() -> Result<(String, String), ClientExchangeError> {
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).map_err(|_| ClientExchangeError::unavailable())?;
     Ok((hex_encode(&secret), credential_digest(&secret)))
 }
 
-/// Computes the persisted `sha256:` digest of one credential secret.
 fn credential_digest(secret: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(secret))
 }
 
-/// Constant-time comparison of the supplied secret's digest against the
-/// stored digest. The fixed digest shape makes the length check public.
 fn credential_digest_matches(secret: &[u8; 32], stored_digest: &str) -> bool {
     constant_time_eq(
         credential_digest(secret).as_bytes(),
@@ -2245,8 +1990,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-/// Decodes the presented bearer text into the 32 credential bytes. Both hex
-/// cases are accepted; the presentation encoding is public.
 fn decode_credential_secret(raw: &str) -> Option<[u8; 32]> {
     let bytes = raw.as_bytes();
     if bytes.len() != 64 {
@@ -2280,10 +2023,8 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, ClientExchangeError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| ClientExchangeError::unavailable())?;
@@ -2296,7 +2037,6 @@ fn generate_prefixed_id(prefix: &str) -> Result<String, ClientExchangeError> {
     Ok(identity)
 }
 
-/// Generates one 10-digit public device number (public, never a credential).
 fn generate_public_client_id() -> Result<String, ClientExchangeError> {
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|_| ClientExchangeError::unavailable())?;
@@ -2304,9 +2044,6 @@ fn generate_public_client_id() -> Result<String, ClientExchangeError> {
     Ok(format!("{value:0>10}"))
 }
 
-/// Whether `value` has the canonical `cnd_` + 26 character Crockford shape
-/// a server-assigned node id carries. Only canonical ids can name an
-/// existing row; device-local placeholders always take the fresh path.
 pub(crate) fn is_canonical_client_node_id(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix("cnd_") else {
         return false;

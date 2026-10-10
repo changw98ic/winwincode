@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Worker-to-Control-Plane delivery ledger.
-//!
-//! This module stores the complete generated frame before the first transport
-//! attempt. A successful send records only an attempt. Frames that require a
-//! canonical response are replayed after restart until that response is
-//! validated and applied.
-
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -28,7 +19,6 @@ const PENDING: &str = "pending";
 const SENT_ATTEMPT: &str = "sent_attempt";
 const HEARTBEAT_SEQUENCE_KEY_PREFIX: &str = "worker-heartbeat-sequence:";
 
-/// Durable delivery operations over the adapter's one private `SQLite` store.
 #[derive(Clone, Debug)]
 pub(crate) struct ExecutionOutbox {
     store: crate::store::AdapterStore,
@@ -37,9 +27,6 @@ pub(crate) struct ExecutionOutbox {
 impl ExecutionOutbox {
     pub(crate) fn open(store: crate::store::AdapterStore) -> Result<Self, AdapterStoreError> {
         let outbox = Self { store };
-        // A process may have stopped after send and before receipt. Only
-        // response-bearing frames are made pending again. Transport-only
-        // frames retain their sent-attempt record without being duplicated.
         outbox
             .store
             .lock()?
@@ -60,7 +47,6 @@ impl ExecutionOutbox {
             .transaction(|transaction| Self::retain_in_transaction(transaction, message))
     }
 
-    /// Reads the original outcome snapshot without requeueing its delivery.
     pub(crate) fn terminal_outcome(
         &self,
         run_key: &str,
@@ -74,8 +60,6 @@ impl ExecutionOutbox {
             .transpose()
     }
 
-    /// Keeps the first complete terminal frame after its transport row is acknowledged.
-    /// The run, terminal snapshot and pending delivery commit in one transaction.
     pub(crate) fn retain_terminal_in_transaction(
         transaction: &Transaction<'_>,
         run_key: &str,
@@ -85,7 +69,6 @@ impl ExecutionOutbox {
             "SELECT frame_digest, frame_json FROM execution_terminal_outcome WHERE run_key = ?1",
             [run_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
             .optional().map_err(|_| AdapterStoreError::Unavailable)?;
-        // Upgrade an existing pending terminal before its ACK can compact it.
         let saved = if saved.is_some() {
             saved
         } else {
@@ -123,9 +106,6 @@ impl ExecutionOutbox {
         message: &ExecutionPortMessage,
     ) -> Result<DurableExecutionDelivery, AdapterStoreError> {
         let frame = serde_json::to_vec(message).map_err(|_| AdapterStoreError::Corrupt)?;
-        // A definitively refused auxiliary frame may have a durable bounded wire
-        // projection. Keep its audited source bytes, and reuse that exact projection
-        // for Core replay and runtime gap recovery as well as ordinary retries.
         let projected: Option<(String, Option<Vec<u8>>)> = transaction.query_row(
             "SELECT original_digest, projected_frame FROM execution_delivery_disposition WHERE delivery_id = ?1",
             [message_id(&frame)?], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -164,15 +144,6 @@ impl ExecutionOutbox {
             let same_original = existing_digest == frame_digest && existing_frame == frame;
             let same_terminal_facts = metadata.family == Family::Outcome.as_str()
                 && same_outcome_facts(&existing_frame, &frame)?;
-            // Worker message ids are process-local sequence values.  A
-            // replacement Worker can therefore reconstruct the same logical
-            // transport frame with a fresh timestamp (and, when the sequence
-            // restarts, the same message id) before it has received the
-            // predecessor's response.  Keep the predecessor's bytes as the
-            // canonical replay and never replace them with the reconstruction.
-            // The generated union tag and every authority/payload field remain
-            // part of the comparison; only transport-attempt fields are
-            // normalized here.
             let same_replay_facts = same_replay_facts(&existing_frame, &frame)?;
             if !same_original && !same_terminal_facts && !same_replay_facts {
                 return Err(AdapterStoreError::Conflict);
@@ -238,7 +209,6 @@ impl ExecutionOutbox {
         .collect()
     }
 
-    /// Keeps the original interaction deadline across execution lease renewals.
     pub(crate) fn retained_interaction(
         &self,
         delivery_id: &str,
@@ -270,7 +240,6 @@ impl ExecutionOutbox {
         Ok(Some(message))
     }
 
-    /// A local deadline response settles transport replay, without inventing a CP receipt.
     pub(crate) fn settle_interaction_deadline(
         &self,
         request: &ExecutionPortMessage,
@@ -333,14 +302,6 @@ impl ExecutionOutbox {
         result
     }
 
-    /// Returns the highest numeric Worker message id retained in the outbox.
-    ///
-    /// Transport-only frames remain durable after a successful send so their
-    /// identity can be audited, but they are intentionally omitted from
-    /// [`Self::pending`]. A replacement Worker still has to advance past
-    /// those ids before creating a new transport frame, otherwise its first
-    /// post-restart dispatch result can collide with the predecessor's frame
-    /// and be treated as a changed replay.
     pub(crate) fn highest_numeric_message_sequence(&self) -> Result<u64, AdapterStoreError> {
         let connection = self.store.lock()?;
         let mut statement = connection
@@ -367,10 +328,6 @@ impl ExecutionOutbox {
         Ok(highest)
     }
 
-    /// Returns the highest heartbeat sequence committed with its canonical
-    /// outbound frame. The cursor remains after an accepted acknowledgement
-    /// compacts that frame, allowing the same Worker instance to continue
-    /// monotonically after an operating-system process restart.
     pub(crate) fn heartbeat_sequence_highwater(
         &self,
         worker_id: &WorkerId,
@@ -429,8 +386,6 @@ impl ExecutionOutbox {
             if event.event.category != winwincode_execution_port::generated::ExecutionEventCategory::Usage {
                 return Ok(None);
             }
-            // Preserve stream identity and sequence, so dropping a report does not
-            // leave a permanent runtime replay gap. No approval/verification fact is removed.
             event.event.payload = None;
             event.event.summary = "optional performance report unavailable".into();
             let projected = serde_json::to_vec(&message).map_err(|_| AdapterStoreError::Corrupt)?;
@@ -492,7 +447,6 @@ impl ExecutionOutbox {
             |row| row.get(0)).map_err(|_| AdapterStoreError::Unavailable)
     }
 
-    /// Loads the exact retained open frame for one durable model exchange.
     pub(crate) fn retained_model_open(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -500,7 +454,6 @@ impl ExecutionOutbox {
         Self::read_model_open(&self.store, model_exchange_id)
     }
 
-    /// Reads original exchange authority without reopening or mutating the outbox.
     pub(crate) fn read_model_open(
         store: &crate::store::AdapterStore,
         model_exchange_id: &ModelExchangeId,
@@ -532,8 +485,6 @@ impl ExecutionOutbox {
         Ok(retained)
     }
 
-    /// Every model role uses the exact retained request and the same durable
-    /// cancellation proof, including before its cancellation effect is dispatched.
     pub(crate) fn model_start_request_allowed(
         store: &crate::store::AdapterStore,
         open: &ModelOpenMessage,
@@ -554,7 +505,6 @@ impl ExecutionOutbox {
         Ok(!cancelled)
     }
 
-    /// Applies an already domain-validated response to its exact retained request.
     pub(crate) fn acknowledge_response(
         &self,
         acknowledgement: &ExecutionPortMessage,
@@ -565,8 +515,6 @@ impl ExecutionOutbox {
         if retryable_heartbeat_gap(acknowledgement) {
             let (family, key) =
                 response_target(acknowledgement)?.ok_or(AdapterStoreError::Conflict)?;
-            // A gap consumes a control receipt, not the retained request. Only
-            // this exact request (or its applied positive proof) authorizes it.
             let known: bool = self.store.lock()?.query_row(
                 "SELECT EXISTS(SELECT 1 FROM execution_outbox WHERE family=?1 AND correlation_key=?2)
                  OR EXISTS(SELECT 1 FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2)",
@@ -612,8 +560,6 @@ impl ExecutionOutbox {
                 return Ok(());
             }
             if matches!(acknowledgement, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack)) {
-                // A first chunk already clears acknowledgement_required, but the
-                // exact open remains authority for a later Worker cancellation.
                 let retained: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM execution_outbox WHERE family=?1 AND correlation_key=?2)",
                     params![family.as_str(), correlation_key], |row| row.get(0))
@@ -635,8 +581,6 @@ impl ExecutionOutbox {
         })
     }
 
-    /// Records proof only after the adapter has durably applied the exact domain response.
-    /// This also repairs the crash/upgrade boundary where the request was already compacted.
     pub(crate) fn record_applied_response(
         &self,
         response: &ExecutionPortMessage,
@@ -651,7 +595,6 @@ impl ExecutionOutbox {
             .transaction(|transaction| save_response_proof(transaction, family, &key, &digest))
     }
 
-    /// Compacts accepted runtime rows or makes exact gap frames pending again.
     pub(crate) fn apply_runtime_ack(
         &self,
         acknowledgement: &winwincode_execution_port::generated::RuntimeAckMessage,
@@ -690,9 +633,6 @@ impl ExecutionOutbox {
             | LeaseWriteStatus::RejectedExpiredLease
             | LeaseWriteStatus::RejectedStaleFencingToken
             | LeaseWriteStatus::RejectedWorkerInstance => self.store.transaction(|transaction| {
-                // The replay responder has authenticated this stream against
-                // current authority. Keep the refused evidence, then let the
-                // Worker settle its job through the existing durable failure path.
                 let bytes =
                     serde_json::to_vec(acknowledgement).map_err(|_| AdapterStoreError::Corrupt)?;
                 save_response_proof(
@@ -712,7 +652,6 @@ impl ExecutionOutbox {
         }
     }
 
-    /// Retains and returns only the requested original runtime frames.
     pub(crate) fn requeue_runtime_events(
         &self,
         events: &[RuntimeEventMessage],
@@ -840,12 +779,6 @@ fn metadata(message: &ExecutionPortMessage, frame: &[u8]) -> Result<Metadata, Ad
                 &message.session_identity,
             ))?,
         ),
-        // A normal model acknowledgement is a Worker->Provider progress
-        // frame, not a request which receives another protocol response. It
-        // still gets retained before the send, but once the transport send is
-        // recorded it must not remain forever in the response-replay set.
-        // Cancellation is the one terminal ModelAck which deliberately
-        // acknowledges the retained ModelOpen exchange.
         ExecutionPortMessage::ModelAckMessage(message)
             if !canonical_terminal_model_ack(message) =>
         {
@@ -879,12 +812,6 @@ fn metadata(message: &ExecutionPortMessage, frame: &[u8]) -> Result<Metadata, Ad
                 &message.session_identity,
             ))?,
         ),
-        // SessionBinding is a durable Worker fact, but it has no response
-        // frame of its own.  Its semantic identity must survive a Worker
-        // restart: messageId and boundAt are transport-attempt fields, while
-        // the lease/session/thread tuple identifies the exact binding.  Using
-        // that tuple here lets a replacement Worker recover the predecessor's
-        // canonical bytes instead of creating a second two-phase CP commit.
         ExecutionPortMessage::SessionBindingMessage(message) => (
             Family::SessionBinding,
             correlation(&(
@@ -1021,8 +948,6 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
         ExecutionPortMessage::WorkerRegistrationResultMessage(_)
             | ExecutionPortMessage::WorkerHeartbeatAckMessage(_)
     ) {
-        // The Control Plane rebuilds these receipts with its current clock on
-        // a duplicate request. That observation is not the applied result.
         object.remove("serverTime");
     }
     if matches!(
@@ -1036,8 +961,6 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
     }
     if matches!(message, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack))
     {
-        // Existing Observer wording is the same typed cancellation fact. Preserve
-        // wire bytes, while normalising only these two accepted legacy descriptions.
         object
             .get_mut("error")
             .and_then(Value::as_object_mut)
@@ -1224,10 +1147,6 @@ fn same_outcome_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreE
     Ok(normalized(first)? == normalized(second)?)
 }
 
-/// Compares one regenerated outbound frame with the durable predecessor while
-/// ignoring fields allocated for the current transport attempt.  The exact
-/// stored frame is returned by [`ExecutionOutbox::retain_in_transaction`], so
-/// this comparison only authorizes replay; it never mutates the durable bytes.
 fn same_replay_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreError> {
     fn normalized(bytes: &[u8]) -> Result<Value, AdapterStoreError> {
         let mut value: Value =
@@ -1488,11 +1407,6 @@ mod tests {
                     | "action.enforcement_receipt"
                     | "approval.decision"
             ) {
-                // The Kernel/input ledger, durable model-call frame ledger,
-                // action gate or approval-operation ledger has already applied
-                // this exact response. Replaying the Control Plane frame after
-                // the Worker lost its ACK must remain an idempotent no-op even
-                // though the durable request row is compacted.
                 outbox
                     .acknowledge_response(&fixture(response_kind))
                     .expect("exact terminal response replay after compaction");

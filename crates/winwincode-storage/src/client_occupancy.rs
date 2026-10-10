@@ -1,29 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Server-side `ClientOccupancyLease` registry and the global
-//! occupancy fencing-token allocator.
-//!
-//! The Control Plane is the authoritative owner of client occupancy (ADR-0030,
-//! plan 6): it atomically creates one occupancy lease per claim, mints a
-//! strictly higher fencing token for every new occupancy, and only the Device
-//! Client ACK of the exact lease and token promotes a lease from `reserving`
-//! to `occupied` (plan 12.2, 12.6). States and legal transitions follow the
-//! frozen state machine in `docs/contracts/client-control-state-machines.md`
-//! contract 4: `available` is the projection of "no active lease", the active
-//! lease starts at `reserving`, at most one active lease exists per
-//! `clientNodeId` (enforced durably by a partial unique index), a `reserving`
-//! lease without an ACK terminates as `released` with the `release_reason`
-//! naming why, `recovery_pending` has no automatic terminal state, an idle
-//! `occupied` lease expires, and `draining` always ends in an automatic
-//! `released`.
-//!
-//! Capacity note: the claim gate requires at least one free worker-session
-//! slot using the device-reported running count plus the slot the occupancy is
-//! about to consume (`reportedRunning + reserved < max`, with `reserved`
-//! simplified to zero durable slots at claim time). The durable per-slot
-//! reservation ledger belongs to the execution FLOW epic and will tighten this
-//! check when it lands.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -73,24 +47,13 @@ CREATE TABLE IF NOT EXISTS client_occupancy_recovery (
 );
 ";
 
-/// Lifecycle state of one `ClientOccupancyLease` (contract 4).
-///
-/// `available` is deliberately absent: it is the projection of "this client
-/// node has no active lease", never a stored state. `released` and `expired`
-/// are the terminal states kept as audit history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OccupancyLeaseState {
-    /// Offer created and waiting for the Device Client ACK of its token.
     Reserving,
-    /// The Device Client acknowledged the exact lease and fencing token.
     Occupied,
-    /// Release requested while worker sessions are still active.
     Draining,
-    /// The client dropped while occupied or draining; reconciliation pending.
     RecoveryPending,
-    /// Terminal: released explicitly, automatically, or by safe cleanup.
     Released,
-    /// Terminal: an idle occupied lease reached its idle policy deadline.
     Expired,
 }
 
@@ -122,8 +85,6 @@ impl OccupancyLeaseState {
         }
     }
 
-    /// True while the lease still occupies the client node's single active
-    /// slot, so a new claim must be rejected.
     #[must_use]
     pub const fn is_active(self) -> bool {
         matches!(
@@ -139,24 +100,13 @@ impl fmt::Display for OccupancyLeaseState {
     }
 }
 
-/// Durable reason distinguishing why a lease ended (contract 4, contract 10
-/// open point 2): the `reserving` release names whether the ACK window
-/// elapsed, the Device Client rejected the offer, or the applicant withdrew.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OccupancyReleaseReason {
-    /// `reserving -> released`: the offer was not `ACKed` within its window.
     AckTimeout,
-    /// `reserving -> released`: the Device Client reported
-    /// `client.occupancy.rejected`.
     ClientRejected,
-    /// `reserving -> released`: the applicant withdrew the claim.
     ClaimWithdrawn,
-    /// `occupied -> released`: the holder released with no active task.
     HolderReleased,
-    /// `draining -> released`: every worker session reached a terminal state.
     DrainCompleted,
-    /// `recovery_pending -> released`: administrator or original holder
-    /// executed the safe cleanup after the recovery deadline passed.
     ForceReleased,
 }
 
@@ -195,21 +145,12 @@ impl fmt::Display for OccupancyReleaseReason {
     }
 }
 
-/// Recovery reconciliation target of a `recovery_pending` lease (contract 4).
-///
-/// The fencing token is never changed by a resume: no new occupancy happened.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OccupancyReconcileTarget {
-    /// The reconcile report says local workers are still running.
     ResumeOccupied,
-    /// The reconcile report says tasks ended or are wrapping up.
     ResumeDraining,
 }
 
-/// Validated atomic claim command (plan 12.2).
-///
-/// The `_id` postfix on every field is the plan's own domain vocabulary, so
-/// the lint against repeated field suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyClaim {
@@ -220,12 +161,6 @@ pub struct OccupancyClaim {
 }
 
 impl OccupancyClaim {
-    /// Builds one validated claim command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical lease, client node, user, and claim request
-    /// identities before any durable write.
     pub fn try_new(
         occupancy_lease_id: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -266,78 +201,44 @@ impl OccupancyClaim {
     }
 }
 
-/// Durable `ClientOccupancyLease` row (plan 7.5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyLeaseRecord {
-    /// Stable occupancy lease identifier.
     pub occupancy_lease_id: String,
-    /// Occupied client node.
     pub client_node_id: String,
-    /// Occupancy belongs to this user, never to a browser cookie.
     pub holder_user_id: String,
-    /// Monotonic fencing token minted for exactly this occupancy.
     pub fencing_token: u64,
-    /// Caller-supplied claim request identity.
     pub claim_request_id: String,
-    /// Lifecycle state.
     pub state: OccupancyLeaseState,
-    /// Device Client ACK instant; set exactly on `reserving -> occupied`.
     pub acknowledged_at: Option<Instant>,
-    /// Instant the claim created this lease in `reserving`.
     pub claimed_at: Option<Instant>,
-    /// Last renewal instant (ACK and reconciliation resumes).
     pub last_renewed_at: Option<Instant>,
-    /// Idle policy deadline owned by the caller; only `occupied` uses it.
     pub idle_expires_at: Option<Instant>,
-    /// Recovery window deadline; only `recovery_pending` uses it.
     pub recovery_deadline_at: Option<Instant>,
-    /// Terminal discriminator; set on every `released` transition.
     pub release_reason: Option<OccupancyReleaseReason>,
-    /// Instant the lease record was created.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Stable occupancy ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OccupancyStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// No occupancy lease matches the requested identity.
     UnknownOccupancyLease,
-    /// The holder has no active `use` access grant on the client node.
     AccessDenied,
-    /// The client node presence is not `online`.
     PresenceNotOnline,
-    /// The client node is `locked`.
     ClientLocked,
-    /// The client node does not accept new occupancy.
     NotAcceptingConnections,
-    /// The client node has no free worker-session slot.
     CapacityExhausted,
-    /// An active lease already occupies the client node.
     ActiveLeaseConflict,
-    /// The occupancy lease id is already used.
     OccupancyLeaseConflict,
-    /// The command carried a fencing token other than the lease's token.
     FencingTokenMismatch,
-    /// The durable fencing-token counter reached the safe integer ceiling.
     FencingTokenExhausted,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race that should be impossible inside
-    /// one immediate transaction.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free occupancy ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyStoreError {
     kind: OccupancyStoreErrorKind,
@@ -359,19 +260,11 @@ impl fmt::Display for OccupancyStoreError {
 
 impl std::error::Error for OccupancyStoreError {}
 
-/// Occupancy lease ledger and fencing-token allocator borrowing the sole
-/// product-state `SQLite` authority.
 pub struct OccupancyLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable occupancy lease ledger on this same product-state
-    /// database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn client_occupancy_ledger(&mut self) -> Result<OccupancyLedger<'_>, OccupancyStoreError> {
         OccupancyLedger::new(self)
     }
@@ -389,12 +282,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Returns the highest fencing token issued so far; zero before the first
-    /// occupancy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a corrupt counter row or storage failure.
     pub fn current_fencing_token(&self) -> Result<u64, OccupancyStoreError> {
         let connection = self.connection()?;
         let stored: Option<i64> = connection
@@ -411,15 +298,6 @@ impl<'storage> OccupancyLedger<'storage> {
             .map(|value| value.unwrap_or(0))
     }
 
-    /// Mints the next global fencing token; strictly higher than every token
-    /// minted before on this database.
-    ///
-    /// Only new occupancies mint tokens. Recovery and reconciliation resume a
-    /// lease under its original token and must not call this.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a counter at the safe integer ceiling or storage failure.
     pub fn mint_fencing_token(&mut self) -> Result<u64, OccupancyStoreError> {
         let transaction = self.transaction()?;
         let token = mint_fencing_token(&transaction)?;
@@ -427,24 +305,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(token)
     }
 
-    /// Atomically claims occupancy of one client node (plan 12.2).
-    ///
-    /// Inside one immediate transaction the five-condition gate reuses the
-    /// durable registry and connect-ledger facts: the holder has an active
-    /// `use` grant, presence is `online` and the node is not `locked`, the
-    /// node accepts new occupancy, no active lease exists (the partial unique
-    /// index is the durable backstop), and at least one worker-session slot is
-    /// free (`reportedRunning + reserved < max`, with the durable reservation
-    /// ledger deferred to the FLOW epic). On success a `reserving` lease is
-    /// created with a freshly minted fencing token. Concurrent claims are
-    /// serialized by the immediate transaction: exactly one wins.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, a missing or `use`-less grant, a
-    /// non-`online` or `locked` node, a node that is not accepting, an
-    /// exhausted capacity, an already active lease, a reused lease id, or
-    /// storage failure.
     pub fn atomic_claim(
         &mut self,
         claim: &OccupancyClaim,
@@ -484,18 +344,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(record)
     }
 
-    /// Records the Device Client ACK (`client.occupancy.ack`, plan 12.2) and
-    /// promotes `reserving -> occupied` only when both the lease id and the
-    /// fencing token match.
-    ///
-    /// The caller owns the idle policy through `idle_expires_at`; only an
-    /// `occupied` lease uses it. An ACK replay for an already `occupied` lease
-    /// carrying the matching token is an accepted idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a token mismatch, a non-`reserving` lease,
-    /// or storage failure.
     pub fn record_acknowledgement(
         &mut self,
         occupancy_lease_id: &str,
@@ -543,18 +391,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Terminates a `reserving` lease as `released` (contract 4): the offer
-    /// was not `ACKed` within its window, the Device Client reported
-    /// `client.occupancy.rejected`, or the applicant withdrew.
-    ///
-    /// The `release_reason` distinguishes the three paths. A replay with the
-    /// same reason is an accepted idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a token mismatch, a reason that does not
-    /// belong to the `reserving` terminal paths, a non-`reserving` lease, or
-    /// storage failure.
     pub fn reject_offer(
         &mut self,
         occupancy_lease_id: &str,
@@ -600,19 +436,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Applies the holder's release request to an `occupied` lease (plan
-    /// 12.4): no active worker session releases immediately, any active
-    /// worker session moves the lease to `draining`.
-    ///
-    /// The active worker-session count is a skeleton input until the FLOW
-    /// epic lands the durable task ledger. `draining` replays with an active
-    /// count are accepted idempotent no-ops; a zero count against `draining`
-    /// is refused because only [`Self::drain_complete`] may release it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a token mismatch, a non-`occupied` lease, or
-    /// storage failure.
     pub fn request_release(
         &mut self,
         occupancy_lease_id: &str,
@@ -668,14 +491,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Applies the automatic `draining -> released` judgement (contract 4):
-    /// once every worker session reached a terminal state the lease releases
-    /// with `drain_completed`. No Device Client ACK is required.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a lease that is not `draining`, or storage
-    /// failure.
     pub fn drain_complete(
         &mut self,
         occupancy_lease_id: &str,
@@ -708,21 +523,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Projects an `occupied` or `draining` lease to `recovery_pending`
-    /// because the client dropped (plan 12.5, contract 4).
-    ///
-    /// The client node presence must already be projected `offline` by the
-    /// registry. The caller owns the recovery-window policy through
-    /// `recovery_deadline_at`. There is no automatic terminal state: until an
-    /// accepted reconciliation or an explicit safe cleanup, no other user may
-    /// preempt the occupancy. A replay against an already
-    /// `recovery_pending` lease is an accepted idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, an unknown client node, a lease that is
-    /// neither `occupied` nor `draining`, a node whose presence is not
-    /// `offline`, or storage failure.
     pub fn mark_recovery_pending(
         &mut self,
         occupancy_lease_id: &str,
@@ -782,20 +582,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Applies an accepted `client.worker.reconcile` outcome (plan 12.5,
-    /// contract 4): `recovery_pending -> occupied` when local workers are
-    /// still running, or `recovery_pending -> draining` when tasks ended or
-    /// are wrapping up.
-    ///
-    /// The fencing token is reused unchanged because no new occupancy
-    /// happened. `idle_expires_at` refreshes the idle policy when resuming to
-    /// `occupied` and must be `None` when resuming to `draining`. A replay
-    /// whose target equals the current state is an accepted idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a lease that is not `recovery_pending`, an
-    /// idle expiry supplied for a draining resume, or storage failure.
     pub fn reconcile_resume(
         &mut self,
         occupancy_lease_id: &str,
@@ -850,13 +636,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Returns the release intent and minimum observation time for recovery.
-    /// Legacy pending rows start a fresh observation window and resume only
-    /// draining, because the previous release intent was not retained.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable store or corrupt recovery context.
     pub fn recovery_context(
         &mut self,
         lease_id: &str,
@@ -873,18 +652,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(context)
     }
 
-    /// Releases a `recovery_pending` lease whose recovery window has passed
-    /// through the explicit administrator or original-holder safe cleanup
-    /// (plan 12.5, contract 4).
-    ///
-    /// The occupancy is never handed to a new user automatically: only this
-    /// explicit cleanup returns the client node to `available`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown lease, a lease that is not `recovery_pending`, a
-    /// cleanup attempted before the recovery deadline, a corrupt deadline, or
-    /// storage failure.
     pub fn force_release(
         &mut self,
         occupancy_lease_id: &str,
@@ -926,17 +693,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(updated)
     }
 
-    /// Expires idle `occupied` leases whose `idle_expires_at` deadline is at
-    /// or before `cutoff` and that still have no active worker session (plan
-    /// 12.4 idle policy, contract 4).
-    ///
-    /// The active worker-session count is supplied per client node by the
-    /// caller as a skeleton input until the FLOW epic lands the durable task
-    /// ledger; leases with an active count are skipped, never expired.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire_idle(
         &mut self,
         cutoff: &Instant,
@@ -980,12 +736,6 @@ impl<'storage> OccupancyLedger<'storage> {
         Ok(expired)
     }
 
-    /// Returns one durable occupancy lease projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical lease identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot(
         &self,
         occupancy_lease_id: &str,
@@ -994,15 +744,6 @@ impl<'storage> OccupancyLedger<'storage> {
         load_occupancy_lease(self.connection()?, occupancy_lease_id)
     }
 
-    /// Returns the one active lease of a client node, if any.
-    ///
-    /// `None` means the occupancy projection is `available`. More than one
-    /// active row is a corrupt database and fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity, a corrupt active-lease
-    /// set, or storage failure.
     pub fn active_lease_for_node(
         &self,
         client_node_id: &str,
@@ -1047,17 +788,10 @@ impl<'storage> OccupancyLedger<'storage> {
     }
 }
 
-/// Applies the five-condition claim gate against the durable registry and
-/// connect-ledger facts inside the caller's transaction (plan 12.2).
-///
-/// The client node is judged first so an unknown identity reports precisely
-/// instead of masking as a missing grant; the remaining conditions follow the
-/// plan order (grant, no active lease, capacity).
 fn ensure_claim_gate(
     transaction: &Transaction<'_>,
     claim: &OccupancyClaim,
 ) -> Result<(), OccupancyStoreError> {
-    // The client node must exist, be online, unlocked, and accepting.
     let node = transaction
         .query_row(
             "SELECT presence_state, lock_state, accepting_connections,
@@ -1097,10 +831,6 @@ fn ensure_claim_gate(
             "client node does not accept new occupancy",
         ));
     }
-    // Capacity: at least one free worker-session slot. The durable
-    // per-slot reservation ledger belongs to the FLOW epic; until then
-    // `reserved` is zero at claim time, so the check is
-    // `reportedRunning + 1 <= max`.
     let max_slots = from_sql_integer(max_slots, "client worker session capacity")?;
     let running = from_sql_integer(running, "reported running worker sessions")?;
     if running.saturating_add(1) > max_slots {
@@ -1109,7 +839,6 @@ fn ensure_claim_gate(
             "client node has no free worker session slot",
         ));
     }
-    // The holder must hold an active access grant with `use` permission.
     let permissions: Option<String> = transaction
         .query_row(
             "SELECT permissions FROM client_access_grants
@@ -1140,8 +869,6 @@ fn ensure_claim_gate(
             "holder access grant does not include use",
         ));
     }
-    // No active lease may exist. The partial unique index is the durable
-    // backstop if a concurrent claim ever slips past this read.
     let active = transaction
         .query_row(
             "SELECT occupancy_lease_id FROM client_occupancy_leases
@@ -1161,7 +888,6 @@ fn ensure_claim_gate(
     Ok(())
 }
 
-/// Mints the next fencing token inside the caller's transaction.
 fn mint_fencing_token(transaction: &Transaction<'_>) -> Result<u64, OccupancyStoreError> {
     transaction
         .execute(
@@ -1198,8 +924,6 @@ fn mint_fencing_token(transaction: &Transaction<'_>) -> Result<u64, OccupancySto
     Ok(next)
 }
 
-/// Terminal `released` write guarded by the lease's current active state and
-/// fencing token.
 fn release_lease(
     transaction: &Transaction<'_>,
     occupancy_lease_id: &str,
@@ -1425,7 +1149,6 @@ const fn is_crockford_base32(byte: u8) -> bool {
     )
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), OccupancyStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1507,10 +1230,6 @@ fn map_lease_insert_sql(sql: &rusqlite::Error) -> OccupancyStoreError {
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the partial one-active-per-
-            // client index; the fencing-token unique shares the extended code
-            // and is unreachable while the allocator mints inside the same
-            // transaction, so both fail closed as an active lease conflict.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 OccupancyStoreErrorKind::ActiveLeaseConflict,
                 "client node already holds an active occupancy lease",
@@ -1536,7 +1255,6 @@ fn lease_missing_after_write() -> OccupancyStoreError {
     )
 }
 
-/// Loads one lease or fails with the unknown-lease category.
 fn require_occupancy_lease(
     connection: &rusqlite::Connection,
     occupancy_lease_id: &str,
@@ -1678,8 +1396,6 @@ mod tests {
 
     fn temporary_directory(name: &str) -> PathBuf {
         let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        // Wall-clock nanos keep the directory unique even when the operating
-        // system reuses a previous run's process id.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -1748,8 +1464,6 @@ mod tests {
             .expect("first active lease insert");
         assert_eq!(inserted, 1);
 
-        // A second active row on the same client must hit the partial unique
-        // index even though the ledger pre-check was bypassed.
         let second = format!("ocl_{lease_two:026}");
         let conflict = storage
             .connection_mut()
@@ -1775,8 +1489,6 @@ mod tests {
             )
         ));
 
-        // After the active row terminates, the same client accepts a new
-        // active lease: history rows never block future occupancy.
         storage
             .connection_mut()
             .expect("connection")
@@ -1802,7 +1514,6 @@ mod tests {
             )
             .expect("active lease after terminal history");
         assert_eq!(inserted, 1);
-        // The allocator never reissued a token across the whole sequence.
         let ledger = storage.client_occupancy_ledger().expect("ledger");
         assert_eq!(
             ledger.current_fencing_token().expect("current"),
@@ -1836,8 +1547,6 @@ mod tests {
                 )
                 .expect("grant");
         }
-        // Flip the independent accepting-connections switch off through the
-        // durable projection (no public registry setter exists for it).
         storage
             .connection_mut()
             .expect("connection")
@@ -1890,8 +1599,6 @@ mod tests {
                 )
                 .expect("grant");
         }
-        // Flip the independent machine-level lock switch while the presence
-        // stays `online` (no public registry setter exists for it).
         storage
             .connection_mut()
             .expect("connection")

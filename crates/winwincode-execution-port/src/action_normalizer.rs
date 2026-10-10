@@ -1,21 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Pure action-intent validation and tool-request normalization.
-//!
-//! This module deliberately has no gate, tool runner, filesystem access, process
-//! spawning, or network access.  Callers pass the request which is about to be
-//! executed and receive stable data that a gate or trace adapter can consume.
-
 use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Version of the frozen JSON shape emitted by this module.
 pub const ACTION_NORMALIZATION_SCHEMA_VERSION: &str = "winwincode.action-normalization.v1";
 
-/// Object named by an executor intent or inferred from a real tool request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionObject {
@@ -42,7 +32,6 @@ impl ActionObject {
     }
 }
 
-/// Side effect named by an intent or inferred from a real tool request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionOperation {
@@ -65,7 +54,6 @@ impl ActionOperation {
     }
 }
 
-/// Executor purpose. It remains self-reported and never changes normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionPurpose {
@@ -77,7 +65,6 @@ pub enum ActionPurpose {
     Migrate,
 }
 
-/// Maximum radius declared by the executor or inferred from actual targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionScope {
@@ -100,7 +87,6 @@ impl ActionScope {
     }
 }
 
-/// Executor risk estimate. The normalizer computes its own minimum level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionRisk {
@@ -121,7 +107,6 @@ impl ActionRisk {
     }
 }
 
-/// Structured executor statement submitted before a critical side effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActionIntent {
@@ -138,7 +123,6 @@ pub struct ActionIntent {
     pub executor_risk: ActionRisk,
 }
 
-/// File operation presented to the capability gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOperation {
@@ -149,7 +133,6 @@ pub enum FileOperation {
     Execute,
 }
 
-/// Test ownership supplied by the trusted test-asset inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestOwner {
@@ -159,7 +142,6 @@ pub enum TestOwner {
     ProtectedAdversarial,
 }
 
-/// Assertion effect supplied by a deterministic AST or diff adapter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssertionEffect {
@@ -170,7 +152,6 @@ pub enum AssertionEffect {
     Unknown,
 }
 
-/// Dependency effect supplied by a package-manifest or lockfile adapter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyEffect {
@@ -181,7 +162,6 @@ pub enum DependencyEffect {
     Removed,
 }
 
-/// Trusted static facts computed before the file operation reaches this module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileAnalysis {
@@ -197,7 +177,6 @@ pub struct FileAnalysis {
     pub migration_change: bool,
 }
 
-/// One real file request. Paths are workspace-relative unless absolute paths are explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileRequest {
@@ -207,7 +186,6 @@ pub struct FileRequest {
     pub analysis: FileAnalysis,
 }
 
-/// Git operation presented to the capability gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitOperation {
@@ -227,7 +205,6 @@ pub enum GitOperation {
     Clone,
 }
 
-/// One real Git request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitRequest {
@@ -237,7 +214,6 @@ pub struct GitRequest {
     pub refs: Vec<String>,
 }
 
-/// One real argv-based shell request. No shell string is reparsed or executed here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShellRequest {
@@ -247,7 +223,6 @@ pub struct ShellRequest {
     pub working_directory: String,
 }
 
-/// One real HTTP network request. Query data is never copied into normalized targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkRequest {
@@ -255,7 +230,6 @@ pub struct NetworkRequest {
     pub url: String,
 }
 
-/// One real MCP capability request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpRequest {
@@ -265,7 +239,6 @@ pub struct McpRequest {
     pub arguments: Value,
 }
 
-/// Supported gateway request families.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolRequest {
@@ -278,7 +251,6 @@ pub enum ToolRequest {
     ProcessInput(crate::process_input::ProcessInputRequest),
 }
 
-/// Runtime category of one typed tool request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExecutionKind {
@@ -293,7 +265,6 @@ pub enum ToolExecutionKind {
 }
 
 impl ToolRequest {
-    /// Returns the execution category without inspecting model prose.
     #[must_use]
     pub fn execution_kind(&self) -> ToolExecutionKind {
         match self {
@@ -320,7 +291,6 @@ impl ToolRequest {
     }
 }
 
-/// Gateway source which produced the observed action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionSource {
@@ -331,7 +301,6 @@ pub enum ActionSource {
     Mcp,
 }
 
-/// Stable evidence used to derive classification and risk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFact {
@@ -362,7 +331,6 @@ pub enum ObservedFact {
     McpCapability,
 }
 
-/// Deterministically classified action derived from the actual request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObservedAction {
@@ -375,7 +343,6 @@ pub struct ObservedAction {
     pub minimum_risk: ActionRisk,
 }
 
-/// Exact field whose observed value does not fit the executor intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentMismatchKind {
@@ -386,7 +353,6 @@ pub enum IntentMismatchKind {
     Risk,
 }
 
-/// One stable, explainable intent mismatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IntentMismatch {
@@ -396,7 +362,6 @@ pub struct IntentMismatch {
     pub explanation: String,
 }
 
-/// Ordered comparison between self-reported intent and the normalized request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IntentComparison {
@@ -404,7 +369,6 @@ pub struct IntentComparison {
     pub mismatches: Vec<IntentMismatch>,
 }
 
-/// Complete pure output ready for a gate or trace adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActionNormalization {
@@ -414,7 +378,6 @@ pub struct ActionNormalization {
     pub comparison: IntentComparison,
 }
 
-/// Deterministic validation failure. It never includes secret-bearing request arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActionNormalizationError {
@@ -423,7 +386,6 @@ pub struct ActionNormalizationError {
     pub message: String,
 }
 
-/// Stable validation error category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionNormalizationErrorCode {
@@ -444,12 +406,6 @@ impl fmt::Display for ActionNormalizationError {
 
 impl std::error::Error for ActionNormalizationError {}
 
-/// Validates and normalizes one pending tool request without performing it.
-///
-/// # Errors
-///
-/// Returns a stable validation error when the intent or typed tool request is
-/// empty, malformed, duplicated, or escapes its supported lexical boundary.
 pub fn normalize_action(
     intent: &ActionIntent,
     request: &ToolRequest,
@@ -465,16 +421,10 @@ pub fn normalize_action(
     })
 }
 
-/// Derives the trusted observed action from the exact typed tool request.
-///
-/// # Errors
-///
-/// Rejects malformed request fields before any gate or tool side effect.
 pub fn observe_action(request: &ToolRequest) -> Result<ObservedAction, ActionNormalizationError> {
     normalize_request(request)
 }
 
-/// Compares a validated intent with one observed action in a fixed field order.
 #[must_use]
 pub fn compare_intent(intent: &ActionIntent, observed: &ObservedAction) -> IntentComparison {
     let mut mismatches = Vec::new();
@@ -853,9 +803,6 @@ fn normalize_mcp(request: &McpRequest) -> Result<ObservedAction, ActionNormaliza
     let tool = request.tool.to_ascii_lowercase();
     let operation = classify_named_operation(&tool);
     let facts = vec![ObservedFact::McpCapability];
-    // Arguments are intentionally not copied into targets or validation errors: the
-    // raw request remains available to the gateway, while normalized trace data does
-    // not accidentally turn an MCP credential argument into a policy identifier.
     Ok(ObservedAction {
         source: ActionSource::Mcp,
         objects: vec![ActionObject::ExternalResource],
@@ -867,15 +814,6 @@ fn normalize_mcp(request: &McpRequest) -> Result<ObservedAction, ActionNormaliza
     })
 }
 
-/// Returns the secret-free canonical capability identifier for one MCP target.
-///
-/// The identifier contains only the validated MCP server and tool names. MCP
-/// arguments, connection configuration, and credentials are never included.
-///
-/// # Errors
-///
-/// Returns an invalid-MCP-identifier error when either name is blank or uses
-/// characters outside the portable MCP identifier alphabet.
 pub fn canonical_mcp_capability_id(
     server: &str,
     tool: &str,

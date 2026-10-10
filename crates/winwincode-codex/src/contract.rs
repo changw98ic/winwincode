@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Canonical Worker-facing contract for the embedded Codex adapter.
-
 use std::{fmt, future::Future, path::Path, sync::Arc};
 
 use sha2::{Digest as _, Sha256};
@@ -32,10 +28,8 @@ use crate::diagnostic_artifact_outbox::{
 };
 use crate::failure_diagnostic::CodexFailureDiagnostic;
 
-/// Local first-start check shared with a Provider thread; it carries no secrets.
 pub type LocalModelStartGuard = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Stable create-or-load identity for one Codex thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CodexRunKey {
     pub job_id: winwincode_domain::ExecutionJobId,
@@ -45,7 +39,6 @@ pub struct CodexRunKey {
 }
 
 impl CodexRunKey {
-    /// Builds the only run identity from an already validated dispatch.
     #[must_use]
     pub fn from_dispatch(dispatch: &JobDispatchMessage) -> Self {
         Self {
@@ -56,12 +49,6 @@ impl CodexRunKey {
         }
     }
 
-    /// Derives the sole stable Codex thread identity for this exact dispatch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an opaque contract error when the canonical identity facts
-    /// cannot be encoded.
     pub fn canonical_thread_id(&self) -> Result<CodexThreadId, CodexRunKeyError> {
         canonical_codex_thread_id(
             &self.job_id,
@@ -72,12 +59,6 @@ impl CodexRunKey {
         .map_err(|_| CodexRunKeyError)
     }
 
-    /// Returns the sole canonical digest used to persist and compare this run.
-    ///
-    /// # Errors
-    ///
-    /// Returns an opaque contract error when the run identity cannot be
-    /// canonically encoded.
     pub fn canonical_digest(&self) -> Result<Sha256Digest, CodexRunKeyError> {
         canonical_execution_run_digest(
             &self.job_id,
@@ -89,7 +70,6 @@ impl CodexRunKey {
     }
 }
 
-/// Secret-safe failure to derive a canonical Codex run identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodexRunKeyError;
 
@@ -132,40 +112,31 @@ mod tests {
     }
 }
 
-/// Start data passed to the sole embedded Codex adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct CodexThreadStart<'job> {
     pub snapshot_id: Option<&'job winwincode_domain::SnapshotId>,
     pub run_key: &'job CodexRunKey,
-    /// Stable Worker identity used to derive the Session's Agent identity.
     pub worker_id: &'job WorkerId,
     pub job: &'job ExecutionJob,
     pub lease: &'job ExecutionLeaseStamp,
     pub worker_session_id: &'job WorkerSessionId,
-    /// Exact detached checkout sealed to this Job before Kernel session open.
     pub workspace: &'job Path,
-    /// Exact source tree sealed by the Worker, never a branch or commit expression.
     pub workspace_revision: &'job WorkspaceRevision,
 }
 
-/// Exact embedded Session facts returned after create-or-resume succeeds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexThreadSession {
     pub thread_id: CodexThreadId,
     pub agent_config: AgentSessionConfigSnapshot,
 }
 
-/// Secret-safe terminal result emitted by Codex Core.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexTurnCompletion {
     pub summary: SecretSafeTraceSummary,
     pub artifacts: Vec<ArtifactReference>,
-    /// Observed accounting may carry unknown totals and a known lower bound.
-    /// `None` means the adapter has no retained accounting observation.
     pub usage: Option<ExecutionOutcomeUsage>,
 }
 
-/// Follow-up phase chosen from one accepted or repair-required `ChangeBatch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedLoopPhase {
@@ -183,9 +154,6 @@ impl DelegatedLoopPhase {
     }
 }
 
-/// One sealed, bounded transition from a settled `ChangeBatch` to an exact
-/// embedded-Core turn. The immutable budget and cumulative Worker counters
-/// are persisted together with the turn intent before Core can be called.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegatedLoopTransition {
@@ -197,7 +165,6 @@ pub struct DelegatedLoopTransition {
     pub observed_at: Instant,
 }
 
-/// Durable reconciliation result for one exact delegated follow-up turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DelegatedLoopTransitionOutcome {
     Submitted {
@@ -222,8 +189,6 @@ pub struct DelegatedObserverPreflight {
     pub observed_at: Instant,
 }
 
-/// Internal durable accounting for one terminal Observer call. A missing usage
-/// means the Provider terminal charge was not proven and must fail closed.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegatedObserverSettlement {
@@ -252,8 +217,6 @@ pub struct DelegatedLoopStopFact {
     pub stopped_at: Instant,
 }
 
-/// Derives the sole follow-up turn identity. The inputs are ordered exactly as
-/// run key, phase, source batch id, and repair round.
 #[must_use]
 pub fn delegated_loop_turn_id(transition: &DelegatedLoopTransition) -> String {
     let mut hasher = Sha256::new();
@@ -271,7 +234,6 @@ pub fn delegated_loop_turn_id(transition: &DelegatedLoopTransition) -> String {
     format!("trn_{}", &digest[..26].to_ascii_uppercase())
 }
 
-/// One result from polling the embedded Codex adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexPoll {
     Pending,
@@ -280,10 +242,6 @@ pub enum CodexPoll {
     ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
     RepairRequired(Box<RepairEnvelope>),
     Completed(CodexTurnCompletion),
-    /// A terminal turn whose command/test diagnostics were `ACKed` separately
-    /// from candidate artifacts. Keeping these references outside
-    /// `CodexTurnCompletion` prevents Worker candidate gating from treating
-    /// diagnostics as a candidate upload.
     CompletedWithDiagnostics(CodexTurnCompletion, Vec<ArtifactReference>),
     Inconclusive(SecretSafeTraceSummary),
     Failed(SecretSafeTraceSummary),
@@ -294,35 +252,18 @@ pub enum CodexPoll {
     InfrastructureFailedWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
 }
 
-/// One canonical `ExecutionPort` frame retained before its first delivery attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DurableExecutionDelivery {
-    /// Stable outbox identity. Exact retries retain this value and the original frame bytes.
     pub delivery_id: String,
-    /// Original generated message decoded from the durable canonical frame.
     pub message: ExecutionPortMessage,
 }
 
-/// Optional local transport for an action request emitted while Core is
-/// awaiting the signed Control Plane receipt.
-///
-/// Separated Worker transports leave this unset and deliver the request and
-/// receipt through the ordinary durable `ExecutionPort` path.  The local
-/// launcher installs the exact same typed Control Plane core here so a
-/// synchronous in-process composition cannot deadlock its Worker poll while
-/// waiting for the response that the poll itself must flush.
 pub type ActionRequestTransport =
     Arc<dyn Fn(ExecutionPortMessage) -> Result<Vec<ExecutionPortMessage>, ()> + Send + Sync>;
 
-/// Sole embedded Codex lifecycle seam used by the Execution Worker.
 pub trait CodexCoreAdapter {
     type Error: Send + 'static;
 
-    /// Checks a first local model start against the live parent session. Production
-    /// additionally recognises child threads registered in the same Core run.
-    ///
-    /// # Errors
-    /// Returns an authority-store failure, rather than authorising an unknown child.
     fn model_start_session_allowed(
         &mut self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -331,13 +272,6 @@ pub trait CodexCoreAdapter {
         Ok(open.session_identity == *parent)
     }
 
-    /// Supplies the existing shared Core authority gate for revalidation inside
-    /// the Provider thread. Lightweight adapters use the Worker's lease deadline.
-    /// Every role must enqueue its exact original request in the shared execution
-    /// outbox before dispatch. Renewal never rewrites that request proof.
-    ///
-    /// # Errors
-    /// Rejects an invalid trusted clock or unavailable authority source.
     fn local_model_start_guard(
         &mut self,
         _open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -347,11 +281,6 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
-    /// Reads complete, durable model usage for a terminal result. Missing or
-    /// unfinished measurements remain unknown, including on failure.
-    ///
-    /// # Errors
-    /// Rejects unknown thread authority or unavailable accounting storage.
     fn retained_outcome_usage(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -359,11 +288,6 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
-    /// Restores the exact persisted Worker session before opening its checkout.
-    /// A lease renewal changes its deadline, not its existing session identity.
-    ///
-    /// # Errors
-    /// Rejects a stored run whose Job, snapshot, lease, or thread differs.
     fn recovered_worker_session_id(
         &mut self,
         _dispatch: &JobDispatchMessage,
@@ -371,7 +295,6 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
-    /// Returns the first retained safe classification for this exact run.
     fn retained_failure_diagnostic(
         &self,
         _thread_id: &CodexThreadId,
@@ -379,7 +302,6 @@ pub trait CodexCoreAdapter {
         None
     }
 
-    /// Classifies an adapter error before a durable thread exists.
     fn error_diagnostic(&self, _error: &Self::Error) -> Option<CodexFailureDiagnostic> {
         None
     }
@@ -389,24 +311,10 @@ pub trait CodexCoreAdapter {
         start: CodexThreadStart<'_>,
     ) -> impl Future<Output = Result<CodexThreadSession, Self::Error>> + Send;
 
-    /// Advances adapter-owned trusted time immediately before a turn is
-    /// submitted.  Production adapters use this hook to make the lease and
-    /// action gates observe the Worker dispatch timestamp before any Kernel
-    /// model request can reach the Provider.  Test and lightweight adapters
-    /// may retain the no-op default.
-    ///
-    /// # Errors
-    ///
-    /// The default implementation always succeeds.
     fn observe_now(&mut self, _now: &Instant) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    /// Extends an existing live Core run without restarting its turn.
-    /// Unsupported adapters fail closed by returning false.
-    ///
-    /// # Errors
-    /// Reports invalid authority or durable update failures.
     fn renew_lease(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -416,8 +324,6 @@ pub trait CodexCoreAdapter {
         Ok(false)
     }
 
-    /// Installs the local-only action request transport.  The default keeps
-    /// remote/test adapters on the ordinary typed response path.
     fn install_action_request_transport(&mut self, _transport: ActionRequestTransport) {}
 
     fn submit_turn(
@@ -426,8 +332,6 @@ pub trait CodexCoreAdapter {
         goal: &str,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Persists and reconciles one bounded delegated follow-up. Lightweight
-    /// adapters fail closed without scheduling a model call.
     fn reconcile_delegated_transition(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -441,11 +345,6 @@ pub trait CodexCoreAdapter {
         }
     }
 
-    /// Reserves one durable Observer call before its Provider open is sent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a conflicting thread, budget, counter, or terminal authority.
     fn preflight_delegated_observer(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -457,12 +356,6 @@ pub trait CodexCoreAdapter {
         })
     }
 
-    /// Retains the terminal Observer charge independently from the public
-    /// observation receipt. Exact terminal replay is idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects conflicting run, batch, or metric authority.
     fn retain_delegated_observer_settlement(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -471,11 +364,6 @@ pub trait CodexCoreAdapter {
         Ok(())
     }
 
-    /// Retains the exact terminal stop fact for a delegated loop.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a stop fact which conflicts with durable run authority.
     fn retain_delegated_loop_stop(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -484,14 +372,6 @@ pub trait CodexCoreAdapter {
         Ok(fact.clone())
     }
 
-    /// Returns the exact durable delegated-loop stop, when one already owns
-    /// the thread terminal path. Production Workers use this before polling
-    /// Core so a crash between retaining the stop and retaining the Job
-    /// outcome cannot schedule another turn.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or conflicting thread authority.
     fn delegated_loop_stop(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -505,12 +385,6 @@ pub trait CodexCoreAdapter {
         now: &Instant,
     ) -> impl Future<Output = Result<CodexPoll, Self::Error>> + Send;
 
-    /// Releases an unaccepted poll delivery for exact replay. Durable operation
-    /// identities and committed effects remain unchanged; this must never reset
-    /// action receipts or terminal ACKs.
-    ///
-    /// # Errors
-    /// Rejects a thread or operation that does not match the retained delivery.
     fn release_poll_delivery(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -531,47 +405,27 @@ pub trait CodexCoreAdapter {
         received_at: &Instant,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Resolves one previously retained approval request through the adapter's
-    /// exact durable operation mapping.
     fn accept_approval_decision(
         &mut self,
         decision: &ApprovalDecisionMessage,
         received_at: &Instant,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Resolves one previously retained interactive-input request through the
-    /// adapter's exact durable operation mapping.
     fn accept_input_response(
         &mut self,
         response: &InputResponseMessage,
         received_at: &Instant,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Durably retains one outbound generated message before transport send.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the canonical frame cannot be retained.
     fn retain_execution_delivery(
         &mut self,
         message: &ExecutionPortMessage,
     ) -> Result<DurableExecutionDelivery, Self::Error>;
 
-    /// Returns retained frames whose next delivery attempt is pending, in durable order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the durable delivery ledger cannot be read.
     fn pending_execution_deliveries(
         &mut self,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error>;
 
-    /// Reads one bounded page in durable order, after the previous delivery.
-    /// A deleted cursor restarts at the first remaining frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error if the durable ledger cannot be read.
     fn pending_execution_delivery_batch(
         &mut self,
         after_delivery: Option<&str>,
@@ -584,28 +438,10 @@ pub trait CodexCoreAdapter {
         Ok(deliveries.into_iter().skip(start).take(limit).collect())
     }
 
-    /// Returns the highest numeric Worker message id retained in durable
-    /// storage, including transport-only frames whose send attempt already
-    /// succeeded. A replacement Worker uses this cursor before allocating a
-    /// new transport identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the durable delivery ledger cannot be
-    /// read.
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
         Ok(0)
     }
 
-    /// Returns the highest heartbeat sequence retained in the Worker's
-    /// canonical durable store. A replacement process with the same Worker
-    /// instance continues after this cursor rather than changing an already
-    /// accepted Registry request.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the durable transport cursor cannot be
-    /// read.
     fn recovered_heartbeat_sequence(
         &mut self,
         _worker_id: &WorkerId,
@@ -614,25 +450,12 @@ pub trait CodexCoreAdapter {
         Ok(0)
     }
 
-    /// Records a successful transport attempt without discarding acknowledgement-required frames.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the delivery identity is unknown or cannot be updated.
     fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error>;
 
-    /// Requeues an explicitly emitted control response, including transport-only replays.
-    ///
-    /// # Errors
-    /// Returns a durable-store failure or a previously rejected identity.
     fn requeue_execution_delivery(&mut self, _delivery_id: &str) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    /// Keeps a bounded auxiliary wire projection after a definite message refusal.
-    ///
-    /// # Errors
-    /// Returns a durable-store failure; required evidence cannot be degraded.
     fn degrade_auxiliary_execution_delivery(
         &mut self,
         _delivery_id: &str,
@@ -640,10 +463,6 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
-    /// Archives a permanently refused frame instead of leaving it pending forever.
-    ///
-    /// # Errors
-    /// Returns a durable-store failure. False means the adapter has no durable rejection support.
     fn record_execution_delivery_rejected(
         &mut self,
         _delivery_id: &str,
@@ -651,18 +470,10 @@ pub trait CodexCoreAdapter {
         Ok(false)
     }
 
-    /// Returns whether a permanent refusal has already ended this delivery.
-    ///
-    /// # Errors
-    /// Returns a durable-store read failure.
     fn execution_delivery_is_rejected(&mut self, _delivery_id: &str) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
-    /// Restores a failure to deliver an immutable terminal after process restart.
-    ///
-    /// # Errors
-    /// Returns a durable-store read failure.
     fn has_rejected_terminal_delivery(
         &mut self,
         _worker_id: &WorkerId,
@@ -671,10 +482,6 @@ pub trait CodexCoreAdapter {
         Ok(false)
     }
 
-    /// Detects rejected evidence for this exact job attempt and fencing authority.
-    ///
-    /// # Errors
-    /// Returns a durable-store read failure.
     fn has_rejected_job_delivery(
         &mut self,
         _lease: &ExecutionLeaseStamp,
@@ -682,10 +489,6 @@ pub trait CodexCoreAdapter {
         Ok(false)
     }
 
-    /// Retains a task failure and stops side effects after required delivery rejection.
-    ///
-    /// # Errors
-    /// Returns a failure to persist or stop the affected task.
     fn fail_required_execution_delivery(
         &mut self,
         thread_id: &CodexThreadId,
@@ -694,82 +497,41 @@ pub trait CodexCoreAdapter {
         self.interrupt(thread_id, at)
     }
 
-    /// Applies a canonical response or acknowledgement after its domain validation succeeds.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the acknowledgement conflicts with the retained frame.
     fn accept_execution_delivery_ack(
         &mut self,
         acknowledgement: &ExecutionPortMessage,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically retains one exact candidate Artifact and all original upload frames.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed bytes, Job, role, lease, or session authority.
     fn retain_candidate_artifact(
         &mut self,
         upload: &CandidateArtifactUpload,
     ) -> Result<RetainedCandidateArtifact, Self::Error>;
 
-    /// Applies one typed Artifact acknowledgement to the exact durable upload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale, foreign, rejected, or non-contiguous acknowledgements.
     fn accept_candidate_artifact_ack(
         &mut self,
         acknowledgement: &ArtifactAckMessage,
     ) -> Result<CandidateArtifactAckOutcome, Self::Error>;
 
-    /// Applies an Artifact acknowledgement to the canonical upload ledgers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign, stale, or malformed acknowledgement.
     fn accept_artifact_ack(
         &mut self,
         acknowledgement: &ArtifactAckMessage,
     ) -> Result<ArtifactAckOutcome, Self::Error>;
 
-    /// Retains one bounded, already-redacted command/test output stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects output that is not bound to the active Job authority.
     fn retain_diagnostic_artifact(
         &mut self,
         upload: &DiagnosticArtifactUpload,
     ) -> Result<RetainedDiagnosticArtifact, Self::Error>;
 
-    /// Returns final `ACK`ed diagnostic references for the exact run authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter storage or authority error.
     fn accepted_diagnostic_artifacts(
         &mut self,
         authority: &DiagnosticArtifactAuthority,
     ) -> Result<Vec<ArtifactReference>, Self::Error>;
 
-    /// Recovers the final accepted candidate reference after restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an authority which differs from the original upload.
     fn accepted_candidate_artifact(
         &mut self,
         authority: &CandidateArtifactAuthority,
     ) -> Result<Option<ArtifactReference>, Self::Error>;
 
-    /// Retains the canonical accepted-final freeze fact after the exact
-    /// candidate Artifact acknowledgement.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a freeze fact which conflicts with durable candidate authority.
     fn retain_final_candidate_freeze(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -778,11 +540,6 @@ pub trait CodexCoreAdapter {
         Ok(fact.clone())
     }
 
-    /// Returns the canonical accepted-final freeze after a process restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or conflicting thread authority.
     fn final_candidate_freeze(
         &mut self,
         _thread_id: &CodexThreadId,
@@ -790,17 +547,6 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
-    /// Commits a cancellation intent before candidate frames are removed.
-    ///
-    /// Adapters with durable candidate storage should make this idempotent so
-    /// a retry after a process stop can suppress replay before cleanup.
-    /// Lightweight adapters may use the default no-op because the Worker also
-    /// gates candidate delivery on its in-memory cancelling state.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the cancellation intent cannot be
-    /// committed.
     fn begin_candidate_artifact_cancel(
         &mut self,
         _authority: &CandidateArtifactAuthority,
@@ -808,15 +554,6 @@ pub trait CodexCoreAdapter {
         Ok(())
     }
 
-    /// Checks the durable cancellation marker before sending a candidate frame.
-    ///
-    /// A missing candidate record is represented as `false` by durable
-    /// adapters, preventing stale frames from becoming a new upload.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the durable candidate record cannot be
-    /// inspected.
     fn candidate_artifact_delivery_allowed(
         &mut self,
         _message: &ExecutionPortMessage,
@@ -824,44 +561,22 @@ pub trait CodexCoreAdapter {
         Ok(true)
     }
 
-    /// Removes an unaccepted candidate upload and every retained upload frame.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed authority or cancellation after final acceptance.
     fn cancel_candidate_artifact(
         &mut self,
         authority: &CandidateArtifactAuthority,
     ) -> Result<(), Self::Error>;
 
-    /// Requeues original runtime frames strictly after the request cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the replay cursor is invalid or the ledger cannot be read.
     fn replay_execution_deliveries(
         &mut self,
         request: &RuntimeReplayRequestMessage,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error>;
 
-    /// Closes Core, retains its final execution facts, then atomically finalizes
-    /// the run and its first canonical outcome with the complete runtime cursor.
-    /// Exact retries return the originally retained frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when finalization or durable retention cannot be committed.
     fn retain_job_outcome(
         &mut self,
         thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,
     ) -> impl Future<Output = Result<DurableExecutionDelivery, Self::Error>> + Send;
 
-    /// Drains newly produced adapter messages for durable retention by the worker.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when pending adapter messages cannot be collected.
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error>;
 
     fn interrupt(
@@ -878,8 +593,6 @@ pub trait CodexCoreAdapter {
     fn shutdown(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// Canonical acknowledgement outcome shared by candidate and diagnostic
-/// Artifact ledgers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArtifactAckOutcome {
     Pending,
@@ -887,30 +600,21 @@ pub enum ArtifactAckOutcome {
     Accepted(ArtifactReference),
 }
 
-/// Scope of an outbound failure, used to stop retries of worker-wide failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionPortFailureKind {
-    /// The authenticated Worker queue must drain before new ingress.
     Backpressure,
-    /// The connection or transport is temporarily unavailable.
     Unavailable,
-    /// Only this frame is permanently rejected; other frames may proceed.
     MessageRejected,
-    /// The port cannot continue after authentication or protocol failure.
     Terminal,
 }
 
-/// Outbound canonical `ExecutionPort` used identically by local and remote IO.
 pub trait WorkerExecutionPort {
     type Error;
 
-    /// A response may carry controls as well as the outbound acceptance receipt.
-    /// Drivers must consume those controls before starting another outbound batch.
     fn has_pending_controls(&self) -> bool {
         false
     }
 
-    /// Existing ports default to a connection failure, which yields the batch.
     fn failure_kind(_error: &Self::Error) -> ExecutionPortFailureKind {
         ExecutionPortFailureKind::Unavailable
     }
@@ -921,11 +625,6 @@ pub trait WorkerExecutionPort {
     ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
-/// Builds a secret-safe runtime summary through the canonical trace validator.
-///
-/// # Errors
-///
-/// Rejects empty or credential-shaped summaries.
 pub fn secret_safe_runtime_summary(
     value: impl Into<String>,
 ) -> Result<SecretSafeTraceSummary, RuntimeTraceInputError> {

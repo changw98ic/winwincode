@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-// One contract for policy producers and the Device process boundary.
 export const deviceAgentEnvironmentKeys = Object.freeze([
   'PYTHONDONTWRITEBYTECODE',
   'WWC_WORKER_APPROVAL_OWNER',
@@ -34,13 +31,10 @@ export function deviceAgentEnvironment(environment, { strict = false } = {}) {
 
 export function assertDeviceAgentEnvironmentForwarded(expected, observed) {
   for (const key of deviceAgentEnvironmentKeys) {
-    // Values can contain private paths or serialized policy. Report the field only.
     if (expected[key] !== observed[key]) fail('DEVICE_AGENT_POLICY_NOT_FORWARDED', key)
   }
 }
 
-// A separate immutable Device policy is required only when the native Fusion
-// comparison differs from the profile's configured model-execution policy.
 export function deviceBenchmarkProfileKey(profile) {
   return `${profile.configurationId}${profile.executionFusion === true && profile.fusion !== true ? '--native-panel' : ''}`
 }

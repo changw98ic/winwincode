@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_lines)]
 
 use std::fs;
@@ -556,9 +554,6 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
     );
     assert_eq!(bound_binding.attempt, 1);
 
-    // Cancellation is addressed by the durable WorkRun identity. The
-    // acknowledgement is intentionally non-terminal: Delivery remains
-    // byte-for-byte unchanged.
     let cancel_intent = request_cancel(&bound, bound.revision(), &identity().work_run_id)
         .expect("accepted WorkRun can be cancelled");
     let after_cancel_ack = acknowledge_cancel(

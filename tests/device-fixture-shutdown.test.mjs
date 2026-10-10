@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'

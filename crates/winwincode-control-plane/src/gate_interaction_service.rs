@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable routing from sealed Gate decisions to Approval and Attention facts.
-//!
-//! This service persists business facts only. The Action Gateway remains the
-//! only action execution point, [`InteractionRouter`] remains the authority for
-//! human-response semantics, and UI/Inbox state is produced by downstream
-//! projections.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -32,13 +23,11 @@ use crate::{
     ProductSessionService, ProductSessionServiceError,
 };
 
-/// Version of the durable Gate interaction state and event payload.
 pub const GATE_INTERACTION_SCHEMA_VERSION: u8 = 1;
 const GATE_INTERACTION_RECEIPT_TOPIC: &str = "gate-interaction.receipt.internal.v1";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_BOUNDED_TEXT: usize = 2_000;
 
-/// Authenticated owner sealed into a pending Approval or Attention route.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateInteractionActor {
@@ -47,7 +36,6 @@ pub enum GateInteractionActor {
     System(SystemActorId),
 }
 
-/// Exact identity of the user-facing business fact.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateInteractionSubject {
@@ -55,7 +43,6 @@ pub enum GateInteractionSubject {
     Attention(AttentionItemId),
 }
 
-/// Non-executing Gate/Observer decisions that require a human route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutableGateDecisionKind {
@@ -66,7 +53,6 @@ pub enum RoutableGateDecisionKind {
     Replan,
 }
 
-/// Secret-safe Gate decision fact. Free-form policy text is retained only by digest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoutableGateDecision {
@@ -75,11 +61,6 @@ pub struct RoutableGateDecision {
 }
 
 impl RoutableGateDecision {
-    /// Converts one Action Gateway stop decision into its safe routing fact.
-    ///
-    /// # Errors
-    ///
-    /// Allowing decisions do not create Approval or Attention business state.
     pub fn from_gate(decision: &GateDecision) -> Result<Self, GateInteractionServiceError> {
         let (kind, reason) = match decision {
             GateDecision::RequestPlanDelta { reason } => {
@@ -104,11 +85,6 @@ impl RoutableGateDecision {
         })
     }
 
-    /// Converts one durable Observer projection into its safe routing fact.
-    ///
-    /// # Errors
-    ///
-    /// WATCH is observational and does not create a human interaction.
     pub fn from_observer(
         projection: &ObserverDecisionProjection,
     ) -> Result<Self, GateInteractionServiceError> {
@@ -140,7 +116,6 @@ impl RoutableGateDecision {
     }
 }
 
-/// Action and envelope facts which the Action Gateway seals around an Observer decision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateActionSeal {
@@ -151,7 +126,6 @@ pub struct GateActionSeal {
     pub candidate: Option<GateCandidateIdentity>,
 }
 
-/// Optional candidate identity sealed with an action decision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateCandidateIdentity {
@@ -160,7 +134,6 @@ pub struct GateCandidateIdentity {
     pub candidate_revision: u64,
 }
 
-/// Exact action and envelope fact produced by the Gate/Observer or embedded Core path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateDecisionFact {
@@ -174,8 +147,6 @@ pub struct GateDecisionFact {
 }
 
 impl GateDecisionFact {
-    /// Seals the embedded Core's approval envelope after ingress authenticated its Worker.
-    /// This requests a human decision; it does not grant execution permission.
     pub(crate) fn from_core_approval(
         request: &winwincode_execution_port::generated::ApprovalRequestMessage,
     ) -> Result<Self, GateInteractionServiceError> {
@@ -190,7 +161,6 @@ impl GateDecisionFact {
             },
             action_id: format!("core-approval:{}", request.approval_id.0),
             action_digest: sha256(&action),
-            // This digest binds the canonical winwincode/v1 approval.request envelope.
             envelope_version: 1,
             envelope_digest: sha256(&envelope),
             decision_revision: 1,
@@ -199,13 +169,11 @@ impl GateDecisionFact {
     }
 }
 
-/// All execution facts that must remain exact while a human route is pending.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateInteractionAuthority {
     pub execution_scope: ExecutionQueueScope,
     pub worker_pool_id: WorkerPoolId,
-    /// None names a Delivery-owned role session; Some seals a Chat catalog revision.
     #[serde(deserialize_with = "Option::deserialize")]
     pub product_session_revision: Option<u64>,
     pub work_contract_id: Option<winwincode_domain::WorkContractId>,
@@ -221,12 +189,6 @@ pub struct GateInteractionAuthority {
 }
 
 impl GateInteractionAuthority {
-    /// Joins one durable Observer projection to the Action Gateway seal which
-    /// identified the stopped action.
-    ///
-    /// # Errors
-    ///
-    /// Rejects WATCH projections and internally inconsistent Observer sources.
     pub fn from_observer(
         projection: &ObserverDecisionProjection,
         action: GateActionSeal,
@@ -276,7 +238,6 @@ impl GateInteractionAuthority {
     }
 }
 
-/// Common durable command facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionCommandContext {
     pub receipt_identity: ReceiptIdentity,
@@ -284,7 +245,6 @@ pub struct GateInteractionCommandContext {
     pub occurred_at: Instant,
 }
 
-/// Registers one sealed Gate decision as Approval or Attention.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -292,11 +252,9 @@ pub struct RegisterGateInteractionCommand {
     pub authority: GateInteractionAuthority,
     pub authorized_actor: GateInteractionActor,
     pub expires_at: Instant,
-    /// Empty for Approval; the only accepted resolutions for Attention.
     pub attention_decisions: Vec<String>,
 }
 
-/// Typed human decision accepted by the Gate interaction route.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum GateHumanDecision {
@@ -312,7 +270,6 @@ pub enum GateHumanDecision {
     },
 }
 
-/// Responds to one exact pending route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RespondGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -323,7 +280,6 @@ pub struct RespondGateInteractionCommand {
     pub responded_at: Instant,
 }
 
-/// Expires one exact unresolved route without authorizing an action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExpireGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -332,7 +288,6 @@ pub struct ExpireGateInteractionCommand {
     pub expired_at: Instant,
 }
 
-/// Durable lifecycle state exposed to business projections.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateInteractionState {
@@ -343,7 +298,6 @@ pub enum GateInteractionState {
     Expired,
 }
 
-/// Secret-safe durable business fact. It carries no UI layout or Inbox state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateInteractionRecord {
@@ -356,15 +310,12 @@ pub struct GateInteractionRecord {
     pub current_revision: u64,
 }
 
-/// Replay-safe mutation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionMutationReceipt {
     pub record: GateInteractionRecord,
     pub replayed: bool,
 }
 
-/// One prepared Gate-state write that another Control Plane aggregate can
-/// attach to the same durable receipt transaction.
 pub struct PreparedGateInteractionMutation {
     stream_id: String,
     expected_revision: u64,
@@ -385,7 +336,6 @@ impl PreparedGateInteractionMutation {
     }
 }
 
-/// Stable fail-closed service code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateInteractionServiceErrorCode {
     InvalidInput,
@@ -402,7 +352,6 @@ pub enum GateInteractionServiceErrorCode {
     Storage,
 }
 
-/// Gate interaction service failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionServiceError {
     code: GateInteractionServiceErrorCode,
@@ -424,7 +373,6 @@ impl fmt::Display for GateInteractionServiceError {
 
 impl std::error::Error for GateInteractionServiceError {}
 
-/// Durable application service joining Gate facts to the human route state machine.
 pub struct GateInteractionService<'storage> {
     storage: &'storage mut dyn ProductSessionPersistence,
 }
@@ -435,11 +383,6 @@ impl<'storage> GateInteractionService<'storage> {
         Self { storage }
     }
 
-    /// Persists one Approval or Attention registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale, expired, cross-scope, or non-routable decisions before writing.
     pub fn register(
         &mut self,
         command: &RegisterGateInteractionCommand,
@@ -488,12 +431,6 @@ impl<'storage> GateInteractionService<'storage> {
         )
     }
 
-    /// Applies one authenticated response to an exact pending route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched or stale facts. A response after the sealed deadline
-    /// deterministically records Expired and never authorizes the action.
     pub fn respond(
         &mut self,
         command: &RespondGateInteractionCommand,
@@ -511,12 +448,6 @@ impl<'storage> GateInteractionService<'storage> {
         )
     }
 
-    /// Prepares the canonical Gate write for an application transaction that
-    /// also updates another Control Plane state stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, terminal, stale, cross-scope, or unauthorized fact.
     pub fn prepare_response(
         &mut self,
         command: &RespondGateInteractionCommand,
@@ -593,11 +524,6 @@ impl<'storage> GateInteractionService<'storage> {
         })
     }
 
-    /// Expires one exact pending route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects early expiry, binding mismatch, final state, and storage errors.
     pub fn expire(
         &mut self,
         command: &ExpireGateInteractionCommand,
@@ -630,11 +556,6 @@ impl<'storage> GateInteractionService<'storage> {
         self.commit(&command.context, digest, stored_revision, &persisted)
     }
 
-    /// Reads one exact business fact after restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns corruption or storage errors for an invalid durable record.
     pub fn get(
         &self,
         scope: &ReceiptScopeKey,
@@ -652,12 +573,6 @@ impl<'storage> GateInteractionService<'storage> {
         Ok(Some(persisted.record))
     }
 
-    /// Revalidates one pending durable Gate fact against the current
-    /// `ProductSession`, Worker slot, admission, lease, and fence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a terminal, expired, stale, or corrupt durable fact.
     pub fn require_current_pending(
         &mut self,
         scope: &ReceiptScopeKey,
@@ -954,7 +869,6 @@ fn rebuild_router(
     Ok(router)
 }
 
-/// Internal role sessions are owned by Delivery, not the Chat session catalog.
 #[allow(
     clippy::too_many_lines,
     reason = "the exact WorkRun identity join stays one fail-closed seam"

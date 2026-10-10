@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable multi-instance Control Plane ownership and command fencing.
-//!
-//! This module stores only operational ownership. Canonical product state and
-//! command results remain in [`crate::StateCommit`] and `command_receipts`.
-//! A claimed command is committed through [`ControlPlaneInstanceLedger::commit_claimed`]
-//! so the instance lease, claim fence, product state, receipt, and outbox share
-//! one `SQLite` transaction.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -50,7 +40,6 @@ CREATE INDEX IF NOT EXISTS control_plane_command_claims_by_instance
     ON control_plane_command_claims (instance_id, instance_generation, claim_fence);
 ";
 
-/// Stable instance identity plus a process-unique boot identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceIdentity {
     instance_id: String,
@@ -58,11 +47,6 @@ pub struct ControlPlaneInstanceIdentity {
 }
 
 impl ControlPlaneInstanceIdentity {
-    /// Builds a canonical instance identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or overlong instance and boot identifiers.
     pub fn try_new(
         instance_id: impl Into<String>,
         boot_id: impl Into<String>,
@@ -88,7 +72,6 @@ impl ControlPlaneInstanceIdentity {
     }
 }
 
-/// Exact durable lease/fence returned by instance registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceAuthority {
     identity: ControlPlaneInstanceIdentity,
@@ -107,7 +90,6 @@ impl ControlPlaneInstanceAuthority {
     }
 }
 
-/// Durable lifecycle state of one Control Plane instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlPlaneInstanceState {
     Active,
@@ -131,7 +113,6 @@ impl ControlPlaneInstanceState {
     }
 }
 
-/// Secret-free readiness and drain projection from one durable read cut.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceHealth {
     pub authority: ControlPlaneInstanceAuthority,
@@ -152,7 +133,6 @@ impl ControlPlaneInstanceHealth {
     }
 }
 
-/// One exact operational claim for a not-yet-committed canonical command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneCommandClaim {
     receipt_identity: ReceiptIdentity,
@@ -189,7 +169,6 @@ impl ControlPlaneCommandClaim {
     }
 }
 
-/// Minimal immutable proof that the unique canonical command receipt exists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneCommittedCommand {
     pub receipt_identity: ReceiptIdentity,
@@ -199,14 +178,12 @@ pub struct ControlPlaneCommittedCommand {
     pub receipt_sequence: u64,
 }
 
-/// Result of command admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlPlaneCommandAdmission {
     Claimed(ControlPlaneCommandClaim),
     Committed(ControlPlaneCommittedCommand),
 }
 
-/// Stable operational failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlPlaneInstanceErrorKind {
     InvalidInput,
@@ -221,7 +198,6 @@ pub enum ControlPlaneInstanceErrorKind {
     Storage,
 }
 
-/// Secret-free instance coordination error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceError {
     kind: ControlPlaneInstanceErrorKind,
@@ -243,17 +219,11 @@ impl fmt::Display for ControlPlaneInstanceError {
 
 impl std::error::Error for ControlPlaneInstanceError {}
 
-/// Instance ledger borrowing the sole product-state `SQLite` authority.
 pub struct ControlPlaneInstanceLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens durable Control Plane instance coordination on this same product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or incompatible existing schema.
     pub fn control_plane_instance_ledger(
         &mut self,
     ) -> Result<ControlPlaneInstanceLedger<'_>, ControlPlaneInstanceError> {
@@ -273,11 +243,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Registers a fresh boot or replays the exact still-live registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid times, a live conflicting boot, an expired replay, or storage failure.
     pub fn register(
         &mut self,
         identity: &ControlPlaneInstanceIdentity,
@@ -379,11 +344,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(authority)
     }
 
-    /// Renews the exact live authority without changing its generation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects late renewal, stale ownership, non-increasing expiry, or storage failure.
     pub fn renew(
         &mut self,
         authority: &ControlPlaneInstanceAuthority,
@@ -424,11 +384,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(health)
     }
 
-    /// Returns one durable readiness/drain snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale ownership, corrupt rows, or storage failure.
     pub fn preflight(
         &self,
         authority: &ControlPlaneInstanceAuthority,
@@ -444,11 +399,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         )
     }
 
-    /// Atomically stops new command claims while allowing existing claims to finish.
-    ///
-    /// # Errors
-    ///
-    /// Rejects expired/stale ownership, invalid deadline, closed state, or storage failure.
     pub fn request_drain(
         &mut self,
         authority: &ControlPlaneInstanceAuthority,
@@ -487,11 +437,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(health)
     }
 
-    /// Cancels an in-progress drain before the lease expires.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/expired ownership, non-draining state, or storage failure.
     pub fn resume(
         &mut self,
         authority: &ControlPlaneInstanceAuthority,
@@ -528,11 +473,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(health)
     }
 
-    /// Closes a fully drained authority. Closed generations cannot resume.
-    ///
-    /// # Errors
-    ///
-    /// Rejects active claims, stale/expired ownership, wrong state, or storage failure.
     pub fn release(
         &mut self,
         authority: &ControlPlaneInstanceAuthority,
@@ -575,11 +515,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(health)
     }
 
-    /// Fences one expired instance generation so it cannot finish stale work.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a live lease, invalid id, missing instance, or storage failure.
     pub fn fence_expired(
         &mut self,
         instance_id: &str,
@@ -626,16 +561,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(health)
     }
 
-    /// Claims one not-yet-committed command or reports its immutable receipt.
-    ///
-    /// Receipt lookup happens before claim arbitration. Therefore a failover
-    /// after commit but before response always returns the canonical committed
-    /// result and never re-executes business work.
-    ///
-    /// # Errors
-    ///
-    /// Rejects draining/expired ownership, changed request reuse, a live
-    /// foreign claim, corrupt durable rows, or storage failure.
     pub fn admit_command(
         &mut self,
         authority: &ControlPlaneInstanceAuthority,
@@ -695,14 +620,6 @@ impl<'storage> ControlPlaneInstanceLedger<'storage> {
         Ok(ControlPlaneCommandAdmission::Claimed(claim))
     }
 
-    /// Atomically validates the instance and command fence, writes the sole
-    /// canonical [`StateCommit`], and releases the operational claim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects expired, drained-to-closed, replaced, changed, or foreign
-    /// authority before any product-state write. Storage validation and
-    /// revision errors preserve both the claim and original product state.
     pub fn commit_claimed(
         &mut self,
         claim: &ControlPlaneCommandClaim,

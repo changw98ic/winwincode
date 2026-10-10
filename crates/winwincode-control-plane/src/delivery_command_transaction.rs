@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Receipt-first atomic transaction for canonical non-dispatch Delivery commands.
-
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
@@ -39,7 +35,6 @@ use crate::{
 
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Opaque product-owned semantic facts omitted from the public Spec command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliverySpecFacts {
     now_millis: u64,
@@ -72,12 +67,6 @@ impl DeliverySpecFacts {
     }
 }
 
-/// Trusted product facts required to turn a transport Delivery command into a
-/// domain transition.
-///
-/// Fields and production construction stay inside the Control Plane so a
-/// caller cannot turn a wall clock, repository ID, source binding, or stage
-/// identity from the request body into product authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeliveryCommandFacts {
     command_digest: Sha256Digest,
@@ -763,8 +752,6 @@ fn map_spec(
                     "trusted Spec facts must match acceptance criterion IDs in exact order",
                 ));
             }
-            // Normalize external labels once, before persisting either the Spec or
-            // WorkContract. Both must name the same criterion during verdict intake.
             let id = if winwincode_domain::is_canonical_prefixed_id(&criterion.id, "crt_") {
                 criterion.id
             } else {

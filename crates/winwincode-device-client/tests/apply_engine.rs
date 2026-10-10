@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! GIT-100.4 coverage: the target-branch safe apply engine over real Git
-//! repositories — fast-forward and cherry-pick/merge delivery inside an
-//! isolated integration worktree, the `expectedHead` strong checks (preflight
-//! and the compare-and-swap ref update), the dirty-policy rejection,
-//! conflict isolation away from the user's working tree, `candidate_missing`
-//! verdicts, fencing and terminal refusals, and the durable
-//! `client.candidate.apply_result` receipt frame. Harness mirrors
-//! `tests/candidate_registry.rs`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,8 +37,6 @@ fn temporary_directory(name: &str) -> PathBuf {
 }
 
 fn cleanup(root: &Path) {
-    // The integration roots only materialize when an attempt gets that far;
-    // a missing directory has nothing to release.
     if root.exists() {
         fs::remove_dir_all(root).expect("temporary directory should be released");
     }
@@ -87,8 +74,6 @@ fn issued_credential_digest() -> String {
     format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
 }
 
-/// A transport that must never be called: the apply engine's uplink is a
-/// durable outbox append, not an exchange.
 struct NeverTransport;
 
 impl ExchangeTransport for NeverTransport {
@@ -153,8 +138,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// Opens a store that already carries an adopted enrollment (the restart
-/// scenario: the identity is durable, never re-adopted).
 fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     let store = DeviceStore::open(root).expect("restarted device store should open");
     let record = load_device_identity(&store)
@@ -163,8 +146,6 @@ fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// Starts a daemon whose occupancy mirror already holds the lease the apply
-/// commands stamp with.
 fn started_daemon(name: &str, root: &Path) -> DeviceDaemon {
     {
         let (mut store, _) = open_enrolled(root);
@@ -208,7 +189,6 @@ fn git(repository: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
-/// Stages everything and commits on the currently checked-out branch.
 fn commit_everything(repository: &Path, message: &str) -> String {
     git(repository, &["add", "-A"]);
     git(
@@ -227,12 +207,6 @@ fn commit_everything(repository: &Path, message: &str) -> String {
     git(repository, &["rev-parse", "HEAD"])
 }
 
-/// One real repository: `main` and `workspace` both at a base commit, the
-/// user checked out on `workspace` (so `main` — the usual apply target — is
-/// never checked out anywhere). The user's workspace file content is
-/// returned for untouched assertions. The returned path is canonical: the
-/// binding's stored mapping must be the canonical spelling, exactly as the
-/// registration check chain stores it.
 fn init_repository(name: &str) -> (PathBuf, String) {
     let created = temporary_directory(name);
     fs::create_dir_all(&created).expect("repository directory should be created");
@@ -259,10 +233,6 @@ fn init_repository(name: &str) -> (PathBuf, String) {
     (root, base)
 }
 
-/// Creates the candidate commit on top of `main` and then returns `main` to
-/// where it was (the frozen-candidate world: the candidate ref holds the
-/// work, the target branch is untouched), returning to the user's
-/// `workspace`. Returns the candidate commit id.
 fn candidate_commit_on_main(repository: &Path, name: &str, step: &str) -> String {
     let original_main = git(repository, &["rev-parse", "main"]);
     git(repository, &["checkout", "-q", "main"]);
@@ -272,14 +242,11 @@ fn candidate_commit_on_main(repository: &Path, name: &str, step: &str) -> String
     )
     .expect("candidate file");
     let candidate = commit_everything(repository, "the candidate change");
-    // Reset `main` (the branch we are on) back to where it was: the
-    // candidate ref holds the frozen work, the target branch is untouched.
     git(repository, &["reset", "-q", "--hard", &original_main]);
     git(repository, &["checkout", "-q", "workspace"]);
     candidate
 }
 
-/// Writes the stable candidate ref for `candidate_commit`.
 fn write_candidate_ref(repository: &Path, candidate_commit: &str) {
     git(
         repository,
@@ -291,7 +258,6 @@ fn write_candidate_ref(repository: &Path, candidate_commit: &str) {
     );
 }
 
-/// Retains `candidate_commit` in the device registry against `BINDING`.
 fn retain_candidate(store: &mut DeviceStore, candidate_commit: &str) {
     record_candidate_retention(
         store,
@@ -367,8 +333,6 @@ fn registry_state(store: &mut DeviceStore, candidate_commit: &str) -> LocalCandi
         .local_state
 }
 
-/// The user's workspace: clean, on `workspace` at `expected_head`, with the
-/// expected file content.
 fn user_tree_is_untouched(repository: &Path, expected_head: &str, file_content: &str) {
     assert_eq!(
         fs::read_to_string(repository.join("file.txt")).expect("the user's file"),
@@ -435,7 +399,6 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     assert_eq!(receipt.conflict_artifact_ref, None);
     assert_eq!(receipt.revision, 1);
     assert!(receipt.local_apply_receipt_id.starts_with("lar_"));
-    // The target branch really moved; the user's checkout did not.
     assert_eq!(git(&repo, &["rev-parse", "main"]), candidate);
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
     assert!(
@@ -447,7 +410,6 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
         LocalCandidateState::Applied,
         "the registry write-back reports the applied state"
     );
-    // The integration worktree left nothing behind.
     let artifacts = integration_root.join("conflict-artifacts");
     assert!(
         !artifacts.exists()
@@ -475,8 +437,6 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     assert_eq!(replay.receipt, outcome.receipt);
     assert_eq!(replay.frame_sequence, outcome.frame_sequence);
 
-    // The durable apply_result frame carries the receipt under the mirrored
-    // lease, with no local path.
     let mut store = daemon.into_store();
     let frames = apply_result_frames(&mut store);
     assert_eq!(frames.len(), 1, "exactly one apply result frame is durable");
@@ -630,8 +590,6 @@ fn peer_candidates_combine_into_a_stable_ref_that_requires_fresh_verification() 
 fn cherry_pick_applies_with_the_original_author_and_device_committer() {
     let (repo, _base) = init_repository("cherry-pick");
     let integration_root = temporary_directory("cherry-pick-root");
-    // `main` and the candidate diverge without conflict: main gets its own
-    // file, the candidate is a child of the shared base.
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("main.txt"), "main work\n").expect("main file");
     let expected_head = commit_everything(&repo, "main work");
@@ -760,8 +718,6 @@ fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
     retain_candidate(daemon.store_mut(), &candidate);
     write_candidate_ref(&repo, &candidate);
 
-    // The caller's expected head drifted away from the real target tip:
-    // `main` moved on after the candidate was frozen.
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("main.txt"), "main moved on\n").expect("main file");
     let moved_on = commit_everything(&repo, "main moved on");
@@ -786,8 +742,6 @@ fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
         "the failure code projects onto the retryable failed state"
     );
 
-    // Retry with the correct expected head (a cherry-pick now that the
-    // target diverged): the apply succeeds.
     let retried = apply_candidate_to_branch(
         &mut daemon,
         &request(&candidate, "main", &moved_on, ApplyStrategy::CherryPick),
@@ -825,10 +779,6 @@ fn the_expected_head_drift_during_execution_is_refused_by_the_cas() {
     let workspace_head = git(&repo, &["rev-parse", "workspace"]);
     let workspace_content = fs::read_to_string(repo.join("file.txt")).expect("workspace file");
 
-    // A concurrent writer's commit exists, and a post-checkout hook moves
-    // `main` to it while the engine is creating its integration worktree —
-    // a deterministic stand-in for a writer between preflight and the
-    // atomic ref update.
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("main.txt"), "a concurrent commit\n").expect("concurrent file");
     let concurrent = commit_everything(&repo, "a concurrent commit");
@@ -895,7 +845,6 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
     let (repo, base) = init_repository("dirty");
     let integration_root = temporary_directory("dirty-root");
     let candidate = candidate_commit_on_main(&repo, "dirty", "1");
-    // The user's dirty tree: an untracked file.
     fs::write(repo.join("scratch.txt"), "user's local note\n").expect("untracked file");
 
     let root = temporary_directory("dirty-store");
@@ -947,8 +896,6 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
 fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
     let (repo, _base) = init_repository("conflict");
     let integration_root = temporary_directory("conflict-root");
-    // Diverging edits of the same tracked file: `main` moved its copy, the
-    // candidate edited the workspace copy differently.
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("file.txt"), "main's own line\n").expect("main edit");
     let expected_head = commit_everything(&repo, "main edit");
@@ -986,7 +933,6 @@ fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
         "the artifact reference is not a path"
     );
 
-    // The user's working tree: untouched, clean, still on the old content.
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
     assert_eq!(git(&repo, &["rev-parse", "main"]), expected_head);
     assert_eq!(
@@ -994,8 +940,6 @@ fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
         LocalCandidateState::Failed
     );
 
-    // The conflict artifact lives only inside the isolated integration root:
-    // the conflicted worktree is real, inspectable Git state.
     let artifact_directory = integration_attempt_directory(
         &integration_root,
         &candidate,
@@ -1055,7 +999,6 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     let mut daemon = started_daemon("candidate-missing", &root);
     bind(daemon.store_mut(), &repo);
     retain_candidate(daemon.store_mut(), &candidate);
-    // No candidate ref was ever written in this checkout.
     let missing = apply_candidate_to_branch(
         &mut daemon,
         &request(&candidate, "main", &base, ApplyStrategy::FastForward),
@@ -1064,7 +1007,6 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     .expect("the missing ref settles a result");
     assert_eq!(missing.receipt.result, ApplyResult::CandidateMissing);
 
-    // A drifted ref (pointing elsewhere) is equally "the candidate is gone".
     let other = git(&repo, &["rev-parse", "workspace"]);
     write_candidate_ref(&repo, &candidate);
     git(
@@ -1108,7 +1050,6 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
     let candidate = candidate_commit_on_main(&repo, "checked-out", "1");
     let workspace_head = git(&repo, &["rev-parse", "workspace"]);
     let workspace_content = fs::read_to_string(repo.join("file.txt")).expect("workspace file");
-    // Another worktree remains protected; only the bound checkout is updated.
     let linked = temporary_directory("checked-out-linked");
     git(
         &repo,
@@ -1184,7 +1125,6 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
 fn a_non_descendant_candidate_fails_closed_under_the_fast_forward_strategy() {
     let (repo, _base) = init_repository("not-ff");
     let integration_root = temporary_directory("not-ff-root");
-    // The candidate is a child of the shared base; `main` moved elsewhere.
     fs::write(repo.join("candidate.txt"), "candidate work\n").expect("candidate file");
     let candidate = commit_everything(&repo, "the candidate change");
     write_candidate_ref(&repo, &candidate);
@@ -1302,7 +1242,6 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     retain_candidate(daemon.store_mut(), &candidate);
     write_candidate_ref(&repo, &candidate);
 
-    // The branch-creation strategy belongs to the other engine.
     let error = apply_candidate_to_branch(
         &mut daemon,
         &request(&candidate, "main", &base, ApplyStrategy::CreateBranch),
@@ -1311,7 +1250,6 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     .expect_err("create_branch is refused by the apply engine");
     assert_eq!(error.kind(), CandidateApplyErrorKind::InvalidInput);
 
-    // No registry row for the candidate: the command identity is unknown.
     let unknown = "ffffffffffffffffffffffffffffffffffffffff";
     let error = apply_candidate_to_branch(
         &mut daemon,
@@ -1321,8 +1259,6 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     .expect_err("an unknown candidate must refuse");
     assert_eq!(error.kind(), CandidateApplyErrorKind::UnknownCandidate);
 
-    // Progress the candidate to its applied terminal; a further apply is
-    // refused without a receipt.
     {
         let connection = rusqlite::Connection::open(daemon.store_mut().database_path())
             .expect("the database opens");

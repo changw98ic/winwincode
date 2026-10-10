@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! GIT-100.3 coverage: the local branch creation engine — the fail-closed
-//! validation chain (registry state, occupancy mirror, branch-name
-//! vocabulary and conflicts), the stable short-id ladder, the `git branch`
-//! creation that never touches the user's checkout and never forges a
-//! commit author, the idempotent repeated request that returns the original
-//! branch, and the lease-stamped durable `client.candidate.apply_result`
-//! uplink. Every Git-facing scenario runs against a real Git repository.
-//! Harness mirrors `tests/candidate_registry.rs`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -187,9 +176,6 @@ fn git(repository: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
-/// Creates a repository with one base commit on `main` and returns
-/// (path, base commit). The name is folded into the seed content so two
-/// repositories created within the same second never share a commit id.
 fn init_repository(name: &str) -> (PathBuf, String) {
     let root = temporary_directory(name);
     fs::create_dir_all(&root).expect("repository directory should be created");
@@ -215,7 +201,6 @@ fn init_repository(name: &str) -> (PathBuf, String) {
     (root, commit)
 }
 
-/// Creates a follow-up commit with a fixed worker author and returns its id.
 fn add_candidate_commit(repository: &Path, message: &str) -> String {
     fs::write(repository.join("file.txt"), format!("{message}\n")).expect("file should be written");
     git(repository, &["add", "-A"]);
@@ -236,8 +221,6 @@ fn add_candidate_commit(repository: &Path, message: &str) -> String {
     git(repository, &["rev-parse", "HEAD"])
 }
 
-/// Publishes the stable candidate ref for one frozen commit (the worker
-/// freeze path's convention).
 fn write_candidate_ref(repository: &Path, commit: &str) {
     git(
         repository,
@@ -259,8 +242,6 @@ fn retention(commit: &str, binding: &str) -> CandidateRetention {
     }
 }
 
-/// Maps one binding onto a repository and retains one frozen candidate, the
-/// state the branch engine consumes.
 fn seed_retained(store: &mut DeviceStore, repository: &Path, commit: &str, binding: &str) {
     store
         .put_path_mapping(&PathMappingRecord {
@@ -292,8 +273,6 @@ fn request_for_commit(commit: &str) -> BranchCreationRequest {
     request(&format!("refs/winwincode/candidates/{commit}"), SLUG, STAMP)
 }
 
-/// A scenario bundle: one store root plus one real repository with one base
-/// commit and one frozen candidate commit whose stable ref is published.
 struct Scenario {
     root: PathBuf,
     repository: PathBuf,
@@ -314,8 +293,6 @@ fn scenario(name: &str) -> Scenario {
     }
 }
 
-/// Seeds the scenario's store (mapping, retention, optionally the occupancy
-/// mirror), closes it, and returns the enrolled identity for a daemon start.
 fn seed_scenario_store(state: &Scenario, with_mirror: bool) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     seed_retained(
@@ -424,8 +401,6 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
         "the apply-result frame rides the strictly advancing stream"
     );
 
-    // The real repository: the branch exists, points at the candidate, and
-    // the user's checkout is untouched.
     assert_eq!(
         branch_head(&state.repository, &expected_branch),
         state.candidate_commit,
@@ -447,8 +422,6 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
         "exactly one winwincode branch exists"
     );
 
-    // The registry row progressed to branch_created and the durable record
-    // names the branch.
     let record = candidate_local_ref(daemon.store_mut(), &state.candidate_commit)
         .expect("the registry row should read")
         .expect("the retained candidate");
@@ -460,7 +433,6 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
     assert_eq!(durable.created_at, STAMP);
     assert_eq!(durable.repository_binding_id, BINDING);
 
-    // The uplink: exactly one lease-stamped apply-result frame.
     let mut store = daemon.into_store();
     let frames = apply_result_frames(&mut store);
     assert_eq!(frames.len(), 1, "exactly one apply-result frame is durable");
@@ -519,7 +491,6 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
     assert_eq!(receipt.created_at, STAMP);
     assert_eq!(receipt.revision, 1);
 
-    // The local-data boundary: no local path rides the frame.
     let frame_text = serde_json::to_string(&payload).expect("the frame should serialize");
     assert!(
         !frame_text.contains(state.repository.to_str().expect("UTF-8")),
@@ -553,8 +524,6 @@ fn a_repeated_request_returns_the_original_branch_and_reports_identically() {
         panic!("the first request creates");
     };
 
-    // A repeated request with a different slug, a later stamp, and even an
-    // explicit name still returns the original branch.
     let mut replay = request_for_commit(&state.candidate_commit);
     replay.task_slug = "renamed-task".to_owned();
     replay.requested_at = LATER_STAMP.to_owned();
@@ -573,7 +542,6 @@ fn a_repeated_request_returns_the_original_branch_and_reports_identically() {
         "no second branch is ever created"
     );
 
-    // The durable record keeps the first creation's stamp.
     let durable = created_branch_record(daemon.store_mut(), &state.candidate_commit)
         .expect("the record should read")
         .expect("the creation is durable");
@@ -618,9 +586,6 @@ fn naming_conflicts_resolve_down_the_stable_short_id_ladder() {
     )
     .expect("daemon should start");
 
-    // Occupy the first three rungs with a foreign branch pointing at the
-    // base commit; the engine must walk to the next rung every time and the
-    // same request must always resolve to the same name.
     let foreign_branches: Vec<String> = [7, 12, 20]
         .iter()
         .map(|length| {
@@ -655,7 +620,6 @@ fn naming_conflicts_resolve_down_the_stable_short_id_ladder() {
         state.candidate_commit
     );
 
-    // Stability: the same inputs resolve to the same branch on a repeat.
     let replay = create_candidate_branch(&mut daemon, &request_for_commit(&state.candidate_commit))
         .expect("the repeat resolves stably");
     let BranchCreationOutcome::Duplicate(returned) = &replay.outcome else {
@@ -668,8 +632,6 @@ fn naming_conflicts_resolve_down_the_stable_short_id_ladder() {
     cleanup(&state.root);
     cleanup(&state.repository);
 
-    // Exhausted ladder: when even the full-commit name is occupied by
-    // another commit, the engine fails closed with a stable conflict.
     let exhausted = scenario("ladder-exhausted");
     let (store, identity) = seed_scenario_store(&exhausted, true);
     let mut daemon = DeviceDaemon::start(
@@ -838,7 +800,6 @@ fn an_explicit_branch_name_conflict_fails_closed() {
 
 #[test]
 fn a_missing_candidate_fails_closed_as_candidate_missing() {
-    // (a) The retention row exists but the Git ref is gone.
     let state = scenario("missing-ref");
     git(
         &state.repository,
@@ -874,7 +835,6 @@ fn a_missing_candidate_fails_closed_as_candidate_missing() {
     cleanup(&state.root);
     cleanup(&state.repository);
 
-    // (b) The candidate was never retained on this device.
     let state = scenario("never-retained");
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     mirror_the_lease(&mut store);
@@ -897,7 +857,6 @@ fn a_missing_candidate_fails_closed_as_candidate_missing() {
     cleanup(&state.root);
     cleanup(&state.repository);
 
-    // (c) The binding maps no local checkout.
     let state = scenario("unmapped-binding");
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     record_candidate_retention(&mut store, &retention(&state.candidate_commit, BINDING))
@@ -951,7 +910,6 @@ fn creation_fails_closed_without_a_mirror_and_completes_after_recovery() {
     let mut store = daemon.into_store();
     assert!(apply_result_frames(&mut store).is_empty());
 
-    // Once occupancy is mirrored, the retry completes the full vertical.
     mirror_the_lease(&mut store);
     store.close().expect("store should close");
     let (store, identity) = open_resumed(&state.root);
@@ -1021,7 +979,6 @@ fn terminal_candidates_refuse_branch_creation() {
 #[test]
 fn a_drifted_candidate_ref_fails_closed() {
     let state = scenario("drifted");
-    // Point the candidate ref at the base commit instead of the candidate.
     git(
         &state.repository,
         &[
@@ -1091,8 +1048,6 @@ fn the_candidate_commit_author_is_preserved_verbatim() {
     let BranchCreationOutcome::Created(facts) = &report.outcome else {
         panic!("the fresh candidate creates");
     };
-    // No commit is forged: the branch resolves to exactly the candidate
-    // commit, whose author and committer are the worker's, unchanged.
     assert_eq!(
         branch_head(&state.repository, &facts.branch_name),
         state.candidate_commit,
@@ -1138,8 +1093,6 @@ fn the_creation_survives_a_restart_and_a_failed_retry_can_succeed() {
     let store = daemon.into_store();
     store.close().expect("store should close");
 
-    // Restart: the durable record and registry state return the original
-    // branch without a second creation.
     let (store, identity) = open_resumed(&state.root);
     let mut daemon = DeviceDaemon::start(
         daemon_config("restart-resume"),
@@ -1163,8 +1116,6 @@ fn the_creation_survives_a_restart_and_a_failed_retry_can_succeed() {
     cleanup(&state.root);
     cleanup(&state.repository);
 
-    // A candidate whose earlier attempt failed (row `failed`, no branch)
-    // still creates on retry: contract 6 keeps `failed` retryable.
     let state = scenario("failed-retry");
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     seed_retained(
@@ -1298,10 +1249,8 @@ fn malformed_requests_are_refused_without_any_effect() {
 
 #[test]
 fn the_branch_engine_error_names_a_stable_category_and_message() {
-    let error = CandidateBranchError::from({
-        // A store failure converts with its category preserved.
-        winwincode_device_client::DeviceStoreError::closed()
-    });
+    let error =
+        CandidateBranchError::from({ winwincode_device_client::DeviceStoreError::closed() });
     assert_eq!(error.kind(), CandidateBranchErrorKind::Store);
     assert!(error.message().contains("closed"));
     assert_eq!(
@@ -1322,8 +1271,6 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
         BINDING,
     );
 
-    // retained -> branch_created is legal; the same-state replay is an
-    // accepted no-op.
     let record = progress_candidate_lifecycle(
         &mut store,
         &state.candidate_commit,
@@ -1339,7 +1286,6 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
     .expect("the same-state replay is an accepted no-op");
     assert_eq!(record.local_state, LocalCandidateState::BranchCreated);
 
-    // branch_created -> retained is not a contract 6 transition.
     let error = progress_candidate_lifecycle(
         &mut store,
         &state.candidate_commit,
@@ -1348,8 +1294,6 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
     .expect_err("branch_created -> retained is illegal");
     assert_eq!(error.kind(), CandidateRegistryErrorKind::Conflict);
 
-    // branch_created -> failed is legal, failed -> branch_created is the
-    // retry, failed -> failed is an accepted no-op.
     progress_candidate_lifecycle(
         &mut store,
         &state.candidate_commit,
@@ -1369,7 +1313,6 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
     )
     .expect("failed -> branch_created is the contract 6 retry");
 
-    // Terminal refusal: applied ends the lifecycle.
     progress_candidate_lifecycle(
         &mut store,
         &state.candidate_commit,

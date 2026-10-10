@@ -1,4 +1,3 @@
-//! Two real Core agents call the V1 completion adapter from native Code Mode cells.
 use super::*;
 use std::collections::BTreeMap;
 

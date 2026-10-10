@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Generated Publication command/query application boundary.
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,14 +73,6 @@ struct LoadedPublicationPage {
 }
 
 impl ControlPlane {
-    /// Cancels one scoped Publication without invoking a provider operation.
-    /// The exact generated command receipt and two deterministic audit facts
-    /// make both a successful first attempt and a restart replay observable.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign scope, changed request body, stale revision, terminal
-    /// state, invalid time, unavailable audit store, or corrupt durable state.
     pub fn publication_cancel(
         &mut self,
         command: &PublicationCancelCommand,
@@ -166,13 +154,6 @@ impl ControlPlane {
         })
     }
 
-    /// Reads one exact scoped Publication after validating its complete durable
-    /// journal. No provider adapter is reachable from this query path.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid query, foreign scope, missing Publication, or corrupt
-    /// state/journal pair.
     pub fn publication_get(
         &mut self,
         query: &PublicationGetQuery,
@@ -210,13 +191,6 @@ impl ControlPlane {
         })
     }
 
-    /// Lists scoped Publications through a bounded keyset walk frozen to an
-    /// upper stream identity and a digest of every matching projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid filters, foreign or stale cursors, unsupported storage
-    /// enumeration, or any corrupt Publication state/journal pair.
     pub fn publication_list(
         &mut self,
         query: &PublicationListQuery,

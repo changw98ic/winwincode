@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Receipt-first atomic transaction for an approved Delivery task graph.
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use winwincode_api::generated::{CommandEnvelope, CommandName, Scope, WorkItemsCreatePayload};
@@ -18,7 +14,6 @@ use crate::{
     storage_commit, validate_delivery_changed_receipt,
 };
 
-/// Receipt-first creation of the canonical `WorkItem` graph.
 #[allow(
     clippy::too_many_lines,
     reason = "Keep receipt-first WorkItem creation and its atomic journal publication together"

@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Theme validation adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT.
-
 const THEME_PREFERENCES = ['light', 'dark', 'system'] as const
 export type ThemePreference = typeof THEME_PREFERENCES[number]
 export interface Preferences {
@@ -17,7 +14,7 @@ export function isThemePreference(value: unknown): value is ThemePreference {
 
 export function readPreferences(browser: Window | null): Preferences {
   let value: Partial<Preferences> = {}
-  try { value = JSON.parse(browser?.localStorage.getItem(PREFERENCES_KEY) ?? '{}') ?? {} } catch { /* Browser storage may be unavailable. */ }
+  try { value = JSON.parse(browser?.localStorage.getItem(PREFERENCES_KEY) ?? '{}') ?? {} } catch { }
   return {
     displayName: typeof value.displayName === 'string' ? value.displayName.slice(0, 80) : '',
     appearance: isThemePreference(value.appearance) ? value.appearance : 'system',

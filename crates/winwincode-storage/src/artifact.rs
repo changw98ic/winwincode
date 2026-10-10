@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Immutable Artifact metadata and content-addressed object storage.
-//!
-//! [`ArtifactStore`] keeps authority metadata in a Control Plane owned `SQLite`
-//! catalog while delegating large bytes to an [`ArtifactObjectStore`]. The
-//! object adapter never receives repository scope or Worker credentials.
-
 mod metering;
 
 pub use metering::{
@@ -35,12 +27,10 @@ const MAX_UNFINISHED_ARTIFACTS_PER_JOB: usize = 4_096;
 const CATALOG_STARTUP_LOCK_FILE_NAME: &str = "artifact-catalog.startup.lock";
 const CATALOG_SCHEMA_VERSION: i64 = 3;
 const MAX_ARTIFACT_BYTES: u64 = 1_099_511_627_776;
-/// Largest Artifact byte range returned by one storage read.
 pub const MAX_ARTIFACT_RANGE_BYTES: u64 = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 4_096;
 static NEXT_TEMPORARY_OBJECT_FILE: AtomicU64 = AtomicU64::new(1);
 
-/// Stable Artifact error categories shared by local and object-store adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactErrorKind {
     InvalidInput,
@@ -56,7 +46,6 @@ pub enum ArtifactErrorKind {
     Closed,
 }
 
-/// Failure returned by Artifact metadata or object storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactError {
     kind: ArtifactErrorKind,
@@ -91,11 +80,6 @@ impl ArtifactError {
         Self::new(ArtifactErrorKind::Adapter, message)
     }
 
-    /// Builds a fixed, secret-safe error at the external object-adapter seam.
-    ///
-    /// Object adapters deliberately cannot attach endpoint, bucket, key, body,
-    /// or provider diagnostics. Domain-only states remain owned by
-    /// [`ArtifactStore`] and collapse to an adapter failure at this boundary.
     #[must_use]
     pub fn object_adapter(kind: ArtifactErrorKind) -> Self {
         match kind {
@@ -150,7 +134,6 @@ impl fmt::Display for ArtifactError {
 
 impl std::error::Error for ArtifactError {}
 
-/// Exact immutable origin of bytes accepted from one fenced `ExecutionJob`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactProvenance {
     execution_job_id: ExecutionJobId,
@@ -163,13 +146,6 @@ pub struct ArtifactProvenance {
 }
 
 impl ArtifactProvenance {
-    /// Builds the storage identity after the Control Plane has authenticated
-    /// the corresponding scheduler lease and Worker session.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed canonical identities, an invalid attempt, or an
-    /// invalid fencing token.
     #[allow(clippy::too_many_arguments)]
     pub fn execution_job(
         execution_job_id: ExecutionJobId,
@@ -256,14 +232,12 @@ impl ArtifactProvenance {
     }
 }
 
-/// Deletion hold saved with Artifact metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactRetention {
     UntilMillis(u64),
     Indefinite,
 }
 
-/// Immutable metadata accepted before the first Artifact chunk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactOpen {
     scope_key: ReceiptScopeKey,
@@ -318,38 +292,32 @@ impl ArtifactOpen {
         }
     }
 
-    /// Binds an explicit upload replacement to the immutable open identity.
     #[must_use]
     pub fn with_replaced_artifact(mut self, predecessor: Option<ArtifactId>) -> Self {
         self.replaces_artifact_id = predecessor;
         self
     }
 
-    /// Returns the immutable Artifact identity sealed before storage admission.
     #[must_use]
     pub const fn artifact_id(&self) -> &ArtifactId {
         &self.artifact_id
     }
 
-    /// Returns the durable open request identity used by storage metering.
     #[must_use]
     pub const fn request_id(&self) -> &RequestId {
         &self.request_id
     }
 
-    /// Returns the exact byte count promised before the object write starts.
     #[must_use]
     pub const fn size_bytes(&self) -> u64 {
         self.size_bytes
     }
 
-    /// Returns the trusted Control Plane attribution frozen with this open.
     #[must_use]
     pub const fn metering_attribution(&self) -> &ArtifactMeteringAttribution {
         &self.metering_attribution
     }
 
-    /// Returns the validated open time in Unix milliseconds.
     #[must_use]
     pub const fn created_at_millis(&self) -> u64 {
         self.created_at_millis
@@ -401,7 +369,6 @@ impl ArtifactOpen {
     }
 }
 
-/// One ordered chunk after transport decoding and per-chunk digest checking.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactChunk {
     scope_key: ReceiptScopeKey,
@@ -471,8 +438,6 @@ impl ArtifactChunk {
     }
 }
 
-/// Exact read authority. Scope, Artifact identity, content digest, and origin
-/// all have to match the immutable catalog row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactAccess {
     scope_key: ReceiptScopeKey,
@@ -498,7 +463,6 @@ impl ArtifactAccess {
     }
 }
 
-/// Immutable Artifact metadata returned through the storage interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactRecord {
     open: ArtifactOpen,
@@ -574,7 +538,6 @@ impl ArtifactRecord {
     }
 }
 
-/// Result of an open or chunk write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactWriteReceipt {
     record: ArtifactRecord,
@@ -603,14 +566,12 @@ impl ArtifactWriteReceipt {
     }
 }
 
-/// Complete content plus its catalog metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactObject {
     metadata: ArtifactRecord,
     bytes: Vec<u8>,
 }
 
-/// One verified, bounded slice of a complete content-addressed object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactObjectRange {
     bytes: Vec<u8>,
@@ -620,13 +581,6 @@ pub struct ArtifactObjectRange {
 }
 
 impl ArtifactObjectRange {
-    /// Builds one adapter result after the adapter has verified the complete
-    /// object's immutable size and digest authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed digests, empty or oversized slices, arithmetic
-    /// overflow, and slices outside the declared complete object.
     pub fn verified(
         bytes: Vec<u8>,
         offset: u64,
@@ -678,7 +632,6 @@ impl ArtifactObjectRange {
     }
 }
 
-/// Authorized Artifact catalog metadata plus one verified bounded byte range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactRangeObject {
     metadata: ArtifactRecord,
@@ -714,14 +667,7 @@ impl ArtifactObject {
     }
 }
 
-/// Byte-storage seam implemented by controlled local files and object stores.
 pub trait ArtifactObjectStore: Send {
-    /// Stores one immutable upload chunk. Exact repeats are accepted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, changed repeats, corrupt bytes, or an
-    /// adapter write failure.
     fn put_chunk(
         &mut self,
         artifact_id: &ArtifactId,
@@ -730,12 +676,6 @@ pub trait ArtifactObjectStore: Send {
         bytes: &[u8],
     ) -> Result<(), ArtifactError>;
 
-    /// Joins contiguous chunks into one digest-addressed immutable object.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing chunks, an aggregate digest/size mismatch, or an
-    /// adapter finalization failure.
     fn finalize(
         &mut self,
         artifact_id: &ArtifactId,
@@ -744,21 +684,8 @@ pub trait ArtifactObjectStore: Send {
         size_bytes: u64,
     ) -> Result<(), ArtifactError>;
 
-    /// Reads one object by content digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed content addresses or an adapter read failure.
     fn read(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, ArtifactError>;
 
-    /// Reads one bounded range while verifying the complete object's declared
-    /// size and content address. Implementations must not buffer the complete
-    /// object merely to return a small range.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero, oversized, overflowing, or out-of-object ranges and any
-    /// object size/hash corruption or adapter read failure.
     fn read_range(
         &self,
         digest: &Sha256Digest,
@@ -767,24 +694,13 @@ pub trait ArtifactObjectStore: Send {
         length: u64,
     ) -> Result<Option<ArtifactObjectRange>, ArtifactError>;
 
-    /// Deletes one unreferenced content object. Missing objects are idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed content addresses or an adapter deletion failure.
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError>;
 
-    /// Releases adapter resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-specific deterministic close failure.
     fn close(self: Box<Self>) -> Result<(), ArtifactError> {
         Ok(())
     }
 }
 
-/// Deep Artifact module: `SQLite` authority metadata plus swappable large-object bytes.
 pub struct ArtifactStore {
     catalog: Option<Connection>,
     catalog_path: PathBuf,
@@ -794,12 +710,6 @@ pub struct ArtifactStore {
 }
 
 impl ArtifactStore {
-    /// Opens the Control Plane metadata catalog with the selected object adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error if the directory, `SQLite` catalog, migration,
-    /// or object adapter cannot be prepared.
     pub fn open(
         data_directory: impl AsRef<Path>,
         objects: Box<dyn ArtifactObjectStore>,
@@ -845,13 +755,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Pins existing immutable metadata and retains the same object adapter.
-    /// The caller pins product-state first under its mutation lock. Object
-    /// bytes are still read and re-hashed by every `read_exact` invocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the existing catalog cannot be read.
     pub fn read_snapshot(&self) -> Result<Self, ArtifactError> {
         self.catalog_ref()?;
         let catalog = Connection::open_with_flags(
@@ -879,12 +782,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Opens or exactly replays immutable Artifact metadata.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed metadata or any attempt to reuse an `ArtifactId` with
-    /// another scope, digest, provenance, retention rule, or descriptor.
     pub fn open_artifact(
         &mut self,
         open: ArtifactOpen,
@@ -978,14 +875,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Looks up one durable open acknowledgement without creating metadata.
-    /// Exact replays remain available after the originating `WorkRun` settles;
-    /// a changed reuse still fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, foreign scope, changed identity reuse, or a
-    /// corrupt catalog row.
     pub fn replay_open(
         &self,
         open: &ArtifactOpen,
@@ -999,13 +888,6 @@ impl ArtifactStore {
         )
     }
 
-    /// Stores one ordered chunk and finalizes content only after the exact
-    /// aggregate size and digest match the open descriptor.
-    ///
-    /// # Errors
-    ///
-    /// Rejects gaps, changed repeats, foreign scope, writes after completion,
-    /// per-chunk corruption, or an aggregate size/digest mismatch.
     pub fn append_chunk(
         &mut self,
         chunk: &ArtifactChunk,
@@ -1024,11 +906,6 @@ impl ArtifactStore {
         self.commit_chunk_metadata(current, chunk)
     }
 
-    /// Looks up one durable chunk acknowledgement without accepting new bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, foreign provenance, or changed message reuse.
     pub fn replay_chunk(
         &self,
         chunk: &ArtifactChunk,
@@ -1226,12 +1103,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Reads and re-hashes one exact complete object.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope or provenance, a changed digest, incomplete or
-    /// deleted metadata, missing bytes, and any object size/hash corruption.
     pub fn read_exact(&self, access: &ArtifactAccess) -> Result<ArtifactObject, ArtifactError> {
         let record = self.load_exact_complete(access)?;
         let bytes = self
@@ -1245,25 +1116,10 @@ impl ArtifactStore {
         })
     }
 
-    /// Returns catalog metadata for one exact complete Artifact authority
-    /// without reading its bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope or provenance, a changed digest, incomplete or
-    /// deleted metadata, and a closed or corrupt catalog.
     pub fn describe_exact(&self, access: &ArtifactAccess) -> Result<ArtifactRecord, ArtifactError> {
         self.load_exact_complete(access)
     }
 
-    /// Reads one authorized bounded range and verifies the adapter result
-    /// against the immutable catalog size, digest, offset, and exact length.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope or provenance, changed digest, incomplete or
-    /// deleted metadata, zero/oversized/overflowing/out-of-object ranges,
-    /// missing bytes, and any adapter result that disagrees with the catalog.
     pub fn read_exact_range(
         &self,
         access: &ArtifactAccess,
@@ -1296,18 +1152,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Reconstructs the durable write receipt for one complete Artifact.
-    ///
-    /// This is the receipt-first bridge used by candidate Git retention after
-    /// an acknowledgement response is lost.  It reads the catalog authority
-    /// with the exact scope and provenance, and never trusts a caller-provided
-    /// descriptor or sequence.  The returned receipt is marked as a replay so
-    /// callers can distinguish recovery from a newly accepted write.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, foreign, deleted, or incomplete Artifact, or a
-    /// closed/corrupt catalog.
     pub fn complete_write_receipt(
         &self,
         scope_key: &ReceiptScopeKey,
@@ -1334,14 +1178,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Returns the highest contiguous sequence accepted for one Artifact.
-    ///
-    /// This is the transport recovery cursor used after a sequence gap or a
-    /// changed repeat. It requires the same exact repository scope as writes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, deleted, or foreign Artifact identity.
     pub fn acknowledged_sequence(
         &self,
         scope_key: &ReceiptScopeKey,
@@ -1352,15 +1188,6 @@ impl ArtifactStore {
             .acknowledged_sequence)
     }
 
-    /// Reads one bounded page of immutable completed-storage sources.
-    ///
-    /// The first page freezes a sequence upper bound, so concurrent Artifact
-    /// completions are visible only when a new scan begins.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid limits/cursors, incomplete or mismatched source rows,
-    /// corrupt Artifact metadata, and unavailable catalog storage.
     pub fn scan_storage_sources(
         &self,
         cursor: Option<&ArtifactStorageSourceCursor>,
@@ -1369,15 +1196,6 @@ impl ArtifactStore {
         metering::scan(self.catalog_ref()?, cursor, limit)
     }
 
-    /// Loads the one immutable storage-finalization source for an Artifact.
-    ///
-    /// A completed Artifact must have exactly one source. An incomplete
-    /// Artifact has no source and therefore cannot be usage-settled.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, source/catalog mismatches, and unavailable
-    /// catalog storage.
     pub fn storage_source_for_artifact(
         &self,
         artifact_id: &ArtifactId,
@@ -1385,17 +1203,6 @@ impl ArtifactStore {
         metering::load_for_artifact(self.catalog_ref()?, artifact_id)
     }
 
-    /// Loads the bounded immutable opens that still reserve storage for one Job.
-    ///
-    /// The catalog, rather than a terminal Worker message, is the authority for
-    /// the open request, expected bytes, attribution, and source seal. Completed
-    /// Artifacts are omitted because their immutable Usage source must settle
-    /// rather than release the reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed Job identity, corrupt/foreign catalog rows, an
-    /// unavailable catalog, or more than the supported unfinished bound.
     pub fn unfinished_quota_opens_for_job(
         &self,
         execution_job_id: &ExecutionJobId,
@@ -1404,14 +1211,6 @@ impl ArtifactStore {
         unfinished_quota_opens_for_job(self.catalog_ref()?, execution_job_id)
     }
 
-    /// Tombstones one exact Artifact after its retention hold ends. Content is
-    /// removed only when no other live Artifact metadata references the same
-    /// digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign access, indefinite or unexpired retention, incomplete
-    /// uploads, and malformed deletion time. Exact repeated deletion is safe.
     pub fn delete(
         &mut self,
         access: &ArtifactAccess,
@@ -1476,11 +1275,6 @@ impl ArtifactStore {
         self.delete_object_if_unreferenced(&access.digest)
     }
 
-    /// Closes both the object adapter and metadata catalog.
-    ///
-    /// # Errors
-    ///
-    /// Attempts both close operations and reports all failures.
     pub fn close(mut self) -> Result<(), ArtifactError> {
         let mut failures = Vec::new();
         if let Some(objects) = self.objects.take()
@@ -1662,8 +1456,6 @@ impl ArtifactStore {
     }
 }
 
-/// Shares the installed adapter without changing its authority or read checks.
-/// A snapshot never invokes `close`; only the owning Artifact store does.
 #[derive(Clone)]
 struct SharedArtifactObjectStore(Arc<Mutex<Option<Box<dyn ArtifactObjectStore>>>>);
 
@@ -1806,18 +1598,11 @@ fn load_message_chunk(
         .map_err(sql_error)
 }
 
-/// Controlled local filesystem object adapter.
 pub struct LocalArtifactObjectStore {
     root: PathBuf,
 }
 
 impl LocalArtifactObjectStore {
-    /// Opens a root owned by the adapter. Callers never provide object keys or
-    /// paths after construction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the root cannot be created or normalized.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ArtifactError> {
         let root = root.as_ref();
         fs::create_dir_all(root.join("objects/sha256")).map_err(io_error)?;
@@ -2031,8 +1816,6 @@ impl ArtifactObjectStore for LocalArtifactObjectStore {
     }
 }
 
-/// In-memory object adapter used to prove the same contract expected from an
-/// downstream object-storage implementation.
 #[derive(Clone, Default)]
 pub struct FakeArtifactObjectStore {
     state: Arc<Mutex<FakeObjectState>>,
@@ -2050,12 +1833,6 @@ impl FakeArtifactObjectStore {
         Self::default()
     }
 
-    /// Test probe that replaces one content-addressed object after acceptance.
-    /// Normal Artifact writes cannot mutate a completed object.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a malformed digest or poisoned test lock.
     pub fn corrupt_object(
         &self,
         digest: &Sha256Digest,
@@ -2070,12 +1847,6 @@ impl FakeArtifactObjectStore {
         Ok(())
     }
 
-    /// Returns the number of staged chunks retained by the fake adapter.
-    /// This test probe verifies that completion releases upload-only bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error if the fake state lock is poisoned.
     pub fn pending_chunk_count(&self) -> Result<usize, ArtifactError> {
         Ok(self
             .state

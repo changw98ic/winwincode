@@ -1,15 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Reliable Worker client for the canonical `ExecutionPort` model stream.
-//!
-//! The client sends generated `model.open`/`model.ack` messages, accepts only
-//! generated `model.chunk` messages for the exact active lease and session,
-//! and stores only sequence fingerprints and terminal facts in the cursor.
-//! The production bridge keeps an independently keyed, private response-frame
-//! ledger for the ProviderFinal/CoreCommitted hand-off; this client never
-//! exposes that payload to its cursor implementation. Request payloads are
-//! borrowed for the open send and are never retained with cursor state.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -34,7 +22,6 @@ use crate::WorkerExecutionPort;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Exact active authority for one model exchange.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ModelLeaseAuthority {
     pub lease: ExecutionLeaseStamp,
@@ -42,26 +29,13 @@ pub struct ModelLeaseAuthority {
     pub session_identity: SessionIdentity,
 }
 
-/// Caller-owned execution and retained-exchange checks. Implementations read
-/// the authority that governs the Worker Job and never derive it from a frame.
 pub trait ModelLeaseAuthoritySource: Send + Sync {
-    /// Verifies that the exact lease, attempt, fence, Worker process, and
-    /// session remain current at `now`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable rejection without exposing scheduler internals.
     fn validate_current(
         &self,
         authority: &ModelLeaseAuthority,
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection>;
 
-    /// Proves the identity of an existing exchange for response delivery,
-    /// acknowledgements, replay and cancellation. This authorizes no new work.
-    ///
-    /// # Errors
-    /// Rejects unknown or foreign exchanges and unavailable identity evidence.
     fn validate_retained_exchange(
         &self,
         authority: &ModelLeaseAuthority,
@@ -69,10 +43,6 @@ pub trait ModelLeaseAuthoritySource: Send + Sync {
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection>;
 
-    /// Validates current authority or a proven original request period for this exchange.
-    ///
-    /// # Errors
-    /// Rejects expired or unproven authority. Sources without renewal proof stay exact.
     fn validate_exchange(
         &self,
         authority: &ModelLeaseAuthority,
@@ -86,7 +56,6 @@ pub trait ModelLeaseAuthoritySource: Send + Sync {
     }
 }
 
-/// Stable current-authority rejection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelAuthorityRejection {
     ExpiredLease,
@@ -94,15 +63,12 @@ pub enum ModelAuthorityRejection {
     Unavailable,
 }
 
-/// Transport metadata allocated for one Worker-originated model message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelMessageMetadata {
     pub message_id: ExecutionMessageId,
     pub sent_at: Instant,
 }
 
-/// One provider-neutral model request. The request payload is consumed by
-/// `open` and is not copied into exchange or cursor state.
 #[derive(Clone, PartialEq)]
 pub struct OpenModelExchangeCommand {
     pub metadata: ModelMessageMetadata,
@@ -113,14 +79,12 @@ pub struct OpenModelExchangeCommand {
     pub request: EncodedPayload,
 }
 
-/// Result of opening one exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelOpenOutcome {
     Opened,
     Duplicate,
 }
 
-/// Secret-safe fingerprint retained for one delivered provider frame.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelChunkFingerprint {
@@ -131,7 +95,6 @@ pub struct ModelChunkFingerprint {
     pub has_error: bool,
 }
 
-/// Explicit terminal reason for an exchange.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTerminationReason {
@@ -143,8 +106,6 @@ pub enum ModelTerminationReason {
     StaleAuthority,
 }
 
-/// Durable, secret-safe model cursor. It contains no payload, response text,
-/// provider Credential, or Credential reference.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCursorSnapshot {
@@ -155,7 +116,6 @@ pub struct ModelCursorSnapshot {
     pub termination: Option<ModelTerminationReason>,
 }
 
-/// Durable identity of the exact Worker cancellation written to the cursor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCancellationFingerprint {
@@ -165,8 +125,6 @@ pub struct ModelCancellationFingerprint {
     pub phase: ModelCancellationPhase,
 }
 
-/// Durable two-phase cancellation state. `Intent` is written before the
-/// idempotent sink interruption; `Applied` is the terminal cursor.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCancellationPhase {
@@ -175,11 +133,6 @@ pub enum ModelCancellationPhase {
 }
 
 impl ModelCursorSnapshot {
-    /// Validates one adapter-loaded cursor before it controls delivery.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-contiguous, changed, oversized, or inconsistent state.
     pub fn validate(&self) -> Result<(), ModelCursorStateError> {
         if self.confirmed_sequence > MAX_SAFE_INTEGER
             || self.frames.len() as u64 != self.confirmed_sequence
@@ -271,7 +224,6 @@ impl ModelCursorSnapshot {
     }
 }
 
-/// Invalid durable model cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCursorStateError {
     CursorMismatch,
@@ -282,26 +234,14 @@ pub enum ModelCursorStateError {
     SequenceOverflow,
 }
 
-/// Durable cursor seam. Implementations must compare `expected_sequence` and
-/// update a frame fingerprint and its terminal fact atomically.
 pub trait ModelCursorStore {
     type Error;
 
-    /// Loads the secret-safe cursor for one canonical stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's read failure.
     fn load(
         &mut self,
         stream: &ReplayStreamKey,
     ) -> Result<Option<ModelCursorSnapshot>, Self::Error>;
 
-    /// Atomically advances one contiguous delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's write or optimistic-cursor failure.
     fn record_delivery(
         &mut self,
         stream: &ReplayStreamKey,
@@ -310,11 +250,6 @@ pub trait ModelCursorStore {
         termination: Option<ModelTerminationReason>,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically records a terminal interruption at the current cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's write or optimistic-cursor failure.
     fn terminate(
         &mut self,
         stream: &ReplayStreamKey,
@@ -322,12 +257,6 @@ pub trait ModelCursorStore {
         reason: ModelTerminationReason,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically records the exact cancellation intent before interrupting
-    /// the embedded stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's write or optimistic-cursor failure.
     fn record_cancellation_intent(
         &mut self,
         stream: &ReplayStreamKey,
@@ -335,12 +264,6 @@ pub trait ModelCursorStore {
         fingerprint: &ModelCancellationFingerprint,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically advances an exact cancellation intent to its terminal
-    /// applied state.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's write or optimistic-cursor failure.
     fn complete_cancellation(
         &mut self,
         stream: &ReplayStreamKey,
@@ -349,8 +272,6 @@ pub trait ModelCursorStore {
     ) -> Result<(), Self::Error>;
 }
 
-/// Borrowed provider chunk handed to the embedded Codex model stream.
-/// Payload and error fields are never copied into the cursor store.
 pub struct ModelChunkDelivery<'chunk> {
     pub model_exchange_id: &'chunk ModelExchangeId,
     pub request_id: &'chunk RequestId,
@@ -360,59 +281,38 @@ pub struct ModelChunkDelivery<'chunk> {
     pub error: Option<&'chunk ExecutionPortError>,
 }
 
-/// Idempotency result from the Codex model-stream sink.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelSinkDeliveryStatus {
     Applied,
     Duplicate,
 }
 
-/// Embedded Codex model-stream delivery seam. Implementations use
-/// `(model_exchange_id, sequence)` as their idempotency identity.
 pub trait ModelChunkSink {
     type Error;
 
-    /// Delivers one contiguous frame to the one embedded Codex stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter failure before the Worker advances its cursor.
     fn deliver(
         &mut self,
         delivery: ModelChunkDelivery<'_>,
     ) -> impl Future<Output = Result<ModelSinkDeliveryStatus, Self::Error>>;
 
-    /// Interrupts one embedded Codex stream using the exchange identity as an
-    /// idempotency key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter failure before the Worker records termination.
     fn terminate(
         &mut self,
         model_exchange_id: &ModelExchangeId,
         reason: ModelTerminationReason,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 
-    /// Releases the local stream buffers and handles at most once.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter failure while the terminal cursor remains retryable.
     fn release(
         &mut self,
         model_exchange_id: &ModelExchangeId,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
-/// Exact Worker cancellation receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelCancellationReceipt {
     pub confirmed_sequence: u64,
     pub replayed: bool,
 }
 
-/// Result of one inbound chunk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelChunkDisposition {
     Delivered {
@@ -428,7 +328,6 @@ pub enum ModelChunkDisposition {
     },
 }
 
-/// Result of an interrupted transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelDisconnectOutcome {
     ResumeRequested {
@@ -439,7 +338,6 @@ pub enum ModelDisconnectOutcome {
     AlreadyTerminal(ModelTerminationReason),
 }
 
-/// Stable Worker `ModelPort` client failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelPortClientErrorCode {
     InvalidInput,
@@ -455,7 +353,6 @@ pub enum ModelPortClientErrorCode {
     AlreadyTerminal,
 }
 
-/// Secret-free Worker `ModelPort` failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelPortClientError {
     code: ModelPortClientErrorCode,
@@ -490,7 +387,6 @@ struct ActiveModelExchange {
     replay_through_sequence: u64,
 }
 
-/// Reliable model-stream client on the Worker's canonical `ExecutionPort`.
 pub struct WorkerModelPortClient<Port, Store, Authority, Sink> {
     port: Port,
     store: Store,
@@ -517,12 +413,6 @@ where
         }
     }
 
-    /// Opens one exact provider-neutral exchange.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, conflicting exchange reuse, invalid canonical
-    /// messages, and transport failures. No request payload is retained.
     pub async fn open(
         &mut self,
         command: OpenModelExchangeCommand,
@@ -588,12 +478,6 @@ where
         Ok(ModelOpenOutcome::Opened)
     }
 
-    /// Delivers one canonical chunk at most once and sends the corresponding
-    /// contiguous acknowledgement or gap replay request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/cross-stream authority before Codex or cursor mutation.
     pub async fn accept_chunk(
         &mut self,
         chunk: &ModelChunkMessage,
@@ -695,13 +579,6 @@ where
         })
     }
 
-    /// Acknowledges an exact terminal frame after the process-local exchange
-    /// handle has been released.
-    ///
-    /// The durable cursor is the source of truth for this path.  It is used
-    /// when a Provider retries a final frame during the small window after a
-    /// Worker restart, before Core has issued the corresponding replay open.
-    /// No sink is touched and no new Core work is created.
     pub(crate) async fn accept_terminal_duplicate(
         &mut self,
         authority: ModelLeaseAuthority,
@@ -749,9 +626,6 @@ where
         let active = ActiveModelExchange {
             authority,
             model_exchange_id: chunk.model_exchange_id.clone(),
-            // The request id is not part of a model acknowledgement.  Keep a
-            // stable placeholder so this synthetic active exchange remains
-            // structurally complete while no Core sink is attached.
             request_id: RequestId("replayed-model-call".to_owned()),
             stream: mapped.stream,
             open_digest: Sha256Digest(format!(
@@ -796,13 +670,6 @@ where
         })
     }
 
-    /// Cancels one exact retained model exchange. Exact retries resend the same
-    /// canonical acknowledgement without interrupting the embedded stream twice.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, changed cancellation identity, other terminal
-    /// outcomes, cursor failures, sink failures, and transport failures.
     pub async fn cancel_exchange(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -861,12 +728,6 @@ where
         })
     }
 
-    /// Forgets the process-local exchange after a terminal acknowledgement has
-    /// been accepted by the Gateway. The durable cursor remains authoritative.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an active cursor and propagates sink or cursor failures.
     pub async fn release_terminal(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -884,13 +745,6 @@ where
         Ok(reason)
     }
 
-    /// Requests replay after the highest confirmed Codex delivery, or records
-    /// an explicit terminal interruption when resume is not permitted.
-    ///
-    /// # Errors
-    ///
-    /// Returns cursor or transport failures. A stale authority is durably
-    /// terminated without emitting a write under the old lease.
     pub async fn handle_disconnect(
         &mut self,
         model_exchange_id: &ModelExchangeId,

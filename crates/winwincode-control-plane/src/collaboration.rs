@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Activity, per-user notification receipts, and leased Presence.
-//!
-//! Activity rows are immutable audit references. Notifications are a read view
-//! over those rows plus one monotonic per-user acknowledgement receipt, so a
-//! delivery or WebSocket failure never changes the originating business state.
-//! Presence is an explicitly short-lived fact whose stale state is derived from
-//! the trusted clock.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -78,7 +68,6 @@ const MAX_ACTIVITY_SOURCE_LENGTH: usize = 200;
 const MAX_ACTIVITY_SUMMARY_CHARS: usize = 4_096;
 const MAX_COMMIT_ATTEMPTS: usize = 8;
 
-/// Stable error classes exposed by the collaboration application boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollaborationErrorKind {
     InvalidRequest,
@@ -90,7 +79,6 @@ pub enum CollaborationErrorKind {
     Corrupt,
 }
 
-/// Bounded collaboration failure. It never exposes storage paths or SQL text.
 #[derive(Debug)]
 pub struct CollaborationError {
     kind: CollaborationErrorKind,
@@ -128,21 +116,13 @@ impl From<StorageError> for CollaborationError {
     }
 }
 
-/// Trusted clock used for notification acknowledgement and Presence leases.
 pub trait CollaborationClock: Send {
-    /// Returns Unix epoch milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted clock is unavailable.
     fn now_millis(&mut self) -> Result<u64, CollaborationClockError>;
 }
 
-/// Bounded trusted-clock failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollaborationClockError;
 
-/// System trusted-clock adapter.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCollaborationClock;
 
@@ -156,7 +136,6 @@ impl CollaborationClock for SystemCollaborationClock {
     }
 }
 
-/// Immutable business-event reference recorded into Activity.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationActivityRecordRequest {
@@ -173,11 +152,6 @@ pub struct CollaborationActivityRecordRequest {
     pub occurred_at: Instant,
 }
 
-/// Durable collaboration application service.
-///
-/// Authorization requires an authenticated user and an exact authenticated scope.
-/// Storage owns Activity, notification receipts, Presence leases, and their
-/// public outbox events in one canonical `SQLite` authority.
 pub struct CollaborationService {
     inner: Mutex<CollaborationInner>,
     database_path: PathBuf,
@@ -211,13 +185,6 @@ impl CollaborationService {
         &self.database_path
     }
 
-    /// Records one immutable Activity reference and one public event atomically.
-    /// Duplicate or out-of-order source receipts never create another row or event.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for invalid input, current RBAC denial, conflicting source
-    /// receipts, exhausted concurrent retries, or durable storage failure.
     pub fn record_activity(
         &self,
         authenticated_scopes: &[Scope],
@@ -228,12 +195,6 @@ impl CollaborationService {
         self.lock()?.record_activity(request)
     }
 
-    /// Returns one stable keyset page from the immutable Activity ledger.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for current RBAC denial, malformed/stale cursor, corrupt
-    /// durable state, or storage failure.
     pub fn activity_list(
         &self,
         authenticated_scopes: &[Scope],
@@ -265,12 +226,6 @@ impl CollaborationService {
         })
     }
 
-    /// Returns the authenticated User's notification view over Activity.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for a non-User actor, current RBAC denial, invalid cursor,
-    /// corrupt durable state, or storage failure.
     pub fn notification_list(
         &self,
         authenticated_scopes: &[Scope],
@@ -330,12 +285,6 @@ impl CollaborationService {
         })
     }
 
-    /// Advances one User's monotonic notification acknowledgement receipt.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for current RBAC denial, revision or request conflict,
-    /// acknowledgement beyond current Activity, clock failure, or storage error.
     pub fn notification_ack(
         &self,
         authenticated_scopes: &[Scope],
@@ -347,12 +296,6 @@ impl CollaborationService {
         self.lock()?.notification_ack(command, &user_id)
     }
 
-    /// Replaces one authenticated User's leased Presence fact.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for current RBAC denial, invalid lease pairing, revision or
-    /// request conflict, clock failure, or durable storage error.
     pub fn presence_update(
         &self,
         authenticated_scopes: &[Scope],
@@ -364,13 +307,6 @@ impl CollaborationService {
         self.lock()?.presence_update(command, &user_id)
     }
 
-    /// Returns current Presence, deriving expired leases as offline at one
-    /// trusted read time and sealing that time in the page cursor.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for current RBAC denial, invalid cursor, clock failure,
-    /// concurrent snapshot change, corrupt state, or storage failure.
     pub fn presence_list(
         &self,
         authenticated_scopes: &[Scope],

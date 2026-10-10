@@ -1,25 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The signed-in user's repository directory for one Client device (plan
-//! 13.4, REPO-100.4): `GET /api/v1/repositories?clientId=…` projects the
-//! durable repository bindings of that Client onto the repo-ui facade shape
-//! (REPO-100.3): `{schemaVersion, repositories: [{repositoryBindingId,
-//! displayName, defaultBranch, headCommit, dirtyState, availability}]}`.
-//!
-//! Visibility follows plan 13.4 exactly: an `active` `ClientAccessGrant`
-//! carrying `use` on the client node AND an `active`
-//! `RepositoryAccessGrant` on the binding must both exist
-//! (`RepositoryBindingService::visible_bindings`); a binding missing either
-//! grant is invisible. The route is a read-only directory projection over the
-//! durable Device-Client-reported facts: occupancy leases and presence play
-//! no part, every card is produced from the same projection the device
-//! refreshes at launch (`client.repository.status`), and no absolute path
-//! ever crosses the boundary.
-//!
-//! The query identity is the public Client id (plan 11.2: digits only). A
-//! pending-enrollment or revoked identity is not a Client (or any more) and
-//! reads as `CLIENT_NOT_FOUND`, matching the connect boundary.
-
 use std::fmt;
 use std::path::PathBuf;
 
@@ -32,28 +10,17 @@ use winwincode_storage::ClientPresenceState;
 use winwincode_storage::RepositoryBindingRecord;
 use winwincode_storage::{ManagedAppRunTemplateRecord, SqliteStorage};
 
-/// Schema version of the public browser-facing repository directory.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// Wire text for a device-reported fact the Server does not know. The repo-ui
-/// facade requires non-empty `defaultBranch` and `headCommit` strings, so a
-/// binding whose last scan could not determine them projects a stable
-/// non-empty placeholder instead of breaking the whole list parse.
 const UNKNOWN_FIELD: &str = "unknown";
 
-/// Stable failure categories of the repository directory boundary. Each
-/// category maps to exactly one wire error code of the §16.3 taxonomy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientRepositoriesErrorKind {
-    /// The request query did not carry exactly one digit `clientId`.
     InvalidRequest,
-    /// The public Client ID does not name a Client.
     ClientNotFound,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Secret-free repository directory failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientRepositoriesError {
     kind: ClientRepositoriesErrorKind,
@@ -103,17 +70,12 @@ impl fmt::Display for ClientRepositoriesError {
 
 impl std::error::Error for ClientRepositoriesError {}
 
-/// The signed-in user's repository directory over the Server's one
-/// product-state database directory. Like the client connections surface,
-/// every operation opens and closes its own storage connection so concurrent
-/// flows never share state in memory.
 #[derive(Debug, Clone)]
 pub struct ClientRepositoriesApplication {
     data_directory: PathBuf,
 }
 
 impl ClientRepositoriesApplication {
-    /// Composes the directory application over one product-state directory.
     #[must_use]
     pub fn open(data_directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -121,15 +83,6 @@ impl ClientRepositoriesApplication {
         }
     }
 
-    /// Projects the user's visible repository list for the Client named by
-    /// the request query (`?clientId=…`).
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable boundary categories: a missing, repeated, or
-    /// malformed `clientId` is `InvalidRequest`; a public id that names no
-    /// Client, or a pending-enrollment or revoked one, is `ClientNotFound`;
-    /// storage failure is `Unavailable`.
     pub fn list(
         &self,
         user_id: &str,
@@ -143,8 +96,6 @@ impl ClientRepositoriesApplication {
                 .snapshot_by_public_client_id(&public_client_id)
                 .map_err(|_| ClientRepositoriesError::unavailable())?
             {
-                // Pending-enrollment and revoked identities are not Clients
-                // yet (or any more); the boundary cannot list them.
                 Some(node)
                     if !matches!(
                         node.presence_state,
@@ -169,14 +120,6 @@ impl ClientRepositoriesApplication {
         }))
     }
 
-    /// Saves one authenticated repository managed-app template. The binding
-    /// visibility check is the project/device settings authorization boundary;
-    /// the template has no run or candidate identity and cannot start a run.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Unavailable` for malformed input, a missing binding, or a
-    /// storage failure so callers do not reveal repository ownership.
     pub fn save_managed_app_template(
         &self,
         user_id: &str,
@@ -226,15 +169,6 @@ impl ClientRepositoriesApplication {
         }))
     }
 
-    /// Reads the authenticated repository managed-app template. A missing
-    /// template is an ordinary empty settings state; the response keeps the
-    /// binding identity and revision fields explicit so a browser refresh can
-    /// distinguish "not configured" from an unavailable repository.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Unavailable` when the binding is not visible to the user or
-    /// the durable template cannot be decoded.
     pub fn load_managed_app_template(
         &self,
         user_id: &str,
@@ -289,8 +223,6 @@ impl ClientRepositoriesApplication {
     }
 }
 
-/// One repository card: exactly the fields the repo-ui facade validates
-/// (REPO-100.3), under the facade's names.
 fn repository_summary(record: &RepositoryBindingRecord) -> Value {
     json!({
         "repositoryBindingId": record.repository_binding_id,
@@ -302,10 +234,6 @@ fn repository_summary(record: &RepositoryBindingRecord) -> Value {
     })
 }
 
-/// Reads the query identity: exactly one `clientId` parameter carrying a
-/// non-empty digit string (the public Client id, plan 11.2). Any other query
-/// shape is a request failure, mirroring the browser facade's own input
-/// assertion.
 fn repository_list_client_id(query: Option<&str>) -> Result<String, ClientRepositoriesError> {
     let Some(query) = query else {
         return Err(ClientRepositoriesError::invalid_request());

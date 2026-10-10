@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type ButtonVariant = 'default' | 'primary' | 'destructive' | 'ghost'

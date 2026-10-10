@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Signed identity for the bundled Kernel helper.
-//!
-//! The helper executable is an execution boundary.  Its identity therefore
-//! comes from a release manifest signed by the release key and from the
-//! public key compiled into this crate.  Callers only select the manifest and
-//! executable paths; they cannot supply a replacement digest.
-
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Read as _;
@@ -27,7 +18,6 @@ use std::os::unix::fs::PermissionsExt as _;
 pub(crate) const HELPER_RELEASE_MANIFEST_NAME: &str = "winwincode-kernel-helper.release.json";
 pub(crate) const HELPER_RELEASE_BINARY_NAME: &str = "winwincode-kernel-helper";
 pub(crate) const HELPER_RELEASE_BINARY_MODE: u32 = 0o755;
-/// Maximum helper image accepted by the Production Codex boundary.
 pub(crate) const MAX_HELPER_BYTES: u64 = 64 * 1024 * 1024;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 const MANIFEST_PROTOCOL: &str = "winwincode-kernel-helper-release";
@@ -63,7 +53,6 @@ struct SigningFields<'a> {
     binary_mode: u32,
 }
 
-/// Authenticated release identity for one exact helper binary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelperReleaseManifest {
     canonical_path: PathBuf,
@@ -76,16 +65,6 @@ pub struct HelperReleaseManifest {
 }
 
 impl HelperReleaseManifest {
-    /// Load and authenticate a release manifest from disk.
-    ///
-    /// The manifest itself must be a regular file with the canonical release
-    /// name.  Its signature, helper source identity, package version, and
-    /// binary digest are checked before a value is returned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the manifest is missing, malformed, or fails any
-    /// identity, digest, permission, or signature check.
     pub fn from_file(path: &Path) -> Result<Self, HelperReleaseManifestError> {
         let public_key = verifying_key(COMPILED_PUBLIC_KEY_HEX)?;
         Self::from_file_with_verifying_key(path, &public_key)
@@ -131,31 +110,26 @@ impl HelperReleaseManifest {
         })
     }
 
-    /// Absolute canonical path of the authenticated manifest.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.canonical_path
     }
 
-    /// Package version bound into the signed helper identity.
     #[must_use]
     pub fn package_version(&self) -> &str {
         &self.package_version
     }
 
-    /// Source digest bound into the signed helper identity.
     #[must_use]
     pub fn source_sha256(&self) -> &str {
         &self.source_sha256
     }
 
-    /// Relative path of the helper binary inside the release directory.
     #[must_use]
     pub fn binary_path(&self) -> &str {
         &self.binary_path
     }
 
-    /// Exact source mode bound by the release signature.
     #[must_use]
     pub const fn binary_mode(&self) -> u32 {
         self.binary_mode
@@ -165,16 +139,6 @@ impl HelperReleaseManifest {
         &self.binary_digest
     }
 
-    /// Build a signed manifest value for the checked-in test helper.
-    ///
-    /// This constructor is only compiled for test-support consumers.  The
-    /// production path always loads the signed file emitted by the release
-    /// build and never accepts a caller-computed digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the helper path is not the exact checked-in test
-    /// helper or when reading it fails validation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn from_test_helper(path: &Path) -> Result<Self, HelperReleaseManifestError> {
         let canonical_helper = path
@@ -223,7 +187,6 @@ impl HelperReleaseManifest {
     }
 }
 
-/// Secret-safe manifest parse/authentication failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HelperReleaseManifestError;
 
@@ -259,10 +222,8 @@ fn parse_manifest(path: &Path) -> Result<ManifestDocument, HelperReleaseManifest
     file.read(true);
     #[cfg(unix)]
     file.custom_flags(if cfg!(target_os = "macos") {
-        // Darwin O_NOFOLLOW.
         0x100
     } else {
-        // Linux O_NOFOLLOW.  Release targets are Darwin and Linux.
         0x20_000
     });
     let file = file

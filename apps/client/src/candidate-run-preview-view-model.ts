@@ -1,16 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * WWX-RUN-04 candidate run preview view-model.
- *
- * One snapshot type for the preview main surface: candidate identity (RUN-02),
- * managed-run lifecycle with lease-bound idempotent controls (RUN-03), the
- * authorized remote preview source (RUN-05), viewport and navigation (RUN-06),
- * file preview classes (RUN-07), and bounded log/diagnostic citations (RUN-08).
- * The model never invents facts; a missing field stays null and the page names
- * the gap.
- */
-
 export type CandidatePreviewMode = 'live' | 'frozen-candidate'
 
 export type ManagedRunPhase =
@@ -37,12 +24,10 @@ export type PreviewFileClass =
 
 export type PreviewTone = 'info' | 'success' | 'warning' | 'danger' | 'neutral'
 
-/** RUN-02 identity: never interchangeable between live and frozen modes. */
 export interface CandidatePreviewIdentity {
   readonly mode: CandidatePreviewMode
   readonly clientId: string
   readonly sourceId: string
-  /** WorkRun identity used by the authorized preview source. */
   readonly workRunId: string
   readonly repositoryBindingId: string
   readonly taskId: string | null
@@ -52,7 +37,6 @@ export interface CandidatePreviewIdentity {
   readonly runConfigVersion: string | null
 }
 
-/** RUN-03 lease-bound control request. Duplicate starts reuse the same lease. */
 export interface ManagedRunControl {
   readonly runId: string
   readonly leaseId: string
@@ -63,19 +47,16 @@ export interface ManagedRunControl {
   readonly failureReason: string | null
 }
 
-/** RUN-05 authorized tunnel source; local sockets never appear here. */
 export interface AuthorizedPreviewSourceFacts {
   readonly previewAccessId: string
   readonly sourceId: string
   readonly mode: CandidatePreviewMode
   readonly candidateCommit: string | null
-  /** Backend-facing origin only (e.g. https://preview.example/p/<sourceId>). */
   readonly previewOrigin: string
   readonly access: PreviewAccessState
   readonly accessExpiresAt: string | null
 }
 
-/** RUN-06 viewport and in-frame navigation. */
 export interface PreviewViewportFacts {
   readonly preset: PreviewViewportPreset
   readonly width: number
@@ -89,7 +70,6 @@ export interface PreviewNavigationFacts {
   readonly lastError: string | null
 }
 
-/** RUN-07 one attachment or generated file under an authorized repo-relative path. */
 export interface PreviewFileFacts {
   readonly path: string
   readonly previewClass: PreviewFileClass
@@ -97,7 +77,6 @@ export interface PreviewFileFacts {
   readonly totalBytes: number | null
 }
 
-/** One bounded chunk of the retained candidate file content. */
 export interface PreviewFileContentFacts {
   readonly path: string
   readonly mediaType: string
@@ -147,7 +126,6 @@ export interface PreviewDiffState {
   readonly retryable: boolean
 }
 
-/** RUN-08 one redacted, source-bound log citation. */
 export interface PreviewLogCitation {
   readonly segmentKey: string
   readonly lineStart: number
@@ -181,9 +159,7 @@ export interface CandidatePreviewState {
 }
 
 export interface CandidatePreviewPort {
-  /** Current identity for this candidate/work run; null when unknown. */
   loadIdentity(): Promise<CandidatePreviewIdentity | null>
-  /** Lease-bound start. Calling start while a run is live returns the same run. */
   startRun?(input: {
     readonly identity: CandidatePreviewIdentity
     readonly requestId: string
@@ -203,7 +179,6 @@ export interface CandidatePreviewPort {
     readonly leaseId: string
     readonly requestId: string
   }): Promise<ManagedRunControl>
-  /** Short-lived authorized preview access for this source. */
   authorizePreview(input: {
     readonly sourceId: string
     readonly requestId: string
@@ -306,7 +281,6 @@ const MOBILE_VIEWPORT: PreviewViewportFacts = Object.freeze({
   height: 844,
 })
 
-/** RUN-08 hard segment ceiling; longer streams stay truncated, never unbounded. */
 export const PREVIEW_LOG_MAX_LINES = 200
 
 function initialState(): CandidatePreviewState {
@@ -332,7 +306,6 @@ function initialState(): CandidatePreviewState {
   })
 }
 
-/** RUN-02 copy: the mode banner never softens live vs frozen. */
 export function candidatePreviewModeText(mode: CandidatePreviewMode): string {
   return mode === 'live'
     ? '实时开发预览'
@@ -343,7 +316,6 @@ export function candidatePreviewModeTone(mode: CandidatePreviewMode): PreviewTon
   return mode === 'live' ? 'warning' : 'success'
 }
 
-/** RUN-02: live previews must never be presented as acceptance proof. */
 export function candidatePreviewAcceptanceEligible(mode: CandidatePreviewMode): boolean {
   return mode === 'frozen-candidate'
 }
@@ -368,10 +340,6 @@ export function managedRunPhaseTone(phase: ManagedRunPhase): PreviewTone {
   }
 }
 
-/**
- * RUN-05: only Backend-visible origins. Localhost, link-local, and metadata
- * addresses are rejected at the view-model boundary.
- */
 export function isSafePreviewOrigin(origin: string): boolean {
   let parsed: URL
   try {
@@ -395,7 +363,6 @@ function isPortablePreviewId(value: string | null): boolean {
 
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
 
-/** Validates the route-carried identity before it can authorize a source. */
 export function isCandidatePreviewIdentity(identity: CandidatePreviewIdentity): boolean {
   return /^\d{9,12}$/u.test(identity.clientId)
     && isPortablePreviewId(identity.sourceId)
@@ -411,7 +378,6 @@ export function isCandidatePreviewIdentity(identity: CandidatePreviewIdentity): 
       : identity.candidateCommit !== null && GIT_OBJECT_ID.test(identity.candidateCommit))
 }
 
-/** Keeps navigation inside the granted preview URL path. */
 export function isSafePreviewPath(path: string): boolean {
   if (!path.startsWith('/') || path.startsWith('//') || path.length > 4096 || path.includes('\\')) {
     return false
@@ -426,7 +392,6 @@ export function isSafePreviewPath(path: string): boolean {
   }
 }
 
-/** RUN-07: attachments only under a normalized repository-relative path. */
 export function isRepositoryRelativePath(path: string): boolean {
   if (path.length === 0 || path.length > 4096) return false
   if (path.startsWith('/') || path.includes('\\')) return false
@@ -542,7 +507,6 @@ export function createCandidatePreviewViewModel(
   const backStack: string[] = []
   const forwardStack: string[] = []
   let closed = false
-  /** RUN-03: one live run identity; a second start never opens a second run. */
   let activeRunKey: string | null = null
   let pendingStartKey: string | null = null
   let pendingDiffPath: string | null = null
@@ -562,7 +526,6 @@ export function createCandidatePreviewViewModel(
       const segments = await options.port.listLogSegments({ runId })
       if (!closed && state.run?.runId === runId) emit({ logSegments: projectLogSegments(segments) })
     } catch {
-      // A run remains usable when its optional diagnostics endpoint is unavailable.
     }
   }
 
@@ -724,7 +687,6 @@ export function createCandidatePreviewViewModel(
       }
       const key = identityFingerprint(identity)
       if (activeRunKey === key && state.run !== null && state.run.phase !== 'exited' && state.run.phase !== 'failed') {
-        // RUN-03 idempotent start: a second click keeps the existing run.
         notice('该候选已有一个进行中的受管运行，不会重复启动。')
         return
       }
@@ -960,8 +922,6 @@ export function createCandidatePreviewViewModel(
         return
       }
       if (file.previewClass === 'html') {
-        // HTML/SVG stays on the separately authorized preview origin; the
-        // management document never receives untrusted markup.
         this.navigate(`/${path}`)
         emit({ fileContent: null, notice: 'HTML/SVG 仅在独立受控预览来源中渲染。' })
         return
@@ -1041,7 +1001,6 @@ export function createCandidatePreviewViewModel(
   }
 }
 
-/** Pure projection used by tests and the page when a run finishes loading. */
 export function projectLogSegments(
   segments: readonly PreviewLogSegmentFacts[],
 ): readonly PreviewLogSegmentFacts[] {

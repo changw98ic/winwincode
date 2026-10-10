@@ -154,8 +154,6 @@ async function freePort() {
 }
 
 function fixtureTargetDirectory() {
-  // Cargo honors CARGO_TARGET_DIR for example binaries too; without it the
-  // default is <root>/target.
   const configured = process.env.CARGO_TARGET_DIR
   return configured === undefined || configured.length === 0
     ? resolve(root, 'target')

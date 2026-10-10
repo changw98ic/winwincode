@@ -1,31 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Typed solution-review authority reconstructed from the current Delivery.
-//!
-//! Raw Attention JSON is accepted only by [`resolve_current_solution_review`].
-//! Callers receive neither a raw parser nor a constructor for the validated
-//! fact. The resolver verifies the current Delivery identities, the exact
-//! planning binding, the human review lifecycle, the ordered task graph, and
-//! the canonical review-set digest before producing one opaque value.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::solution_review::ValidatedSolutionReviewSet;
-//!
-//! let _caller_supplied: ValidatedSolutionReviewSet = serde_json::from_str("{}").unwrap();
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::solution_review::SolutionReviewContextV1;
-//!
-//! let _caller_context: SolutionReviewContextV1 = serde_json::from_str("{}").unwrap();
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::application::solution_review::SolutionReviewDecisionV1;
-//!
-//! let _caller_decision: SolutionReviewDecisionV1 = serde_json::from_str("{}").unwrap();
-//! ```
-
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -468,7 +440,6 @@ struct Settlement {
     reviewed_at: Option<u64>,
 }
 
-/// Rebuilds the one current typed solution review from canonical Delivery facts.
 pub(crate) fn resolve_current_solution_review(
     delivery: &Delivery,
 ) -> Result<Option<ValidatedSolutionReviewSet>, SolutionReviewError> {
@@ -747,8 +718,6 @@ fn resolve_settlement(
     })
 }
 
-// Called only after the persisted Attention, planning WorkRun, actor, time,
-// decision, digest, Spec revision, and highest attempt have matched exactly.
 const fn settlement_status_is_current(
     action: DecisionActionWire,
     status: crate::domain::DeliveryStatus,
@@ -768,7 +737,6 @@ const fn settlement_status_is_current(
     }
 }
 
-/// Validates one pending plan-review decision before the Attention aggregate mutates.
 pub(crate) fn validate_solution_review_settlement(
     delivery: &Delivery,
     attention_item_id: &AttentionItemId,

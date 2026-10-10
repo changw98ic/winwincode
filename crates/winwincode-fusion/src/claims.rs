@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Extracts independent model claims without granting them verification authority.
-
 use crate::analysis::{
     FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence, validate_candidates,
 };
@@ -14,7 +10,6 @@ pub struct ClaimExtractionError {
     pub message: String,
 }
 
-/// Closed structured answer expected from independent members.
 #[must_use]
 pub fn default_claim_output_schema() -> Value {
     let evidence_type = serde_json::json!({"type":"string", "enum":[
@@ -53,18 +48,6 @@ pub fn default_claim_output_schema() -> Value {
     })
 }
 
-/// Extracts one candidate's claims from an isolated answer payload.
-///
-/// Expected answer shape (`camelCase` or `snake_case` accepted):
-/// `{ "claims": [{ "claimKey", "summary", "position", "evidence"?, "requiredEvidence"? }] }`
-///
-/// Extraction is purely local to `answer`. Sibling outputs are never an input.
-///
-/// # Errors
-///
-/// Returns [`ClaimExtractionError`] when the answer is not an
-/// object, has no parseable `claims` array, or fails the analyzer's claim
-/// constraints. A member must pass the same constraints before panel admission.
 pub fn extract_claims_from_answer(
     candidate_id: &str,
     answer: &Value,
@@ -165,8 +148,6 @@ fn parse_evidence(item: &Value) -> Result<FusionEvidence, String> {
     Ok(FusionEvidence {
         evidence_type,
         source_ref,
-        // A candidate's answer is model prose. It can cite a source, but it
-        // cannot promote that citation to a verified fact by naming a result.
         verified_conclusion: None,
     })
 }

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, prepare_workrun_start,
 };
@@ -127,13 +125,11 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
         .unwrap();
     consumer.work_item_id = auth.work_item_id().clone();
     consumer.state = winwincode_domain::WorkRunState::Running;
-    // Test the canonical aggregate gate directly: an active reader blocks retirement.
     assert!(
         busy.work_run_aggregate
             .start_verification(auth.work_item_id())
             .is_err()
     );
-    // The same seal cannot retire the candidate twice or mutate its input revision.
     assert!(auth.dispatch_aggregate(&accepted.delivery).is_err());
     assert_eq!(
         accepted.delivery.snapshot().session_bindings,

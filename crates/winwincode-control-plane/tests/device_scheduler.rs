@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! `DeviceSchedulerService` two-phase scheduling verticals (plan FLOW-100.2):
-//! phase one validates the holder, occupancy semantics, dual authorization,
-//! and the durable capacity, then reserves exactly one free slot; phase two
-//! issues the Worker request through the frozen launch grant gate. Every
-//! refusal and every failure path must leave the durable capacity unchanged.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,8 +18,6 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 fn temporary_directory(name: &str) -> PathBuf {
     let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-    // Wall-clock nanos keep the directory unique even when the operating
-    // system reuses a previous run's process id.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock")
@@ -58,7 +48,6 @@ const GRANT_EXPIRES: &str = "2026-01-01T01:00:00.000Z";
 
 const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-/// Every identity one scheduling vertical needs against one client node.
 #[derive(Clone)]
 struct Fixture {
     directory: PathBuf,
@@ -70,9 +59,6 @@ struct Fixture {
     binding: String,
 }
 
-/// Seeds one `online` client node with `capacity` worker-session slots, a
-/// `use` access grant for `holder`, an occupancy lease (device-confirmed
-/// when `confirmed`), and one visible repository binding.
 fn seed_fixture(seed: u64, holder: &str, capacity: u32, confirmed: bool) -> Fixture {
     let directory = temporary_directory(&format!("fixture-{seed}"));
     let node = id("cnd", seed);
@@ -154,8 +140,6 @@ fn seed_fixture(seed: u64, holder: &str, capacity: u32, confirmed: bool) -> Fixt
     }
 }
 
-/// Seeds one repository binding of `node` with an active `Use` grant for
-/// `holder`, so the dual-authorization visibility gate accepts it.
 fn seed_visible_binding(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -229,7 +213,6 @@ fn scheduling_request_for(
     .expect("scheduling request")
 }
 
-/// The public Client ID of the fixture's node (12 digits, matching the seed).
 fn public_client_id_for(fixture: &Fixture) -> String {
     let seed = fixture
         .node
@@ -239,8 +222,6 @@ fn public_client_id_for(fixture: &Fixture) -> String {
     public_client_id(seed)
 }
 
-/// Directly issues one launch grant through the frozen ledger, bypassing the
-/// scheduler — the crash-orphan and phase-two-conflict fixtures.
 fn seed_orphan_grant(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -316,17 +297,13 @@ fn the_two_phase_schedule_reserves_a_slot_then_issues_the_worker_request() {
     assert_eq!(receipt.product_session_id, Some(id("ps", seed + 31)));
     assert_eq!(receipt.work_run_id, Some(id("wrn", seed + 32)));
     assert!(!receipt.replayed);
-    // Phase one left exactly one reservation and it settled onto the grant.
     let reservation = stored_reservation(&mut storage, &id("req", seed + 20)).expect("reservation");
     assert_eq!(reservation.state, DeviceSchedulerReservationState::Granted);
     assert_eq!(
         reservation.launch_grant_id.as_deref(),
         Some(receipt.worker_launch_grant_id.as_str())
     );
-    // Phase two issued exactly one live grant: the durable capacity view.
     assert_eq!(non_terminal_grant_count(&mut storage, &fixture.node), 1);
-    // The holder can schedule a second concurrent WorkerSession on the same
-    // device while the capacity lasts.
     let second = scheduling_request(seed + 40, &fixture);
     DeviceSchedulerService::new(&mut storage)
         .select_and_request_worker(&second, &instant(T2))
@@ -340,7 +317,6 @@ fn a_client_without_confirmed_occupancy_is_never_dispatched() {
     let holder = id("usr", seed + 1);
     let fixture = seed_fixture(seed, &holder, 2, true);
     let mut storage = open(&fixture.directory);
-    // Drop the lease entirely: nothing is occupied, so nothing is dispatched.
     storage
         .client_occupancy_ledger()
         .expect("ledger")
@@ -358,8 +334,6 @@ fn a_client_without_confirmed_occupancy_is_never_dispatched() {
         stored_reservation(&mut storage, &id("req", seed + 20)).is_none(),
         "a refusal must not reserve anything"
     );
-    // A merely `reserving` (not device-confirmed) lease is equally not
-    // dispatchable.
     let seed = seed + 50;
     let holder = id("usr", seed + 1);
     let fixture = seed_fixture(seed, &holder, 2, false);
@@ -394,7 +368,6 @@ fn a_non_holder_and_an_unreachable_client_are_refused() {
         stored_reservation(&mut storage, &id("req", seed + 20)).is_none(),
         "a refusal must not reserve anything"
     );
-    // The holder is refused once the device drops offline.
     let revision = {
         let mut registry = ClientRegistryService::new(&mut storage);
         registry
@@ -417,7 +390,6 @@ fn a_non_holder_and_an_unreachable_client_are_refused() {
         error.kind(),
         DeviceSchedulerServiceErrorKind::PresenceNotOnline
     );
-    // An unknown public Client ID names no launchable client.
     let request = DeviceWorkerSchedulingRequest::try_new(
         id("req", seed + 60),
         &holder,
@@ -446,7 +418,6 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
     let seed = 400;
     let holder = id("usr", seed + 1);
     let fixture = seed_fixture(seed, &holder, 2, true);
-    // A binding of a different client node, visible to the same holder there.
     let other = seed_fixture(seed + 50, &holder, 2, true);
     let mut storage = open(&fixture.directory);
     let request = DeviceWorkerSchedulingRequest::try_new(
@@ -470,7 +441,6 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         error.kind(),
         DeviceSchedulerServiceErrorKind::BindingNotVisible
     );
-    // A known binding whose repository grant was revoked is equally invisible.
     {
         let mut grants = RepositoryAccessGrantService::new(&mut storage);
         let grant = grants
@@ -491,7 +461,6 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         error.kind(),
         DeviceSchedulerServiceErrorKind::BindingNotVisible
     );
-    // An unknown binding id gets the same uniform refusal.
     let request = DeviceWorkerSchedulingRequest::try_new(
         id("req", seed + 60),
         &holder,
@@ -566,11 +535,8 @@ fn concurrent_schedules_never_oversell_the_durable_capacity() {
 fn a_failed_phase_two_releases_the_reservation_immediately() {
     let seed = 600;
     let holder = id("usr", seed + 1);
-    // Capacity 2: the orphan grant holds one slot, the scheduler the other.
     let fixture = seed_fixture(seed, &holder, 2, true);
     let mut storage = open(&fixture.directory);
-    // A live grant already carries the requested worker session but for a
-    // different worker identity: phase two must refuse without adopting it.
     seed_orphan_grant(
         &mut storage,
         seed + 15,
@@ -584,7 +550,6 @@ fn a_failed_phase_two_releases_the_reservation_immediately() {
         .select_and_request_worker(&request, &instant(T2))
         .expect_err("a conflicting live grant must refuse the launch");
     assert_eq!(error.kind(), DeviceSchedulerServiceErrorKind::LaunchRefused);
-    // The reservation was released durably: the scheduler holds no slot.
     let reservation = stored_reservation(&mut storage, &id("req", seed + 20)).expect("reservation");
     assert_eq!(reservation.state, DeviceSchedulerReservationState::Released);
     assert_eq!(
@@ -599,7 +564,6 @@ fn a_failed_phase_two_releases_the_reservation_immediately() {
             .expect("pending"),
         0
     );
-    // The released slot is reusable by a fresh request.
     let request = scheduling_request(seed + 40, &fixture);
     DeviceSchedulerService::new(&mut storage)
         .select_and_request_worker(&request, &instant(T2))
@@ -613,12 +577,7 @@ fn an_orphan_grant_of_a_crashed_attempt_is_adopted_idempotently() {
     let holder = id("usr", seed + 1);
     let fixture = seed_fixture(seed, &holder, 1, true);
     let mut storage = open(&fixture.directory);
-    // Touch the launch grant ledger so the durable capacity view exists on
-    // this fresh database (the order production flows open their ledgers in).
     storage.worker_launch_grant_ledger().expect("ledger");
-    // Simulate the crash window exactly: phase one reserved the slot, phase
-    // two issued the grant with the exact request identities, and the
-    // scheduler died before the settlement.
     let crashed = DeviceSchedulerReservationRequest::try_new(
         id("dsr", seed + 15),
         id("req", seed + 20),
@@ -651,7 +610,6 @@ fn an_orphan_grant_of_a_crashed_attempt_is_adopted_idempotently() {
     assert_eq!(receipt.worker_launch_grant_id, orphan);
     let reservation = stored_reservation(&mut storage, &id("req", seed + 20)).expect("reservation");
     assert_eq!(reservation.state, DeviceSchedulerReservationState::Granted);
-    // No second slot was issued: the crash recovery stays at-most-once.
     assert_eq!(non_terminal_grant_count(&mut storage, &fixture.node), 1);
 }
 
@@ -674,9 +632,7 @@ fn replaying_one_request_identity_returns_the_original_receipt() {
         replay.device_scheduler_reservation_id,
         first.device_scheduler_reservation_id
     );
-    // The replay issued no second slot.
     assert_eq!(non_terminal_grant_count(&mut storage, &fixture.node), 1);
-    // The same identity with a different body is a conflict, not a replay.
     let conflicting = DeviceWorkerSchedulingRequest::try_new(
         id("req", seed + 20),
         &holder,
@@ -711,8 +667,6 @@ fn rolling_a_launch_back_frees_the_slot_after_a_timeout() {
         .select_and_request_worker(&request, &instant(T2))
         .expect("schedule");
     assert_eq!(non_terminal_grant_count(&mut storage, &fixture.node), 1);
-    // The bounded launch flow times out and rolls the attempt back: the
-    // issued grant is revoked, which frees the durable slot.
     let reservation = DeviceSchedulerService::new(&mut storage)
         .rollback_launch(&id("req", seed + 20), &instant(T3))
         .expect("rollback");
@@ -725,8 +679,6 @@ fn rolling_a_launch_back_frees_the_slot_after_a_timeout() {
         .expect("grant");
     assert_eq!(grant.state.as_str(), "revoked");
     assert_eq!(non_terminal_grant_count(&mut storage, &fixture.node), 0);
-    // Rolling back again is an idempotent no-op; an unknown request is
-    // refused without a durable change.
     DeviceSchedulerService::new(&mut storage)
         .rollback_launch(&id("req", seed + 20), &instant(T3))
         .expect("idempotent rollback");
@@ -737,7 +689,6 @@ fn rolling_a_launch_back_frees_the_slot_after_a_timeout() {
         error.kind(),
         DeviceSchedulerServiceErrorKind::UnknownReservation
     );
-    // The freed slot schedules a replacement worker session.
     let request = scheduling_request(seed + 40, &fixture);
     DeviceSchedulerService::new(&mut storage)
         .select_and_request_worker(&request, &instant(T3))
@@ -751,10 +702,7 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
     let holder = id("usr", seed + 1);
     let fixture = seed_fixture(seed, &holder, 1, true);
     let mut storage = open(&fixture.directory);
-    // Touch the launch grant ledger so the durable capacity view exists on
-    // this fresh database (the order production flows open their ledgers in).
     storage.worker_launch_grant_ledger().expect("ledger");
-    // A scheduler reserved a slot at T0 and died before phase two.
     let command = DeviceSchedulerReservationRequest::try_new(
         id("dsr", seed + 15),
         id("req", seed + 20),
@@ -775,7 +723,6 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
         pending,
         winwincode_storage::DeviceSchedulerReserveOutcome::Reserved(_)
     ));
-    // The stale reservation holds the slot: a fresh schedule is exhausted.
     let request = scheduling_request(seed + 40, &fixture);
     let error = DeviceSchedulerService::new(&mut storage)
         .select_and_request_worker(&request, &instant(T2))
@@ -784,7 +731,6 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
         error.kind(),
         DeviceSchedulerServiceErrorKind::CapacityExhausted
     );
-    // The boundary sweeps: the stale reservation is reclaimed as expired.
     let reclaimed = DeviceSchedulerService::new(&mut storage)
         .expire_stale_reservations(&instant(T1))
         .expect("sweep");
@@ -795,7 +741,6 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
         stale.release_reason,
         Some(DeviceSchedulerReleaseReason::Expired)
     );
-    // The freed slot schedules, and the dead request identity stays closed.
     let request = scheduling_request(seed + 40, &fixture);
     DeviceSchedulerService::new(&mut storage)
         .select_and_request_worker(&request, &instant(T2))

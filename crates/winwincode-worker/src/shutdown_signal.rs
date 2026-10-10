@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Interrupt subscription retained across registration and execution turns.
-
 #[cfg(unix)]
 pub(crate) struct WorkerInterrupt {
     interrupt: tokio::signal::unix::Signal,
@@ -15,8 +11,6 @@ pub(crate) struct WorkerInterrupt {
 
 impl WorkerInterrupt {
     pub(crate) fn new() -> std::io::Result<Self> {
-        // Subscribe before any registration/drive await. A ctrl_c future
-        // created per select loses signals while that turn's body runs.
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -89,8 +83,6 @@ mod tests {
             return;
         }
         let mut interrupt = WorkerInterrupt::new().expect("subscribe to interrupts");
-        // Prime the registration select, then let a drive turn win. Its body
-        // awaits external work while the interrupt branch is no longer polled.
         tokio::select! {
             biased;
             () = interrupt.wait() => panic!("unexpected early interrupt"),
@@ -102,8 +94,6 @@ mod tests {
             .await
             .expect("interrupt during the drive body must remain pending");
 
-        // Subscription is eager: even a signal before the first registration
-        // poll must be remembered rather than depending on select ordering.
         let mut before_registration =
             WorkerInterrupt::new().expect("subscribe before registration");
         send_interrupt();

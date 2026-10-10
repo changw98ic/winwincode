@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { ControlPlaneLoginFailure } from './community-control-plane-client.js'
 import type {
   LoginSubmissionSource,
@@ -14,7 +12,6 @@ export interface LoginPageOptions {
 
 export interface LoginPage {
   close(): void
-  /** Show or hide the page; drafts survive visibility changes and re-renders. */
   setVisible(visible: boolean): void
 }
 
@@ -56,16 +53,9 @@ function statusText(state: LoginViewModelState): string {
   return ''
 }
 
-/**
- * Mount the username + password login page with the first-time initialization
- * entry. The entry only appears when the Server reports itself uninitialized.
- */
 export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const document = options.root.ownerDocument
   const region = element(document, 'section', 'wwc-login')
-  // The audit allows exactly one live-region channel per surface and pins the
-  // heading list of every mounted page, so this page renders its titles as
-  // styled paragraphs and keeps announcements on the submit-busy form state.
   const heading = element(document, 'p', 'wwc-login-heading')
   const status = element(document, 'p', 'wwc-login-status')
   const error = element(document, 'p', 'wwc-login-error')
@@ -74,7 +64,6 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const username = element(document, 'input', 'wwc-login-control wwc-login-username')
   const passwordLabel = element(document, 'label', 'wwc-login-label')
   const password = element(document, 'input', 'wwc-login-control wwc-login-password')
-  // Design page 01: the password field carries a visibility toggle.
   const passwordToggle = element(document, 'button', 'wwc-login-password-toggle')
   const passwordWrap = element(document, 'div', 'wwc-login-password-wrap')
   const submit = element(document, 'button', 'wwc-login-submit')
@@ -134,9 +123,6 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   passwordToggle.type = 'button'
   passwordToggle.setAttribute('aria-label', '显示密码')
   passwordToggle.setAttribute('aria-pressed', 'false')
-  // Inline SVG eye icon. Set through innerHTML on purpose: it is purely
-  // presentational, and a data:/http icon URL would surface as a network
-  // request, which the security audits correctly treat as a leak.
   passwordToggle.innerHTML = [
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"',
     ' stroke="currentColor" stroke-width="2" stroke-linecap="round"',
@@ -254,7 +240,6 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
     if (username.value.length === 0 || password.value.length === 0) return
     const submittedUsername = username.value
     const submittedPassword = password.value
-    // Secret-safe submission: the password leaves the DOM before the await.
     password.value = ''
     void options.model.login({ username: submittedUsername, password: submittedPassword })
   }

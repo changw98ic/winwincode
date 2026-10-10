@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
@@ -50,7 +48,6 @@ pub(crate) fn ledger_state(bytes: usize) {
 }
 
 mod fixture {
-    // Reuse the canonical local lease/dispatch/WorkRun/SessionBinding fixture.
     include!("../tests/durable_execution_port_ingress.rs");
     include!("storage_runtime_regression.rs");
 }

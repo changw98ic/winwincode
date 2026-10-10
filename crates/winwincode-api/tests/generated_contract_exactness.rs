@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use serde_json::{Value, json};
 use winwincode_api::generated::{
     ApprovalProjection, CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame,

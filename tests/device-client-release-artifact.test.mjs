@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
@@ -426,9 +424,6 @@ test('optional helper release manifest must bind the packaged helper', () => {
     })
     const tampered = { ...helperReleaseManifest, binarySha256: `sha256:${'0'.repeat(64)}` }
     writeFileSync(destination, JSON.stringify(tampered))
-    // Binding a tampered helper manifest into a package manifest must fail
-    // closed; a stale package manifest instead reports the byte mismatch
-    // already covered by the binary-tamper test above.
     assertDeviceClientReleaseError(
       () => writeManifestAndChecksums(artifactRoot),
       'HELPER_RELEASE_MANIFEST_INVALID',

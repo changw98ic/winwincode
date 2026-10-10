@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//! Bounded read-only joins over ordered Core metadata receipts.
 use super::sources::TrustedProjectionReadError;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};

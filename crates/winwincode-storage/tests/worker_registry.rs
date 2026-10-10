@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::drop_non_drop)]
 
 use std::{

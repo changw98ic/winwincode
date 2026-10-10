@@ -1,35 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Transport-neutral exchange framework for the `ClientControlPort`.
-//!
-//! This module implements the transmission semantics of
-//! `POST /internal/v1/client/exchange` (see
-//! `docs/contracts/client-control-port-v1.md`) as a pure synchronous library:
-//! no IO, no async runtime, no adapter configuration beyond the frame byte
-//! bound. Both peers — the Device Client and the Control Plane — run the same
-//! machinery on both directions:
-//!
-//! - the send side allocates sequences from 1 without gaps
-//!   ([`SequenceAllocator`]), persists every frame through a durable outbox
-//!   before sending ([`FrameOutbox`]), and tracks the peer's contiguous
-//!   acknowledgement ([`OutboxSession::acknowledge`]) so confirmed frames may
-//!   be compacted ([`CompactingOutbox`]);
-//! - the receive side validates sequences against the contiguous
-//!   acknowledgement ([`AckCursor`]), returns `replayFromSequence` on gaps,
-//!   judges frame replays and command idempotency conflicts
-//!   ([`DedupRegister`]), guards the `clientInstanceId`
-//!   ([`InstanceTracker`]), and produces the fixed contract outcomes
-//!   ([`IngestDecision`]);
-//! - the codec seals and opens bounded frames ([`FrameCodec`]) with the
-//!   stable payload digest both sides compare.
-//!
-//! One exchange then composes these pieces: the request carries a bounded
-//! batch from the sender's outbox plus its `ackSequence` of the reverse
-//! stream; the response carries the acknowledgement (and replay hint) of the
-//! request batch plus the next bounded batch of the reverse stream. The
-//! scenario tests at the bottom of this module walk the fixed result table
-//! end to end.
-
 pub mod dedup;
 pub mod frame;
 pub mod inbound;
@@ -101,9 +69,6 @@ mod tests {
         }
     }
 
-    /// One direction of one exchange: the sender drains a bounded batch of
-    /// its outbox, the receiver ingests every frame, and the receiver's
-    /// acknowledgement (with the replay hint on gaps) flows back.
     fn exchange_one_direction(
         session: OutboxSession,
         outbox: &mut InMemoryOutbox,
@@ -132,7 +97,6 @@ mod tests {
 
     #[test]
     fn a_full_exchange_delivers_replays_and_compacts() {
-        // The Device Client fills its durable outbox with five frames.
         let codec = FrameCodec::default();
         let mut outbox = InMemoryOutbox::new();
         let session = OutboxSession::new();
@@ -147,9 +111,6 @@ mod tests {
                 .expect("persist before send");
         }
 
-        // The server receives frames 1 and 2, confirms them, and the
-        // exchange ends; the client persists the acknowledgement and may
-        // compact the confirmed prefix.
         let mut server_inbound = InboundStream::with_instance(INSTANCE);
         assert_eq!(
             exchange_one_direction(session, &mut outbox, &mut server_inbound, INSTANCE, 0, 2),
@@ -167,8 +128,6 @@ mod tests {
             "confirmed frames leave the outbox, unconfirmed frames never do"
         );
 
-        // A network reorder delivers frame 5 before 3 and 4: the server
-        // answers `replayFromSequence` and keeps its acknowledgement at 2.
         let pending = session
             .deliverable(&mut outbox, 2, 8)
             .expect("resume batch");
@@ -182,7 +141,6 @@ mod tests {
                 replay_from_sequence: 3
             }
         );
-        // Frame 3 arrives and is accepted; a retry of it is a duplicate.
         assert_eq!(
             server_inbound.ingest(INSTANCE, &frame3, None),
             IngestDecision::Accepted {
@@ -194,7 +152,6 @@ mod tests {
             server_inbound.ingest(INSTANCE, &frame3, None),
             IngestDecision::Duplicate { ack_sequence: 3 }
         );
-        // Frame 4 closes the window and frame 5 completes the batch.
         assert_eq!(
             server_inbound.ingest(INSTANCE, &frame4, None),
             IngestDecision::Accepted {
@@ -209,8 +166,6 @@ mod tests {
                 command: CommandOutcome::Fresh
             }
         );
-        // The retry exchange carries the peer acknowledgement; the outbox
-        // records it and can compact everything.
         assert_eq!(session.acknowledge(&mut outbox, 5).expect("acknowledge"), 5);
         assert_eq!(session.compact_confirmed(&mut outbox).expect("compact"), 3);
         let batch = session.deliverable(&mut outbox, 5, 4).expect("retry batch");
@@ -219,8 +174,6 @@ mod tests {
             "a fully confirmed stream has nothing to deliver"
         );
 
-        // The receiver's dedup records can now be compacted through the
-        // confirmed prefix.
         assert_eq!(server_inbound.compact_dedup_through(5), 5);
         assert_eq!(
             server_inbound.ingest(INSTANCE, &frame5, None),
@@ -234,8 +187,6 @@ mod tests {
         let mut server_inbound = InboundStream::with_instance(INSTANCE);
         server_inbound.ingest(INSTANCE, &FrameIdentity::new("msg-1", 1, "sha256:01"), None);
 
-        // The device restarted and reports a new clientInstanceId: the old
-        // instance is replaced and its frames are refused.
         let new_instance = "inst-02k9";
         assert_eq!(
             server_inbound.observe_instance(new_instance),
@@ -248,7 +199,6 @@ mod tests {
             IngestDecision::ReacquireRequired { ack_sequence: 1 }
         );
 
-        // The new instance continues the same per-node stream.
         assert_eq!(
             server_inbound.ingest(
                 new_instance,

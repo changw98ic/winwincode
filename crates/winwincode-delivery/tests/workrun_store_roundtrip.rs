@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{fs, sync::Arc};
 use winwincode_delivery::{
     domain::Delivery,

@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The FLOW-100.4 Quick Chat native Codex continuous execution path over the
-//! real composed Server application: a `chat.submit` turn of a session with a
-//! durable launch anchor is dispatched to the launched Device `WorkerSession`
-//! (the launch material becomes the device session's bound `ExecutionPort`
-//! identity and the queued job receives its device facts, which exclude it
-//! from every local claim), while a session without an anchor keeps the
-//! supervised local execution path unchanged. A permission-gate denial
-//! dispatches nothing.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
@@ -342,8 +331,6 @@ fn compose_application_with_runtime(
     .expect("compose application")
 }
 
-// ---- durable staging over the same product-state database ------------------
-
 fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     let node = format!("cnd_{}", suffix(seed));
     let registration = ClientNodeRegistration::try_new(
@@ -454,7 +441,6 @@ fn stage_occupied_lease(
     (occupied.occupancy_lease_id, occupied.fencing_token)
 }
 
-/// The device identities one staged launch anchor exposes to the test.
 #[allow(clippy::struct_field_names)]
 struct AnchorLaunch {
     worker_launch_grant_id: String,
@@ -514,8 +500,6 @@ fn stage_anchor(
     }
 }
 
-/// Settles the device launch acknowledgement exactly like the client exchange
-/// does, so the anchor grant reaches its post-launch `consumed` state.
 fn settle_launch(storage: &mut SqliteStorage, anchor: &AnchorLaunch, lease_id: &str, token: u64) {
     let settlement = LaunchAckSettlement::try_new(
         &anchor.worker_launch_grant_id,
@@ -536,8 +520,6 @@ fn settle_launch(storage: &mut SqliteStorage, anchor: &AnchorLaunch, lease_id: &
         winwincode_storage::LaunchAckOutcome::Consumed(_)
     ));
 }
-
-// ---- generated command helpers ---------------------------------------------
 
 fn session_create_request(request: u64, session: u64, user: &str, node: &str) -> CommandRequest {
     serde_json::from_value(serde_json::json!({
@@ -590,7 +572,6 @@ fn open_storage(root: &Path) -> SqliteStorage {
     SqliteStorage::open(root).expect("open staging storage")
 }
 
-/// The one queued job of the test's repository scope.
 fn queued_job_id(storage: &mut SqliteStorage) -> ExecutionJobId {
     let jobs = storage
         .repository_scheduler()
@@ -717,8 +698,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
     let job_id = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
-        // The launch material is the device session's durable ExecutionPort
-        // identity, and the job carries the exact device worker facts.
         let bound = binding_snapshot(&mut storage, &format!("wsn_{}", suffix(154)))
             .expect("the device session is bound");
         assert_eq!(bound.state.as_str(), "bound");
@@ -734,7 +713,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         assert_eq!(facts.holder_user_id, holder);
         assert_eq!(facts.repository_binding_id, format!("rbd_{}", suffix(102)));
         assert_eq!(facts.product_session_id, Some(id("psn", 1)));
-        // The job itself stays queued for the device worker.
         let record = storage
             .load_execution_job_record(&job_id)
             .expect("job record")
@@ -761,14 +739,11 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         assert_eq!(record.state, ExecutionJobState::Queued);
         job_id
     };
-    // The local embedded worker cannot claim the device-owned job: the
-    // queue selection excludes it, so a local drive finds nothing.
     {
         let mut storage = open_storage(&root);
         let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 400);
         assert!(claim_locally(&mut storage, 401, &worker_id, &worker_instance_id).is_none());
     }
-    // The job still waits for its device worker, not for a local slot.
     let storage = open_storage(&root);
     let record = storage
         .load_execution_job_record(&job_id)
@@ -912,8 +887,6 @@ fn a_gate_denial_dispatches_nothing() {
     assert_eq!(denial.status(), 403);
     assert_eq!(denial.code(), "ACCESS_DENIED");
 
-    // No dispatch fact exists for the refused turn: the gate runs before the
-    // turn is committed, so nothing was bound and nothing was queued.
     let mut storage = open_storage(&root);
     assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(854))).is_none());
     let jobs = storage
@@ -957,7 +930,6 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
             &binding,
             &id("psn", 1),
         );
-        // The launch is revoked before the device ever accepted it.
         WorkerLaunchGrantService::new(&mut storage)
             .revoke(
                 &anchor.worker_launch_grant_id,
@@ -978,7 +950,6 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
     assert_eq!(denial.status(), 409);
     assert_eq!(denial.code(), "WRONG_STATE");
 
-    // The dead anchor never binds a worker session and never attaches facts.
     let mut storage = open_storage(&root);
     assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(954))).is_none());
     let jobs = storage

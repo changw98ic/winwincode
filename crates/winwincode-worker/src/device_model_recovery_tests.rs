@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exercise the Worker's real admission callbacks across an actual HTTPS retry.
-
 use super::{TlsStream, WAIT, member_open, read_request, write_answer};
 use crate::device_model::{DeviceModelSendOutcome, DeviceModels};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -175,8 +171,6 @@ fn run_worker_retry(directory: &Path, endpoint: &str) {
     });
     assert_eq!(held.len(), 2);
     assert_full(&store, &open);
-    // Past the actual Retry-After, all three OS slots are still occupied by
-    // this test. The Worker must not invoke its second attempt without one.
     thread::sleep(Duration::from_millis(1250));
     assert_eq!(attempts(&database), vec!["failed"]);
     assert!(!directory.join("second-request-observed").exists());

@@ -1,19 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Transactional product-state storage for the `WinWinCode` Control Plane.
-//!
-//! Community product boundary: exactly one local Owner, local `SQLite` product
-//! state, Owner user-account ledger, and local execution queue/registry
-//! storage. Organization/tenant identifiers in internal worker/publication
-//! scope keys are protocol encodings, not multi-tenant Member storage product
-//! APIs. `PostgreSQL` product runtime belongs to Cloud/Enterprise repositories.
-//!
-//! [`ProductStateStorage`] is the storage seam used by the Control Plane. A
-//! commit replaces one canonical state value and atomically appends an optional
-//! opaque aggregate-journal record, its scoped request receipt, and outbox
-//! events. The interface deliberately does not expose transaction handles, so
-//! callers cannot publish an event before every durable fact commits.
-
 mod artifact;
 mod client_connect;
 mod client_downlink;
@@ -254,8 +238,6 @@ use winwincode_domain::{
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
 const SCHEMA_VERSION: i64 = 6;
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-// SQLite's default busy timeout accumulates requested sleeps and is not a wall-clock deadline.
-// The open-only handler reads this thread-local monotonic deadline on every busy callback.
 thread_local! {
     static SQLITE_OPEN_BUSY_DEADLINE: Cell<Option<StdInstant>> = const { Cell::new(None) };
 }
@@ -267,7 +249,6 @@ const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
 const LEGACY_V1_ACTOR_KEY: &[u8] = b"winwincode.command-receipt.actor.legacy-v1";
 const LEGACY_V1_SCOPE_KEY: &[u8] = b"winwincode.command-receipt.scope.legacy-v1";
 
-/// One event to append atomically with a canonical state change.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewOutboxEvent {
     pub event_id: String,
@@ -277,11 +258,6 @@ pub struct NewOutboxEvent {
     public_context: Option<PublicProjectionEventContext>,
 }
 
-/// Complete immutable envelope facts for one public projection event.
-///
-/// These closed storage types are stored beside the payload in the same state
-/// transaction. The Server reads this value directly after a crash instead of
-/// decoding receipt keys or inventing a time or source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublicProjectionEventContext {
     scope: PublicEventScope,
@@ -314,7 +290,6 @@ impl PublicProjectionEventContext {
     }
 }
 
-/// Closed public actor identity stored without authentication material.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicEventActor {
@@ -323,7 +298,6 @@ pub enum PublicEventActor {
     System { id: SystemActorId },
 }
 
-/// Closed tenant scope stored with every public event.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicEventScope {
@@ -347,7 +321,6 @@ pub enum PublicEventScope {
     },
 }
 
-/// Closed secret-safe origin stored with every public event.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicEventSource {
@@ -372,15 +345,12 @@ pub enum PublicEventSource {
 
 impl Eq for PublicEventSource {}
 
-/// Closed resource stream used to hand an HTTP snapshot to WebSocket replay.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum ProjectionEventStream {
-    /// One ordered stream per exact tenant scope key.
     Scope,
     Delivery(DeliveryId),
     ProductSession(ProductSessionId),
-    /// One ordered stream per exact `WorkerId` and `LeaseId` identity.
     Lease {
         worker_id: WorkerId,
         lease_id: LeaseId,
@@ -572,7 +542,6 @@ fn validate_public_stream_source(
     Ok(())
 }
 
-/// Exact tenant scope and resource stream key owned by durable storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionEventStreamKey {
     scope_key: ReceiptScopeKey,
@@ -580,11 +549,6 @@ pub struct ProjectionEventStreamKey {
 }
 
 impl ProjectionEventStreamKey {
-    /// Creates one exact event stream key.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid resource identity.
     pub fn new(
         scope_key: ReceiptScopeKey,
         stream: ProjectionEventStream,
@@ -604,7 +568,6 @@ impl ProjectionEventStreamKey {
     }
 }
 
-/// Last retained event included in one complete HTTP snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionEventCursor {
     key: ProjectionEventStreamKey,
@@ -613,11 +576,6 @@ pub struct ProjectionEventCursor {
 }
 
 impl ProjectionEventCursor {
-    /// Rebuilds an exact cursor supplied by the typed application service.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a sequence/event identity mismatch or unsafe public value.
     pub fn try_new(
         key: ProjectionEventStreamKey,
         sequence: u64,
@@ -656,10 +614,6 @@ impl ProjectionEventCursor {
     }
 }
 
-/// Stable opaque identity for one append-only domain journal.
-///
-/// Storage treats both fields as bound data. The Control Plane adapter owns
-/// their domain meaning, so this crate does not depend on Delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AggregateJournalKey {
     aggregate_type: String,
@@ -667,11 +621,6 @@ pub struct AggregateJournalKey {
 }
 
 impl AggregateJournalKey {
-    /// Builds one opaque aggregate journal identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] when either component is empty.
     pub fn new(
         aggregate_type: impl Into<String>,
         aggregate_id: impl Into<String>,
@@ -700,7 +649,6 @@ impl AggregateJournalKey {
     }
 }
 
-/// One opaque, digest-addressed append-only journal record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AggregateJournalRecord {
     pub sequence: u64,
@@ -719,14 +667,12 @@ impl AggregateJournalRecord {
     }
 }
 
-/// Fully committed opaque journal bytes loaded through the storage port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedAggregateJournal {
     pub manifest: Vec<u8>,
     pub records: Vec<AggregateJournalRecord>,
 }
 
-/// One journal create or tail-CAS append staged in a state transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AggregateJournalPublication {
     Create {
@@ -800,7 +746,6 @@ fn validate_journal_record(record: &AggregateJournalRecord) -> Result<(), Storag
 }
 
 impl NewOutboxEvent {
-    /// Creates an internal event that is never used as a public replay cursor.
     #[must_use]
     pub fn internal(
         event_id: impl Into<String>,
@@ -816,14 +761,6 @@ impl NewOutboxEvent {
         }
     }
 
-    /// Creates the only canonical public event shape with its complete durable
-    /// envelope context.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid stream identity, occurrence time, or source before
-    /// the state transaction. A Worker-origin Lease event must name the exact
-    /// `WorkerId` and `LeaseId` authority carried by its source.
     pub fn public_projection(
         event_id: ControlPlaneEventId,
         topic: impl Into<String>,
@@ -863,19 +800,10 @@ impl NewOutboxEvent {
     }
 }
 
-/// Opaque canonical actor identity encoded by the Control Plane adapter.
-///
-/// The storage adapter never receives authentication proof or credentials. It
-/// only receives the stable actor identity fields from `CommandEnvelope`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiptActorKey(Vec<u8>);
 
 impl ReceiptActorKey {
-    /// Builds a typed storage key from the canonical actor fields.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] for an empty encoding.
     pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, StorageError> {
         if encoded.is_empty() {
             return Err(StorageError::invalid("receipt actor key must not be empty"));
@@ -889,16 +817,10 @@ impl ReceiptActorKey {
     }
 }
 
-/// Opaque canonical organization/workspace/project/repository scope encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiptScopeKey(Vec<u8>);
 
 impl ReceiptScopeKey {
-    /// Builds a typed storage key from every canonical scope field.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] for an empty encoding.
     pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, StorageError> {
         if encoded.is_empty() {
             return Err(StorageError::invalid("receipt scope key must not be empty"));
@@ -912,7 +834,6 @@ impl ReceiptScopeKey {
     }
 }
 
-/// The complete idempotency identity of one canonical HTTP command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiptIdentity {
     actor_key: ReceiptActorKey,
@@ -921,11 +842,6 @@ pub struct ReceiptIdentity {
 }
 
 impl ReceiptIdentity {
-    /// Combines actor, full scope, and request id into one receipt identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] for an empty request id.
     pub fn new(
         actor_key: ReceiptActorKey,
         scope_key: ReceiptScopeKey,
@@ -957,12 +873,6 @@ impl ReceiptIdentity {
     }
 }
 
-/// Encodes the sole canonical durable actor key for a public actor.
-///
-/// # Errors
-///
-/// Returns [`StorageErrorKind::InvalidInput`] when the actor id is not
-/// canonical.
 pub fn receipt_actor_key(actor: &PublicEventActor) -> Result<ReceiptActorKey, StorageError> {
     let (tag, id, prefix) = match actor {
         PublicEventActor::User { id } => (b"user".as_slice(), id.0.as_str(), "usr_"),
@@ -975,12 +885,6 @@ pub fn receipt_actor_key(actor: &PublicEventActor) -> Result<ReceiptActorKey, St
     ReceiptActorKey::from_encoded(encode_public_key(ACTOR_KEY_PREFIX, tag, &[id]))
 }
 
-/// Decodes the public actor stored in one canonical receipt actor key.
-///
-/// # Errors
-///
-/// Returns [`StorageErrorKind::InvalidInput`] when the opaque key is not a
-/// canonical public actor encoding.
 pub fn public_actor_from_receipt_key(
     key: &ReceiptActorKey,
 ) -> Result<PublicEventActor, StorageError> {
@@ -1018,12 +922,6 @@ pub fn public_actor_from_receipt_key(
     }
 }
 
-/// Encodes the sole canonical durable scope key for a public scope.
-///
-/// # Errors
-///
-/// Returns [`StorageErrorKind::InvalidInput`] when any scope id is not
-/// canonical.
 pub fn receipt_scope_key(scope: &PublicEventScope) -> Result<ReceiptScopeKey, StorageError> {
     let encoded = match scope {
         PublicEventScope::Organization { organization_id } => {
@@ -1089,13 +987,6 @@ pub fn receipt_scope_key(scope: &PublicEventScope) -> Result<ReceiptScopeKey, St
     ReceiptScopeKey::from_encoded(encoded)
 }
 
-/// Decodes the canonical repository scope used by Worker-origin producers that
-/// receive only a previously verified durable receipt identity.
-///
-/// # Errors
-///
-/// Returns [`StorageErrorKind::InvalidInput`] when the opaque key is not the
-/// canonical repository-scope encoding.
 pub fn repository_scope_from_receipt_key(
     key: &ReceiptScopeKey,
 ) -> Result<PublicEventScope, StorageError> {
@@ -1131,13 +1022,6 @@ pub fn repository_scope_from_receipt_key(
     })
 }
 
-/// Builds one HTTP command receipt identity through the canonical actor/scope
-/// encoders owned by storage.
-///
-/// # Errors
-///
-/// Returns [`StorageErrorKind::InvalidInput`] when the actor, scope, or request
-/// id is not canonical.
 pub fn public_receipt_identity(
     actor: &PublicEventActor,
     scope: &PublicEventScope,
@@ -1215,13 +1099,6 @@ fn decode_public_key_field(encoded: &[u8], offset: &mut usize) -> Result<Vec<u8>
     Ok(field)
 }
 
-/// One opaque, canonical `AuditEvent` waiting for the Control Plane audit
-/// store. Storage owns only the atomic receipt bridge; the audit crate owns
-/// the payload schema and hash chain.
-///
-/// Storage owns the atomicity and idempotency boundary, while the Control
-/// Plane owns the payload's audit schema. Keeping the payload opaque avoids a
-/// dependency from storage back into the audit or application crates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingAuditEvent {
     event_id: String,
@@ -1229,12 +1106,6 @@ pub struct PendingAuditEvent {
 }
 
 impl PendingAuditEvent {
-    /// Builds one opaque pending event for the same scoped receipt transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] for an empty event identity
-    /// or empty encoded event.
     pub fn new(
         event_id: impl Into<String>,
         payload: impl Into<Vec<u8>>,
@@ -1272,11 +1143,6 @@ impl PendingAuditEvent {
     }
 }
 
-/// One secondary canonical-state revision that must still be current when a
-/// [`StateCommit`] is written.
-///
-/// A guard is evaluated in the same `SQLite` `IMMEDIATE` transaction as the
-/// guarded commit. A stream that has not been persisted yet has revision zero.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateRevisionGuard {
     stream_id: String,
@@ -1284,12 +1150,6 @@ pub struct StateRevisionGuard {
 }
 
 impl StateRevisionGuard {
-    /// Creates one exact secondary-stream revision guard.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] when the stream identity is
-    /// empty or the revision cannot be represented by `SQLite`.
     pub fn new(stream_id: impl Into<String>, expected_revision: u64) -> Result<Self, StorageError> {
         let stream_id = stream_id.into();
         if stream_id.is_empty() {
@@ -1319,12 +1179,6 @@ impl StateRevisionGuard {
     }
 }
 
-/// One secondary canonical-state write staged inside a [`StateCommit`].
-///
-/// The mutation uses compare-and-swap semantics: its stream must still have
-/// `expected_revision` when the receipt transaction starts writing. Secondary
-/// mutations do not own a receipt, journal publication, audit event, or
-/// outbox event of their own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateMutation {
     stream_id: String,
@@ -1333,12 +1187,6 @@ pub struct StateMutation {
 }
 
 impl StateMutation {
-    /// Creates one typed secondary canonical-state mutation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::InvalidInput`] when the stream identity is
-    /// empty or its next revision cannot be represented by `SQLite`.
     pub fn new(
         stream_id: impl Into<String>,
         expected_revision: u64,
@@ -1383,14 +1231,10 @@ impl StateMutation {
     }
 }
 
-/// Maximum secondary canonical-state writes accepted by one receipt.
 pub const MAX_STATE_MUTATIONS_PER_COMMIT: usize = 16;
-/// Maximum bytes accepted from one secondary canonical-state payload.
 pub const MAX_STATE_MUTATION_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-/// Maximum combined secondary canonical-state payload bytes in one receipt.
 pub const MAX_STATE_MUTATION_BYTES_PER_COMMIT: usize = 16 * 1024 * 1024;
 
-/// One atomic canonical-state and outbox commit at the storage port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateCommit {
     pub receipt_identity: ReceiptIdentity,
@@ -1431,7 +1275,6 @@ impl StateCommit {
         }
     }
 
-    /// Adds one opaque aggregate publication to the same state transaction.
     #[must_use]
     pub fn with_journal_publication(mut self, publication: AggregateJournalPublication) -> Self {
         self.journal_publication = Some(publication);
@@ -1443,8 +1286,6 @@ impl StateCommit {
         self.journal_publication.as_ref()
     }
 
-    /// Adds one canonical audit event to this same state/receipt/outbox
-    /// transaction.
     #[must_use]
     pub fn with_pending_audit_event(mut self, pending_audit_event: PendingAuditEvent) -> Self {
         self.pending_audit_event = Some(pending_audit_event);
@@ -1456,7 +1297,6 @@ impl StateCommit {
         self.pending_audit_event.as_ref()
     }
 
-    /// Adds one secondary canonical-state revision guard to this commit.
     #[must_use]
     pub fn with_state_guard(mut self, guard: StateRevisionGuard) -> Self {
         self.state_guards.push(guard);
@@ -1468,7 +1308,6 @@ impl StateCommit {
         &self.state_guards
     }
 
-    /// Adds one secondary canonical-state compare-and-swap write.
     #[must_use]
     pub fn with_state_mutation(mut self, mutation: StateMutation) -> Self {
         self.state_mutations.push(mutation);
@@ -1480,27 +1319,15 @@ impl StateCommit {
         &self.state_mutations
     }
 
-    /// Returns whether this commit may only replay an already durable receipt.
     #[must_use]
     pub const fn receipt_replay_required(&self) -> bool {
         self.receipt_replay_required
     }
 
-    /// Runs the canonical validation shared by every storage adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter-neutral validation failure before any transaction
-    /// or database-specific operation begins.
     pub fn validate_for_storage_adapter(&self) -> Result<(), StorageError> {
         self.validate()
     }
 
-    /// Requires this call to resolve an already durable scoped receipt.
-    ///
-    /// Aggregate adapters use this after their journal reports the request as
-    /// a replay. If an older unsafe composition left only the journal record,
-    /// storage fails closed instead of persisting recomputed state or events.
     #[must_use]
     pub fn require_receipt_replay(mut self) -> Self {
         self.receipt_replay_required = true;
@@ -1651,7 +1478,6 @@ impl StateCommit {
     }
 }
 
-/// Canonical state loaded through the storage seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredState {
     pub stream_id: String,
@@ -1659,8 +1485,6 @@ pub struct StoredState {
     pub payload: Vec<u8>,
 }
 
-/// One state-directory row sealed without retaining its potentially large
-/// payload in the caller's directory snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredStateDirectoryEntry {
     pub stream_id: String,
@@ -1668,12 +1492,6 @@ pub struct StoredStateDirectoryEntry {
     pub payload_sha256: Sha256Digest,
 }
 
-/// One consistent read of canonical state streams and a resource-local public
-/// event cursor.
-///
-/// A `SQLite` implementation obtains every value in this structure through one
-/// read transaction. The Control Plane uses it to prevent a runtime snapshot
-/// from being paired with a cursor observed after a concurrent commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionReadCut {
     states: Vec<StoredState>,
@@ -1702,25 +1520,16 @@ impl ProjectionReadCut {
     }
 }
 
-/// A durable event waiting to be published.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboxEvent {
     pub sequence: u64,
     pub event_id: String,
     pub topic: String,
     pub payload: Vec<u8>,
-    /// Present only for a secret-safe resource-stream event.
     pub projection_cursor: Option<ProjectionEventCursor>,
-    /// Complete immutable envelope facts, present exactly when this is public.
     pub public_context: Option<PublicProjectionEventContext>,
 }
 
-/// One exact durable outbox row together with the receipt that authorized it.
-///
-/// Unlike [`ProductStateStorage::pending_events`], this read is independent of
-/// publication acknowledgement. Application transactions use it to join a
-/// Worker message to the immutable `ExecutionJob` that was committed before
-/// dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableOutboxEvent {
     event: OutboxEvent,
@@ -1757,37 +1566,22 @@ impl DurableOutboxEvent {
     }
 }
 
-/// The durable result of one state commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitReceipt {
     pub receipt_identity: ReceiptIdentity,
-    /// Exact canonical digest accepted for this scoped request.
     pub command_digest: Sha256Digest,
     pub stream_id: String,
     pub revision: u64,
-    /// Exact durable events attached to the original scoped request.
-    ///
-    /// Replays return these stored bytes rather than values recomputed by a
-    /// retry, so application adapters can recover the original dispatch job.
     pub events: Vec<OutboxEvent>,
     pub idempotent_replay: bool,
 }
 
-/// One atomic receipt proving a canonical state mutation and its schedulable
-/// execution job were committed or replayed together.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateExecutionJobCommitReceipt {
     pub state: CommitReceipt,
     pub execution_job: ExecutionJobMutationReceipt,
 }
 
-/// Exact current execution authority that must still hold when one terminal
-/// round state commit starts writing.
-///
-/// The guard owns the complete queue and accepted-dispatch records rather than
-/// a caller-selected subset. This keeps scope, payload, attempt, revision,
-/// state, lease, Worker instance/session, fence, and lease times inside one
-/// compare-and-swap fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionAuthorityCommitGuard {
     expected_job: ExecutionJobRecord,
@@ -1795,16 +1589,6 @@ pub struct ExecutionAuthorityCommitGuard {
 }
 
 impl ExecutionAuthorityCommitGuard {
-    /// Seals the authority accepted for a terminal-round state commit.
-    ///
-    /// Running and cancelling Jobs cover receipt processing before scheduler
-    /// settlement. Completed and failed Jobs cover the legal ordering where
-    /// the exact Registry lease was terminalized first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-active/non-terminal Job or a queue record that differs
-    /// from the accepted dispatch's Job, payload, or attempt.
     pub fn terminal_round(
         expected_job: ExecutionJobRecord,
         expected_dispatch: ExecutionDispatchAuthority,
@@ -1846,7 +1630,6 @@ impl ExecutionAuthorityCommitGuard {
     }
 }
 
-/// Stable error categories exposed by storage adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageErrorKind {
     InvalidInput,
@@ -1861,7 +1644,6 @@ pub enum StorageErrorKind {
     Closed,
 }
 
-/// Storage failure with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageError {
     kind: StorageErrorKind,
@@ -1900,8 +1682,6 @@ impl StorageError {
         }
     }
 
-    /// Builds the adapter-neutral concurrency result used by application
-    /// adapters that already validated a typed aggregate revision conflict.
     #[must_use]
     pub fn revision_conflict(expected: u64, actual: u64) -> Self {
         Self {
@@ -1919,7 +1699,6 @@ impl StorageError {
         }
     }
 
-    /// Builds a revision conflict for a secondary [`StateRevisionGuard`].
     #[must_use]
     pub fn state_revision_guard_conflict(stream_id: &str, expected: u64, actual: u64) -> Self {
         Self {
@@ -1931,7 +1710,6 @@ impl StorageError {
         }
     }
 
-    /// Builds a compare-and-swap conflict for a secondary [`StateMutation`].
     #[must_use]
     pub fn state_mutation_revision_conflict(stream_id: &str, expected: u64, actual: u64) -> Self {
         Self {
@@ -1943,8 +1721,6 @@ impl StorageError {
         }
     }
 
-    /// Builds the revision-token conflict for the one reviewed solution-set
-    /// digest accepted at the task-promotion boundary.
     #[must_use]
     pub fn revision_token_conflict(field: &str) -> Self {
         if field != "reviewSetSha256" {
@@ -1957,8 +1733,6 @@ impl StorageError {
         }
     }
 
-    /// Builds the adapter-neutral result for a reused scoped request whose
-    /// canonical command digest differs from the first committed command.
     #[must_use]
     pub fn request_conflict(request_id: &RequestId) -> Self {
         Self {
@@ -2028,8 +1802,6 @@ impl StorageError {
         self.kind
     }
 
-    /// Returns whether this revision conflict came from a secondary
-    /// [`StateRevisionGuard`] rather than the primary commit stream.
     #[must_use]
     pub const fn is_state_guard_conflict(&self) -> bool {
         self.state_guard_conflict
@@ -2044,20 +1816,8 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-/// Deep storage seam shared by local and remote adapters.
-///
-/// `commit` owns the full transaction. `pending_events` and `mark_published`
-/// implement an at-least-once outbox with stable event ids.
 #[doc = "winwincode-community-persistence-port"]
 pub trait ProductStateStorage: Send {
-    /// Reads validated Candidate retention receipts at this storage's cut.
-    /// The controlled root remains caller-owned authority. Implementations
-    /// verify physical Git facts without repairing refs or advancing intents.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable storage, corrupt receipts, changed repository
-    /// identities, or physical references inconsistent with settled receipts.
     fn read_candidate_git_retention_for_delivery(
         &self,
         _controlled_repository_root: &Path,
@@ -2068,15 +1828,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Commits a state mutation and its server-sealed managed-app config as
-    /// one durable fact. `SQLite` overrides this with one transaction. Other
-    /// adapters must override this method before accepting a config; a
-    /// post-commit fallback would leave a `WorkRun` without its authoritative
-    /// runtime configuration when the second write fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when either fact cannot be committed.
     fn commit_with_managed_app_run_config(
         &mut self,
         commit: &StateCommit,
@@ -2090,11 +1841,6 @@ pub trait ProductStateStorage: Send {
         }
     }
 
-    /// Persists the authenticated repository managed-app template.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the template cannot be written.
     fn save_managed_app_run_template(
         &mut self,
         _record: &ManagedAppRunTemplateRecord,
@@ -2104,11 +1850,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the authenticated repository managed-app template.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_managed_app_run_template(
         &self,
         _repository_binding_id: &str,
@@ -2116,11 +1857,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Persists a server-sealed managed application configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when this storage cannot persist the fact.
     fn save_managed_app_run_config(
         &mut self,
         _record: &ManagedAppRunConfigRecord,
@@ -2130,11 +1866,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the server-sealed managed application configuration for one `WorkRun`.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_managed_app_run_config_for_work_run(
         &self,
         _work_run_id: &WorkRunId,
@@ -2142,16 +1873,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Atomically writes canonical state, its request receipt, and outbox
-    /// events. Every [`StateRevisionGuard`] and [`StateMutation`] on `commit`
-    /// is checked after the receipt lookup and before the first write in that
-    /// same transaction. Secondary mutations are then written in that same
-    /// transaction without creating separate receipts or journal records.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when validation, concurrency control,
-    /// request idempotency, or the adapter transaction fails.
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         commit.validate()?;
         if !commit.state_mutations().is_empty() {
@@ -2162,17 +1883,6 @@ pub trait ProductStateStorage: Send {
         self.commit_adapter(commit)
     }
 
-    /// Atomically writes canonical product state and exactly one scheduler
-    /// execution job under the same database transaction.
-    ///
-    /// An exact request retry requires both original receipts. A partial
-    /// historical write is rejected instead of creating the missing half on
-    /// replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error unless the storage implementation can prove
-    /// the state receipt, queue receipt, job row, and outbox share one commit.
     fn commit_with_execution_job(
         &mut self,
         commit: &StateCommit,
@@ -2185,18 +1895,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Atomically verifies one exact current execution authority before the
-    /// first state, journal, receipt, or outbox write.
-    ///
-    /// Exact command receipt replay is checked before current authority so a
-    /// previously committed result remains recoverable after the Job advances.
-    /// Callers should still perform receipt-first lookup before reconstructing
-    /// a command or current authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error unless the implementation can verify the
-    /// queue, Registry, and state commit in one transaction.
     fn commit_with_execution_authority_guard(
         &mut self,
         commit: &StateCommit,
@@ -2209,15 +1907,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the canonical scheduler row for one globally unique execution Job.
-    ///
-    /// Local production storage overrides this seam so every Control Plane
-    /// transaction resolves an attempt replacement before validating a Worker
-    /// frame. Non-scheduler adapters return no row.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_execution_job_record(
         &self,
         _job_id: &ExecutionJobId,
@@ -2225,12 +1914,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Proves a historical lease window from accepted Registry claim/renewal
-    /// receipts. This is identity evidence, not permission to start new work
-    /// after expiry or settlement.
-    ///
-    /// # Errors
-    /// Returns corrupt receipt or adapter failures.
     fn load_accepted_execution_lease_for_period(
         &mut self,
         _period: &ExecutionLeaseRecord,
@@ -2238,12 +1921,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Loads the scheduler-sealed Client and repository identity for one
-    /// execution Job. Non-device adapters return no binding.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_work_run_device_binding_facts(
         &self,
         _job_id: &ExecutionJobId,
@@ -2251,9 +1928,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Loads the immutable Device route of a particular historical `WorkRun`.
-    /// # Errors
-    /// Returns corrupt lineage or adapter failures.
     fn load_device_binding_facts_for_work_run(
         &self,
         job_id: &ExecutionJobId,
@@ -2262,15 +1936,6 @@ pub trait ProductStateStorage: Send {
         self.load_work_run_device_binding_facts(job_id)
     }
 
-    /// Loads the one active scheduler row of a Delivery stage run (`FLOW-100.5`).
-    ///
-    /// Local production storage overrides this seam so the `StrongFlow` device
-    /// routing resolves exactly the stage's committed job. Non-scheduler
-    /// adapters return no row.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_active_execution_job_record_for_work_run(
         &self,
         _work_run_id: &WorkRunId,
@@ -2278,11 +1943,6 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Loads the scheduler-sealed predecessor-to-successor authority for a Job.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage corruption or adapter failures.
     fn load_execution_scope_replacement_authority(
         &self,
         _job_id: &ExecutionJobId,
@@ -2290,49 +1950,17 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
-    /// Adapter implementation hook behind the default [`Self::commit`].
-    ///
-    /// The default boundary invokes this hook only after validation and only
-    /// when the commit has no secondary mutations. An adapter that proves the
-    /// full atomic mutation contract overrides [`Self::commit`] instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the adapter transaction fails or
-    /// the adapter is read-only.
     #[doc(hidden)]
     fn commit_adapter(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         Err(StorageError::adapter("state commit storage is unavailable"))
     }
 
-    /// Loads the original durable result for one scoped command identity.
-    ///
-    /// A matching receipt is returned as an idempotent replay. Reusing the
-    /// same actor, scope, and request id with another command digest fails
-    /// with [`StorageErrorKind::RequestConflict`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the digest is malformed, the
-    /// scoped request conflicts, or the read fails.
     fn load_receipt(
         &self,
         identity: &ReceiptIdentity,
         command_digest: &Sha256Digest,
     ) -> Result<Option<CommitReceipt>, StorageError>;
 
-    /// Loads the durable result for an exact scoped request without comparing
-    /// a supplied command body. This is used only to report the committed
-    /// cursor after a changed-body idempotency conflict; it does not authorize
-    /// replay or reinterpret any current aggregate state.
-    ///
-    /// Adapters that do not provide this lookup fail closed with an adapter
-    /// error, and callers must return a zero acknowledgement cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the lookup is unavailable or the
-    /// storage adapter cannot read the receipt.
     fn load_receipt_for_identity(
         &self,
         _identity: &ReceiptIdentity,
@@ -2342,19 +1970,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the one durable command receipt that advanced an exact state
-    /// stream revision.
-    ///
-    /// This lookup is used by recovery compositions that observe a terminal
-    /// aggregate after the original command response has been lost.  It never
-    /// reconstructs a receipt from the state payload: the actor, scope,
-    /// request, digest, and outbox events all come from the canonical receipt
-    /// row.  Adapters that cannot provide this exact lookup fail closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the stream/revision is invalid,
-    /// the receipt directory is ambiguous, or the adapter cannot read it.
     fn load_receipt_for_stream_revision(
         &self,
         _stream_id: &str,
@@ -2365,16 +1980,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the pending canonical audit event attached to one scoped receipt,
-    /// whether or not the Control Plane has flushed it to `AuditStore`.
-    ///
-    /// Adapters that do not yet persist pending audit events fail closed rather
-    /// than manufacturing a value from a receipt or outbox event.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when pending audit-event lookup is
-    /// unavailable or the storage adapter cannot read the event.
     fn load_pending_audit_event(
         &self,
         _identity: &ReceiptIdentity,
@@ -2384,38 +1989,16 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads canonical audit events that have committed with state but have
-    /// not yet been appended to the immutable `AuditStore`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the storage adapter cannot read
-    /// the pending audit-event outbox.
     fn pending_audit_events(&self) -> Result<Vec<PendingAuditEvent>, StorageError> {
         Ok(Vec::new())
     }
 
-    /// Marks one pending canonical audit event as durably appended to the
-    /// immutable `AuditStore`. The marker is idempotent so a crash between
-    /// append and marker update is recovered by retrying the same event id.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the event id is invalid, the
-    /// event is missing, or the storage adapter cannot update the marker.
     fn mark_audit_event_persisted(&mut self, _event_id: &str) -> Result<(), StorageError> {
         Err(StorageError::adapter(
             "pending audit event acknowledgement is unavailable",
         ))
     }
 
-    /// Loads one exact durable event by stable event id, whether or not it was
-    /// already acknowledged as published.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral read failure. Adapters that have not yet
-    /// implemented exact durable event lookup fail closed.
     fn load_outbox_event(
         &self,
         _event_id: &str,
@@ -2425,36 +2008,14 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads the current canonical state for one stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or storage is closed.
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError>;
 
-    /// Returns the greatest current stream identity under one exact prefix.
-    ///
-    /// This is the immutable upper bound used by stable keyset walks. Adapters
-    /// that do not expose bounded state enumeration fail closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the prefix is invalid, the read
-    /// is unavailable, or storage is closed.
     fn last_state_stream_id(&self, _prefix: &str) -> Result<Option<String>, StorageError> {
         Err(StorageError::adapter(
             "bounded state stream enumeration is unavailable",
         ))
     }
 
-    /// Scans one bounded keyset page under an exact prefix. The returned rows
-    /// are ordered by stream identity and never exceed `limit` or
-    /// `upper_bound`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the bounds are invalid, the read
-    /// is unavailable, or storage is closed.
     fn scan_state_streams(
         &self,
         _prefix: &str,
@@ -2467,16 +2028,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads one complete, bounded state-stream directory from a single
-    /// adapter read cut. Rows are ordered by stream identity. Unlike paged
-    /// enumeration, this seam cannot omit a lower-sorting row inserted after
-    /// an earlier page has already been consumed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the prefix or bound is invalid,
-    /// the directory exceeds `max_entries` or `max_payload_bytes`, the atomic
-    /// read is unavailable, or storage is closed.
     fn load_bounded_state_directory(
         &self,
         _prefix: &str,
@@ -2488,15 +2039,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads one bounded, atomic directory cut containing only streams at the
-    /// exact current revision. This lets restart reconcilers bound unresolved
-    /// work without retaining every historical terminal stream in the scan.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the revision or bounds are
-    /// invalid, the matching directory exceeds a bound, the atomic read is
-    /// unavailable, or storage is closed.
     fn load_bounded_state_directory_at_revision(
         &self,
         _prefix: &str,
@@ -2509,13 +2051,6 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads canonical state streams and the resource-local public event
-    /// cursor from one durable read cut.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when either state or cursor loading
-    /// fails.
     fn load_projection_read_cut(
         &self,
         state_stream_ids: &[String],
@@ -2523,23 +2058,11 @@ pub trait ProductStateStorage: Send {
         expected: Option<&ProjectionEventCursor>,
     ) -> Result<ProjectionReadCut, StorageError>;
 
-    /// Loads one fully committed opaque aggregate journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or storage is closed.
     fn load_journal(
         &self,
         key: &AggregateJournalKey,
     ) -> Result<Option<LoadedAggregateJournal>, StorageError>;
 
-    /// Loads the latest retained position, or validates one exact historical
-    /// position, in a tenant-scoped resource event stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageErrorKind::EventCursorExpired`] only when a previously
-    /// persisted positive position is no longer retained.
     fn load_projection_event_cursor(
         &self,
         _key: &ProjectionEventStreamKey,
@@ -2550,30 +2073,13 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
-    /// Loads all unpublished events in durable sequence order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or storage is closed.
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError>;
 
-    /// Marks one stable event id as published.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the event is missing, the write
-    /// fails, or storage is closed.
     fn mark_published(&mut self, event_id: &str) -> Result<(), StorageError>;
 
-    /// Deterministically closes the adapter and releases its resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when checkpointing or close fails.
     fn close(self: Box<Self>) -> Result<(), StorageError>;
 }
 
-/// Local `SQLite` implementation of [`ProductStateStorage`].
 pub struct SqliteStorage {
     connection: Option<Connection>,
     read_connection: Option<Mutex<Connection>>,
@@ -2581,9 +2087,6 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// A replaced attempt remains financially unknown until an independent usage fact arrives.
-    /// # Errors
-    /// Returns unavailable durable accounting state.
     pub fn execution_has_unknown_predecessor(
         &self,
         job: &ExecutionJobId,
@@ -2599,20 +2102,6 @@ impl SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// Opens an application sidecar under the same bounded initialization
-    /// boundary as product-state storage.
-    ///
-    /// The initializer configures journal settings and prepares its existing
-    /// schema while openings of the same canonical database are serialized.
-    /// It must finish schema preparation before returning, without external
-    /// I/O or recursively opening this database. Runtime reads and writes use
-    /// the ordinary busy timeout after initialization.
-    ///
-    /// # Errors
-    ///
-    /// Returns an open failure through `E::from`, or preserves the
-    /// initializer's own error. Lock waiting and `SQLite` busy retries share one
-    /// five-second deadline. This method does not retry application writes.
     pub fn open_sidecar<E>(
         database_path: impl AsRef<Path>,
         initialize: impl FnOnce(&Connection) -> Result<(), E>,
@@ -2624,18 +2113,6 @@ impl SqliteStorage {
         Self::open_sidecar_until(database_path, open_deadline, initialize)
     }
 
-    /// Opens a sidecar within a caller-owned initialization deadline.
-    ///
-    /// Use the same deadline for any safe schema-initialization retries so
-    /// reopening a connection cannot restart the waiting budget. The same
-    /// per-database lock and `SQLite` busy handler apply as in [`Self::open_sidecar`].
-    /// The caller may shorten the default five-second limit, but not extend it.
-    /// Runtime reads and writes are not retried by this boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an open or deadline failure through `E::from`, or preserves the
-    /// initializer's own error. An expired deadline never enters the initializer.
     pub fn open_sidecar_until<E>(
         database_path: impl AsRef<Path>,
         open_deadline: StdInstant,
@@ -2683,12 +2160,6 @@ impl SqliteStorage {
         result
     }
 
-    /// Opens the local database and applies all schema migrations before return.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the directory, connection,
-    /// durability settings, or schema migration cannot be prepared.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, StorageError> {
         let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
         let data_directory = data_directory.as_ref();
@@ -2699,9 +2170,6 @@ impl SqliteStorage {
             StorageError::adapter(format!("failed to resolve the data directory: {error}"))
         })?;
         let database_path = canonical_data_directory.join(DATABASE_FILE_NAME);
-        // SQLite schema and journal-mode setup acquire database-wide locks. Serialize only
-        // callers opening the same canonical database; unrelated repositories must not consume
-        // one another's bounded initialization window.
         let open_lock = sqlite_open_lock(&database_path, open_deadline)?;
         let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_deadline)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -2748,14 +2216,6 @@ impl SqliteStorage {
         })
     }
 
-    /// Pins a read-only transaction on an already initialized local database.
-    /// Every read, including runtime facts and their event cursor, uses this
-    /// connection until the snapshot is dropped. This never runs migrations,
-    /// recovery, an outbox replay, or a checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the existing database cannot be read.
     pub fn open_read_snapshot(database_path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let database_path = fs::canonicalize(database_path).map_err(|error| {
             StorageError::adapter(format!("failed to resolve the existing database: {error}"))
@@ -2771,8 +2231,6 @@ impl SqliteStorage {
         connection
             .execute_batch("BEGIN DEFERRED TRANSACTION")
             .map_err(sql_error)?;
-        // BEGIN is lazy. Read the database before releasing the application's
-        // mutation lock so later reads cannot establish a different cut.
         connection
             .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
                 row.get::<_, i64>(0)
@@ -2801,11 +2259,6 @@ impl SqliteStorage {
         self.connection.as_mut().ok_or_else(StorageError::closed)
     }
 
-    /// Persists the Server-sealed managed application configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
     pub fn save_managed_app_run_config(
         &mut self,
         record: &ManagedAppRunConfigRecord,
@@ -2813,11 +2266,6 @@ impl SqliteStorage {
         managed_app::save_run_config(self.connection_mut()?, record)
     }
 
-    /// Persists the authenticated repository managed-app template.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
     pub fn save_managed_app_run_template(
         &mut self,
         record: &ManagedAppRunTemplateRecord,
@@ -2825,11 +2273,6 @@ impl SqliteStorage {
         managed_app::save_run_template(self.connection()?, record)
     }
 
-    /// Loads the authenticated repository managed-app template.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when `SQLite` cannot read it.
     pub fn load_managed_app_run_template(
         &self,
         repository_binding_id: &str,
@@ -2837,11 +2280,6 @@ impl SqliteStorage {
         managed_app::load_run_template(self.connection()?, repository_binding_id)
     }
 
-    /// Loads the authoritative configuration for one managed application run.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when `SQLite` cannot read the record.
     pub fn load_managed_app_run_config(
         &self,
         run_id: &str,
@@ -2849,11 +2287,6 @@ impl SqliteStorage {
         managed_app::load_run_config(self.connection()?, run_id)
     }
 
-    /// Loads the authoritative configuration by its bound `WorkRun` identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when `SQLite` cannot read the record.
     pub fn load_managed_app_run_config_for_work_run(
         &self,
         work_run_id: &str,
@@ -2861,11 +2294,6 @@ impl SqliteStorage {
         managed_app::load_run_config_for_work_run(self.connection()?, work_run_id)
     }
 
-    /// Records the latest Device lifecycle status durably.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
     pub fn save_managed_app_status(
         &mut self,
         record: &ManagedAppStatusRecord,
@@ -2873,11 +2301,6 @@ impl SqliteStorage {
         managed_app::save_status(self.connection_mut()?, record)
     }
 
-    /// Loads the latest status for one Device/run pair.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when `SQLite` cannot read the record.
     pub fn load_managed_app_status(
         &self,
         client_node_id: &str,
@@ -5284,12 +4707,9 @@ mod sqlite_open_deadline_tests {
     }
 }
 
-/// Launch publication preserves domain refusals separately from storage failures.
 #[derive(Debug)]
 pub enum WorkerLaunchBundleError {
-    /// The atomic issuance gate rejected current launch authority.
     Launch(WorkerLaunchGrantStoreError),
-    /// Publication or durable storage failed.
     Storage(StorageError),
 }
 impl From<StorageError> for WorkerLaunchBundleError {
@@ -5304,14 +4724,6 @@ impl fmt::Display for WorkerLaunchBundleError {
 }
 impl std::error::Error for WorkerLaunchBundleError {}
 
-/// Atomically publishes one launch, its credential lifecycle row and downlink.
-/// Encrypted private material must already be fsynced before this commit.
-/// The encoder receives the next downlink sequence inside the same immediate
-/// transaction, so concurrent launches each publish at their own position.
-/// A concurrent launch for the exact same live scope reuses its committed
-/// identity without allocating another credential, frame or stream position.
-/// # Errors
-/// Rejects changed authority, duplicate publication or unavailable storage.
 pub fn issue_worker_launch_bundle(
     storage: &mut SqliteStorage,
     issuance: &LaunchGrantIssuance,
@@ -5374,8 +4786,6 @@ pub fn issue_worker_launch_bundle(
         "workRunId":grant.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":grant.worker_session_id,"workerId":grant.worker_id,
         "workerInstanceId":grant.worker_instance_id,"credentialDigest":grant.credential_digest,"expiresAt":grant.expires_at.0,"state":"issued","revision":grant.revision});
     let mut actual_grant = frame["payload"]["launchGrant"].clone();
-    // The optional Chat anchor is omitted by the formal serializer. Null has
-    // the same typed meaning; every required identity remains exact.
     if let Some(object) = actual_grant.as_object_mut() {
         object.entry("workRunId").or_insert(serde_json::Value::Null);
     }

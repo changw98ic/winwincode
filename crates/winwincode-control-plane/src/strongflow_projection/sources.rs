@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Trusted source ports and their bounded, validated read values.
-
 use std::{error::Error, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -40,13 +36,6 @@ use crate::runtime_event_transaction::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Runtime facts exposed by the trusted source seam.
-///
-/// A Delivery read contains the Delivery-owned runtime sessions. A standalone
-/// `ProductSession` read has no Delivery aggregate and therefore deliberately
-/// contains no `SessionBinding` rows. Keeping the aggregate identity optional
-/// prevents a `ProductSession` read from being represented as a fabricated
-/// Delivery or a generic session binding.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TrustedRuntimeFoldSnapshot {
     pub delivery_id: Option<DeliveryId>,
@@ -54,13 +43,6 @@ pub struct TrustedRuntimeFoldSnapshot {
     pub sessions: Vec<RuntimeSessionProjection>,
 }
 
-/// Exact runtime identity for a standalone `ProductSession` execution.
-///
-/// `ProductSession` execution uses the typed `(ProductSession, ExecutionJob)`
-/// binding rather than a Delivery `SessionBinding` id. The transport contract
-/// still exposes one `sessionBindingId` field, so the mapping layer derives a
-/// stable projection key from those two durable identities. No independent
-/// binding authority is created here.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrustedProductSessionRuntimeSession {
     pub(crate) product_session_id: ProductSessionId,
@@ -92,7 +74,6 @@ impl TrustedRuntimeFoldSnapshot {
     }
 }
 
-/// Expected accepted-ledger coordinates when replaying a server-issued cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCutExpectation {
     ledger_revision: Revision,
@@ -118,7 +99,6 @@ impl RuntimeCutExpectation {
     }
 }
 
-/// Exact bounded runtime-ledger request created only by the application service.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryRuntimeReadRequest {
     scope: RepositoryScope,
@@ -129,7 +109,6 @@ pub struct DeliveryRuntimeReadRequest {
     limit: usize,
 }
 
-/// Exact bounded accepted-ledger request for one `ProductSession`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductSessionRuntimeReadRequest {
     scope: RepositoryScope,
@@ -238,13 +217,10 @@ impl DeliveryRuntimeReadRequest {
     }
 }
 
-/// Adapter-neutral failure from a trusted source owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustedProjectionReadError {
     Unavailable,
     TemporarilyUnavailable,
-    /// The adapter once issued the requested exact cut, but its durable
-    /// retention window no longer contains it.
     ExactCutNotRetained,
     Stale,
     Invalid,
@@ -264,7 +240,6 @@ impl fmt::Display for TrustedProjectionReadError {
 
 impl Error for TrustedProjectionReadError {}
 
-/// One verified accepted-ledger fold plus its durable cut coordinates.
 #[derive(Debug, Clone)]
 pub struct TrustedRuntimeProjectionRead {
     scope: RepositoryScope,
@@ -275,22 +250,10 @@ pub struct TrustedRuntimeProjectionRead {
     snapshot: TrustedRuntimeFoldSnapshot,
     product_session_runtime: Option<TrustedProductSessionRuntimeSession>,
     source_seal: Sha256Digest,
-    /// Cursor captured by the same durable read as this runtime fact.
-    ///
-    /// The field is optional for the original in-memory test adapters. A
-    /// production adapter must populate it through [`Self::with_event_cursor`]
-    /// so the application cannot pair a source read with a cursor obtained by a
-    /// later independent read.
     event_cursor: Option<ProjectionEventCursor>,
 }
 
 impl TrustedRuntimeProjectionRead {
-    /// Validates one projection already rebuilt by the accepted-ledger owner.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-positive revisions, incomplete sequence coordinates, an
-    /// oversized fold, unsafe timestamps, or a malformed durable source seal.
     pub fn try_new(
         scope: RepositoryScope,
         delivery_revision: u64,
@@ -357,9 +320,6 @@ impl TrustedRuntimeProjectionRead {
         })
     }
 
-    /// Validates one `ProductSession` runtime ledger read. `ProductSession`
-    /// execution is not a Delivery stage and therefore cannot be promoted to
-    /// a Delivery `SessionBinding` projection.
     pub(crate) fn try_new_product_session(
         scope: RepositoryScope,
         product_session_id: ProductSessionId,
@@ -402,13 +362,6 @@ impl TrustedRuntimeProjectionRead {
         })
     }
 
-    /// Associates the exact resource-local event cursor captured with this
-    /// runtime fact.
-    ///
-    /// The cursor is deliberately attached after the trusted runtime owner has
-    /// completed its one storage read. It is not a second runtime cursor: it is
-    /// the existing public `ProjectionEventCursor` emitted by the same
-    /// `StateCommit` that made the accepted ledger state visible.
     #[must_use]
     pub fn with_event_cursor(mut self, event_cursor: ProjectionEventCursor) -> Self {
         self.event_cursor = Some(event_cursor);
@@ -445,8 +398,6 @@ impl TrustedRuntimeProjectionRead {
         &self.snapshot
     }
 
-    /// Returns the resource-local public cursor captured with this read, when
-    /// the source owner provides the atomic read-cut seam.
     #[must_use]
     pub const fn event_cursor(&self) -> Option<&ProjectionEventCursor> {
         self.event_cursor.as_ref()
@@ -463,26 +414,11 @@ impl TrustedRuntimeProjectionRead {
     }
 }
 
-/// Trusted append-only runtime-ledger reader.
 pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
-    /// Reports whether this adapter returns the runtime fact and its public
-    /// resource cursor from one storage-owned durable read.
-    ///
-    /// The default is `false` for the small in-memory adapters used by older
-    /// tests. Production adapters must override this and attach the cursor to
-    /// every successful read; the application then never performs a separate
-    /// cursor-baseline read.
     fn provides_atomic_read_cut(&self) -> bool {
         false
     }
 
-    /// Reads a Delivery runtime fact and its public event cursor through the
-    /// storage-owned atomic read-cut seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable source failure without substituting an independent
-    /// latest cursor read.
     fn read_delivery_with_storage(
         &self,
         storage: &dyn ProductStateStorage,
@@ -490,34 +426,17 @@ pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
         delivery: &Delivery,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError>;
 
-    /// Reads a `ProductSession` runtime fact and its public event cursor through
-    /// the storage-owned atomic read-cut seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable source failure without substituting an independent
-    /// latest cursor read.
     fn read_product_session_with_storage(
         &self,
         storage: &dyn ProductStateStorage,
         request: &ProductSessionRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError>;
 
-    /// Reads latest or exact accepted facts for one current aggregate scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable source failure without substituting live Worker input.
     fn read_delivery(
         &self,
         request: &DeliveryRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError>;
 
-    /// Reads a product-session projection independently of any aggregate cursor.
-    ///
-    /// # Errors
-    ///
-    /// The default remains closed until the accepted-ledger adapter implements it.
     fn read_product_session(
         &self,
         _request: &ProductSessionRuntimeReadRequest,
@@ -526,16 +445,12 @@ pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
     }
 }
 
-/// One trusted runtime fact and the resource-local event cursor captured by
-/// the same durable read.
 #[derive(Debug, Clone)]
 pub struct TrustedRuntimeProjectionReadCut {
     runtime: TrustedRuntimeProjectionRead,
 }
 
 impl TrustedRuntimeProjectionReadCut {
-    /// Builds a read cut and attaches its existing storage cursor to the
-    /// runtime fact. No cursor is generated or advanced here.
     #[must_use]
     pub fn new(runtime: TrustedRuntimeProjectionRead, event_cursor: ProjectionEventCursor) -> Self {
         Self {
@@ -548,16 +463,8 @@ impl TrustedRuntimeProjectionReadCut {
         &self.runtime
     }
 
-    /// Returns the resource cursor captured with the runtime fact.
-    ///
-    /// # Panics
-    ///
-    /// This invariant cannot be violated because the inner value is private
-    /// and [`Self::new`] always attaches the cursor.
     #[must_use]
     pub fn event_cursor(&self) -> &ProjectionEventCursor {
-        // `runtime` is private and can only be initialized by `new`, which
-        // attaches this cursor before the cut is handed to an adapter.
         self.runtime
             .event_cursor()
             .expect("a read cut always contains its durable event cursor")
@@ -568,20 +475,7 @@ impl TrustedRuntimeProjectionReadCut {
     }
 }
 
-/// Storage-owned seam for one atomic runtime fact/cursor read.
-///
-/// `SqliteStorage` owns the transaction and implements this seam at the
-/// composition boundary. The projection module only receives already
-/// validated trusted facts and the existing `ProjectionEventCursor`; it never
-/// opens a second database connection or invents a parallel cursor table.
 pub trait TrustedRuntimeProjectionReadCutReader: Send + Sync {
-    /// Reads one Delivery runtime fact and its resource-local cursor at one
-    /// durable cut.
-    ///
-    /// # Errors
-    ///
-    /// Returns a trusted-source error when the durable cut cannot be read or
-    /// fails validation.
     fn read_delivery_cut(
         &self,
         storage: &dyn ProductStateStorage,
@@ -589,13 +483,6 @@ pub trait TrustedRuntimeProjectionReadCutReader: Send + Sync {
         delivery: &Delivery,
     ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError>;
 
-    /// Reads one `ProductSession` runtime fact and its resource-local cursor at
-    /// one durable cut.
-    ///
-    /// # Errors
-    ///
-    /// Returns a trusted-source error when the durable cut cannot be read or
-    /// fails validation.
     fn read_product_session_cut(
         &self,
         storage: &dyn ProductStateStorage,
@@ -603,26 +490,16 @@ pub trait TrustedRuntimeProjectionReadCutReader: Send + Sync {
     ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError>;
 }
 
-/// Production adapter for a storage-owned `SQLite` read-cut implementation.
-///
-/// The reader is intentionally injected at the deep storage seam: the
-/// adapter cannot fall back to a second connection or independently query a
-/// latest cursor. This keeps runtime state and its public event baseline
-/// inseparable while allowing the storage crate to retain its private `SQLite`
-/// transaction handle.
 pub struct SqliteTrustedRuntimeProjectionAdapter {
     reader: Box<dyn TrustedRuntimeProjectionReadCutReader>,
 }
 
 impl SqliteTrustedRuntimeProjectionAdapter {
-    /// Creates the adapter over the storage-owned `SQLite` read-cut seam.
     #[must_use]
     pub fn new(reader: Box<dyn TrustedRuntimeProjectionReadCutReader>) -> Self {
         Self { reader }
     }
 
-    /// Creates the production adapter backed by the `SqliteStorage` read-cut
-    /// implementation supplied by the owning `ControlPlane`.
     #[must_use]
     pub fn from_sqlite_storage() -> Self {
         Self::new(Box::new(SqliteStorageRuntimeProjectionReadCutReader))
@@ -674,12 +551,6 @@ impl TrustedRuntimeProjectionAdapter for SqliteTrustedRuntimeProjectionAdapter {
     }
 }
 
-/// Production runtime read-cut reader composed with `SqliteStorage`.
-///
-/// The reader receives the owning storage adapter for each read instead of
-/// opening a second cursor source. `ProductStateStorage::load_projection_read_cut`
-/// owns the `SQLite` transaction and returns the runtime state streams together
-/// with the existing resource-local public event cursor.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteStorageRuntimeProjectionReadCutReader;
 
@@ -720,8 +591,6 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
                     .iter()
                     .find(|run| run.id.0 == binding.work_run_id.0)
                     .ok_or(TrustedProjectionReadError::Invalid)?;
-                // A claimed execution has a worker session before Core reports its thread.
-                // It remains visible as Leased, but has no runtime checkpoint to read yet.
                 if run.state != winwincode_domain::WorkRunState::Leased
                     || run.codex_thread_id.is_some()
                     || Some(&run.worker_session_id) != binding.worker_session_id.as_ref()
@@ -1315,7 +1184,6 @@ pub use winwincode_publication::{
     PublicationFactBinding, PublicationResourceFact, PublicationResourceKind, PublicationResultFact,
 };
 
-/// Candidate and publication facts read from one durable publication cut.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrustedPublicationProjectionRead {
     scope: RepositoryScope,
@@ -1328,11 +1196,6 @@ pub struct TrustedPublicationProjectionRead {
 }
 
 impl TrustedPublicationProjectionRead {
-    /// Builds one sealed publication-ledger read.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsafe revisions, source seals, or a mismatched result revision.
     pub fn try_new(
         scope: RepositoryScope,
         delivery_id: DeliveryId,
@@ -1405,19 +1268,7 @@ impl TrustedPublicationProjectionRead {
     }
 }
 
-/// Trusted Git/publication intent and result reader.
 pub trait TrustedPublicationProjectionAdapter: Send + Sync {
-    /// Reads publication facts through the Control Plane's canonical durable
-    /// storage, Artifact store, and Git source resolver.
-    ///
-    /// Production adapters override this method. The default preserves the
-    /// small in-memory adapter seam while ensuring that application code has
-    /// one call path for local and injected sources.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable source failure when the exact durable facts cannot be
-    /// reconstructed or have changed.
     #[allow(
         clippy::too_many_arguments,
         reason = "the trusted read binds every independent durable authority explicitly"
@@ -1441,12 +1292,6 @@ pub trait TrustedPublicationProjectionAdapter: Send + Sync {
         )
     }
 
-    /// Reads latest or exact publication facts for one aggregate revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable source failure without treating a missing adapter as an
-    /// empty successful publication set.
     fn read_current(
         &self,
         scope: &RepositoryScope,
@@ -1456,7 +1301,6 @@ pub trait TrustedPublicationProjectionAdapter: Send + Sync {
     ) -> Result<TrustedPublicationProjectionRead, TrustedProjectionReadError>;
 }
 
-/// Runtime and publication adapters installed as one immutable authority set.
 pub struct StrongFlowProjectionSources {
     pub(crate) runtime: Box<dyn TrustedRuntimeProjectionAdapter>,
     pub(crate) publication: Box<dyn TrustedPublicationProjectionAdapter>,

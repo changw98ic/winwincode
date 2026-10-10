@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Versioned cost projections over immutable model Usage facts.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -13,7 +9,6 @@ use crate::{ModelUsageSourceEntry, ProviderModelSelector};
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const TOKENS_PER_MILLION: u128 = 1_000_000;
 
-/// Pricing identity. Costs with different identities are never added together.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPriceReference {
@@ -23,7 +18,6 @@ pub struct ModelPriceReference {
     pub billing_semantics: String,
 }
 
-/// Per-million-token rates for mutually exclusive token categories.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelTokenPrice {
@@ -34,7 +28,6 @@ pub struct ModelTokenPrice {
     pub reasoning_output: u64,
 }
 
-/// One versioned price entry.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPriceEntry {
@@ -43,18 +36,12 @@ pub struct ModelPriceEntry {
     pub micros_per_million_tokens: ModelTokenPrice,
 }
 
-/// Immutable price catalog used for one recalculation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelPriceCatalog {
     entries: BTreeMap<ProviderModelSelector, ModelPriceEntry>,
 }
 
 impl ModelPriceCatalog {
-    /// Builds a catalog without duplicate models or unversioned price sources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed or duplicate entries.
     pub fn try_new(entries: Vec<ModelPriceEntry>) -> Result<Self, ModelCostError> {
         let mut indexed = BTreeMap::new();
         for entry in entries {
@@ -68,11 +55,6 @@ impl ModelPriceCatalog {
         Ok(Self { entries: indexed })
     }
 
-    /// Recalculates one immutable Usage fact; absent pricing remains unknown.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when token categories or calculated cost are invalid.
     pub fn project(
         &self,
         entry: &ModelUsageSourceEntry,
@@ -102,7 +84,6 @@ impl ModelPriceCatalog {
     }
 }
 
-/// Whether cost belongs to ordinary execution or independent verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCostClass {
     Execution,
@@ -119,7 +100,6 @@ impl ModelCostClass {
     }
 }
 
-/// Derived cost. Unknown is never represented as zero.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCostFact {
     Known {
@@ -129,7 +109,6 @@ pub enum ModelCostFact {
     Unknown,
 }
 
-/// One source Usage fact projected under one retained price catalog.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCostProjection {
     pub provider_usage_id: String,
@@ -137,18 +116,15 @@ pub struct ModelCostProjection {
     pub product_session_id: ProductSessionId,
     pub class: ModelCostClass,
     pub cost: ModelCostFact,
-    /// Provider-reported value retained for audit, never mixed with catalog pricing.
     pub provider_reported_cost_micros: Option<u64>,
 }
 
-/// Cost grouped under one exact price source/version/semantic identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCostBucket {
     pub reference: ModelPriceReference,
     pub amount_micros: u64,
 }
 
-/// Task and Session cost facts. Verification remains a separate ledger.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModelCostSummary {
     pub execution_by_task: BTreeMap<String, Vec<ModelCostBucket>>,
@@ -158,11 +134,6 @@ pub struct ModelCostSummary {
     pub unknown_usage_ids: Vec<String>,
 }
 
-/// Projects and groups Usage without combining unlike billing semantics.
-///
-/// # Errors
-///
-/// Returns an error for invalid Usage arithmetic or cost overflow.
 pub fn summarize_model_costs(
     entries: &[ModelUsageSourceEntry],
     catalog: &ModelPriceCatalog,
@@ -226,14 +197,12 @@ fn add_bucket(
     Ok(())
 }
 
-/// Explicit handling for usage whose price is not known.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnknownCostPolicy {
     Stop,
     Continue,
 }
 
-/// Soft/hard cost limits under one exact billing semantic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelBudgetPolicy {
     pub reference: ModelPriceReference,
@@ -242,7 +211,6 @@ pub struct ModelBudgetPolicy {
     pub unknown_cost: UnknownCostPolicy,
 }
 
-/// Budget state returned at a safe execution boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelBudgetState {
     WithinBudget,
@@ -251,7 +219,6 @@ pub enum ModelBudgetState {
     UnknownCost,
 }
 
-/// Budget control is not a task result and therefore has no failure variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelBudgetAction {
     Continue,
@@ -266,11 +233,6 @@ pub struct ModelBudgetDecision {
 }
 
 impl ModelBudgetPolicy {
-    /// Evaluates one execution or verification ledger at its next safe point.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed limits, references, or cost overflow.
     pub fn evaluate(
         &self,
         projections: &[ModelCostProjection],
@@ -326,7 +288,6 @@ impl ModelBudgetPolicy {
     }
 }
 
-/// Bounded validation or arithmetic failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelCostError;
 

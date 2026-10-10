@@ -1,25 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Precise, bounded Delivery rework decisions.
-//!
-//! The values in this module are derived authorization facts. They are not an
-//! extra persisted Delivery object and they do not schedule Codex work.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::rework::ReworkAuthorization;
-//!
-//! let _caller_built_authorization = ReworkAuthorization {
-//!     previous_candidate: todo!(),
-//!     ..todo!()
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::rework::ReworkAuthorization;
-//!
-//! let _: ReworkAuthorization = serde_json::from_str("{}").unwrap();
-//! ```
-
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -66,7 +44,6 @@ impl ReworkTargetFact {
     }
 }
 
-/// The current candidate/diff projection resolved by the Control Plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentReworkScope {
     candidate_ref: String,
@@ -75,7 +52,6 @@ pub struct CurrentReworkScope {
 }
 
 impl CurrentReworkScope {
-    /// Returns the complete repair scope derived from the current failed evidence and Git hunks.
     #[must_use]
     pub fn annotations(&self) -> Vec<PreciseReworkAnnotation> {
         self.targets
@@ -90,11 +66,6 @@ impl CurrentReworkScope {
             })
             .collect()
     }
-    /// Derives allowed targets exclusively from the sealed current candidate
-    /// and the current failing Verdict, never from request-supplied paths.
-    ///
-    /// # Errors
-    /// Rejects stale candidates, missing failed evidence, invalid item bindings and oversized scopes.
     pub fn from_candidate(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -172,12 +143,6 @@ pub struct PreciseReworkAnnotation {
     pub evidence_ref_ids: Vec<EvidenceId>,
 }
 
-/// Append-only prior verdict history validated for one current `DeliverySpec`.
-///
-/// Fields and construction stay crate-private so transport callers cannot
-/// erase a prior failure by submitting an empty history. The Control Plane
-/// transaction derives this fact from journal snapshots before asking for a
-/// rework decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedReworkHistoryFact {
     delivery_id: DeliveryId,
@@ -209,8 +174,6 @@ pub enum ReworkClarificationReason {
     RepeatedCriterionFailure,
 }
 
-/// Constructor-derived proof that the current bounded rework policy requires
-/// human clarification instead of another remediator attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReworkClarification {
     delivery_id: DeliveryId,
@@ -323,7 +286,6 @@ impl ReworkAuthorization {
         self.next_attempt
     }
 
-    /// Initial attempt of the new execution job, independent of the rework budget.
     #[must_use]
     pub fn work_run_attempt(&self) -> i64 {
         self.work_run_attempt
@@ -344,11 +306,6 @@ impl ReworkAuthorization {
         true
     }
 
-    /// Derives the only aggregate change authorized by this precise rework:
-    /// retire the exact failed candidate producer and reopen its unchanged input.
-    ///
-    /// # Errors
-    /// Rejects stale authorization, active consumers, or a non-candidate source.
     pub fn dispatch_aggregate(
         &self,
         delivery: &Delivery,
@@ -386,12 +343,6 @@ impl ReworkAuthorization {
         Ok(aggregate)
     }
 
-    /// Revalidates this sealed decision immediately before dispatch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects state drift, an invalidated candidate, changed failure facts,
-    /// or a changed Delivery-wide attempt number.
     pub fn validate_for_dispatch(
         &self,
         delivery: &Delivery,
@@ -595,7 +546,6 @@ pub enum ReworkDecision {
     Clarify(ReworkClarification),
 }
 
-/// Blocking follow-up actions derived from all current Verdict Attention items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerdictAttentionAction {
     ClarifyDefinition,
@@ -603,9 +553,6 @@ pub(crate) enum VerdictAttentionAction {
     RetryVerification,
 }
 
-/// Reconstructs the derived Verdict action from one resolved current
-/// `AttentionItem`. The action itself is deliberately not persisted: the
-/// canonical item type and resolution are the authority.
 pub(crate) const fn resolved_verdict_attention_action(
     item_type: super::AttentionItemType,
     status: super::AttentionItemStatus,
@@ -628,10 +575,6 @@ pub(crate) const fn resolved_verdict_attention_action(
     }
 }
 
-/// Chooses the safest next state from the complete current action set.
-///
-/// Clarification always outranks code rework, which outranks a retry. The
-/// result therefore cannot change with Attention resolution order.
 pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) -> DeliveryStatus {
     if actions.contains(&VerdictAttentionAction::ClarifyDefinition) {
         DeliveryStatus::Clarifying
@@ -642,7 +585,6 @@ pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) ->
     }
 }
 
-/// Returns the next business rework number from distinct accepted dispatches.
 pub(crate) fn next_rework_attempt(delivery: &Delivery) -> u64 {
     rework_dispatch_count(delivery.snapshot()).saturating_add(1)
 }
@@ -657,11 +599,6 @@ pub(crate) fn rework_dispatch_count(snapshot: &DeliverySnapshot) -> u64 {
         .len() as u64
 }
 
-/// Derives sealed rework history from append-only Delivery journal snapshots.
-///
-/// The transaction may provide the full Delivery history. Only verdicts for
-/// the current Spec revision and an earlier candidate are included. Missing,
-/// reordered, duplicate, foreign, or insufficient history is rejected.
 pub(crate) fn derive_validated_rework_history(
     delivery: &Delivery,
     append_only_history: &[DeliverySnapshot],
@@ -713,10 +650,6 @@ pub(crate) fn derive_validated_rework_history(
         );
     }
 
-    // Rework is a business transition, not a WorkRun lease-attempt counter.
-    // The append-only candidate verdict chain is the authoritative history
-    // available at this seam; a missing prior verdict is rejected when the
-    // sealed fact is consumed by `decide_precise_rework`.
     let observed_rework_count = u64::try_from(prior_candidate_refs.len()).unwrap_or(u64::MAX);
     let mut prior_failed_criterion_ids = prior_failed_criterion_ids.into_iter().collect::<Vec<_>>();
     prior_failed_criterion_ids.sort_by(|left, right| left.0.cmp(&right.0));
@@ -755,26 +688,12 @@ fn seal_rework_history(
     )))
 }
 
-/// Removes prior candidate authorization when a remediator writer starts.
-///
-/// Historical records stay in the append-only journal, while the new current
-/// snapshot no longer exposes prior-candidate Evidence or Verdict as usable.
 pub(crate) fn invalidate_candidate_authorization_for_writer_start(snapshot: &mut DeliverySnapshot) {
     snapshot.same_candidate_reverification = None;
     snapshot.evidence.clear();
     snapshot.verdict = None;
 }
 
-/// Chooses clarification or returns one exact remediator authorization.
-///
-/// The caller supplies current candidate annotations, but cannot supply the
-/// writer role or attempt number. All annotations must exactly equal a current
-/// Control Plane projection target and cite current candidate-bound Evidence.
-///
-/// # Errors
-///
-/// Rejects stale candidates, non-failing verdicts, expanded scope, foreign
-/// tasks/files/hunks, or missing/foreign Evidence references.
 pub fn decide_precise_rework(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -794,10 +713,6 @@ pub fn decide_precise_rework(
         ));
     }
 
-    // Rework is a business transition, not an execution attempt ordinal.
-    // The sealed append-only verdict history counts prior candidates, so a
-    // lease retry (including a retry on another WorkItem) cannot consume a
-    // Delivery rework slot.
     let rework_count = history.observed_rework_count;
     if history.delivery_id != *delivery.id()
         || history.delivery_spec_id != delivery.snapshot().spec.id
@@ -1003,16 +918,6 @@ fn candidate_contains_hunk(
         .any(|hunk| hunk.file_path == file_path && hunk.hunk_sha256 == hunk_sha256)
 }
 
-/// Atomically freezes and authorizes one remediator replacement candidate.
-///
-/// This is the only production entry that can turn remediator output into a
-/// frozen candidate. The generic candidate freezer accepts executors only, so
-/// skipping the scope check cannot create a verification-eligible candidate.
-///
-/// # Errors
-///
-/// Rejects stale authorization, another writer or fenced Job, changed Spec
-/// lineage, and any old-to-new path or hunk outside the approved scope.
 pub fn freeze_rework_replacement_candidate(
     delivery: &Delivery,
     authorization: &ReworkAuthorization,
@@ -1035,10 +940,6 @@ pub fn freeze_rework_replacement_candidate(
     Ok(replacement_candidate)
 }
 
-/// Verifies a sealed old-to-new remediator snapshot after execution.
-///
-/// This check consumes the Git/Artifact adapter's opaque snapshot. Prompt text
-/// and caller-provided path lists are not result authority.
 fn assert_remediator_output_in_scope(
     delivery: &Delivery,
     authorization: &ReworkAuthorization,
@@ -1161,9 +1062,6 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
     )
 }
 
-/// Narrow sealed fixtures for cross-crate rework transaction tests. They are
-/// compiled only for tests and still pass through the production verdict,
-/// Attention, candidate, history, decision, and `WorkRun` application services.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
@@ -1218,14 +1116,6 @@ pub mod test_support {
         pub reason: ReworkClarificationReason,
     }
 
-    /// Freezes one authorization-bound remediator replacement through the
-    /// production candidate and rework seams.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the producer is not the current authorized remediator, its
-    /// binding is foreign, or the observable old-to-new Git/artifact values
-    /// exceed the exact authorized scope.
     #[must_use]
     pub fn freeze_rework_replacement_candidate_fixture(
         delivery: &Delivery,
@@ -1244,14 +1134,6 @@ pub mod test_support {
             .expect("rework fixture must match the current authorization and sealed observations")
     }
 
-    /// Derives one first-failure remediator authorization from the current
-    /// Delivery, its failed Evidence, and the exact first sealed candidate hunk.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the candidate is stale, the Delivery is not in `Reworking`,
-    /// the current verdict has no failed Evidence, or the candidate has no
-    /// sealed changed hunk.
     #[must_use]
     pub fn precise_rework_authorization_fixture(
         delivery: &Delivery,
@@ -1333,11 +1215,6 @@ pub mod test_support {
         Ok(*authorization)
     }
 
-    /// Builds one production-derived, sealed rework dispatch fixture.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the fixed test facts no longer form a valid rework transition.
     #[must_use]
     pub fn authorized_rework_dispatch(delivery_id: &DeliveryId) -> ReworkDispatchFixture {
         let (journal, source_delivery, candidate, decision, evidence_ref_ids) =
@@ -1377,11 +1254,6 @@ pub mod test_support {
         }
     }
 
-    /// Builds one production-sealed repeated-failure clarification fixture.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the fixed test facts no longer form a valid clarification transition.
     #[must_use]
     pub fn repeated_rework_clarification(delivery_id: &DeliveryId) -> ReworkClarificationFixture {
         let (journal, source_delivery, _candidate, _decision, _evidence_ref_ids) =

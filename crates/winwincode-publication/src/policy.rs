@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::fmt;
 use std::net::IpAddr;
 
@@ -15,7 +13,6 @@ use crate::facts::{
     repository_slug,
 };
 
-/// Exact actor whose authenticated command is being evaluated.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum PublicationRequester {
@@ -47,7 +44,6 @@ impl PublicationRequester {
     }
 }
 
-/// Exact repository ancestry to which one policy applies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryPolicyScope {
@@ -62,11 +58,6 @@ pub struct RepositoryPolicyScope {
 }
 
 impl RepositoryPolicyScope {
-    /// Builds one canonical repository policy scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any non-canonical organization, workspace, project, or repository identity.
     pub fn try_new(
         organization_id: OrganizationId,
         workspace_id: WorkspaceId,
@@ -114,14 +105,12 @@ impl RepositoryPolicyScope {
         &self.repository
     }
 
-    /// Returns the deterministic digest used by sealed Publication authority.
     #[must_use]
     pub fn sha256(&self) -> Sha256Digest {
         sha256_json(self)
     }
 }
 
-/// One closed allow/deny value. Deny is always evaluated before allow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyPermission {
@@ -129,7 +118,6 @@ pub enum PolicyPermission {
     Deny,
 }
 
-/// Closed request origin retained by the audit adapter.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicationPolicyOrigin {
@@ -137,10 +125,6 @@ pub enum PublicationPolicyOrigin {
     Network { source_ip: IpAddr },
 }
 
-/// One authenticated policy-evaluation request.
-///
-/// The context is application authority rather than a wire DTO. Its request
-/// identity gives every allow or deny decision a stable audit identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationPolicyContext {
@@ -152,11 +136,6 @@ pub struct PublicationPolicyContext {
 }
 
 impl PublicationPolicyContext {
-    /// Seals the authenticated actor, request, origin, and current policy facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed actor or request identity.
     pub fn try_new(
         requester: PublicationRequester,
         request_id: RequestId,
@@ -204,7 +183,6 @@ impl PublicationPolicyContext {
     }
 }
 
-/// Closed failure returned by the policy-audit boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublicationPolicyAuditError;
 
@@ -223,17 +201,7 @@ impl fmt::Display for PublicationPolicyAuditError {
 
 impl std::error::Error for PublicationPolicyAuditError {}
 
-/// Required audit port for every Publication policy evaluation.
-///
-/// The coordinator does not expose a publish or resume constructor without
-/// this port, so a provider adapter cannot skip the recorded decision.
 pub trait PublicationPolicyAudit {
-    /// Records one exact, secret-safe decision before a durable intent or
-    /// provider operation.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the immutable audit sink cannot retain the decision.
     fn record(
         &mut self,
         decision: &PublicationPolicyDecision,
@@ -241,11 +209,6 @@ pub trait PublicationPolicyAudit {
 }
 
 impl PublicationPolicyOrigin {
-    /// Builds a bounded local component origin.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unbounded or non-portable component names.
     pub fn local(component: &str) -> Result<Self, String> {
         if !portable_token(component) {
             return Err("publication policy local origin is invalid".to_owned());
@@ -261,10 +224,6 @@ impl PublicationPolicyOrigin {
     }
 }
 
-/// Trusted current Delivery/verification/Artifact facts used by policy.
-///
-/// This type is not a wire DTO. Its publication-set digest prevents reuse with
-/// another candidate, approval, target, or Artifact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationPolicyEvidence {
@@ -276,11 +235,6 @@ pub struct PublicationPolicyEvidence {
 }
 
 impl PublicationPolicyEvidence {
-    /// Seals current verification and Artifact-export facts to one authorization.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid authorization or timestamp.
     pub fn try_from_current_facts(
         authorization: &PublicationAuthorization,
         independent_verification: bool,
@@ -316,7 +270,6 @@ impl PublicationPolicyEvidence {
     }
 }
 
-/// First closed repository policy for Publication.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryPublicationPolicy {
@@ -334,12 +287,6 @@ pub struct RepositoryPublicationPolicy {
 }
 
 impl RepositoryPublicationPolicy {
-    /// Builds a deterministic repository Publication policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope/repository/principal values, empty allow sets,
-    /// duplicate members, or an invalid approval lifetime.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         scope: RepositoryPolicyScope,
@@ -402,11 +349,6 @@ impl RepositoryPublicationPolicy {
         })
     }
 
-    /// Evaluates every trusted fact before a Publication intent or provider call.
-    ///
-    /// # Errors
-    ///
-    /// Rejects facts that belong to another repository, authorization, or time.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
@@ -489,7 +431,6 @@ impl RepositoryPublicationPolicy {
     }
 }
 
-/// Stable rule that produced one policy decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicationPolicyRule {
@@ -523,7 +464,6 @@ impl PublicationPolicyRule {
     }
 }
 
-/// Closed policy result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicationPolicyEffect {
@@ -531,7 +471,6 @@ pub enum PublicationPolicyEffect {
     Deny,
 }
 
-/// Secret-safe policy result passed to the Control Plane audit adapter.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationPolicyDecision {

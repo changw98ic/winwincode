@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Atomic application transition for one current computed Delivery verdict.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{AttentionItemId, EvidenceId, WorkItemId, WorkItemState, WorkRunId};
@@ -19,7 +15,6 @@ use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 const VERDICT_ATTENTION_PROTOCOL: &str = "winwincode.delivery-verdict-attention.v1";
 
-/// Sealed authoritative facts accepted by the verdict application service.
 #[derive(Debug, Clone, Copy)]
 pub struct SubmitVerdictFacts<'facts> {
     pub expected_revision: u64,
@@ -29,7 +24,6 @@ pub struct SubmitVerdictFacts<'facts> {
     pub produced_at_millis: u64,
 }
 
-/// One constructor-derived Delivery transition accepted by persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputedVerdictTransition {
     source_revision: u64,
@@ -64,7 +58,6 @@ impl ComputedVerdictTransition {
     }
 }
 
-/// Immutable outbox projection produced from the same computed transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryVerdictSubmittedEvent {
@@ -135,12 +128,6 @@ struct VerdictAttentionContext {
     rework_attempts_limit: u64,
 }
 
-/// Recomputes Evidence, Verdict, Attention, task state, and Delivery status.
-///
-/// # Errors
-///
-/// Returns a stable coordination error for a stale revision or any rejected
-/// authoritative fact. No partial snapshot is returned.
 pub fn compute_verdict_transition(
     delivery: &Delivery,
     facts: SubmitVerdictFacts<'_>,
@@ -697,9 +684,6 @@ fn event_from_transition(
     verdict: DeliveryVerdict,
     attention_items: Vec<AttentionItem>,
 ) -> DeliveryVerdictSubmittedEvent {
-    // The durable outbox event carries only criterion-cited Evidence. Extra
-    // sealed facts such as producer Commit Evidence remain on the Delivery
-    // snapshot for preview source authority.
     let cited = verdict
         .criteria
         .iter()
@@ -768,9 +752,6 @@ fn validate_transition_delta(
         .iter()
         .map(|evidence| evidence.id.0.as_str())
         .collect::<std::collections::HashSet<_>>();
-    // Every outbox-cited Evidence must be one exact newly appended fact.
-    // The Delivery snapshot may also retain sealed producer Commit Evidence
-    // that preview source authority reads but no criterion cites.
     let event_evidence_exact = transition.event.evidence.iter().all(|reference| {
         appended_evidence
             .iter()
@@ -842,9 +823,6 @@ fn delivery_digest(delivery: &Delivery) -> Result<String, CoordinationError> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-/// Narrow fixtures for cross-crate transaction tests. This module is absent
-/// from normal builds and still constructs every sealed fact through the
-/// production candidate, verification, Evidence, and verdict seams.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use winwincode_domain::{
@@ -877,7 +855,6 @@ pub mod test_support {
         pub evidence: Vec<ResolvedDeliveryEvidence>,
     }
 
-    /// Sealed inputs accepted by the production verdict computation.
     #[derive(Debug)]
     pub struct VerdictFactsFixture {
         verification: IndependentVerification,
@@ -904,13 +881,6 @@ pub mod test_support {
         InfraError,
     }
 
-    /// Resolves one high-level outcome through production verification and
-    /// Evidence resolvers without exposing their raw authority facts.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the Delivery/candidate is stale or its verification
-    /// role `WorkRun` values do not have the terminal states required by `outcome`.
     #[must_use]
     pub fn verdict_facts_fixture(
         delivery: &Delivery,
@@ -974,11 +944,6 @@ pub mod test_support {
         }
     }
 
-    /// Builds the exact approval identity for an already verified fixture.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the fixture has no passing verdict or its context is invalid.
     #[must_use]
     pub fn delivery_approval_fixture(
         delivery: &Delivery,
@@ -1220,8 +1185,6 @@ mod tests {
                 candidate_commit_id: "6".repeat(40),
                 candidate_tree_id: "7".repeat(40),
                 diff_sha256: "8".repeat(64),
-                // Distinct identities and opposing orders make reconstruction
-                // observably different from copying the sealed candidate.
                 changed_paths: vec![
                     CandidatePathFact {
                         path: "src/zeta.rs".into(),

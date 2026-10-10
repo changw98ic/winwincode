@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Product-owned refusal of an already successful writer's candidate.
-//! The execution result and source remain immutable. A typed Attention records
-//! why that output cannot enter verification; it is not another Candidate.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
@@ -26,7 +20,6 @@ pub enum CandidateRejectionReason {
     InvalidCandidateSource,
 }
 
-/// Exact immutable source and execution coordinates observed by the CP.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateRejectionFact {
@@ -50,16 +43,8 @@ pub struct CandidateRejectionFact {
 }
 
 impl CandidateRejectionFact {
-    /// Derives the canonical Attention identity from the complete refusal fact.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the serialization contract of the fact's plain value
-    /// fields is broken and the fact can no longer be encoded as JSON.
     #[must_use]
     pub fn attention_id(&self) -> AttentionItemId {
-        // All fields are plain serializable values. The complete fact binds
-        // the stable refusal identity, including its source and authorization.
         let bytes = serde_json::to_vec(self).expect("candidate rejection fact serializes");
         let digest = Sha256::digest(bytes);
         let mut prefix = [0_u8; 16];
@@ -103,7 +88,6 @@ impl CandidateRejectionFact {
     }
 }
 
-/// Returns only the canonical, exact currently rejected writer's Attention.
 #[must_use]
 pub fn current_candidate_rejection(delivery: &Delivery) -> Option<CandidateRejectionFact> {
     if delivery.snapshot().status != DeliveryStatus::NeedsAttention {
@@ -133,7 +117,6 @@ pub fn rejection_attention_fact(item: &AttentionItem) -> Option<CandidateRejecti
     .then_some(fact)
 }
 
-/// Non-deserializable seal for the specialized journal mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateRejectedTransition {
     source_delivery: Delivery,
@@ -141,9 +124,6 @@ pub struct CandidateRejectedTransition {
 }
 
 impl CandidateRejectedTransition {
-    /// Seals a CP-observed refusal after the exact writer success was committed.
-    /// # Errors
-    /// Rejects stale versions, a foreign/non-successful writer, or a duplicate refusal.
     pub fn new(
         delivery: &Delivery,
         fact: CandidateRejectionFact,

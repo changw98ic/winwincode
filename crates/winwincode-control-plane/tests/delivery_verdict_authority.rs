@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -761,8 +759,6 @@ fn append_ambiguous_writer(snapshot: &mut winwincode_delivery::domain::DeliveryS
         .find(|accepted| accepted.id == source_binding.work_run_id)
         .expect("source canonical WorkRun")
         .clone();
-    // Preserve one CandidateReady producer. This fixture targets ambiguous
-    // writer bindings, not an invalid aggregate with two current candidates.
     accepted.state = winwincode_domain::WorkRunState::Settled;
     accepted.id = binding.work_run_id.clone();
     accepted.product_session_id = Some(binding.product_session_id.clone());

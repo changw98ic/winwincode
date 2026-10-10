@@ -553,9 +553,6 @@ fn claim_without_acceptance(storage: &mut SqliteStorage, scope: &RepositorySched
     );
 }
 
-// Seed the candidate-ready input phase without invoking an external Provider.
-// The original Executor queue intent is closed through the scheduler; a fresh
-// immutable Reviewer job is submitted through the production storage port.
 fn seed_reviewer(
     storage: &mut SqliteStorage,
     executor: &winwincode_storage::ExecutionJobRecord,

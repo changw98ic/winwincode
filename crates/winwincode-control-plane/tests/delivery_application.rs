@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::path::PathBuf;
 
 use winwincode_api::generated::{

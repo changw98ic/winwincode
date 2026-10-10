@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Community `SQLite` storage for the storage-neutral observability core.
-
 use std::{fs, path::Path, time::Duration};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -17,21 +13,12 @@ use winwincode_observability_core::{
 
 const SCHEMA_VERSION: &str = "winwincode.observability.sqlite.v1";
 
-/// SQLite-backed telemetry service. Each operation is bounded and owns its
-/// transaction; no query returns a live cursor or holds a lock after return.
 pub struct SqliteObservability {
     connection: Connection,
     config: ObservabilityConfig,
 }
 
 impl SqliteObservability {
-    /// Opens or creates a durable observability database in WAL mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe error for invalid configuration, inaccessible
-    /// storage, schema mismatch, or an alert rule set that changed after the
-    /// database was initialized.
     pub fn open(
         path: impl AsRef<Path>,
         mut config: ObservabilityConfig,
@@ -58,17 +45,6 @@ impl SqliteObservability {
         Ok(Self { connection, config })
     }
 
-    /// Atomically records a structured observation, updates its fixed metric
-    /// bucket, and evaluates durable alert state.
-    ///
-    /// Exact replay returns the original transition set without updating
-    /// metrics or alerts. Reusing an observation or source identity with
-    /// changed facts fails before any write.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable error for invalid input, replay conflict, configured
-    /// receipt exhaustion, corrupt durable rows, or storage failure.
     pub fn record(
         &mut self,
         observation: &Observation,
@@ -108,12 +84,6 @@ impl SqliteObservability {
         })
     }
 
-    /// Loads one bounded materialized trace page.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed trace identities, zero or oversized limits, and
-    /// corrupt retained observations.
     pub fn trace_page(
         &self,
         trace_id: &TraceId,
@@ -171,12 +141,6 @@ impl SqliteObservability {
         })
     }
 
-    /// Loads a bounded metric page over an explicitly bounded bucket window.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-aligned or oversized windows, malformed cursors, oversized
-    /// pages, and corrupt metric rows.
     pub fn metric_page(
         &self,
         from_bucket_inclusive: u64,
@@ -248,11 +212,6 @@ impl SqliteObservability {
         Ok(MetricPage { rows: result, next })
     }
 
-    /// Loads a bounded alert-transition page.
-    ///
-    /// # Errors
-    ///
-    /// Rejects oversized limits and corrupt durable transitions.
     pub fn alert_page(
         &self,
         after_sequence: u64,

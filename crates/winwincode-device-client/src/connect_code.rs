@@ -1,20 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Dynamic connect code lifecycle on the device (CLIENT-200.2, plan
-//! sections 11.1 and 11.3).
-//!
-//! The device generates its own 8-digit one-time connect code, publishes it
-//! to the Control Plane as a `sha256` digest inside a durable
-//! `client.connect_code.published` frame (persist-before-send through the
-//! daemon's outbox path). Browser authorization consumes the published code
-//! on Server; Device receives no authorization challenge.
-//!
-//! Secret boundary: the plaintext code exists only in the process memory of
-//! whoever generated it ([`ConnectCodePlaintext`] redacts its `Debug`
-//! output). It never enters the durable store, the outbox, or any log
-//! payload — only the digest does. A restart therefore loses the ability to
-//! *display* the code. The Server retains the digest used for authorization.
-
 use std::fmt;
 use std::time::Duration;
 
@@ -31,45 +14,27 @@ use winwincode_client_port::messages::{
 use crate::identity::generate_prefixed_id;
 use crate::store::{ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError};
 
-/// Digit count of the dynamic connect code (plan 11.3: `8 位数字`).
 pub const CONNECT_CODE_DIGITS: usize = 8;
-/// Default validity window of one publication (plan 11.3: `默认 2 分钟有效`).
 pub const CONNECT_CODE_TTL: Duration = Duration::from_mins(2);
-/// Canonical connect code id prefix, matching the schema's
-/// `ClientConnectCodeId` pattern (`cct_` + 26 Crockford characters).
 const CONNECT_CODE_ID_PREFIX: &str = "cct_";
-/// Largest byte accepted by the uniform digit rejection sampler: the first
-/// multiple of ten at or below 256 keeps every digit equally likely.
 const UNBIASED_DIGIT_BYTE_CEILING: u8 = 250;
-/// Bound on the weak-shape rejection loop; reachable only if the entropy
-/// source itself is broken.
 const MAX_GENERATION_ATTEMPTS: usize = 64;
 const MAX_ID_BYTES: usize = 200;
 
-/// The plaintext 8-digit connect code, held in process memory only.
-///
-/// `Debug` is manually redacted and there is no `Display`, so the code can
-/// only leave process memory through [`ConnectCodePlaintext::expose`] or
-/// [`ConnectCodePlaintext::grouped`] — the two explicit presentation
-/// surfaces (plan 11.1 local display, §16.8 CLI fallback).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConnectCodePlaintext(String);
 
 impl ConnectCodePlaintext {
-    /// Wraps an already validated digit string (tests and callers that
-    /// received the code from [`generate_connect_code`]).
     #[must_use]
     pub(crate) const fn from_digits(code: String) -> Self {
         Self(code)
     }
 
-    /// The plaintext code. Never log, persist, or frame the returned value.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
     }
 
-    /// The grouped presentation of the plan's local display (`6842 1975`).
     #[must_use]
     pub fn grouped(&self) -> String {
         self.0
@@ -87,25 +52,16 @@ impl fmt::Debug for ConnectCodePlaintext {
     }
 }
 
-/// A freshly generated (or refreshed) publication: the one-time plaintext
-/// for local display plus the durable record whose digest was published.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedConnectCode {
-    /// The plaintext code; display it once, then drop it.
     pub plaintext: ConnectCodePlaintext,
-    /// The durable state that replaced the previous generation.
     pub record: ConnectCodeStateRecord,
 }
 
-/// Failure of a connect-code publication or frame append.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectCodeError {
-    /// The durable store failed.
     Store(DeviceStoreError),
-    /// The publication requires an adopted enrollment (`clientNodeId`).
     NotEnrolled,
-    /// The entropy source failed too often for the weak-shape rejection
-    /// loop, or a frame could not be encoded.
     Protocol(String),
 }
 
@@ -130,16 +86,6 @@ impl From<DeviceStoreError> for ConnectCodeError {
     }
 }
 
-/// Generates one strong 8-digit connect code with `getrandom`.
-///
-/// Digits use rejection sampling (uniform, unbiased). Weak shapes are
-/// rejected and regenerated: all-identical digits and full ascending or
-/// descending runs (`11111111`, `12345678`, `87654321`).
-///
-/// # Errors
-///
-/// Returns [`ConnectCodeError::Protocol`] when the entropy source fails or
-/// the rejection loop exhausts its (practically unreachable) attempt bound.
 pub fn generate_connect_code() -> Result<ConnectCodePlaintext, ConnectCodeError> {
     for _ in 0..MAX_GENERATION_ATTEMPTS {
         let digits = random_digits(CONNECT_CODE_DIGITS)?;
@@ -153,7 +99,6 @@ pub fn generate_connect_code() -> Result<ConnectCodePlaintext, ConnectCodeError>
     ))
 }
 
-/// Draws `count` uniform decimal digits via rejection sampling.
 fn random_digits(count: usize) -> Result<Vec<u8>, ConnectCodeError> {
     let mut digits = Vec::with_capacity(count);
     let mut chunk = [0_u8; 32];
@@ -172,9 +117,6 @@ fn random_digits(count: usize) -> Result<Vec<u8>, ConnectCodeError> {
     Ok(digits)
 }
 
-/// Whether `code` is malformed or one of the rejected weak shapes: not
-/// exactly [`CONNECT_CODE_DIGITS`] ASCII digits, all digits identical, or a
-/// full ascending/descending run.
 #[must_use]
 pub fn is_weak_connect_code(code: &str) -> bool {
     let bytes = code.as_bytes();
@@ -187,18 +129,11 @@ pub fn is_weak_connect_code(code: &str) -> bool {
         || digits.windows(2).all(|window| window[1] + 1 == window[0])
 }
 
-/// The `sha256:` digest published to the server instead of the plaintext.
 #[must_use]
 pub fn connect_code_digest(code: &ConnectCodePlaintext) -> String {
     format!("sha256:{:x}", Sha256::digest(code.expose().as_bytes()))
 }
 
-/// The effective connection policy: the durable row, or the default
-/// (accepting new connections, unlocked) before the first policy write.
-///
-/// # Errors
-///
-/// Returns a store failure when the read fails.
 pub fn connection_policy(store: &DeviceStore) -> Result<ConnectionPolicyRecord, DeviceStoreError> {
     Ok(store
         .connection_policy()?
@@ -209,18 +144,6 @@ pub fn connection_policy(store: &DeviceStore) -> Result<ConnectionPolicyRecord, 
         }))
 }
 
-/// Generates (or refreshes) the dynamic connect code and persists its
-/// durable digest state.
-///
-/// Every publication replaces the previous generation: the old code stops
-/// being published as current, and the new row carries
-/// `generation + 1`. The plaintext is returned for local display only; it is
-/// never written to the store.
-///
-/// # Errors
-///
-/// Returns [`ConnectCodeError::Store`] for durable failures and
-/// [`ConnectCodeError::Protocol`] for entropy failures.
 pub fn publish_connect_code(
     store: &mut DeviceStore,
     issued_by_instance_id: &str,
@@ -255,12 +178,6 @@ pub fn publish_connect_code(
     Ok(PublishedConnectCode { plaintext, record })
 }
 
-/// Persists a new connection policy (lock state plus whether new
-/// connections are accepted) and returns the stored record.
-///
-/// # Errors
-///
-/// Returns a store failure when the write fails.
 pub fn set_connection_policy(
     store: &mut DeviceStore,
     accepting_connections: bool,
@@ -276,9 +193,6 @@ pub fn set_connection_policy(
     Ok(record)
 }
 
-/// Builds the `client.connect_code.published` payload's message for one
-/// publication. The digest rides alone; the plaintext is not part of the
-/// message type at all.
 #[must_use]
 pub fn published_message(record: &ConnectCodeStateRecord) -> ClientToServerMessage {
     ClientToServerMessage::ConnectCodePublished(ClientConnectCodePublishedPayload {
@@ -294,17 +208,6 @@ pub fn published_message(record: &ConnectCodeStateRecord) -> ClientToServerMessa
     })
 }
 
-/// Appends the durable `client.connect_code.published` frame for one
-/// publication to the outbox (persist-before-send), using the same
-/// message-id convention as the daemon's enqueue path.
-///
-/// The frame stays pending on the durable stream until the server
-/// acknowledges it; a restart re-delivers it unchanged.
-///
-/// # Errors
-///
-/// Returns a store failure when the durable append fails and
-/// [`ConnectCodeError::Protocol`] when the envelope cannot be encoded.
 pub fn enqueue_published_frame(
     store: &mut DeviceStore,
     client_node_id: &str,
@@ -334,7 +237,6 @@ pub fn enqueue_published_frame(
         .map_err(map_outbox_error)
 }
 
-/// Maps an outbox state-machine failure onto the connect-code error set.
 fn map_outbox_error(
     error: winwincode_client_port::exchange::OutboxError<DeviceStoreError>,
 ) -> ConnectCodeError {
@@ -350,7 +252,6 @@ fn map_outbox_error(
     }
 }
 
-/// RFC 3339 UTC stamp of the caller's clock observation.
 fn rfc3339(time: OffsetDateTime) -> String {
     crate::canonical_rfc3339(time)
 }

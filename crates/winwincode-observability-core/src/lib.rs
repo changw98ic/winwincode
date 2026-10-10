@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Bounded, secret-safe operational telemetry for `WinWinCode` processes.
-//!
-//! This crate accepts only closed metric dimensions, stable correlation
-//! identities, and references to facts that their owning subsystem already
-//! validated. It never accepts prompts, request bodies, credential material,
-//! command arguments, file contents, or arbitrary log messages. Telemetry is
-//! diagnostic state only and never becomes a business authority.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt};
@@ -21,16 +11,10 @@ const MAX_QUERY_BUCKETS: u32 = 1_440;
 const MIN_BUCKET_WIDTH_MILLIS: u64 = 1_000;
 const MAX_BUCKET_WIDTH_MILLIS: u64 = 86_400_000;
 
-/// Stable identity for one submitted observation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ObservationId(String);
 
 impl ObservationId {
-    /// Creates a canonical `obs_` identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects identities outside the canonical Crockford format.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         if !canonical_id(&value, "obs") {
@@ -45,16 +29,10 @@ impl ObservationId {
     }
 }
 
-/// W3C-compatible lower-case trace identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct TraceId(String);
 
 impl TraceId {
-    /// Creates a 128-bit lower-case hexadecimal trace identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or all-zero identities.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         if !lower_hex(&value, 32) || value.bytes().all(|byte| byte == b'0') {
@@ -69,16 +47,10 @@ impl TraceId {
     }
 }
 
-/// W3C-compatible lower-case span identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct SpanId(String);
 
 impl SpanId {
-    /// Creates a 64-bit lower-case hexadecimal span identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or all-zero identities.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         if !lower_hex(&value, 16) || value.bytes().all(|byte| byte == b'0') {
@@ -93,16 +65,10 @@ impl SpanId {
     }
 }
 
-/// Canonical digest of a source fact or correlation authority.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct FactDigest(String);
 
 impl FactDigest {
-    /// Creates a canonical lower-case SHA-256 digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed digests.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         if !sha256_digest(&value) {
@@ -117,17 +83,10 @@ impl FactDigest {
     }
 }
 
-/// Stable, bounded identity of an already-validated source fact.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct SourceFactId(String);
 
 impl SourceFactId {
-    /// Creates a source identity used only for replay deduplication.
-    ///
-    /// # Errors
-    ///
-    /// Rejects blank, oversized, control-bearing, credential-shaped, or
-    /// non-portable values.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         let normalized = value.to_ascii_lowercase();
@@ -151,7 +110,6 @@ impl SourceFactId {
     }
 }
 
-/// Closed source authority for a secret-safe observation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSourceKind {
@@ -161,7 +119,6 @@ pub enum ObservationSourceKind {
     InternalOperation,
 }
 
-/// Reference to a fact owned and validated outside observability.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSource {
@@ -170,7 +127,6 @@ pub struct ObservationSource {
     pub fact_digest: FactDigest,
 }
 
-/// Closed process component. This is safe to use as a metric label.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Component {
@@ -183,8 +139,6 @@ pub enum Component {
     Queue,
 }
 
-/// Closed operation category. No route, model, tenant, or user value can enter
-/// the metric label set.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
@@ -206,7 +160,6 @@ pub enum Operation {
     QueueRetry,
 }
 
-/// Closed result class. Raw error text and status codes are excluded.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -221,7 +174,6 @@ pub enum Outcome {
     Failed,
 }
 
-/// Closed capacity resource label.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapacityResource {
@@ -234,7 +186,6 @@ pub enum CapacityResource {
     QueueDepth,
 }
 
-/// Closed structured-log severity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogSeverity {
@@ -243,7 +194,6 @@ pub enum LogSeverity {
     Error,
 }
 
-/// Closed diagnostic code. Arbitrary messages cannot enter structured logs.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
@@ -259,7 +209,6 @@ pub enum DiagnosticCode {
     RecoveryFailed,
 }
 
-/// Stable trace context shared across structured metrics, logs, and alerts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TraceContext {
@@ -270,15 +219,6 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
-    /// Deterministically derives a trace and span from a pre-validated
-    /// correlation digest and closed span dimensions.
-    ///
-    /// `span_ordinal` distinguishes repeated spans of the same operation. It
-    /// must come from the caller's durable sequence, never from current time.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if an internal derived identity is malformed.
     pub fn derive(
         correlation: &FactDigest,
         component: Component,
@@ -310,11 +250,6 @@ impl TraceContext {
         })
     }
 
-    /// Validates canonical trace and parent-span identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities and self-parenting spans.
     pub fn validate(&self) -> Result<(), ObservabilityError> {
         TraceId::try_new(self.trace_id.0.clone())?;
         SpanId::try_new(self.span_id.0.clone())?;
@@ -328,7 +263,6 @@ impl TraceContext {
     }
 }
 
-/// One secret-safe signal.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObservationSignal {
@@ -352,8 +286,6 @@ pub enum ObservationSignal {
     },
 }
 
-/// Complete structured observation. No field can contain a raw diagnostic,
-/// input, credential, provider payload, path, or command.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Observation {
@@ -367,11 +299,6 @@ pub struct Observation {
 }
 
 impl Observation {
-    /// Validates closed dimensions, bounded values, and safe identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or cross-component observations.
     pub fn validate(&self) -> Result<(), ObservabilityError> {
         ObservationId::try_new(self.observation_id.0.clone())?;
         SourceFactId::try_new(self.source.fact_id.0.clone())?;
@@ -420,11 +347,6 @@ impl Observation {
         Ok(())
     }
 
-    /// Checks accumulator values against configured durable row bounds.
-    ///
-    /// # Errors
-    ///
-    /// Rejects values that could overflow a configured aggregate.
     pub fn validate_for_config(
         &self,
         config: &ObservabilityConfig,
@@ -454,16 +376,10 @@ impl Observation {
     }
 }
 
-/// Stable configured alert rule identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct AlertRuleId(String);
 
 impl AlertRuleId {
-    /// Creates a low-cardinality configuration identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects blank, oversized, or non-portable identifiers.
     pub fn try_new(value: impl Into<String>) -> Result<Self, ObservabilityError> {
         let value = value.into();
         if value.is_empty()
@@ -485,7 +401,6 @@ impl AlertRuleId {
     }
 }
 
-/// Closed alert condition evaluated only against a matching structured signal.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AlertCondition {
@@ -615,7 +530,6 @@ impl AlertCondition {
     }
 }
 
-/// Configured alert severity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertSeverity {
@@ -623,7 +537,6 @@ pub enum AlertSeverity {
     Critical,
 }
 
-/// One low-cardinality alert rule.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertRule {
@@ -632,7 +545,6 @@ pub struct AlertRule {
     pub condition: AlertCondition,
 }
 
-/// Durable alert status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertStatus {
@@ -640,7 +552,6 @@ pub enum AlertStatus {
     Resolved,
 }
 
-/// One durable, deduplicated alert transition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertTransition {
@@ -655,7 +566,6 @@ pub struct AlertTransition {
     pub occurred_at_unix_millis: u64,
 }
 
-/// Bounded durable-store and query policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservabilityConfig {
     pub bucket_width_millis: u64,
@@ -668,11 +578,6 @@ pub struct ObservabilityConfig {
 }
 
 impl ObservabilityConfig {
-    /// Validates bounds and sorts alert rules into canonical order.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid bounds, rules, or duplicate rule identities.
     pub fn validate_and_normalize(&mut self) -> Result<(), ObservabilityError> {
         if !(MIN_BUCKET_WIDTH_MILLIS..=MAX_BUCKET_WIDTH_MILLIS).contains(&self.bucket_width_millis)
             || !(1..=MAX_CONFIGURED_ROWS).contains(&self.max_receipts)
@@ -698,7 +603,6 @@ impl ObservabilityConfig {
     }
 }
 
-/// Result of recording one observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationReceipt {
     pub accepted_sequence: u64,
@@ -706,21 +610,18 @@ pub struct ObservationReceipt {
     pub alert_transitions: Vec<AlertTransition>,
 }
 
-/// One retained trace or structured-log row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceRow {
     pub sequence: u64,
     pub observation: Observation,
 }
 
-/// Bounded trace page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TracePage {
     pub rows: Vec<TraceRow>,
     pub next_after_sequence: Option<u64>,
 }
 
-/// Closed metric-series identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetricSeriesKey {
@@ -746,11 +647,6 @@ pub enum MetricSeriesKey {
 }
 
 impl MetricSeriesKey {
-    /// Validates that the closed dimensions form a supported series.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-component operations, resources, and diagnostics.
     pub fn validate(&self) -> Result<(), ObservabilityError> {
         let valid = match *self {
             Self::Operation {
@@ -783,7 +679,6 @@ impl MetricSeriesKey {
     }
 }
 
-/// One metric-series bucket. Fields not used by a series kind remain zero.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MetricRow {
     pub bucket_start_unix_millis: u64,
@@ -797,28 +692,24 @@ pub struct MetricRow {
     pub maximum_used: u64,
 }
 
-/// Cursor for deterministic metric ordering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetricCursor {
     pub bucket_start_unix_millis: u64,
     pub key: MetricSeriesKey,
 }
 
-/// One bounded metric page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetricPage {
     pub rows: Vec<MetricRow>,
     pub next: Option<MetricCursor>,
 }
 
-/// Bounded alert-transition page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlertPage {
     pub transitions: Vec<AlertTransition>,
     pub next_after_sequence: Option<u64>,
 }
 
-/// Stable public error category without paths, SQL, or input echoes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservabilityErrorKind {
     InvalidInput,
@@ -830,7 +721,6 @@ pub enum ObservabilityErrorKind {
     Storage,
 }
 
-/// Secret-safe observability error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservabilityError {
     kind: ObservabilityErrorKind,
@@ -905,7 +795,6 @@ impl fmt::Display for ObservabilityError {
 
 impl std::error::Error for ObservabilityError {}
 
-/// One storage-neutral metric update derived from a validated observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetricDelta {
     pub key: MetricSeriesKey,
@@ -916,11 +805,6 @@ pub struct MetricDelta {
 }
 
 impl MetricDelta {
-    /// Validates an observation and converts it into one closed metric update.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed observations before deriving metric dimensions.
     pub fn try_from_observation(observation: &Observation) -> Result<Self, ObservabilityError> {
         observation.validate()?;
         Ok(match observation.signal {
@@ -983,11 +867,6 @@ impl MetricDelta {
 }
 
 impl MetricRow {
-    /// Starts one aggregate bucket from a validated observation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsafe bucket or observation values.
     pub fn try_from_observation(
         bucket_start_unix_millis: u64,
         observation: &Observation,
@@ -1007,11 +886,6 @@ impl MetricRow {
         })
     }
 
-    /// Applies another validated observation to the same closed metric series.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a different series or an accumulator overflow.
     pub fn apply_observation(
         &mut self,
         observation: &Observation,
@@ -1043,7 +917,6 @@ impl MetricRow {
     }
 }
 
-/// Durable alert state without a storage-engine representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlertState {
     pub status: AlertStatus,
@@ -1051,11 +924,6 @@ pub struct AlertState {
 }
 
 impl AlertState {
-    /// Creates a validated durable state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or unsafe generations.
     pub fn try_new(status: AlertStatus, generation: u64) -> Result<Self, ObservabilityError> {
         if generation == 0 {
             return Err(ObservabilityError::corrupt());
@@ -1065,15 +933,6 @@ impl AlertState {
     }
 }
 
-/// Evaluates one alert rule against an optional durable state.
-///
-/// `None` means the rule is either unrelated to the observation or remains in
-/// its current state. A returned state must be persisted atomically with the
-/// observation by the storage implementation.
-///
-/// # Errors
-///
-/// Rejects malformed rules, observations, or durable state.
 pub fn evaluate_alert_rule(
     rule: &AlertRule,
     observation: &Observation,
@@ -1118,11 +977,6 @@ pub fn evaluate_alert_rule(
 }
 
 impl AlertTransition {
-    /// Creates a deterministic transition after the store allocates a sequence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed sequence, rule, state, or observation values.
     pub fn try_from_state(
         sequence: u64,
         rule: &AlertRule,
@@ -1152,23 +1006,12 @@ impl AlertTransition {
     }
 }
 
-/// Storage-neutral recording and bounded-query port.
 pub trait ObservabilityStore {
-    /// Records one validated observation atomically.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable validation, conflict, limit, corruption, or storage error.
     fn record(
         &mut self,
         observation: &Observation,
     ) -> Result<ObservationReceipt, ObservabilityError>;
 
-    /// Reads one bounded trace page.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable validation, limit, corruption, or storage error.
     fn trace_page(
         &self,
         trace_id: &TraceId,
@@ -1176,11 +1019,6 @@ pub trait ObservabilityStore {
         limit: u32,
     ) -> Result<TracePage, ObservabilityError>;
 
-    /// Reads one bounded metric page.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable validation, limit, corruption, or storage error.
     fn metric_page(
         &self,
         from_bucket_inclusive: u64,
@@ -1189,19 +1027,9 @@ pub trait ObservabilityStore {
         limit: u32,
     ) -> Result<MetricPage, ObservabilityError>;
 
-    /// Reads one bounded alert-transition page.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable validation, limit, corruption, or storage error.
     fn alert_page(&self, after_sequence: u64, limit: u32) -> Result<AlertPage, ObservabilityError>;
 }
 
-/// Validates a bounded metric query window.
-///
-/// # Errors
-///
-/// Rejects unsafe, unaligned, reversed, or oversized windows.
 pub fn validate_bucket_window(
     config: &ObservabilityConfig,
     from: u64,
@@ -1219,11 +1047,6 @@ pub fn validate_bucket_window(
     Ok(())
 }
 
-/// Validates one bounded page limit.
-///
-/// # Errors
-///
-/// Rejects zero or values above the configured limit.
 pub fn validate_limit(limit: u32, configured: u32) -> Result<(), ObservabilityError> {
     if limit == 0 || limit > configured {
         return Err(ObservabilityError::limit());
@@ -1294,11 +1117,6 @@ fn diagnostic_belongs_to(component: Component, code: DiagnosticCode) -> bool {
     )
 }
 
-/// Validates a durable alert transition loaded by a storage implementation.
-///
-/// # Errors
-///
-/// Rejects malformed identities, sequences, generations, traces, or timestamps.
 pub fn validate_alert_transition(transition: &AlertTransition) -> Result<(), ObservabilityError> {
     if transition.sequence == 0
         || transition.generation == 0
@@ -1341,11 +1159,6 @@ fn crockford_128(bytes: &[u8]) -> String {
     encoded.into_iter().map(char::from).collect()
 }
 
-/// Validates a value against the shared exact-integer bound.
-///
-/// # Errors
-///
-/// Rejects values above the shared exact-integer maximum.
 pub fn safe_integer(value: u64) -> Result<(), ObservabilityError> {
     if value > MAX_SAFE_INTEGER {
         return Err(ObservabilityError::invalid());

@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic scheduling policy layered over durable execution queue records.
-//!
-//! The policy never reads a Codex plan and never writes storage. Callers use the
-//! selected job identity and revision to perform the durable `queued -> leased`
-//! transition through [`crate::ExecutionQueue`].
-
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -14,8 +6,6 @@ use winwincode_domain::{ExecutionJobId, OrganizationId, ProductSessionId, Projec
 
 use crate::{ExecutionJobRecord, ExecutionJobState, ExecutionQueueScope};
 
-/// Closed, explicit scheduler priority. A larger rank wins unless starvation
-/// protection has made an older job urgent.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SchedulerPriority {
     Low,
@@ -24,7 +14,6 @@ pub enum SchedulerPriority {
     Critical,
 }
 
-/// Relative fair-share weights for the three scheduler-owned scope levels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerWeights {
     pub organization: u32,
@@ -33,7 +22,6 @@ pub struct SchedulerWeights {
 }
 
 impl SchedulerWeights {
-    /// Equal weight at every scheduler-owned scope level.
     pub const EQUAL: Self = Self {
         organization: 1,
         project: 1,
@@ -41,22 +29,16 @@ impl SchedulerWeights {
     };
 }
 
-/// Queue record plus policy metadata that is deliberately absent from the
-/// persistence contract.
 #[derive(Clone, Copy, Debug)]
 pub struct SchedulerCandidate<'record> {
     pub record: &'record ExecutionJobRecord,
-    /// Delivery jobs reserve one `WorkRun`; `ProductSession` Chat jobs use `None`.
     pub work_run_id: Option<&'record WorkRunId>,
     pub priority: SchedulerPriority,
-    /// Monotonic scheduler tick when the job entered this queue tier.
     pub enqueued_at_tick: u64,
-    /// Earliest monotonic scheduler tick at which a retry may run.
     pub eligible_at_tick: u64,
     pub weights: SchedulerWeights,
 }
 
-/// Durable transition input selected by the policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerDispatch {
     pub scope: ExecutionQueueScope,
@@ -66,7 +48,6 @@ pub struct SchedulerDispatch {
     pub expected_revision: u64,
 }
 
-/// Parent whose cancellation must be expanded into concrete execution jobs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchedulerCancellationTarget {
     Organization(OrganizationId),
@@ -82,13 +63,11 @@ pub enum SchedulerCancellationTarget {
     ExecutionJob(ExecutionJobId),
 }
 
-/// Deterministically ordered jobs to receive durable cancellation requests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerCancellationPlan {
     pub job_ids: Vec<ExecutionJobId>,
 }
 
-/// Finite retry and capped exponential-backoff policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerRetryPolicy {
     pub max_attempts: u64,
@@ -96,7 +75,6 @@ pub struct SchedulerRetryPolicy {
     pub max_backoff_ticks: u64,
 }
 
-/// Scheduler decision after one failed dispatch attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedulerRetryDecision {
     Retry {
@@ -107,7 +85,6 @@ pub enum SchedulerRetryDecision {
     PermanentFailure,
 }
 
-/// Invalid scheduler input or an inconsistent active-dispatch snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerPolicyError {
     message: String,
@@ -136,8 +113,6 @@ enum FairnessKey {
     ProductSession(String, String, String),
 }
 
-/// Stateful deterministic scheduler. Dispatch counters retain fair-share
-/// history while active `WorkRun` reservations prevent concurrent duplicates.
 #[derive(Debug)]
 pub struct SchedulerPolicy {
     starvation_threshold_ticks: u64,
@@ -146,8 +121,6 @@ pub struct SchedulerPolicy {
 }
 
 impl SchedulerPolicy {
-    /// Creates a scheduler with a fixed starvation threshold in monotonic
-    /// caller-owned ticks.
     #[must_use]
     pub fn new(starvation_threshold_ticks: u64) -> Self {
         Self {
@@ -157,19 +130,6 @@ impl SchedulerPolicy {
         }
     }
 
-    /// Selects one ready queue record. Priority is explicit; jobs waiting past
-    /// the starvation threshold outrank fresh jobs; remaining ties use
-    /// hierarchical weighted fairness across organization, project, and
-    /// product session.
-    ///
-    /// The returned revision must be used for the durable lease transition.
-    /// Until [`Self::release_work_run`] is called or a terminal snapshot is
-    /// observed, the policy will not select a second job for that `WorkRun`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate records, zero/inconsistent weights, empty `WorkRun`
-    /// identities, and snapshots containing two active jobs for one `WorkRun`.
     pub fn select(
         &mut self,
         now_tick: u64,
@@ -226,8 +186,6 @@ impl SchedulerPolicy {
         }))
     }
 
-    /// Releases an in-memory `WorkRun` reservation only when both identities
-    /// match the reservation created by [`Self::select`].
     #[must_use]
     pub fn release_work_run(&mut self, work_run_id: &WorkRunId, job_id: &ExecutionJobId) -> bool {
         if self
@@ -346,8 +304,6 @@ impl SchedulerPolicy {
     }
 }
 
-/// Expands an organization, project, product-session, or execution-job parent
-/// cancellation into all cancellable jobs and dependency descendants.
 #[must_use]
 pub fn plan_scheduler_cancellation(
     target: &SchedulerCancellationTarget,
@@ -383,12 +339,6 @@ pub fn plan_scheduler_cancellation(
     SchedulerCancellationPlan { job_ids }
 }
 
-/// Produces a finite retry decision without mutating the failed record.
-/// Callers create the next durable attempt only for [`SchedulerRetryDecision::Retry`].
-///
-/// # Errors
-///
-/// Rejects an invalid retry policy or a job outside an active/failed state.
 pub fn scheduler_retry_decision(
     record: &ExecutionJobRecord,
     retryable_failure: bool,

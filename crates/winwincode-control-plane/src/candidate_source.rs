@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control Plane join from durable Artifact/source authority to Delivery candidate.
-
 use std::fmt;
 
 use winwincode_delivery::{
@@ -18,7 +14,6 @@ use winwincode_storage::{
 use crate::delivery_transaction::delivery_stream_id;
 use crate::repository_scope_key;
 
-/// Failure while deriving an immutable candidate from durable source facts.
 #[derive(Debug)]
 pub enum CandidateResolutionError {
     Storage(StorageError),
@@ -110,10 +105,6 @@ pub(crate) fn resolve(
     .map_err(|error| CandidateResolutionError::Storage(StorageError::adapter(error.to_string())))
 }
 
-/// Rebuilds a candidate source from a complete Artifact and the current
-/// Delivery specification without requiring a terminal outcome.  This is the
-/// narrow source-authority seam used when the final Artifact acknowledgement is
-/// committed, before the Worker can emit its terminal outcome.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_source(
     storage: &dyn ProductStateStorage,
@@ -163,9 +154,6 @@ pub(crate) fn resolve_source(
         .map_err(Into::into)
 }
 
-/// Builds the Artifact provenance bound to one accepted `SessionBinding`.  The
-/// lease/session fields are already sealed by the Control Plane authority, so
-/// this helper does not copy any Worker-reported descriptor values.
 pub(crate) fn provenance_from_session_binding(
     authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
 ) -> Result<ArtifactProvenance, ArtifactError> {

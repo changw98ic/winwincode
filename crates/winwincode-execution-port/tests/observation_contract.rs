@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
@@ -390,7 +388,6 @@ fn model_response_normalizes_wrappers_without_changing_authority() {
     ] {
         assert!(parse_observation_response_strict(message.as_bytes(), &intent).is_err());
     }
-    // The authenticated request wire format remains canonical JSON.
     let request = ObservationRequest {
         intent: intent.clone(),
         one_shot: true,

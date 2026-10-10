@@ -1,13 +1,4 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * Device-task vertical: Device pairing, Device-local Provider secrets, then
- * StrongFlow on the Device Worker path.
- *
- * Real model secrets are configured only on the Device process. The Server
- * never receives WWC_SERVER_MODEL_* or GLM API keys.
- */
 
 import assert from 'node:assert/strict'
 import { join, resolve } from 'node:path'
@@ -104,16 +95,12 @@ function mimoResponsesEndpoint(environment) {
   assert.ok(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password
     && !endpoint.search && !endpoint.hash, `${variable} must be HTTPS without credentials, query, or fragment`)
   if (variable === 'XIAOMI_RESPONSES_URL') return value
-  // Only these official origins document the Responses endpoint. A proxy's
-  // route must be supplied explicitly rather than inferred from its base URL.
   assert.ok(['api.xiaomimimo.com', 'token-plan-cn.xiaomimimo.com'].includes(endpoint.hostname)
     && !endpoint.port, 'Set XIAOMI_RESPONSES_URL to the complete Responses endpoint for this route')
   return `${endpoint.origin}/v1/responses`
 }
 
 export function deviceProviderSecretValues(provider) {
-  // Only this exact protocol switch is public. An API key with the same value
-  // and every other header still belong in the secret guard and redaction.
   const headerSecrets = Object.entries(provider.customHeaders ?? {})
     .filter(([name, value]) => !(provider.protocol === 'openai_responses'
       && name === 'x-openai-internal-codex-responses-lite' && value === 'true'))
@@ -217,8 +204,6 @@ export function benchmarkDeviceEnvironment(configuration, settings = {}, environ
   return deviceAgentEnvironment(result, { strict: true })
 }
 
-// A WorkRun cannot submit new evidence once its execution lease expires,
-// whether the Worker has exited or is still retrying a rejected frame.
 export function expiredDeviceWorkRunLease(directory, workRunId, workerSessionId, now = Date.now(), jobId = null) {
   const devicePath = join(directory, 'device-data', 'device-client.sqlite3')
   const serverPath = join(directory, 'server-data', 'control-plane.sqlite3')
@@ -257,8 +242,6 @@ export function expiredCrashedDeviceWorkRun(directory, workRunId, workerSessionI
   return expired?.workerState === 'crashed' ? expired : null
 }
 
-// A queued WorkRun has no aggregate run yet. Read the scheduler's durable
-// terminal state so an invalid dispatch cannot leave the Device driver waiting.
 export function failedDeviceDispatch(directory, workRunId, deliveryId) {
   const path = join(directory, 'server-data', 'control-plane.sqlite3')
   if (!existsSync(path)) return null
@@ -270,9 +253,6 @@ export function failedDeviceDispatch(directory, workRunId, deliveryId) {
       ORDER BY updated_at DESC, attempt DESC, revision DESC, job_id DESC LIMIT 1`)
       .get(workRunId, deliveryId)
     if (job?.state === 'failed') {
-      // Scheduler cancellation retains a failed job row. A claimed job
-      // requires its exact current cancelled lease terminal; the public
-      // product projection still owns cancellation and evidence closure.
       const cancelled = server.prepare(`SELECT 1 FROM execution_leases l
         JOIN execution_lease_terminals t ON t.lease_id = l.lease_id
           AND t.job_id = l.job_id AND t.attempt = l.attempt
@@ -299,9 +279,6 @@ function queuedCancellationMatches(server, job) {
     WHERE scope_key = ? AND request_id = ?`)
     .get(scopeFields.map(key => job[key]).join('\u001f'), job.cancellation_request_id)
   if (!stored) return false
-  // An unclaimed cancellation has no lease terminal. Its native scheduler
-  // receipt must describe this exact current queue job, with no dispatch
-  // authority, before the public product projection can own its closure.
   const receipt = JSON.parse(stored.response_json)
   const retained = receipt.job
   return receipt.request_id === job.cancellation_request_id
@@ -319,8 +296,6 @@ function queuedCancellationMatches(server, job) {
     && !server.prepare('SELECT 1 FROM execution_leases WHERE job_id = ? LIMIT 1').get(job.job_id)
 }
 
-// One registered launch owns its evidence directory; the product databases stay
-// in the long-lived Server/Device runtime. Recovery reads the same durable facts.
 export function bindSharedDeviceTaskDirectory(directory, runtime) {
   assert.ok(runtime?.directory && runtime?.devicePath?.deviceData, 'shared Device runtime is required')
   const runtimeDirectory = realpathSync(runtime.directory)
@@ -345,8 +320,6 @@ export function bindSharedDeviceTaskDirectory(directory, runtime) {
   else writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 })
 }
 
-// The WorkRun projection contains leased/running roles. Controller-dispatched
-// queued roles already exist durably and still need a Device launch grant.
 export function pendingDeviceTaskWorkRuns(directory, deliveryId) {
   const path = join(directory, 'server-data', 'control-plane.sqlite3')
   if (!existsSync(path)) return []
@@ -440,7 +413,6 @@ export async function runDeviceTaskVertical({
   const deviceRoute = {
     providerId: deviceProvider.providerId,
     modelId: deviceProvider.modelId,
-    // Filled after pairing by establishDeviceOnlyExecutionPath.
     clientNodeId: null,
   }
 
@@ -491,7 +463,6 @@ export async function runDeviceTaskVertical({
     if (!existsSync(wwcBinary)) {
       throw new BenchmarkError('DEVICE_CLI_MISSING', `Device CLI is missing: ${wwcBinary}`)
     }
-    // The ledger commits this address before the first product command or model call.
     await registerLaunch({ callId, directory, productSessionId, deliveryId })
   }
   report.productSessionId = productSessionId
@@ -573,7 +544,6 @@ export async function runDeviceTaskVertical({
     itemPayload.items[0].goal = task.goal
     const items = await api.command('workitems.create', created.currentRevision, itemPayload)
     assert.equal(items.outcome, 'completed')
-    // A failed source Worker must be detected before any paid Job is dispatched.
     await waitForDeviceWorkerRegistered(api, sourceAnchor, 60_000)
     supervisor.checkpoint('ready')
     const started = await api.command('workrun.start', items.currentRevision, {
@@ -680,9 +650,6 @@ export async function runDeviceTaskVertical({
   }
 }
 
-// Reattach supervision to registered execution. This path never creates a
-// Session, Delivery, WorkRun, or model call. Exact launch anchors are replayed
-// only for the already registered WorkRun identities.
 async function driveRegisteredDeviceTask({ api, devicePath, report, supervisor, directory,
   productSessionId, deliveryId, modelRoute, input, timeoutMillis, automaticTaskActions, save }) {
     const anchored = new Map((report.workRuns ?? []).filter(run => run.workerSessionId)
@@ -864,7 +831,6 @@ export async function inspectUnresolvedDeviceTasks(ledgerPath) {
         ? { registeredLaunch, observation: 'launch_not_registered' }
         : { observation: 'queried', ...await inspectRegisteredDeviceTask(registeredLaunch) }) })
     } catch (error) {
-      // An unavailable original Server is unresolved, never permission to rerun.
       observations.push({ runId: row.run_id, registeredLaunch, observation: 'unavailable',
         code: typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
           ? error.code : 'PRODUCT_QUERY_FAILED' })

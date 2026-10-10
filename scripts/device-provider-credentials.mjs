@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/** Admit resolved credentials before contacting a Device or saving secrets. */
 export function assertResolvedDeviceProviderCredentials({ apiKey, customHeaders }) {
   if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
     throw credentialError('PROVIDER_CREDENTIAL_MISSING')

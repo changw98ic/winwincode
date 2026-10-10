@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 
 fn usage() -> Value {
@@ -43,7 +41,6 @@ fn parse(bytes: &[u8]) -> Result<ParsedOpenAiStream, AnthropicCodecError> {
 
 #[test]
 fn usage_extensions_complete_usage_only_tail_and_accounting() {
-    // The real failed preflight had these extra fields with zero values.
     let mut reported = usage();
     reported["prompt_tokens_details"]["cache_write_tokens"] = json!(0);
     let bytes = wire(&reported);
@@ -78,7 +75,6 @@ fn usage_extensions_preserve_cache_writes_and_do_not_double_count() {
         output_micros_per_million_tokens: 4_000_000,
         reasoning_output_micros_per_million_tokens: 0,
     };
-    // Seven standard input tokens, six cache reads, three writes, ten output.
     assert_eq!(pricing.cost_micros(parsed).unwrap(), Some(69));
 }
 

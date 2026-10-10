@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Authenticated HTTPS exchange for a separated Execution Worker.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -32,7 +28,6 @@ use crate::{
 
 const MAX_PENDING_REMOTE_DELIVERIES: usize = 256;
 
-/// Stable, secret-free remote transport failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerTransportError {
     message: &'static str,
@@ -87,7 +82,6 @@ impl RemoteWorkerTransportError {
             }
         }
     }
-    /// HTTP category distinguishes permanent rejection from retryable authority failures.
     #[must_use]
     pub const fn status_code(&self) -> u16 {
         self.status
@@ -102,12 +96,7 @@ impl fmt::Display for RemoteWorkerTransportError {
 
 impl std::error::Error for RemoteWorkerTransportError {}
 
-/// HTTP boundary used by the Server route without exposing the route through
-/// the generated public API.
 pub trait RemoteWorkerExchangePort: Send + Sync {
-    /// Financial-only reconciliation under the explicit trusted Device key.
-    /// # Errors
-    /// Rejects missing authority, altered receipts, or unavailable accounting.
     fn accounting(
         &self,
         _token: &str,
@@ -117,12 +106,6 @@ pub trait RemoteWorkerExchangePort: Send + Sync {
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
         Err(RemoteWorkerTransportError::authentication())
     }
-    /// Applies one authenticated bounded exchange.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a stable category; credentials and frame contents are
-    /// never included in diagnostics.
     fn exchange(
         &self,
         credential: Vec<u8>,
@@ -131,7 +114,6 @@ pub trait RemoteWorkerExchangePort: Send + Sync {
     ) -> Result<Vec<u8>, RemoteWorkerTransportError>;
 }
 
-/// Credential authority backed by one operator-owned mode-0600 file.
 pub struct FileRemoteWorkerAuthenticator {
     credential_path: PathBuf,
     principal: RemoteWorkerPrincipal,
@@ -140,12 +122,6 @@ pub struct FileRemoteWorkerAuthenticator {
 }
 
 impl FileRemoteWorkerAuthenticator {
-    /// Loads only a SHA-256 fingerprint from a mode-0600 credential file.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, empty, oversized, broadly-readable, or expired
-    /// credential configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         credential_path: impl Into<PathBuf>,
@@ -241,7 +217,6 @@ impl RemoteWorkerAuthenticator for FileRemoteWorkerAuthenticator {
     }
 }
 
-/// Credential authority for Device Client-launched Worker sessions.
 pub struct WorkerSessionRemoteAuthenticator {
     data_directory: PathBuf,
     scope: WorkerRegistryScope,
@@ -353,8 +328,6 @@ fn device_session_pool(
     ))
 }
 
-/// Keeps the configured fleet Worker and Device-launched Workers on the one
-/// canonical Execution Port endpoint.
 pub struct CompositeRemoteWorkerAuthenticator {
     fleet: FileRemoteWorkerAuthenticator,
     sessions: WorkerSessionRemoteAuthenticator,
@@ -488,8 +461,6 @@ impl RemoteDeliveryQueue {
         authenticator: &dyn RemoteWorkerAuthenticator,
         now: &Instant,
     ) -> Result<(), RemoteWorkerTransportError> {
-        // Only the credential authority may retire unacknowledged controls.
-        // Authority unavailability preserves them for the durable scheduler to replay.
         let mut authorities = self.authorities.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
         })?;
@@ -679,9 +650,6 @@ impl RemoteDeliveryQueue {
     }
 }
 
-// A retryable gap and the eventual positive ACK must coexist until separately
-// confirmed. Accepted/Duplicate share one identity; neither can erase a gap or
-// be erased by a delayed confirmation of that gap.
 fn separate_heartbeat_receipt_identity(
     message: &mut ExecutionPortMessage,
 ) -> Result<(), RuntimeSupervisorError> {
@@ -750,8 +718,6 @@ impl ExecutionPortCore for NoopCore {
     }
 }
 
-/// Production exchange over the Server's one application, scheduler, and
-/// durable storage directory.
 pub struct ProductionRemoteWorkerExchange<Core> {
     accounting_key:
         Option<winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey>,
@@ -781,7 +747,6 @@ impl<Core> ProductionRemoteWorkerExchange<Core> {
             queue: RemoteDeliveryQueue::default(),
         }
     }
-    /// Enables the separate financial-only Provider receipt consumer.
     #[must_use]
     pub fn with_accounting_key(
         mut self,
@@ -910,14 +875,6 @@ where
                 request.acknowledgements(),
             )
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler failed"))?;
-        // Registration leaves Registry health at `registered` by default.
-        // Device WorkerSessions are live Client-spawned processes that already
-        // hold a launch grant; mark them healthy on the accepting registration
-        // so the same exchange can drive the identity-bound queued Job claim
-        // (StrongFlow WorkRun executor jobs are never locally claimable).
-        // A later scheduler failure must not erase an accepted registration:
-        // the Worker already joined the Registry and will retry drive on the
-        // next heartbeat.
         let drive_result = if frame_accepted {
             let worker_queue = WorkerDeliveryQueue {
                 queue: &self.queue,
@@ -1054,8 +1011,6 @@ where
         self.queue
             .retire_inactive(self.authenticator.as_ref(), now)?;
 
-        // The exchange gate keeps this response reservation through business commit.
-        // ACKs are accepted only after authenticating the exact Worker instance.
         let can_accept = self.queue.prepare_ingress(request, &principal)?;
         if !can_accept {
             if request.supports_acceptance_receipt() {
@@ -1075,8 +1030,6 @@ where
                     .map_err(RemoteWorkerTransportError::from_pool)?,
             ])
         } else {
-            // Heartbeats must reach the shared Core's durable lease renewal.
-            // Authenticate their frame identity as well as the envelope.
             let (worker_id, instance_id) = match frame.message() {
                 ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) => {
                     (&heartbeat.worker_id, &heartbeat.worker_instance_id)
@@ -1332,7 +1285,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 2);
-        // A confirmation of the old negative receipt must leave acceptance queued.
         queue
             .pending
             .lock()

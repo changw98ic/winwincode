@@ -1,21 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Repository-local deterministic rules for machine-derived post-action work.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Canonical path read from the frozen repository snapshot.
 pub const REPOSITORY_RULE_PACK_PATH: &str = ".winwincode/rules.json";
-/// Only accepted rule-pack schema.
 pub const REPOSITORY_RULE_PACK_SCHEMA_VERSION: u8 = 1;
 
 const MAX_RULES: usize = 256;
 const MAX_TEXT: usize = 500;
 
-/// Runtime event kinds understood by the repository rule engine.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryRuleEvent {
@@ -28,7 +21,6 @@ pub enum RepositoryRuleEvent {
     CandidateReady,
 }
 
-/// Trusted executor result used by a rule condition.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostActionOutcome {
@@ -36,7 +28,6 @@ pub enum PostActionOutcome {
     Failed,
 }
 
-/// Closed machine action emitted by repository rules.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostActionHook {
@@ -44,7 +35,6 @@ pub enum PostActionHook {
     CreateMachineBlocker,
 }
 
-/// Exact normalized fact presented to the pure evaluator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRuleFact<'fact> {
     pub event: RepositoryRuleEvent,
@@ -53,7 +43,6 @@ pub struct RepositoryRuleFact<'fact> {
     pub outcome: Option<PostActionOutcome>,
 }
 
-/// One versioned repository rule.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RepositoryRule {
@@ -69,7 +58,6 @@ pub struct RepositoryRule {
     pub priority: u16,
 }
 
-/// Current repository-local rule-pack contract.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RepositoryRulePack {
@@ -77,7 +65,6 @@ pub struct RepositoryRulePack {
     pub rules: Vec<RepositoryRule>,
 }
 
-/// Why one rule matched during a dry run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRuleMatch {
     pub rule_id: String,
@@ -88,14 +75,12 @@ pub struct RepositoryRuleMatch {
     pub actions: Vec<PostActionHook>,
 }
 
-/// Deterministic explanation and action set. Constructing it performs no action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRuleEvaluation {
     pub matched_rules: Vec<RepositoryRuleMatch>,
     pub actions: Vec<PostActionHook>,
 }
 
-/// Closed lint/parse failure for a repository rule pack.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryRulePackError {
     InvalidJson,
@@ -120,11 +105,6 @@ impl fmt::Display for RepositoryRulePackError {
 impl std::error::Error for RepositoryRulePackError {}
 
 impl RepositoryRulePack {
-    /// Parses and lints the exact bytes read from [`REPOSITORY_RULE_PACK_PATH`].
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown fields, another schema version, or ambiguous rules.
     pub fn from_json(bytes: &[u8]) -> Result<Self, RepositoryRulePackError> {
         let pack: Self =
             serde_json::from_slice(bytes).map_err(|_| RepositoryRulePackError::InvalidJson)?;
@@ -132,7 +112,6 @@ impl RepositoryRulePack {
         Ok(pack)
     }
 
-    /// Built-in project behavior used when the repository has no local pack.
     #[must_use]
     pub fn project_defaults() -> Self {
         Self {
@@ -162,12 +141,6 @@ impl RepositoryRulePack {
         }
     }
 
-    /// Adds repository rules to the project defaults. An identical ID replaces
-    /// its default, which is the single conflict policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects either invalid input before producing the effective pack.
     pub fn with_project_defaults(self) -> Result<Self, RepositoryRulePackError> {
         self.lint()?;
         let mut rules = RepositoryRulePack::project_defaults()
@@ -186,11 +159,6 @@ impl RepositoryRulePack {
         Ok(pack)
     }
 
-    /// Validates rule identities, conditions, actions, and bounds.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first stable lint category.
     pub fn lint(&self) -> Result<(), RepositoryRulePackError> {
         if self.schema_version != REPOSITORY_RULE_PACK_SCHEMA_VERSION {
             return Err(RepositoryRulePackError::UnsupportedVersion);
@@ -231,11 +199,6 @@ impl RepositoryRulePack {
         Ok(())
     }
 
-    /// Evaluates and explains one fact without executing the returned actions.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid pack or malformed input fact.
     pub fn dry_run(
         &self,
         fact: &RepositoryRuleFact<'_>,
@@ -384,7 +347,6 @@ fn portable(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_TEXT && !value.chars().any(char::is_control)
 }
 
-/// Returns the canonical language label derived only from a repository path.
 #[must_use]
 pub fn language_for_path(path: &str) -> Option<&'static str> {
     let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();

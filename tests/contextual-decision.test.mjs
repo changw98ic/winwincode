@@ -296,8 +296,6 @@ test('an approval is decided inline and keeps its reason until the server confir
   findByClass(row, 'wwc-contextual-decision-submit').click()
   assert.deepEqual(actions, [['decideApproval', 'apr_00000000000000000000000001', 'approve', 'Reviewed the exact command.']])
 
-  // The draft survives the submission: the row clears only when the server
-  // stops listing this decision.
   assert.equal(reason.value, 'Reviewed the exact command.')
   assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, '拒绝')
 
@@ -461,7 +459,6 @@ test('the card keeps the host note and falls back to its own count', () => {
   const note = findByClass(root, 'wwc-contextual-decision-note')
   assert.equal(note.hidden, false)
   assert.equal(note.textContent, 'The Solution review is decided in the Delivery actions.')
-  // Without a host note the card reports its own decision count.
   card.update({
     view: view({ approvals: [approval()] }),
     presentation: readyPresentation,

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable `DeviceExecutionBinding`, execution-reservation device facts, and
-//! the per-node reservation capacity ledger contract tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,7 +47,6 @@ const GRANT_EXPIRES: &str = "2026-01-01T01:00:00.000Z";
 
 const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-/// Every authoritative identity one binding needs.
 struct Fixture {
     node: String,
     instance: String,
@@ -62,8 +56,6 @@ struct Fixture {
     binding_id: String,
 }
 
-/// Seeds the registry, access grants, occupancy lease, and repository
-/// binding; the caller stays responsible for the launch grant.
 #[allow(clippy::too_many_lines)]
 fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> Fixture {
     let node = id("cnd", seed);
@@ -171,7 +163,6 @@ fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> Fixture {
     }
 }
 
-/// Issues one live launch grant over the seeded fixture.
 fn issue_launch_grant(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -180,8 +171,6 @@ fn issue_launch_grant(
     issue_launch_grant_for_session(storage, seed, fixture, &id("wsn", seed + 8))
 }
 
-/// Issues one live launch grant over the seeded fixture with an explicit
-/// worker session identity (the recovery path reuses the session).
 fn issue_launch_grant_for_session(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -212,7 +201,6 @@ fn issue_launch_grant_for_session(
         .expect("issue")
 }
 
-/// Echoes every grant field into a validated bind command.
 fn bind_command(seed: u64, grant: &WorkerLaunchGrantRecord) -> DeviceExecutionBindingIssuance {
     DeviceExecutionBindingIssuance::try_new(
         id("deb", seed),
@@ -231,15 +219,10 @@ fn bind_command(seed: u64, grant: &WorkerLaunchGrantRecord) -> DeviceExecutionBi
     .expect("bind command")
 }
 
-/// Configures every admission boundary and reserves one queued Job for the
-/// fixture holder. The reservation scope carries the `psn_`-prefixed session
-/// identity the admission ledger validates.
 fn seed_reservation(storage: &mut SqliteStorage, seed: u64, fixture: &Fixture) -> String {
     seed_reservation_for_user(storage, seed, &fixture.holder)
 }
 
-/// Configures every admission boundary and reserves one queued Job for an
-/// arbitrary reservation user.
 fn seed_reservation_for_user(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -321,8 +304,6 @@ fn seed_reservation_with_scope(
     id("job", seed)
 }
 
-/// Seeds fixture, grant, binding, and one queued reservation; returns the
-/// job id for the attachment tests.
 fn seed_bound_job(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -354,7 +335,6 @@ fn bind_persists_a_durable_traceable_binding_across_restart() {
         let binding = &receipt.binding;
         assert_eq!(binding.state, DeviceExecutionBindingState::Bound);
         assert_eq!(binding.revision, 1);
-        // Every identity is traceable to the ProductSession/WorkRun stamp.
         assert_eq!(
             binding.product_session_id.as_deref(),
             grant.product_session_id.as_deref()
@@ -371,7 +351,6 @@ fn bind_persists_a_durable_traceable_binding_across_restart() {
         assert_eq!(snapshot, *binding);
         (grant, receipt.binding)
     };
-    // Reopen: the binding survives the restart and still names the grant.
     let mut storage = SqliteStorage::open(&directory).expect("reopen");
     let ledger = storage.device_execution_binding_ledger().expect("ledger");
     let snapshot = ledger
@@ -402,7 +381,6 @@ fn bind_replays_idempotently_and_refuses_request_reuse() {
     assert!(!first.replayed);
     assert!(replay.replayed);
     assert_eq!(first.binding, replay.binding);
-    // The same request id with a different body is a fixed conflict.
     let conflicting = DeviceExecutionBindingIssuance::try_new(
         id("deb", 2300),
         command.request_id.clone(),
@@ -432,7 +410,6 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
     let grant = issue_launch_grant(&mut storage, 3100, &fixture);
     {
         let mut ledger = storage.device_execution_binding_ledger().expect("ledger");
-        // A projection that guesses any field is refused.
         let guesses = [
             ("client node", "expected_client_node_id", id("cnd", 3999)),
             (
@@ -483,7 +460,6 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
             error.kind(),
             DeviceExecutionBindingStoreErrorKind::FieldMismatch
         );
-        // An unknown grant names the unknown category.
         let unknown = DeviceExecutionBindingIssuance::try_new(
             id("deb", 3300),
             id("req", 3301),
@@ -505,7 +481,6 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
             DeviceExecutionBindingStoreErrorKind::UnknownLaunchGrant
         );
     }
-    // A revoked grant is terminal and refuses the binding.
     storage
         .worker_launch_grant_ledger()
         .expect("ledger")
@@ -536,7 +511,6 @@ fn bind_enforces_one_bound_binding_per_session_and_per_grant() {
         ledger
             .bind(&bind_command(4200, &grant), &instant(T2))
             .expect("bind");
-        // The same grant cannot bind twice under any binding identity.
         let error = ledger
             .bind(&bind_command(4300, &grant), &instant(T2))
             .expect_err("second grant binding");
@@ -545,8 +519,6 @@ fn bind_enforces_one_bound_binding_per_session_and_per_grant() {
             DeviceExecutionBindingStoreErrorKind::BindingConflict
         );
     }
-    // After the grant terminates and the binding releases, a fresh grant may
-    // bind the same worker session again (the recovery path).
     storage
         .worker_launch_grant_ledger()
         .expect("ledger")
@@ -596,7 +568,6 @@ fn release_follows_the_fixed_cas_and_replay_rules() {
     ledger
         .bind(&bind_command(5200, &grant), &instant(T2))
         .expect("bind");
-    // A stale revision loses the compare-and-swap race.
     let stale = DeviceExecutionBindingRelease::try_new(
         &grant.worker_session_id,
         id("req", 5300),
@@ -628,11 +599,9 @@ fn release_follows_the_fixed_cas_and_replay_rules() {
             .map(|value| value.0.as_str()),
         Some(T3)
     );
-    // The replay is an accepted idempotent no-op.
     let replay = ledger.release(&release, &instant(T3)).expect("replay");
     assert!(replay.replayed);
     assert_eq!(replay.binding, receipt.binding);
-    // A further release with a fresh request names the missing bound row.
     let repeat = DeviceExecutionBindingRelease::try_new(
         &grant.worker_session_id,
         id("req", 5500),
@@ -679,12 +648,10 @@ fn attach_copies_reservation_facts_from_the_launch_grant() {
             facts.work_run_id,
             grant.work_run_id.as_ref().map(|value| value.0.clone())
         );
-        // The durable projection round-trips, and the replay is idempotent.
         assert_eq!(ledger.facts(&job).expect("facts").expect("stored"), *facts);
         let replay = ledger.attach_facts(&command, &instant(T3)).expect("replay");
         assert!(replay.replayed);
         assert_eq!(replay.facts, *facts);
-        // A second attachment under a fresh request identity is refused.
         let repeat = DeviceExecutionFactsAttachment::try_new(
             id("req", 6200),
             &job,
@@ -726,7 +693,6 @@ fn attach_refuses_mismatched_unknown_or_terminal_reservations() {
         ledger
             .bind(&bind_command(7200, &grant), &instant(T2))
             .expect("bind");
-        // Unknown Job.
         let unknown = DeviceExecutionFactsAttachment::try_new(
             id("req", 7300),
             id("job", 7999),
@@ -741,7 +707,6 @@ fn attach_refuses_mismatched_unknown_or_terminal_reservations() {
             DeviceExecutionBindingStoreErrorKind::UnknownExecutionJob
         );
     }
-    // The reservation user differs from the grant holder.
     let foreign_job = seed_reservation_for_user(&mut storage, 7500, &id("usr", 7999));
     let foreign = DeviceExecutionFactsAttachment::try_new(
         id("req", 7400),
@@ -749,7 +714,6 @@ fn attach_refuses_mismatched_unknown_or_terminal_reservations() {
         &grant.worker_launch_grant_id,
     )
     .expect("mismatched attachment");
-    // A reservation that will be settled (terminal) refuses the attachment.
     let settled_job = seed_reservation(&mut storage, 7800, &fixture);
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -837,7 +801,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
     let fixture = seed_fixture(&mut storage, 9000);
     {
         let ledger = storage.device_execution_binding_ledger().expect("ledger");
-        // Unknown nodes have no ledger view.
         assert!(
             ledger
                 .capacity_snapshot(&id("cnd", 9999))
@@ -853,7 +816,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
         assert_eq!(empty.bound_bindings, 0);
         assert_eq!(empty.free_worker_sessions, 4);
     }
-    // An issued grant reserves one slot durably.
     let grant = issue_launch_grant(&mut storage, 9100, &fixture);
     {
         let mut ledger = storage.device_execution_binding_ledger().expect("ledger");
@@ -870,7 +832,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
                 .expect("reserved"),
             1
         );
-        // The binding is visible as the bound ledger fact.
         ledger
             .bind(&bind_command(9200, &grant), &instant(T2))
             .expect("bind");
@@ -881,7 +842,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
         assert_eq!(bound.bound_bindings, 1);
         assert_eq!(bound.reserved_worker_sessions, 1);
     }
-    // Consuming the grant keeps it non-terminal: still reserved.
     storage
         .worker_launch_grant_ledger()
         .expect("ledger")
@@ -900,7 +860,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
             &instant(T2),
         )
         .expect("ack");
-    // A reported running count above the reservation dominates in-flight.
     {
         let mut registry = storage.client_node_registry().expect("registry");
         registry
@@ -922,7 +881,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
         assert_eq!(reported.in_flight_worker_sessions, 3);
         assert_eq!(reported.free_worker_sessions, 1);
     }
-    // A second issued grant reserves another slot.
     let second = issue_launch_grant(&mut storage, 9300, &fixture);
     {
         let ledger = storage.device_execution_binding_ledger().expect("ledger");
@@ -934,8 +892,6 @@ fn capacity_ledger_drives_claim_and_launch_validation_from_one_durable_view() {
         assert_eq!(doubled.in_flight_worker_sessions, 3);
         assert_eq!(doubled.free_worker_sessions, 1);
     }
-    // Revoking the issued grant releases exactly its reserved slot; the
-    // consumed grant stays reserved until its own session ends.
     storage
         .worker_launch_grant_ledger()
         .expect("ledger")
@@ -1079,13 +1035,11 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
             ],
         )
         .unwrap();
-        // Dispatch session is deliberately different from the launch credential session.
         db.execute("INSERT INTO execution_dispatch_authorities VALUES (?1,?2,'digest',?3,?4,?5,1,'1',?6,?7,?8,?6)",
             params![job,id("lease",seed),grant.worker_id,grant.worker_instance_id,id("wsn",seed+900),T0,GRANT_EXPIRES,id("req",seed+901)]).unwrap();
         let lease = &heartbeat.active_leases[0];
         let renewal_time = instant("2026-01-01T00:20:00.000Z");
         let expiry = instant("2026-01-01T00:50:00.000Z");
-        // A same-Worker lease alone is insufficient without trusted launch reservation facts.
         assert!(
             storage
                 .worker_session_credential_ledger()
@@ -1181,7 +1135,6 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
                 .count(),
             1
         );
-        // Rotation changes the active digest, while the consumed grant retains its initial digest.
         let rotated = storage
             .worker_session_credential_ledger()
             .unwrap()
@@ -1702,7 +1655,6 @@ fn independent_launch_bundles_reserve_distinct_downlink_positions() {
     let directory = temporary_directory("parallel-launch-bundles");
     let mut storage = SqliteStorage::open(&directory).unwrap();
     let f = seed_fixture(&mut storage, 32000);
-    // Compose both launches before either publication reserves a stream position.
     let launches = [32000, 32001].map(|seed| {
         let digest = format!("sha256:{seed:064x}");
         let issuance = LaunchGrantIssuance::try_new(

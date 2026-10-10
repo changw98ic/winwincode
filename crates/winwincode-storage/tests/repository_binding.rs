@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable `RepositoryBinding` registry and `RepositoryAccessGrant` ledger
-//! contract tests (plan 7.6, 7.7, 13.4, 13.5; contract 7).
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -67,7 +62,6 @@ fn projection(seed: u64, client: &str, fingerprint: &str) -> RepositoryBindingPr
     .expect("projection")
 }
 
-/// Seeds one registered, `online` client node and returns its id.
 fn seed_client(storage: &mut SqliteStorage, seed: u64) -> String {
     let registration = ClientNodeRegistration::try_new(
         node_id(seed),
@@ -91,7 +85,6 @@ fn seed_client(storage: &mut SqliteStorage, seed: u64) -> String {
     node_id(seed)
 }
 
-/// Creates one active `use` client access grant for `holder`.
 fn seed_client_grant(storage: &mut SqliteStorage, seed: u64, client: &str, holder: &str) {
     let issuance = AccessGrantIssuance::try_new(
         client_grant_id(seed),
@@ -118,7 +111,6 @@ fn issuance(seed: u64, binding: &str, user: &str) -> RepositoryAccessGrantIssuan
     RepositoryAccessGrantIssuance::try_new(grant_id(seed), binding, user, user).expect("issuance")
 }
 
-/// Builds one validated scan outcome for the projection-machine tests.
 fn outcome(
     availability: RepositoryAvailability,
     dirty_state: RepositoryDirtyState,
@@ -135,7 +127,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
     {
         let mut ledger = storage.repository_binding_ledger().expect("ledger");
 
-        // First report creates the binding at revision 1.
         let first = ledger
             .upsert(
                 &projection(10, &client, "fingerprint-a"),
@@ -161,8 +152,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
             vec![first.record.clone()]
         );
 
-        // A byte-identical re-report is an accepted idempotent replay that
-        // leaves the revision untouched.
         let replay = ledger
             .upsert(
                 &projection(10, &client, "fingerprint-a"),
@@ -174,8 +163,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
         assert!(!replay.enrolled);
         assert_eq!(replay.record.revision, 1);
 
-        // A replay received later still compares the device's scan instant,
-        // not the Server receive time, so the revision remains unchanged.
         let replay_after_delivery_delay = ledger
             .upsert(
                 &projection(10, &client, "fingerprint-a"),
@@ -187,8 +174,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
         assert!(!replay_after_delivery_delay.enrolled);
         assert_eq!(replay_after_delivery_delay.record.revision, 1);
 
-        // A different client cannot take over an existing binding id, even
-        // when it supplies a fresh revision and the same fingerprint.
         let foreign_error = ledger
             .upsert(
                 &projection(10, &foreign_client, "fingerprint-a"),
@@ -208,7 +193,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
         assert_eq!(unchanged.client_node_id, client);
         assert_eq!(unchanged.revision, 1);
 
-        // A changed projection advances the revision exactly once under CAS.
         let changed = RepositoryBindingProjection::try_new(
             binding_id(10),
             &client,
@@ -233,7 +217,6 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
         assert_eq!(refreshed.record.display_name, "Renamed Repo");
         assert_eq!(refreshed.record.availability, RepositoryAvailability::Dirty);
 
-        // A stale expectedRevision fails closed.
         let error = ledger
             .upsert(
                 &projection(10, &client, "fingerprint-a"),
@@ -264,8 +247,6 @@ fn fingerprint_is_unique_per_client_and_freed_by_removal() {
             )
             .expect("first upsert");
 
-        // A different binding id claiming the same fingerprint on the same
-        // client fails closed.
         let conflict = ledger
             .upsert(
                 &projection(11, &client, "fingerprint-a"),
@@ -279,7 +260,6 @@ fn fingerprint_is_unique_per_client_and_freed_by_removal() {
             RepositoryBindingStoreErrorKind::FingerprintConflict
         );
     }
-    // The same fingerprint on a different client is fine.
     let other = seed_client(&mut storage, 2);
     {
         let mut ledger = storage.repository_binding_ledger().expect("ledger");
@@ -293,8 +273,6 @@ fn fingerprint_is_unique_per_client_and_freed_by_removal() {
             .expect("same fingerprint on another client");
         assert!(cross_client.enrolled);
 
-        // Removing the first binding frees the fingerprint for a new binding
-        // id on the original client.
         let removed = ledger.remove(binding_id(10).as_str()).expect("remove");
         assert!(removed);
         let re_registered = ledger
@@ -334,8 +312,6 @@ fn seven_availability_states_move_freely_after_reverification() {
     let binding = binding_id(10);
     let mut revision = enrolled.record.revision;
 
-    // The projection machine is non-transactional: any state may move to any
-    // other state after re-verification, and there are no terminal states.
     let chain = [
         (
             outcome(RepositoryAvailability::Moved, RepositoryDirtyState::Clean),
@@ -399,7 +375,6 @@ fn seven_availability_states_move_freely_after_reverification() {
         assert_eq!(updated.revision, revision);
     }
 
-    // An identical report is an accepted idempotent replay.
     let replay = ledger
         .update_availability(
             binding.as_str(),
@@ -429,7 +404,6 @@ fn only_available_and_dirty_allow_launch_and_stale_cas_fails() {
         .expect("upsert");
     let binding = binding_id(10);
 
-    // Only `available` and `dirty` carry the launch gate (contract 7).
     assert!(RepositoryAvailability::Available.allows_launch());
     assert!(RepositoryAvailability::Dirty.allows_launch());
     assert!(!RepositoryAvailability::Unavailable.allows_launch());
@@ -438,7 +412,6 @@ fn only_available_and_dirty_allow_launch_and_stale_cas_fails() {
     assert!(!RepositoryAvailability::PermissionDenied.allows_launch());
     assert!(!RepositoryAvailability::ScanFailed.allows_launch());
 
-    // A stale expectedRevision fails closed.
     let error = ledger
         .update_availability(
             binding.as_str(),
@@ -486,7 +459,6 @@ fn grants_are_unique_active_per_user_and_revoke_is_immediate() {
         1
     );
 
-    // A second active grant for the same user and binding conflicts.
     let duplicate = ledger
         .create_grant(
             &issuance(21, binding.as_str(), holder.as_str()),
@@ -499,7 +471,6 @@ fn grants_are_unique_active_per_user_and_revoke_is_immediate() {
         RepositoryBindingStoreErrorKind::AccessGrantConflict
     );
 
-    // Revocation is immediate; a replay is an accepted no-op.
     let revoked = ledger
         .revoke_grant(grant.repository_access_grant_id.as_str(), grant.revision)
         .expect("revoke");
@@ -515,7 +486,6 @@ fn grants_are_unique_active_per_user_and_revoke_is_immediate() {
         .expect("revoke replay");
     assert_eq!(replay.state, RepositoryGrantState::Revoked);
 
-    // A stale expectedRevision fails closed on an active grant.
     let fresh = ledger
         .create_grant(
             &issuance(22, binding.as_str(), holder.as_str()),
@@ -531,7 +501,6 @@ fn grants_are_unique_active_per_user_and_revoke_is_immediate() {
         RepositoryBindingStoreErrorKind::RevisionConflict
     );
 
-    // Removing the binding cascades its grants away.
     ledger.remove(binding.as_str()).expect("remove");
     assert!(
         ledger
@@ -566,7 +535,6 @@ fn visibility_requires_both_client_and_repository_grants() {
         )
         .expect("binding two");
 
-    // No client grant at all: invisible even with a repository grant.
     ledger
         .create_grant(
             &issuance(40, binding_id(10).as_str(), outsider.as_str()),
@@ -581,8 +549,6 @@ fn visibility_requires_both_client_and_repository_grants() {
             .is_empty()
     );
 
-    // A client grant plus a repository grant on only one binding makes
-    // exactly that binding visible.
     ledger
         .create_grant(
             &issuance(41, binding_id(11).as_str(), member.as_str()),
@@ -596,7 +562,6 @@ fn visibility_requires_both_client_and_repository_grants() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].repository_binding_id, binding_id(11));
 
-    // The second repository grant widens the visible set to two.
     ledger
         .create_grant(
             &issuance(42, binding_id(10).as_str(), member.as_str()),
@@ -609,7 +574,6 @@ fn visibility_requires_both_client_and_repository_grants() {
         .expect("visibility");
     assert_eq!(visible.len(), 2);
 
-    // Revoking the repository grant hides the binding immediately.
     let revoked = ledger
         .revoke_grant(grant_id(42).as_str(), 1)
         .expect("revoke");
@@ -647,7 +611,6 @@ fn multi_users_hold_disjoint_visible_sets() {
                 &instant(T1),
             )
             .expect("binding two");
-        // Alice sees only binding one; Bob sees only binding two.
         ledger
             .create_grant(
                 &issuance(40, binding_id(10).as_str(), alice.as_str()),
@@ -691,8 +654,6 @@ fn multi_users_hold_disjoint_visible_sets() {
             1
         );
     }
-    // Revoking Alice's client grant hides every binding from her even while
-    // her repository grant row stays active.
     storage
         .client_connect_ledger()
         .expect("connect ledger")

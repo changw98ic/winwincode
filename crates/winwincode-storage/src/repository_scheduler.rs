@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Repository-scoped durable scheduler authority.
-//!
-//! One immediate `SQLite` transaction owns fair selection, the queue lease
-//! transition, the Registry claim, and the scheduler response receipt. The
-//! caller never lists private tables or constructs lease authority.
-
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -106,7 +98,6 @@ const DISPATCH_LEASE_TERMINAL_ID_NAMESPACE: &[u8] =
 const REPLACEMENT_LEASE_TERMINAL_ID_NAMESPACE: &[u8] =
     b"winwincode.repository-scheduler.replacement-lease-terminal.v1";
 
-/// One configured repository without `ProductSession` or Delivery narrowing.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerScope {
     pub organization_id: OrganizationId,
@@ -115,13 +106,10 @@ pub struct RepositorySchedulerScope {
     pub repository_id: RepositoryId,
 }
 
-/// One receipt-bearing scheduler drive request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerClaimRequest {
     pub scope: RepositorySchedulerScope,
     pub request_id: RequestId,
-    /// Process-unique Control Plane boot identity. A new generation may
-    /// re-offer active work once; the same generation does not spin.
     pub scheduler_generation: String,
     pub worker_id: WorkerId,
     pub worker_instance_id: WorkerInstanceId,
@@ -129,7 +117,6 @@ pub struct RepositorySchedulerClaimRequest {
     pub expires_at: Instant,
 }
 
-/// Exact dispatch authority returned only after queue and Registry commit.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerClaimReceipt {
     pub job: ExecutionJobRecord,
@@ -140,7 +127,6 @@ pub struct RepositorySchedulerClaimReceipt {
     pub recovered: bool,
 }
 
-/// Scheduler-owned finite retry of one durable failed Job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySchedulerRetryRequest {
     pub scope: RepositorySchedulerScope,
@@ -157,14 +143,12 @@ pub struct RepositorySchedulerRetryRequest {
     pub expires_at: Instant,
 }
 
-/// One Worker dispatch result joined to its repository queue revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySchedulerDispatchResultRequest {
     pub scope: RepositorySchedulerScope,
     pub dispatch: DispatchResultRequest,
 }
 
-/// Atomic Registry dispatch receipt and resulting queue record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySchedulerDispatchResultReceipt {
     pub job: ExecutionJobRecord,
@@ -172,7 +156,6 @@ pub struct RepositorySchedulerDispatchResultReceipt {
     pub accepted: bool,
 }
 
-/// One repository-scoped cancellation request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerCancellationRequest {
     pub scope: RepositorySchedulerScope,
@@ -182,10 +165,6 @@ pub struct RepositorySchedulerCancellationRequest {
     pub requested_at: Instant,
 }
 
-/// Durable cancellation result. Accepted dispatches always retain the exact
-/// Worker session and cancel-message authority; `codex_thread_id` is filled
-/// when that Worker session binds its slot and is absent only while the
-/// cancellation is pending.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerCancellationReceipt {
     pub job: ExecutionJobRecord,
@@ -198,14 +177,12 @@ pub struct RepositorySchedulerCancellationReceipt {
     pub replayed: bool,
 }
 
-/// One exact terminal settlement joining queue state and Registry capacity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySchedulerTerminalRequest {
     pub scope: RepositorySchedulerScope,
     pub terminal: ExecutionLeaseTerminalRequest,
 }
 
-/// Durable result of atomically terminalizing the queue and Registry lease.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySchedulerTerminalReceipt {
     pub job: ExecutionJobRecord,
@@ -227,32 +204,19 @@ enum ActiveJobRecovery {
     },
 }
 
-/// Borrowed repository scheduler over the one canonical product database.
 pub struct RepositoryScheduler<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the repository scheduler over this storage connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when any canonical queue, Registry, or scheduler
-    /// table cannot be prepared.
     pub fn repository_scheduler(&mut self) -> Result<RepositoryScheduler<'_>, StorageError> {
         RepositoryScheduler::new(self)
     }
 }
 
 impl<'storage> RepositoryScheduler<'storage> {
-    /// Prepares all scheduler-owned tables on the same `SQLite` connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first schema/storage failure.
     pub fn new(storage: &'storage mut SqliteStorage) -> Result<Self, StorageError> {
         ensure_execution_queue_schema(storage.connection()?)?;
-        // Opening the canonical Registry is the only supported schema owner.
         {
             let _registry = storage.execution_registry()?;
         }
@@ -265,12 +229,6 @@ impl<'storage> RepositoryScheduler<'storage> {
                 "{SCHEDULER_SCHEMA}{EXECUTION_SCOPE_REPLACEMENT_SCHEMA}"
             ))
             .map_err(sql_error)?;
-        // FLOW-100.4: a job dispatched to a Device WorkerSession carries one
-        // durable device execution fact row, and queue selection excludes such
-        // jobs so the local embedded worker can never claim device-owned work.
-        // The marker table is owned by the device execution binding ledger;
-        // ensuring it here keeps the exclusion predicate working on every
-        // database that selects the queue, whatever ledger was opened first.
         storage
             .connection()?
             .execute_batch(
@@ -280,17 +238,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(Self { storage })
     }
 
-    /// Fairly claims or recovers one repository job.
-    ///
-    /// Exact request replay returns the original result before consulting live
-    /// Worker capacity or current queue state. A changed body conflicts. One
-    /// process generation receives each active job at most once, while a new
-    /// boot generation re-offers the exact stored lease/message after restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope/time/worker facts, a changed replay, corrupt
-    /// active authority, a rejected Registry claim, and `SQLite` failures.
     pub fn claim_next(
         &mut self,
         request: &RepositorySchedulerClaimRequest,
@@ -365,16 +312,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(Some(receipt))
     }
 
-    /// Claims one policy-eligible failed Job as exactly one higher attempt.
-    ///
-    /// Receipt replay is resolved before current state or Worker capacity. The
-    /// transaction changes `Failed` directly to `Leased`, rotates dispatch and
-    /// Registry authority, and never routes the Job through `Queued`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay, cancelled/terminal/non-failed Jobs, invalid
-    /// retry policy or time, foreign Worker authority, and storage failures.
     pub fn retry_failed(
         &mut self,
         request: &RepositorySchedulerRetryRequest,
@@ -441,11 +378,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(receipt)
     }
 
-    /// Lists a bounded repository cut for cancellation/restart orchestration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope/state filters and storage corruption.
     pub fn list_jobs(
         &self,
         scope: &RepositorySchedulerScope,
@@ -455,10 +387,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         list_repository_jobs(self.storage.connection()?, scope, states)
     }
 
-    /// Reads queued Device launches from the same durable job that fences local claims.
-    ///
-    /// # Errors
-    /// Rejects corrupt dispatch payloads or unavailable storage.
     pub fn pending_device_launches(&self) -> Result<Vec<Vec<u8>>, StorageError> {
         let mut statement = self.storage.connection()?.prepare(
             "SELECT dispatch_payload FROM scheduler_execution_jobs j
@@ -473,11 +401,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         rows.map(|row| row.map_err(sql_error)).collect()
     }
 
-    /// Resolves the repository owner of one globally unique durable Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/missing Job identity and stored scope corruption.
     pub fn scope_for_job(
         &self,
         job_id: &ExecutionJobId,
@@ -508,9 +431,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(scope)
     }
 
-    /// Lists Device jobs whose exact current launch has trusted exit evidence.
-    /// # Errors
-    /// Rejects corrupt payloads or unavailable recovery authority.
     pub fn pending_device_recoveries(&self) -> Result<Vec<Vec<u8>>, StorageError> {
         let available: bool = self
             .storage
@@ -532,13 +452,6 @@ impl<'storage> RepositoryScheduler<'storage> {
             .map_err(sql_error)
     }
 
-    /// Persists one cancellation and either returns exact Worker cancel
-    /// authority or terminalizes work which never reached an accepted dispatch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay bodies, stale revisions, cross-repository jobs,
-    /// corrupt lease/dispatch authority, and storage failures.
     pub fn request_cancellation(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
@@ -546,16 +459,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         self.request_cancellation_checked(request, None, None)
     }
 
-    /// Persists cancellation only when the queue row still belongs to the
-    /// supplied `WorkRun`.  This closes the lookup-to-cancel race during
-    /// predecessor/successor replacement while reusing the same receipt and
-    /// outbox transaction as ordinary cancellation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay bodies, stale revisions, a missing or mismatched
-    /// `WorkRun`, cross-repository jobs, corrupt lease/dispatch or
-    /// `WorkerSession` slot authority, and `SQLite` failures.
     pub fn request_cancellation_for_work_run(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
@@ -564,14 +467,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         self.request_cancellation_checked(request, Some(work_run_id), None)
     }
 
-    /// Same run-aware cancellation path with the canonical public command
-    /// digest included in the durable idempotency body. The queue request
-    /// contains server-derived revision/time values, while this digest freezes
-    /// the client-visible scope, payload, actor, request, and Delivery
-    /// revision across response-loss retries.
-    ///
-    /// # Errors
-    /// Rejects invalid authority, conflicting request bodies, or a failed storage transaction.
     pub fn request_cancellation_for_work_run_with_command_digest(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
@@ -581,13 +476,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         self.request_cancellation_checked(request, Some(work_run_id), Some(command_digest))
     }
 
-    /// Replays a previously committed `WorkRun` cancellation for restart
-    /// orchestration. The queue receipt already contains the original
-    /// request's immutable authority, so recovery does not invent a new
-    /// revision or timestamp digest.
-    ///
-    /// # Errors
-    /// Rejects invalid requests, foreign run receipts, or a failed storage transaction.
     pub fn replay_cancellation_for_work_run(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
@@ -633,9 +521,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         validate_cancellation_request(request)?;
         let scope_key = repository_scope_key(&request.scope);
         let request_digest = match public_command_digest {
-            // Queue revision/time are derived from the current row and may
-            // differ after restart. Public command retries use only the
-            // immutable scope/job/WorkRun plus the frozen command digest.
             Some(command_digest) => digest(&(
                 &request.scope,
                 &request.job_id,
@@ -680,10 +565,6 @@ impl<'storage> RepositoryScheduler<'storage> {
                 "cancellation WorkRun does not match the durable execution job",
             ));
         }
-        // Resolve the slot while this immediate transaction still holds the
-        // queue write lock. A missing slot is a valid accepted-dispatch race:
-        // the receipt remains pending until the Worker binds its session.
-        // Any present slot is checked before the queue transition commits.
         let codex_thread_id = cancellation_slot_codex_thread(&transaction, &current)?;
         let source_state = current.state;
         let cancelled = cancel_execution_job_in_transaction(
@@ -714,14 +595,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(receipt)
     }
 
-    /// Atomically records a Worker dispatch result and advances the queue.
-    /// Accepted authority moves the job to running. A rejected result fails
-    /// the same queue attempt and releases its Registry lease.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-repository jobs, changed message replay, stale revisions,
-    /// mismatched lease authority, and storage failures.
     pub fn record_dispatch_result(
         &mut self,
         request: &RepositorySchedulerDispatchResultRequest,
@@ -808,13 +681,6 @@ impl<'storage> RepositoryScheduler<'storage> {
         })
     }
 
-    /// Atomically commits one exact terminal queue state and releases the
-    /// matching Registry lease. Exact replay returns the original queue fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-repository jobs, stale revisions/fences, illegal source
-    /// states, changed receipts, and storage failures.
     pub fn settle_terminal(
         &mut self,
         request: &RepositorySchedulerTerminalRequest,
@@ -906,9 +772,6 @@ pub(crate) fn load_execution_job_by_id(
         .transpose()
 }
 
-/// Resolves the one active (non-terminal) Job of a canonical Delivery
-/// `WorkRun`. The `WorkRun` index guarantees at most one active attempt so
-/// routing and cancellation can anchor exactly that run.
 pub(crate) fn load_active_execution_job_by_work_run(
     connection: &Connection,
     work_run_id: &WorkRunId,

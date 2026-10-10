@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type PageHeadingLevel = 1 | 2 | 3
@@ -8,7 +6,6 @@ export interface PageHeaderProps {
   readonly title: string
   readonly description?: string
   readonly eyebrow?: string
-  /** Fixed for the lifetime of one mounted header. */
   readonly headingLevel?: PageHeadingLevel
   readonly className?: string
 }

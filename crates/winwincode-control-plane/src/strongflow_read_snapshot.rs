@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Query-only resources pinned before releasing the application's mutation lock.
-
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,8 +11,6 @@ use winwincode_storage::{
 use crate::ControlPlane;
 use crate::strongflow_projection::StrongFlowProjectionError;
 
-/// Read-only access to the original product database and source authorities.
-/// There is no mutable dereference, startup, recovery, or event publisher.
 pub struct StrongFlowReadSnapshot {
     context: ControlPlane,
 }
@@ -31,8 +25,6 @@ impl Deref for StrongFlowReadSnapshot {
 
 impl Drop for StrongFlowReadSnapshot {
     fn drop(&mut self) {
-        // Close only the pinned readers. Their close paths roll back and
-        // release connections; they never flush or close shared authorities.
         if let Some(artifacts) = self.context.artifact_store.take() {
             let _ = artifacts.close();
         }
@@ -43,16 +35,6 @@ impl Drop for StrongFlowReadSnapshot {
 }
 
 impl ControlPlane {
-    /// Pins product state followed by Artifact metadata under the caller's
-    /// application mutation lock. The original typed queries retain their
-    /// exact-cursor and double-read checks after that lock is released.
-    ///
-    /// These are two database transactions, not a cross-database transaction.
-    /// Artifact provenance and content validation still bind their facts.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the original local resources cannot be retained.
     pub fn strongflow_read_snapshot(
         &self,
     ) -> Result<StrongFlowReadSnapshot, StrongFlowProjectionError> {
@@ -97,8 +79,6 @@ impl ControlPlane {
     }
 }
 
-/// All users of one installed resolver serialize only its Git resources.
-/// This includes the production Delivery authority and query snapshots.
 #[derive(Clone)]
 pub(crate) struct SharedGitSourceResolver {
     resolver: Arc<Mutex<Box<dyn GitSourceResolver>>>,

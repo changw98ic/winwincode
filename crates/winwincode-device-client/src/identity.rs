@@ -1,41 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device identity and device credential: first-boot local generation and
-//! durable persistence (plan sections 7.2, 11.2, and 17.1).
-//!
-//! Identifier lifetimes:
-//!
-//! - `device_id`: stable, purely local row identity, and the placeholder
-//!   `clientNodeId` of the enrollment exchange (the server treats any
-//!   non-canonical id as a fresh device).
-//! - `client_node_id` / `publicClientId`: never generated locally. Both are
-//!   server-issued with the accepted enrollment ([`adopt_enrollment`]) and
-//!   backfilled into the persisted identity row; until then they are empty.
-//! - `clientInstanceId`: a fresh canonical `cix_` + 26 character Crockford
-//!   value on every process launch; the previously persisted value is always
-//!   replaced on [`ensure_device_identity`].
-//!
-//! Credential model (plan 17.1): first boot creates a local random secret so
-//! the durable row exists; the server-issued Device Credential replaces it at
-//! enrollment. The issued material crosses the enrollment transport response
-//! exactly once, is persisted here, and is presented as the exchange bearer
-//! credential afterwards.
-
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::store::{DeviceStore, DeviceStoreError, sql_error};
 
-/// Number of random bytes in the device credential secret.
 const CREDENTIAL_SECRET_BYTES: usize = 32;
-/// Crockford Base32 alphabet shared with the canonical identity encodings
-/// (`I`, `L`, `O`, and `U` are excluded, matching the registry validation).
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-/// A canonical prefixed identifier is prefix + 26 Crockford characters.
 const CANONICAL_ID_SUFFIX_LEN: usize = 26;
 const MAX_ID_BYTES: usize = 200;
 
-/// Static description of this device recorded on first boot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceIdentitySeed {
     pub display_name: String,
@@ -44,11 +16,7 @@ pub struct DeviceIdentitySeed {
     pub client_version: String,
 }
 
-/// Stable device identifiers (plan sections 7.2 and 11.2).
-///
-/// `client_node_id` and `public_client_id` are empty until the enrollment is
-/// adopted; both are server-issued and then stable across restarts.
-#[allow(clippy::struct_field_names)] // every field is a distinct wire identifier
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceIdentity {
     device_id: String,
@@ -62,30 +30,22 @@ impl DeviceIdentity {
         &self.device_id
     }
 
-    /// The server-assigned `clientNodeId` (`cnd_` identity), or the empty
-    /// string before the enrollment is adopted.
     #[must_use]
     pub fn client_node_id(&self) -> &str {
         &self.client_node_id
     }
 
-    /// The server-assigned public `publicClientId`, or the empty string
-    /// before the enrollment is adopted.
     #[must_use]
     pub fn public_client_id(&self) -> &str {
         &self.public_client_id
     }
 
-    /// Whether the server-issued enrollment identity was adopted.
     #[must_use]
     pub fn is_enrolled(&self) -> bool {
         !self.client_node_id.is_empty()
     }
 }
 
-/// Locally persisted device credential. The secret never leaves the device
-/// except as the exchange bearer credential; only [`DeviceCredential::digest`]
-/// is persisted server-side.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceCredential {
     secret: Vec<u8>,
@@ -94,15 +54,11 @@ pub struct DeviceCredential {
 }
 
 impl DeviceCredential {
-    /// Exposes the local credential secret bytes; they must never be logged.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8] {
         &self.secret
     }
 
-    /// The lowercase-hex presentation of the credential secret: the bearer
-    /// material the exchange transport sends after enrollment. It must never
-    /// be logged.
     #[must_use]
     pub fn material_hex(&self) -> String {
         hex_encode(&self.secret)
@@ -119,21 +75,14 @@ impl DeviceCredential {
     }
 }
 
-/// The server-issued enrollment identity carried by the exchange response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssuedEnrollment {
-    /// Server-assigned canonical `clientNodeId` (`cnd_` identity).
     pub client_node_id: String,
-    /// Server-assigned public `publicClientId`.
     pub public_client_id: String,
-    /// Raw Device Credential material as lowercase hex of the 32 secret
-    /// bytes.
     pub credential_material: String,
-    /// The persisted `sha256:` digest of the issued material.
     pub credential_digest: String,
 }
 
-/// The complete durable device identity after one startup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityRecord {
     identity: DeviceIdentity,
@@ -154,8 +103,6 @@ impl IdentityRecord {
         &self.credential
     }
 
-    /// The `clientInstanceId` for this process launch; a fresh value on
-    /// every call to [`ensure_device_identity`].
     #[must_use]
     pub fn current_instance_id(&self) -> &str {
         &self.current_instance_id
@@ -172,7 +119,6 @@ impl IdentityRecord {
     }
 }
 
-/// The identity row as stored, plus whether this launch created it.
 struct StoredIdentity {
     identity: DeviceIdentity,
     created_at: String,
@@ -180,18 +126,6 @@ struct StoredIdentity {
     fresh: bool,
 }
 
-/// Loads the durable device identity, creating it on first boot, and rotates
-/// the `clientInstanceId` for this launch.
-///
-/// Must be called once per process start before any envelope is produced, so
-/// every persisted or sent `clientInstanceId` names this launch.
-///
-/// # Errors
-///
-/// Returns
-/// [`DeviceStoreErrorKind::InvalidInput`](crate::store::DeviceStoreErrorKind::InvalidInput)
-/// for an empty seed or timestamp, and an adapter-neutral error when the
-/// store is closed, the stored rows are inconsistent, or a write fails.
 pub fn ensure_device_identity(
     store: &mut DeviceStore,
     seed: &DeviceIdentitySeed,
@@ -223,9 +157,6 @@ pub fn ensure_device_identity(
     }
     transaction.commit().map_err(sql_error)?;
 
-    // The fresh insert already persisted revision 1 with this launch's
-    // instance id; a restart rotates the row and reports the rotated
-    // revision.
     let revision = if stored.fresh { 1 } else { stored.revision + 1 };
     Ok(IdentityRecord {
         identity: stored.identity,
@@ -236,17 +167,6 @@ pub fn ensure_device_identity(
     })
 }
 
-/// Loads the durable device identity without mutating anything.
-///
-/// Unlike [`ensure_device_identity`] this never rotates the
-/// `clientInstanceId`, so read-only callers (status display) can inspect the
-/// identity without producing a new launch identity. Returns `None` before
-/// the first boot.
-///
-/// # Errors
-///
-/// Returns an adapter-neutral error when the store is closed or the stored
-/// rows are inconsistent, and an adapter-neutral error when a read fails.
 pub fn load_device_identity(
     store: &DeviceStore,
 ) -> Result<Option<IdentityRecord>, DeviceStoreError> {
@@ -313,21 +233,6 @@ pub fn load_device_identity(
     }))
 }
 
-/// Adopts the server-issued enrollment identity: backfills the persisted
-/// identity row with the assigned `clientNodeId` and `publicClientId` and
-/// replaces the local credential secret with the issued Device Credential.
-///
-/// Called exactly once, when the enrollment exchange response
-/// returns the issued credential; a later call is refused so a replay can never rotate the
-/// adopted identity.
-///
-/// # Errors
-///
-/// Returns
-/// [`DeviceStoreErrorKind::InvalidInput`](crate::store::DeviceStoreErrorKind::InvalidInput)
-/// for a non-canonical issued identity or credential material, and an
-/// adapter-neutral error when the store is closed, the identity row is
-/// missing, or the enrollment was already adopted.
 pub fn adopt_enrollment(
     store: &mut DeviceStore,
     device_id: &str,
@@ -409,8 +314,6 @@ pub fn adopt_enrollment(
     transaction.commit().map_err(sql_error)
 }
 
-/// Loads the single identity row, or creates it inside the same transaction
-/// on first boot.
 fn load_or_create_identity(
     transaction: &rusqlite::Transaction<'_>,
     seed: &DeviceIdentitySeed,
@@ -485,13 +388,6 @@ fn create_identity(
     })
 }
 
-/// Loads the durable credential for the identity, creating it inside the
-/// same transaction on first boot.
-///
-/// The credential row must exist exactly with the identity row: it is
-/// created in the same transaction, and the foreign key plus cascade delete
-/// keep the pair consistent, so absence on a restart is a fail-closed
-/// adapter fault.
 fn load_or_create_credential(
     transaction: &rusqlite::Transaction<'_>,
     device_id: &str,
@@ -602,11 +498,6 @@ fn validate_credential_rows(
 }
 
 fn generate_identity() -> Result<DeviceIdentity, DeviceStoreError> {
-    // The local `device_id` is a random, purely local row identity and the
-    // placeholder `clientNodeId` of the enrollment exchange; the server
-    // treats every non-canonical id as a fresh device. `client_node_id` and
-    // `public_client_id` stay empty until the server-issued enrollment
-    // identity is adopted.
     let mut device_id_bytes = [0_u8; 16];
     fill_random(&mut device_id_bytes)?;
     Ok(DeviceIdentity {
@@ -631,10 +522,6 @@ fn credential_digest(secret: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(secret))
 }
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier, the
-/// same encoding the server assigns (`cnd_` node ids) and the registry
-/// validates (`cix_` instance ids); also used for locally generated
-/// `cct_` connect code ids.
 pub(crate) fn generate_prefixed_id(prefix: &str) -> Result<String, DeviceStoreError> {
     let mut random = [0_u8; 13];
     fill_random(&mut random)?;
@@ -647,8 +534,6 @@ pub(crate) fn generate_prefixed_id(prefix: &str) -> Result<String, DeviceStoreEr
     Ok(identity)
 }
 
-/// Whether `value` carries the canonical `prefix` + 26 character Crockford
-/// shape the server-side registry validates.
 fn is_canonical_prefixed_id(value: &str, prefix: &str) -> bool {
     let Some(suffix) = value.strip_prefix(prefix) else {
         return false;
@@ -663,7 +548,6 @@ fn is_canonical_prefixed_id(value: &str, prefix: &str) -> bool {
         })
 }
 
-/// Decodes the 64 lowercase-hex credential material into its 32 secret bytes.
 fn decode_credential_material(material: &str) -> Result<Vec<u8>, DeviceStoreError> {
     let bytes = material.as_bytes();
     if bytes.len() != CREDENTIAL_SECRET_BYTES * 2 {

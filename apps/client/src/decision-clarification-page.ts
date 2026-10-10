@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type {
   ClarificationState,
   ClarificationViewModel,
@@ -41,7 +39,6 @@ const FIELD_OPTIONS = Object.freeze([
   { field: 'constraints', label: '约束（每行一项）', required: false, rows: 4 },
 ] as const)
 
-/** Fixed native controls are the whole render protocol; arbitrary HTML/actions never enter it. */
 export function mountDecisionClarificationPage(
   options: DecisionClarificationPageOptions,
 ): DecisionClarificationPage {

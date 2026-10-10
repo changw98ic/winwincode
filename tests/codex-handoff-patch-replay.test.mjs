@@ -13,7 +13,6 @@ const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.
 const patches = sourceLock.patches.filter(({ file, planned }) => (
   file.startsWith('upstream/patches/codex/') && !planned
 ))
-// Measured from the archive whose commit and SHA-256 are pinned below.
 const originalHashes = {
   'codex-rs/core/src/session/turn.rs': '4465f3e33dc8ee65f79ec02cfba8716d6873948e92bc51f30fbab813c2e0c7b6',
   'codex-rs/core/src/session/turn_tests.rs': '8e6b6071c7b6a33e69311f6c792616d95a6add796d010851eb5953a7137ea2b5',

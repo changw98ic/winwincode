@@ -1,16 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Browser session initialization, login, persistence, authentication, and
-//! revocation.
-//!
-//! The bootstrap proof is a one-time initialization credential: an
-//! uninitialized Server accepts exactly one proof (within the bootstrap
-//! window) to create the first Owner account, and then initialization closes
-//! permanently — in memory and through a durable marker that survives
-//! restarts. Daily sign-in is username plus Argon2id password. Every session
-//! binds to one durable `UserAccount` userId, renews its TTL while in use,
-//! and is revoked immediately when its account is disabled.
-
 use std::fmt;
 use std::fs::OpenOptions;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -39,20 +26,14 @@ const SESSION_TOKEN_BYTES: usize = 32;
 const MAX_BOOTSTRAP_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 const MAX_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
-/// Explicit lifetime limits for the initialization window and browser
-/// sessions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthSessionConfig {
     bootstrap_window: Duration,
     session_ttl: Duration,
-    /// Community local: loopback browsers skip password login while unlocked.
     local_open: bool,
 }
 
 impl AuthSessionConfig {
-    /// # Errors
-    ///
-    /// Rejects zero or unrepresentable durations.
     pub fn new(
         bootstrap_window: Duration,
         session_ttl: Duration,
@@ -73,7 +54,6 @@ impl AuthSessionConfig {
         })
     }
 
-    /// Community loopback default: no password until lock/remote auth.
     #[must_use]
     pub const fn with_local_open(self, local_open: bool) -> Self {
         Self { local_open, ..self }
@@ -134,19 +114,11 @@ impl AuthSessionTokenGenerator for SystemAuthSessionTokenGenerator {
     }
 }
 
-/// One short-window bootstrap proof: the Server's one-time initialization
-/// credential.
-///
-/// The proof deliberately has no `Debug`, serialization, or getter surface;
-/// it stays write-only, is compared in constant time, and is never echoed.
 pub struct AuthSessionBootstrap {
     proof: String,
 }
 
 impl AuthSessionBootstrap {
-    /// # Errors
-    ///
-    /// Rejects malformed proof material.
     pub fn new(proof: impl Into<String>) -> Result<Self, AuthSessionError> {
         let proof = proof.into();
         if proof.is_empty()
@@ -160,15 +132,10 @@ impl AuthSessionBootstrap {
     }
 }
 
-/// Runs once when the first Owner account is created.
 pub trait OwnerInitializationHook: Send + Sync {
-    /// # Errors
-    ///
-    /// Reports a secret-free failure reason.
     fn owner_initialized(&self, owner: &UserId) -> Result<(), String>;
 }
 
-/// The canonical standalone browser-session implementation.
 pub struct SqliteAuthSessionManager {
     connection: Mutex<Connection>,
     initialization: Mutex<InitializationGate>,
@@ -180,23 +147,15 @@ pub struct SqliteAuthSessionManager {
     config: AuthSessionConfig,
     clock: Arc<dyn AuthSessionClock>,
     token_generator: Arc<dyn AuthSessionTokenGenerator>,
-    /// Cached Owner identity for unlocked local loopback access.
     local_principal: Mutex<Option<AuthenticatedPrincipal>>,
 }
 
 struct InitializationGate {
     proofs: Vec<String>,
-    /// In-memory half of the permanent close marker.
     closed: bool,
 }
 
 impl SqliteAuthSessionManager {
-    /// Open or create the digest-only browser session database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid configuration, unavailable durable storage, or an
-    /// unavailable account authority.
     pub fn open(
         directory: impl AsRef<Path>,
         bootstraps: Vec<AuthSessionBootstrap>,
@@ -285,9 +244,6 @@ impl SqliteAuthSessionManager {
                 ensure_session_context_columns(connection)
             })?;
         let opened_at_millis = clock.unix_millis()?;
-        // The durable marker is the persistent half of the permanent close;
-        // once present, initialization stays closed across restarts no matter
-        // which proof is presented.
         let closed = connection
             .query_row(
                 "SELECT singleton FROM server_initialization WHERE singleton = 1",
@@ -322,8 +278,6 @@ impl SqliteAuthSessionManager {
         Ok(manager)
     }
 
-    /// Community local-open: create the first Owner without a browser bootstrap
-    /// and cache that principal for cookie-less loopback requests.
     fn ensure_local_owner(&mut self) -> Result<(), AuthSessionError> {
         if let Some(owner_id) = self.initialization_owner() {
             self.cache_local_principal(&owner_id)?;
@@ -369,7 +323,6 @@ impl SqliteAuthSessionManager {
         Ok(())
     }
 
-    /// True when the browser Client may skip password sign-in on loopback.
     #[must_use]
     pub const fn local_open(&self) -> bool {
         self.config.local_open
@@ -382,37 +335,16 @@ impl SqliteAuthSessionManager {
             .and_then(|guard| guard.clone())
     }
 
-    /// Returns the userId of the durable first Owner, or `None` while the
-    /// Server is still uninitialized.
-    ///
-    /// The session store's `server_initialization` marker is the browser
-    /// bootstrap's durable close; the account ledger's active Owner is the
-    /// equivalent durable fact written by the CLI's first-Owner command.
-    /// Either one means initialization is complete, so both initialization
-    /// paths share one authority.
     #[must_use]
     pub fn initialized_owner(&self) -> Option<UserId> {
         self.initialization_owner()
     }
 
-    /// Exposes the canonical account authority for Owner administration.
     #[must_use]
     pub const fn accounts(&self) -> &Arc<UserAccountService> {
         &self.accounts
     }
 
-    /// One-time initialization: exchange the bootstrap proof for the first
-    /// Owner account and its independent random cookie session.
-    ///
-    /// The proof stays write-only and is never echoed. After the Owner is
-    /// created, initialization closes permanently — in memory and through a
-    /// durable marker — and every later attempt is rejected, including after
-    /// restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-bearer credentials, bad or late proofs, already-completed
-    /// initialization, invalid account input, and unavailable storage.
     pub(crate) fn initialize(
         &self,
         credentials: &TransportCredentials,
@@ -430,8 +362,6 @@ impl SqliteAuthSessionManager {
         if now > self.opened_at_millis.saturating_add(window) {
             return Err(AuthSessionError::authentication());
         }
-        // The gate lock stays held for the whole flow so concurrent
-        // initialization attempts serialize behind the durable close.
         let mut gate = self
             .initialization
             .lock()
@@ -485,10 +415,6 @@ impl SqliteAuthSessionManager {
         self.issue_for_user(&account.user_id)
     }
 
-    /// Cheap pre-check, run before any Argon2 work is scheduled: reports
-    /// whether a username + password login from `client` is currently rate
-    /// limited. Invalid usernames and clock failures report `false` so the
-    /// full login path produces its regular error.
     #[must_use]
     pub(crate) fn login_rate_limited(&self, client: &str, username: &str) -> bool {
         let Ok(normalized) = UserAccountService::normalize_username(username) else {
@@ -500,16 +426,6 @@ impl SqliteAuthSessionManager {
         self.login_limiter.rejected(client, &normalized, now)
     }
 
-    /// Daily username + Argon2id password login for one active account.
-    ///
-    /// Failures are rate limited per (normalized username, client) pair; once
-    /// the budget is exhausted, further attempts fail with an explicit
-    /// rate-limit error.
-    ///
-    /// # Errors
-    ///
-    /// Rejects bearer credentials, unknown/wrong/disabled credentials, rate
-    /// limited clients, and storage failure.
     pub(crate) fn login(
         &self,
         credentials: &TransportCredentials,
@@ -520,8 +436,6 @@ impl SqliteAuthSessionManager {
         if credentials.bearer().is_some() {
             return Err(AuthSessionError::authentication());
         }
-        // Login requires a completed initialization from either path: the
-        // browser bootstrap's durable marker or the CLI's durable first Owner.
         if self.initialization_owner().is_none() {
             return Err(AuthSessionError::authentication());
         }
@@ -532,8 +446,6 @@ impl SqliteAuthSessionManager {
             return Err(AuthSessionError::invalid_request());
         }
         let now = self.clock.unix_millis()?;
-        // Atomic admission: reserves a tracked slot (or rejects) before the
-        // Argon2 work in verify_credentials, so every attempt is accounted.
         if !self.login_limiter.admit(client, &normalized, now) {
             return Err(AuthSessionError::rate_limited());
         }
@@ -553,9 +465,6 @@ impl SqliteAuthSessionManager {
         }
     }
 
-    /// One durable first-Owner fact: the session-store marker first, then the
-    /// account ledger's active Owner (the CLI's initialization path). Storage
-    /// failures degrade to "uninitialized" so callers fail closed.
     fn initialization_owner(&self) -> Option<UserId> {
         if let Some(owner) = self.stored_initialization_owner() {
             return Some(owner);
@@ -636,12 +545,6 @@ impl SqliteAuthSessionManager {
         })
     }
 
-    /// Revoke the exact current cookie digest (logout).
-    ///
-    /// # Errors
-    ///
-    /// Rejects bearer credentials, missing/expired/revoked cookies, and storage
-    /// failures.
     pub(crate) fn revoke(
         &self,
         credentials: &TransportCredentials,
@@ -708,9 +611,6 @@ impl SqliteAuthSessionManager {
         if principal.subject() != stored.0 {
             return Err(AuthSessionError::storage());
         }
-        // Sliding renewal: extend a live session back to the full TTL once a
-        // quarter of the TTL has been consumed, so a session in active use
-        // never expires mid-use.
         let ttl = duration_millis(self.config.session_ttl)?;
         let renewed_expires_at_millis = now.saturating_add(ttl);
         let expires_at_millis = if renewed_expires_at_millis.saturating_sub(stored.3) > ttl / 4 {
@@ -735,11 +635,6 @@ impl SqliteAuthSessionManager {
         })
     }
 
-    /// Return the current secret-free cookie session context.
-    ///
-    /// # Errors
-    ///
-    /// Rejects bearer credentials, missing/expired/revoked cookies, and invalid durable context.
     pub fn current(
         &self,
         credentials: &TransportCredentials,
@@ -748,7 +643,6 @@ impl SqliteAuthSessionManager {
             return Err(AuthSessionError::authentication());
         }
         let Some(cookie) = credentials.session_cookie() else {
-            // Community unlocked local: no cookie is the Owner session.
             if self.config.local_open
                 && let Some(principal) = self.local_principal()
             {
@@ -763,11 +657,6 @@ impl SqliteAuthSessionManager {
         self.read_session(cookie)?.response()
     }
 
-    /// Replace every live session Scope set for one exact Actor.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scopes or unavailable durable storage.
     pub fn replace_authorized_scopes(
         &self,
         actor: &Actor,
@@ -796,14 +685,6 @@ impl SqliteAuthSessionManager {
             .map_err(|_| AuthSessionError::storage())
     }
 
-    /// Revoke every live session for one exact Actor.
-    ///
-    /// This is the disable-user kill switch: disabling an account revokes all
-    /// of its sessions immediately.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage failure without exposing Actor or cookie data.
     pub fn revoke_actor_sessions(&self, actor: &Actor) -> Result<usize, AuthSessionError> {
         let subject = actor_subject(actor);
         let now = self.clock.unix_millis()?;
@@ -831,7 +712,6 @@ impl RequestAuthenticator for SqliteAuthSessionManager {
             return Err(AuthError::new("browser session authentication is required"));
         }
         let Some(cookie) = credentials.session_cookie() else {
-            // Community unlocked local loopback: cookie-less Owner access.
             if self.config.local_open
                 && let Some(principal) = self.local_principal()
             {
@@ -845,7 +725,6 @@ impl RequestAuthenticator for SqliteAuthSessionManager {
     }
 }
 
-/// Raw cookie material exists only long enough to build one `Set-Cookie` header.
 pub(crate) struct IssuedBrowserSession {
     cookie_value: String,
     expires_at_millis: i64,
@@ -854,11 +733,6 @@ pub(crate) struct IssuedBrowserSession {
 }
 
 impl IssuedBrowserSession {
-    /// Builds the browser `Set-Cookie` header.
-    ///
-    /// TLS listeners keep `Secure; SameSite=None` for independent Client
-    /// origins. Community loopback HTTP drops `Secure` and uses `SameSite=Lax`
-    /// so the browser will actually store the session cookie.
     pub(crate) fn set_cookie_header(&self, secure: bool) -> Result<String, AuthSessionError> {
         let expires = httpdate::fmt_http_date(self.expiry_system_time()?);
         let attributes = if secure {
@@ -905,7 +779,6 @@ pub(crate) fn cleared_session_cookie_header(secure: bool) -> &'static str {
     }
 }
 
-/// Secret-free auth-session failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthSessionError {
     kind: AuthSessionErrorKind,
@@ -1094,8 +967,6 @@ fn session_response(
 }
 
 fn instant_from_millis(millis: i64) -> Result<Instant, AuthSessionError> {
-    // Canonical `Instant` text is exactly `yyyy-MM-ddTHH:mm:ss.mmmZ`, so the
-    // millisecond field is rendered explicitly (RFC 3339 drops `.000`).
     let seconds = millis.div_euclid(1_000);
     let millisecond = millis.rem_euclid(1_000);
     let at = OffsetDateTime::from_unix_timestamp(seconds).map_err(|_| AuthSessionError::clock())?;
@@ -1375,8 +1246,6 @@ mod tests {
         assert!(second_error.is_already_initialized());
         drop(first);
 
-        // A restarted Server keeps initialization closed even for a fresh
-        // proof, while the issued session and login stay usable.
         let restarted =
             manager_with_sequence(&directory, Arc::clone(&clock), "after-restart-proof", 60);
         let error = restarted
@@ -1455,14 +1324,11 @@ mod tests {
         let issued = initialize(&manager, "Wen", "initial-owner-password");
         let credentials = TransportCredentials::new(None, Some(issued.cookie_value));
 
-        // Early in the TTL the expiry stays fixed (renews at most once per
-        // quarter TTL).
         clock.set(20_000);
         assert_eq!(
             manager.current(&credentials).expect("current").expires_at.0,
             "1970-01-01T00:01:05.000Z"
         );
-        // Past the quarter mark the session slides back to the full TTL.
         clock.set(30_000);
         assert_eq!(
             manager.current(&credentials).expect("renewed").expires_at.0,
@@ -1477,10 +1343,8 @@ mod tests {
                 .0,
             "1970-01-01T00:01:30.000Z"
         );
-        // An unused session still expires.
         clock.set(91_000);
         assert!(manager.current(&credentials).is_err());
-        // And a late initialization outside the bootstrap window is refused.
         let error = manager
             .initialize(
                 &TransportCredentials::new(Some("initialization-proof".to_owned()), None),
@@ -1508,7 +1372,6 @@ mod tests {
             .err()
             .expect("rate limited");
         assert!(limited.is_rate_limited());
-        // A different client is not affected.
         assert!(login(&manager, "198.51.100.4", "wen", "initial-owner-password").is_ok());
     }
 

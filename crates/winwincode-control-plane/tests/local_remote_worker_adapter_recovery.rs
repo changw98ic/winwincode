@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Local/remote Worker transport parity and recovery.
-
 use std::{
     fs,
     path::PathBuf,

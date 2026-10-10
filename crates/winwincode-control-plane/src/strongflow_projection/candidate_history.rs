@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Verified append-only Candidate history and display-only historical review.
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -250,9 +246,6 @@ pub(super) fn review_get(
     )
 }
 
-// Read only the already verified journal cut. A later Spec may clear its
-// current Attention, but the exact refusal remains in this bounded history.
-// A read ending before that refusal cannot borrow a future classification.
 fn refusals_in_verified_cut(snapshots: &[Delivery]) -> Vec<CandidateRejectionFact> {
     snapshots
         .iter()
@@ -274,13 +267,7 @@ fn candidate_for_verified_history(
             if error
                 .candidate_rejection
                 .as_deref()
-                .is_some_and(|observed| {
-                    // The old revision's terminal, Artifact, Git source and sealed
-                    // authorization were resolved again. Every coordinate, including
-                    // source revision, must equal a refusal retained in this cut.
-                    // Generic IO/storage errors and foreign/tampered sources remain errors.
-                    refusals.iter().any(|retained| observed == retained)
-                }) =>
+                .is_some_and(|observed| refusals.iter().any(|retained| observed == retained)) =>
         {
             Ok(None)
         }

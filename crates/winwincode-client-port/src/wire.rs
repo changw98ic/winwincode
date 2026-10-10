@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Serde wiring shared by the `ClientControlPort` contract types.
-
-/// `serde(with)` helpers for occupancy fencing tokens.
-///
-/// The authoritative schema encodes a fencing token as a decimal string
-/// matching `^[1-9][0-9]{0,19}$` (`OccupancyFencingToken`, identical to the
-/// `ExecutionPort` `FencingToken` definition) to preserve 64-bit precision,
-/// while the in-memory type stays [`u64`].
 pub mod fencing_token {
     use serde::Deserialize;
     use serde::Deserializer;
@@ -15,13 +5,6 @@ pub mod fencing_token {
     use serde::de::Error as _;
     use serde::ser::Error as _;
 
-    /// Parses a wire-encoded occupancy fencing token.
-    ///
-    /// The text must match `^[1-9][0-9]{0,19}$` and fit a [`u64`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the reason the text is not a valid wire-encoded token.
     pub fn parse_token(text: &str) -> Result<u64, String> {
         let bytes = text.as_bytes();
         let shape_ok = matches!(bytes.first(), Some(&first) if matches!(first, b'1'..=b'9'))
@@ -36,11 +19,6 @@ pub mod fencing_token {
             .map_err(|_| format!("occupancy fencing token exceeds the u64 range: {text:?}"))
     }
 
-    /// Serializes a fencing token as its decimal string form.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the token is `0`; the wire pattern starts at `1`.
     pub fn serialize<S>(token: &u64, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -53,12 +31,6 @@ pub mod fencing_token {
         serializer.collect_str(token)
     }
 
-    /// Deserializes a fencing token from its decimal string form.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the text does not match the wire pattern or exceeds the
-    /// [`u64`] range.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
     where
         D: Deserializer<'de>,

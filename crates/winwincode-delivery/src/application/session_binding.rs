@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exact execution-session binding transitions.
-
 use crate::domain::{
     Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance, SessionRuntimeContext,
 };
@@ -25,12 +21,6 @@ pub struct SessionBindingIdentity {
     pub execution_job_id: ExecutionJobId,
 }
 
-/// Scheduler-owned authority that may complete one pending `SessionBinding`.
-///
-/// These values are copied into the canonical Delivery binding only after the
-/// caller has proved that they belong to the exact active `WorkRun`. Once
-/// persisted, a different lease, Worker, instance, attempt, fence, or source
-/// cannot replace them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingAuthority {
     worker_id: WorkerId,
@@ -77,11 +67,6 @@ pub struct DurableExecutionAttemptReplacementInput {
     pub successor_lease: DurableExecutionLeaseInput,
 }
 
-/// Scheduler-sealed old-to-new execution authority accepted by one Delivery.
-///
-/// Only [`Self::from_scheduler`] can construct production values. The
-/// Delivery transition revalidates the predecessor against its complete
-/// `WorkRun` binding before clearing it for the exact successor attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryExecutionAttemptReplacement {
     receipt_id: RequestId,
@@ -96,7 +81,6 @@ pub struct DeliveryExecutionAttemptReplacement {
 }
 
 impl DeliveryExecutionAttemptReplacement {
-    /// Copies one already verified scheduler seal into the Delivery owner.
     #[must_use]
     pub fn from_scheduler(authority: DurableExecutionAttemptReplacementInput) -> Self {
         Self {
@@ -123,12 +107,6 @@ impl DeliveryExecutionAttemptReplacement {
 }
 
 impl SessionBindingAuthority {
-    /// Creates authority for a validated typed `ExecutionPort` message.
-    ///
-    /// The Control Plane must validate the message against its scheduler-owned
-    /// lease before calling this constructor. Keeping the source provenance
-    /// private prevents callers from changing an `ExecutionPort` authority into
-    /// an unqualified or migration source.
     #[must_use]
     pub fn from_execution_port(
         worker_id: WorkerId,
@@ -151,14 +129,6 @@ impl SessionBindingAuthority {
     }
 }
 
-/// Completes a replacement after the successor `WorkerSession` has been
-/// accepted. The predecessor remains as a terminal audit run; the successor
-/// is appended with the scheduler-sealed `WorkRun` and the newly accepted
-/// session authority.
-///
-/// # Errors
-/// Returns a conflict when the revision, predecessor, successor, lease, or
-/// worker authority does not match the scheduler-sealed replacement.
 pub fn accept_replacement_worker_session_with_authority(
     delivery: &Delivery,
     expected_revision: u64,
@@ -224,7 +194,6 @@ pub fn accept_replacement_worker_session_with_authority(
             "replacement requires the exact in-progress WorkItem revision from the accepted job",
         ));
     }
-    // The scheduler seal commits the intermediate Ready state and successor together.
     let item_revision = snapshot.work_run_aggregate.items[item_index]
         .revision
         .clone();
@@ -236,7 +205,6 @@ pub fn accept_replacement_worker_session_with_authority(
             .map_err(|error| {
                 replacement_conflict(format!("verification replacement rejected: {error:?}"))
             })?;
-        // The exact same-job successor attempt was checked against the scheduler seal above.
         snapshot.work_run_aggregate.runs.push(successor);
         snapshot.work_run_aggregate.validate().map_err(|error| {
             replacement_conflict(format!("verification successor rejected: {error:?}"))
@@ -385,10 +353,6 @@ fn validate_replacement_identity(
             ));
         }
     } else {
-        // A Worker may have accepted a dispatch before it opened its
-        // WorkerSession slot. In that crash window the Delivery binding
-        // remains the original pending placeholder; rotate only its
-        // attempt and leave all runtime owners empty for the successor.
         let pending = binding.attempt == predecessor.attempt
             && binding.worker_session_id.as_ref()
                 == replacement.predecessor_worker_session_id.as_ref()
@@ -410,17 +374,6 @@ fn replacement_conflict(message: impl Into<String>) -> CoordinationError {
     CoordinationError::new(CoordinationErrorCode::BindingConflict, message)
 }
 
-/// Records a `WorkerSession` together with the complete scheduler lease
-/// authority that produced it.
-///
-/// The mutation is idempotent only for the same complete authority. A
-/// replacement lease or Worker identity is rejected before a Delivery copy is
-/// changed.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, inactive run, mismatched attempt, changed
-/// authority, or a `WorkerSession` already owned by another binding.
 pub fn accept_worker_session_with_authority(
     delivery: &Delivery,
     expected_revision: u64,
@@ -481,13 +434,6 @@ pub fn accept_worker_session_with_authority(
     })
 }
 
-/// Records a `CodexThread` while revalidating the complete Worker lease
-/// authority that already owns the binding.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, inactive run, changed authority, a missing
-/// accepted `WorkerSession`, or a `CodexThread` owned by another binding.
 pub fn report_codex_thread_with_authority(
     delivery: &Delivery,
     expected_revision: u64,

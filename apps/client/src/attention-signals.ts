@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type {
   ApprovalProjection,
@@ -10,24 +8,14 @@ import type {
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 
-/**
- * UI-506 derives notification-worthy facts from the projections that already
- * exist: pending Approvals and Delivery summaries.  There is no second business
- * queue here, only one stable identity per server event and its state.
- */
 export type AttentionSignalKind = 'attention' | 'approval' | 'completion' | 'failure'
 
 export interface AttentionSignal {
   readonly kind: AttentionSignalKind
-  /** The authoritative server identity this signal is derived from. */
   readonly id: string
-  /** Identity plus the state that makes one notification unique. */
   readonly identity: string
-  /** Secret-safe headline: never an Approval subject, prompt, or command body. */
   readonly title: string
-  /** Secret-safe context line: the Delivery title, or the decision surface. */
   readonly context: string
-  /** How many underlying server entries this signal stands for. */
   readonly weight: number
   readonly revision: number
   readonly deliveryId: DeliveryId | null
@@ -68,7 +56,6 @@ function expired(instant: string, nowMillis: number): boolean {
   return !Number.isFinite(parsed) || parsed <= nowMillis
 }
 
-/** The decision still needs the user only while the Approval is pending and unexpired. */
 function approvalIsOpen(projection: ApprovalProjection, nowMillis: number): boolean {
   return projection.state === 'pending' && !expired(projection.expiresAt, nowMillis)
 }
@@ -89,11 +76,6 @@ function originForApproval(
   return origins.get(boundWorkRunId) ?? null
 }
 
-/**
- * One notification-worthy fact per pending Approval and per Delivery state that
- * needs the user.  Identities that carry a non-canonical server identifier are
- * dropped, so a notification can never link into a fabricated context.
- */
 export function attentionSignals(input: AttentionSignalInput): readonly AttentionSignal[] {
   const origins = new Map<WorkRunId, DeliveryProjection>()
   const signals: AttentionSignal[] = []
@@ -191,30 +173,21 @@ export function attentionSignalBadge(signals: readonly AttentionSignal[]): Atten
   return Object.freeze(badge)
 }
 
-/** The page title count: `(4) WinWinCode`, or the plain base when nothing needs the user. */
 export function attentionSignalsTitle(base: string, badge: AttentionSignalBadge): string {
   return badge.total === 0 ? base : `(${String(badge.total)}) ${base}`
 }
 
-/**
- * The exact still-authorized context for one signal: the task board is the
- * one inbox for every entry that needs the user, so each notification deep
- * links there with the attention-only filter on.
- */
 export function attentionSignalRouteHash(selection: ScopeRouteSelection): string {
   return scopeHash('#/home?filter=attention', selection)
 }
 
 export interface AttentionSignalGate {
-  /** Return only the signals whose identity has never been admitted before. */
   admit(signals: readonly AttentionSignal[]): readonly AttentionSignal[]
-  /** Drop one identity so a returning state can notify again. */
   forget(identity: string): void
   known(): readonly string[]
   close(): void
 }
 
-/** Remembers admitted identities only; it holds no business state and no queue. */
 export function createAttentionSignalGate(): AttentionSignalGate {
   const known = new Set<string>()
   const gate: AttentionSignalGate = {

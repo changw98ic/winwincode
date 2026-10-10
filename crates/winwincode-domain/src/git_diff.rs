@@ -1,10 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Small, shared Git-diff checks used before and after Worker candidate upload.
-
 use sha2::{Digest, Sha256};
 
-/// Why a rework diff cannot be mapped to one exact source hunk.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHunkOriginError {
     InvalidHeader,
@@ -13,15 +8,6 @@ pub enum GitHunkOriginError {
     AmbiguousSourceHunk,
 }
 
-/// Maps each replacement hunk digest to its containing source hunk digest.
-///
-/// Both inputs must be the exact per-path Git diff bytes from the retained
-/// source candidate and the proposed replacement. Whole-hunk containment is
-/// intentional: a broader Git context is rejected rather than widening scope.
-///
-/// # Errors
-/// Returns an error for malformed text hunks or a replacement hunk that is not
-/// contained by exactly one source hunk.
 pub fn rework_hunk_origins(
     previous: &[u8],
     delta: &[u8],

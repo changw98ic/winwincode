@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The `FLOW-100.5` `StrongFlow` role-to-Device `WorkerSession` routing over the
-//! real composed Server application with its production-local Delivery
-//! authority: the `workrun.start` that commits a Codex `WorkRun`'s
-//! `ExecutionJob` routes that job to the `WorkRun`'s launched Device
-//! `WorkerSession` when a durable launch anchor exists (after the
-//! FLOW-100.3 permission gate approves the acting user), while a `WorkRun`
-//! without an anchor keeps the supervised local execution path unchanged —
-//! and a gate denial routes nothing.
-
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -153,8 +142,6 @@ fn principal(user: &str) -> AuthenticatedPrincipal {
     AuthenticatedPrincipal::new(actor(user), principal_scope()).expect("principal")
 }
 
-// ---- fixture repository (the production-local Delivery authority input) ----
-
 fn initialize_repository(repository: &Path) -> String {
     std::fs::create_dir_all(repository.join("src")).expect("create repository");
     std::fs::write(
@@ -191,8 +178,6 @@ fn git(repository: &Path, arguments: &[&str]) {
         .expect("run Git");
     assert!(status.success(), "Git command failed: {arguments:?}");
 }
-
-// ---- composed application with the production-local Delivery authority -----
 
 fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
     compose_application_with_runtime(root, Some(3_600))
@@ -247,8 +232,6 @@ fn compose_application_with_clock(
     )
     .expect("compose application")
 }
-
-// ---- durable staging over the same product-state database ------------------
 
 #[allow(clippy::too_many_lines)]
 fn work_run_device_fixture(
@@ -359,7 +342,6 @@ fn work_run_device_fixture(
     (node, instance, lease_id, fencing_token, binding)
 }
 
-/// The device identities one staged `WorkRun` anchor exposes to the test.
 #[allow(clippy::struct_field_names)]
 struct AnchorLaunch {
     worker_launch_grant_id: String,
@@ -368,8 +350,6 @@ struct AnchorLaunch {
     worker_instance_id: String,
 }
 
-/// Stages the launch anchor of one Delivery `WorkRun` exactly as the Client's
-/// two-phase scheduler would after the user asked the device to run it.
 #[allow(clippy::too_many_arguments)]
 fn work_run_anchor(
     root: &Path,
@@ -416,8 +396,6 @@ fn work_run_anchor(
     }
 }
 
-/// Settles the device launch acknowledgement exactly like the client exchange
-/// does, so the anchor grant reaches its post-launch `consumed` state.
 fn settle_launch(root: &Path, anchor: &AnchorLaunch, lease_id: &str, token: u64) {
     let mut storage = SqliteStorage::open(root).expect("open staging storage");
     let settlement = winwincode_storage::LaunchAckSettlement::try_new(
@@ -517,8 +495,6 @@ fn existing_worker_authentication_survives_device_recovery_but_not_release() {
     }
 }
 
-// ---- generated command helpers ---------------------------------------------
-
 fn delivery_create_request(
     request: u64,
     delivery: u64,
@@ -610,7 +586,6 @@ fn open_storage(root: &Path) -> SqliteStorage {
     SqliteStorage::open(root).expect("open staging storage")
 }
 
-/// The one queued job of the test's repository scope.
 fn queued_job_id(storage: &mut SqliteStorage) -> ExecutionJobId {
     let jobs = storage
         .repository_scheduler()
@@ -698,9 +673,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
     let baseline = initialize_repository(&root.join("repository"));
     let application = compose_application_with_runtime(&root, runtime);
     let holder = canonical_id("usr", 1);
-    // The holder creates the Delivery and advances it once: the first Codex
-    // WorkRun's job (the requirements role) is committed with no device anchor
-    // yet.
     application
         .command(
             &principal(&holder),
@@ -735,8 +707,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         (job_id, work_run_id, record.scope.product_session_id.clone())
     };
     assert_eq!(started["result"]["activeWorkRunId"], work_run_id.0);
-    // The Client launches this role's WorkerSession for exactly this WorkRun
-    // run, and the control plane settles the launch acknowledgement.
     let (node, instance, lease_id, fencing_token, binding) =
         work_run_device_fixture(&root, 100, &holder);
     let anchor = work_run_anchor(
@@ -752,8 +722,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         work_run_id.0.as_str(),
     );
     settle_launch(&root, &anchor, &lease_id, fencing_token);
-    // The exact advance replay re-runs the routing: the anchor now exists,
-    // so the committed planner job is dispatched to the launched session.
     application
         .command(
             &principal(&holder),
@@ -763,9 +731,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         .expect("receipt-first advance replay completes the dispatch");
     let facts = {
         let mut storage = open_storage(&root);
-        // The launch material is the device session's durable ExecutionPort
-        // identity, and the WorkRun job carries the exact device facts with the
-        // WorkRun's role stamped on them.
         let bound = binding_snapshot(&mut storage, &anchor.worker_session_id)
             .expect("the device session is bound");
         assert_eq!(bound.state.as_str(), "bound");
@@ -785,7 +750,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
             Some(product_session_id.0.as_str())
         );
         assert_eq!(facts.work_run_id.as_deref(), Some(work_run_id.0.as_str()));
-        // The job itself stays queued for the device worker.
         let record = storage
             .load_execution_job_record(&job_id)
             .expect("job record")
@@ -812,8 +776,6 @@ fn assert_anchored_runtime(runtime: Option<i64>) {
         assert_eq!(record.state, ExecutionJobState::Queued);
         facts
     };
-    // The local embedded worker cannot claim the device-owned WorkRun job: the
-    // queue selection excludes it, so a local drive finds nothing.
     {
         let mut storage = open_storage(&root);
         let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 400);
@@ -869,7 +831,6 @@ fn an_unanchored_work_run_keeps_the_local_execution_path() {
         "an unanchored WorkRun job must not carry device facts"
     );
     assert!(binding_snapshot(&mut storage, &ulid_id("wsn", 105)).is_none());
-    // The local embedded worker claims the WorkRun job exactly as before.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     assert_eq!(
         claim_locally(&mut storage, 701, &worker_id, &worker_instance_id),
@@ -888,8 +849,6 @@ fn a_gate_denial_dispatches_nothing() {
     let application = compose_application(&root);
     let holder = canonical_id("usr", 1);
     let member = canonical_id("usr", 2);
-    // The member drives their own Delivery: the advance that commits the
-    // first Codex WorkRun's job carries no device anchor yet.
     application
         .command(
             &principal(&member),
@@ -924,7 +883,6 @@ fn a_gate_denial_dispatches_nothing() {
             record.scope.product_session_id.clone(),
         )
     };
-    // The WorkRun's launch anchor belongs to the holder's occupied device.
     let (node, instance, lease_id, fencing_token, binding) =
         work_run_device_fixture(&root, 800, &holder);
     let anchor = work_run_anchor(
@@ -939,9 +897,6 @@ fn a_gate_denial_dispatches_nothing() {
         product_session_id.0.as_str(),
         work_run_id.0.as_str(),
     );
-    // The member's exact replay commits as a receipt-first replay, but the
-    // FLOW-100.3 gate denies the device dispatch with the central gate wire
-    // code: nothing is bound and no device facts are attached.
     let denial: ApiError = application
         .command(&principal(&member), CommandFamily::Delivery, advance)
         .expect_err("a non-holder must not dispatch to the holder's device");

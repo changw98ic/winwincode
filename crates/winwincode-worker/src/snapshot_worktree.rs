@@ -1,14 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Freezes one candidate commit into a read-only `git worktree`.
-//!
-//! A verifier must run against the snapshot, never the live workspace, so
-//! later writes by any other worker cannot change what was tested.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Failure while freezing or releasing one snapshot worktree.
 #[derive(Debug)]
 pub struct SnapshotWorktreeError {
     code: SnapshotWorktreeErrorCode,
@@ -30,7 +22,6 @@ impl SnapshotWorktreeError {
         }
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> SnapshotWorktreeErrorCode {
         self.code
@@ -45,23 +36,13 @@ impl std::fmt::Display for SnapshotWorktreeError {
 
 impl std::error::Error for SnapshotWorktreeError {}
 
-/// A read-only checkout of one exact candidate commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrozenWorktree {
-    /// Absolute path of the read-only checkout.
     pub path: PathBuf,
-    /// Exact commit the checkout resolves to.
     pub commit_id: String,
-    /// Git tree id of that commit.
     pub tree_id: String,
 }
 
-/// Checks `candidate_commit` out into `dest` as a read-only worktree.
-///
-/// # Errors
-///
-/// Refuses a missing repository, a commit that is not reachable from `repo`,
-/// an existing `dest`, or any `git worktree` failure.
 pub fn freeze_worktree(
     repo: &Path,
     candidate_commit: &str,
@@ -114,11 +95,6 @@ pub fn freeze_worktree(
     })
 }
 
-/// Releases one frozen worktree and removes its directory.
-///
-/// # Errors
-///
-/// Returns the underlying `git worktree remove` failure.
 pub fn drop_worktree(repo: &Path, dest: &Path) -> Result<(), SnapshotWorktreeError> {
     git(
         repo,

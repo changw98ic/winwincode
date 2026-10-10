@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -41,17 +39,11 @@ export type AttentionNotificationStatus =
   | 'closed'
 
 export interface AttentionDesktopNotificationContent {
-  /** The notification identity: one operating-system tag per event identity. */
   readonly tag: string
   readonly title: string
   readonly body: string
 }
 
-/**
- * The single seam to the browser notification permission and surface.  The
- * browser only grants it after an explicit user action, and the Client only
- * hands it secret-safe content.
- */
 export interface AttentionDesktopNotifications {
   readonly supported: boolean
   permission(): 'default' | 'granted' | 'denied'
@@ -71,7 +63,6 @@ export interface AttentionNotificationMonitorState {
   readonly status: AttentionNotificationStatus
   readonly signals: readonly AttentionSignal[]
   readonly badge: AttentionSignalBadge
-  /** The exact document title to present, including the count when one exists. */
   readonly titleText: string
   readonly desktop: AttentionNotificationDesktopState
 }
@@ -81,7 +72,6 @@ export interface AttentionNotificationMonitor {
   subscribe(listener: (state: AttentionNotificationMonitorState) => void): () => void
   start(): Promise<void>
   refresh(): Promise<void>
-  /** Re-apply the navigation badge after the shell rebuilt its navigation labels. */
   applyBadge(): void
   setDesktopEnabled(enabled: boolean): Promise<void>
   close(): void
@@ -93,7 +83,6 @@ export interface AttentionNotificationControl {
   setDesktopEnabled(enabled: boolean): Promise<void>
 }
 
-/** Browser adapter for the one desktop notification seam. */
 export function browserAttentionDesktopNotifications(
   browser: Window,
 ): AttentionDesktopNotifications {
@@ -130,7 +119,6 @@ export function browserAttentionDesktopNotifications(
         ...(content.body === undefined ? {} : { body: content.body }),
         ...(content.tag === undefined ? {} : { tag: content.tag }),
       })
-      // One tag per event identity keeps at most one notification per event.
       if (content.tag !== undefined) shown.set(content.tag, instance)
       instance.onclick = () => {
         instance.close()
@@ -153,15 +141,11 @@ export interface AttentionNotificationMonitorOptions {
   readonly scope: RepositoryScope
   readonly nextRequestId: () => RequestId
   readonly nowMillis?: () => number
-  /** Presentation host that carries the page title count. */
   readonly document: Document
-  /** The navigation entry that carries the badge. */
   readonly badgeTarget: HTMLElement
-  /** Base page title without a count prefix; defaults to the current title. */
   readonly titleBase?: string
   readonly notifications?: AttentionDesktopNotifications | null
   readonly onOpenTarget?: (hash: string) => void
-  /** Bounded revalidation clock; the monitor owns no event subscription. */
   readonly scheduleTick?: (handler: () => void, millis: number) => () => void
   readonly tickMillis?: number
 }
@@ -211,7 +195,6 @@ function itemsOf<T>(response: { readonly result: unknown }, kind: string): reado
   return items as readonly T[]
 }
 
-/** Strip an already rendered count prefix so the base title never accumulates. */
 function baseTitleOf(document: Document, explicit: string | undefined): string {
   if (explicit !== undefined) return explicit
   return document.title.replace(TITLE_BADGE_PATTERN, '')
@@ -228,13 +211,6 @@ function browserTick(browser: Window | undefined): (
   }
 }
 
-/**
- * UI-506 shell monitor.  It keeps the navigation badge, the page title count,
- * and the optional desktop notifications aligned with the authoritative
- * projections, notifies one event identity exactly once, and clears resolved or
- * expired entries on the next bounded tick.  It opens no event subscription, so
- * the mounted feature routes keep their single event stream.
- */
 export function createAttentionNotificationMonitor(
   options: AttentionNotificationMonitorOptions,
 ): AttentionNotificationMonitor {
@@ -288,8 +264,6 @@ export function createAttentionNotificationMonitor(
     options.document.title = currentState.titleText
     const target = options.badgeTarget
     const total = currentState.badge.total
-    // The shell rewrites the navigation label on its own, so only the badge
-    // node is ever touched here and the entry keeps its own name.
     if (badgeNode !== null && badgeNode.parentNode !== target) {
       badgeNode.remove()
       badgeNode = null
@@ -392,7 +366,6 @@ export function createAttentionNotificationMonitor(
         throw clientFailure('交付列表超过了分页上限。')
       }
     } catch {
-      // A failed revalidation never presents stale counts and never notifies.
       gate.close()
       shownTags.clear()
       patch({
@@ -462,8 +435,6 @@ export function createAttentionNotificationMonitor(
           return
         }
       }
-      // Consent never replays entries that already existed: only events that
-      // arrive after the user opted in may notify.
       gate.admit(currentState.signals)
       desktopEnabled = true
       patch({ desktop: desktopState({ enabled: true, blocked: false }) })

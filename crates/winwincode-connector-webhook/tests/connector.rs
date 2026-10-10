@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::VecDeque;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};

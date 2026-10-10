@@ -1,19 +1,5 @@
 #!/usr/bin/env node
 
-// Client source-boundary lint (original plan §8.1, §13, §17.3,
-// §20.7, task 6). Absolute local paths must never enter the
-// Client public surface: schemas, generated contracts, contract docs,
-// public fixtures, and the ADR that freezes access and occupancy. These
-// files are projected to the Server verbatim, so a committed absolute path
-// leaks machine-local structure (plan gate: "no absolute path in public
-// projections").
-//
-// The scope is deliberately narrow. Client-local code may resolve absolute
-// paths freely (§13: RepositoryBinding stays local); the ban applies only
-// to the public contract surface listed in scanTargets below. Targets that
-// do not exist yet (parallel Phase 0 lanes) are skipped so the gate stays
-// green until those files land.
-
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -22,8 +8,6 @@ export const NO_ABSOLUTE_PATHS_SCHEMA_VERSION = 1
 
 const root = resolve(import.meta.dirname, '..')
 
-// Public Client surface. `match` filters directory targets by
-// entry name; null means the target path itself (file or directory tree).
 const scanTargets = Object.freeze([
   {
     path: 'schema/winwincode/v1',
@@ -42,10 +26,6 @@ const scanTargets = Object.freeze([
   },
 ])
 
-// Lines containing one of these literals are exempt. The allowlist exists
-// for legitimate path-shaped text that is not a filesystem path (for
-// example HTTP route paths in contract prose). Every entry must carry a
-// reason so the exemption stays auditable.
 const defaultAllowedLiterals = Object.freeze([
   {
     literal: '/internal/v1/client/exchange',
@@ -63,16 +43,10 @@ const forbiddenRules = Object.freeze([
   { id: 'macos-volume-path', pattern: /\/Volumes\//gu },
   {
     id: 'windows-drive-path',
-    // `C:\` and any backslash/forward drive prefix, not preceded by a word
-    // character so URL schemes like `https:` do not match.
     pattern: /(?<![A-Za-z0-9])[A-Za-z]:[/\\]/gu,
   },
   {
     id: 'posix-absolute-path',
-    // Long path-shaped strings with at least two segments. The lookbehind
-    // skips URL schemes (`https:`), host-qualified URLs, `../` relative
-    // links, `~/` home shorthand, and JSON pointers (`#/$defs/...`); none
-    // of those are filesystem paths.
     pattern: /(?<![\w~#.:/])\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+/gu,
     minimumLength: 10,
   },
@@ -108,9 +82,6 @@ function collectTargetFiles(scanRoot, target) {
 }
 
 export function collectScanFiles(scanRoot = root) {
-  // Negative fixtures under an `invalid/` segment deliberately contain
-  // absolute paths to prove the golden contract rejects them; they are sample
-  // data, not part of the valid public surface.
   const files = scanTargets
     .flatMap(target => collectTargetFiles(scanRoot, target))
     .filter(path => !path.includes('/invalid/'))

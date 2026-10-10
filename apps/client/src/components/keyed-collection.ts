@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted } from '@winwincode/browser-ui'
 
 export type KeyedCollectionKey = string | number
@@ -27,7 +25,6 @@ export interface KeyedCollectionView<
   close(): void
 }
 
-/** Maintain one bounded DOM node per stable business identity. */
 export function mountKeyedCollection<
   Item,
   Key extends KeyedCollectionKey,

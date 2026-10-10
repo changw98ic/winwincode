@@ -375,8 +375,6 @@ test('candidate-ready lagging projection waits for the Controller without local 
           },
         }
       }
-      // The lagging WorkRun projection eventually catches up to done without
-      // the runner inventing workrun.start / submit_verdict commands.
       if (instant >= 3) delivered = true
       return {
         result: {
@@ -458,7 +456,6 @@ test('API production vertical is a direct generated HTTP runner', async () => {
     'workitems.create',
     'workrun.start',
     'delivery.resolve_attention',
-    // Controller owns delivery.submit_verdict after verifier terminal.
     'delivery.get',
     'runtime.projection.get',
     'workrun.get',
@@ -815,7 +812,6 @@ test('source seal rejects changes in every locally patched Cargo dependency', t 
     assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
     writeFileSync(path, 'pub const VERSION: u32 = 1;\n')
     verifyApiProductionSourceSeal(options)
-    // Equal bytes with a changed tracked file mode still invalidate the sealed input.
     chmodSync(path, 0o755)
     assert.equal(projectSourceDigest(sourceRoot), originalDigest)
     assert.throws(() => verifyApiProductionSourceSeal(options), /tracked diff is stale/u)

@@ -11,12 +11,6 @@ use crate::{
 };
 
 pub trait RepositoryContextPort {
-    /// Detects repository facts from the exact commit named by `query`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the baseline is not an exact reachable commit or
-    /// a required baseline configuration file cannot be read.
     fn inspect(
         &self,
         query: &RepositoryContextQuery,
@@ -24,24 +18,12 @@ pub trait RepositoryContextPort {
 }
 
 pub trait LocalCodeIndexPort: Send + Sync {
-    /// Reads the configured index status without changing repository files.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the status provider cannot run or returns an
-    /// invalid response.
     fn status(
         &self,
         repository_root: &Path,
         baseline_sha: &str,
     ) -> Result<LocalCodeIndexProbe, RepositoryContextError>;
 
-    /// Refreshes only the external index cache for the requested baseline.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the configured index provider cannot refresh its
-    /// cache. Implementations must not modify the target repository.
     fn refresh(
         &self,
         repository_root: &Path,

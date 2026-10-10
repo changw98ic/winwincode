@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Representation normalization for typed model results. Evidence and authority
-//! validation remain with the caller; this module never repairs JSON values.
-
 use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
 
@@ -19,7 +14,6 @@ pub(crate) fn decode<T: DeserializeOwned>(raw: &str) -> Result<T, ()> {
         MAX_RESULT_BYTES,
     )
     .map_err(|_| ())?;
-    // Direct typed decoding retains duplicate and unknown field rejection.
     let result = serde_json::from_str(normalized.json).map_err(|_| ())?;
     if normalized.json != raw {
         eprintln!(

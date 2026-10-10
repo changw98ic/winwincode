@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type {
   ControlPlaneCandidateApplyReceipt,
   ControlPlaneCandidateApplyResult,
@@ -23,10 +21,8 @@ import {
 } from './clients-view-model.js'
 import type { RepositoriesViewModel } from './repositories-view-model.js'
 
-/** The one presentation tone of a state or result badge (ADR-0029). */
 type CandidateTone = 'info' | 'success' | 'warning' | 'danger' | 'neutral'
 
-/** The displayed candidate states the run page's Candidate row renders. */
 type CandidateDisplayState =
   | 'produced'
   | 'retained'
@@ -36,11 +32,6 @@ type CandidateDisplayState =
   | 'discarded'
   | 'failed'
 
-/**
- * Derive the displayed state from the Server projection alone: a live merge
- * conflict rises above the retained states, everything else keeps its honest
- * lifecycle name.
- */
 function candidateDisplayState(
   candidate: ControlPlaneRunCandidateProjection,
 ): CandidateDisplayState {
@@ -54,7 +45,6 @@ function candidateDisplayState(
   return candidate.state
 }
 
-/** The one copy per displayed state; every badge also carries the tone. */
 function candidateDisplayStateText(state: CandidateDisplayState): string {
   switch (state) {
     case 'produced': return '候选结果已生成'
@@ -79,7 +69,6 @@ function candidateDisplayStateTone(state: CandidateDisplayState): CandidateTone 
   }
 }
 
-/** The one copy per terminal apply result. */
 function candidateResultText(result: ControlPlaneCandidateApplyResult): string {
   switch (result) {
     case 'retained': return '仍保留在本地。'
@@ -110,32 +99,27 @@ function candidateResultTone(result: ControlPlaneCandidateApplyResult): Candidat
   }
 }
 
-/** The short commit form the Apply row shows; the full SHA stays in the title. */
 function shortCommitText(commit: string): string {
   return commit.slice(0, 7)
 }
 
-/** The Client row of the §16.7 run-page identity zone. */
 export interface TaskRunClientFacts {
   readonly displayName: string
   readonly stateText: string
   readonly tone: 'info' | 'success' | 'warning' | 'danger' | 'neutral'
 }
 
-/** The Occupancy row of the §16.7 run-page identity zone. */
 export interface TaskRunOccupancyFacts {
   readonly stateText: string
   readonly tone: 'info' | 'success' | 'warning' | 'danger' | 'neutral'
   readonly capacityText: string
 }
 
-/** The Repository row of the §16.7 run-page identity zone. */
 export interface TaskRunRepositoryFacts {
   readonly displayName: string
   readonly defaultBranch: string
 }
 
-/** One WorkerSession row of the §16.7 run-page identity zone. */
 export interface TaskRunWorkerSessionFacts {
   readonly workerSessionId: string
   readonly state: ControlPlaneRunWorkerSessionState
@@ -144,7 +128,6 @@ export interface TaskRunWorkerSessionFacts {
   readonly startedAt: string | null
 }
 
-/** The latest-Candidate row of the §16.7 run-page identity zone. */
 export interface TaskRunCandidateFacts {
   readonly candidateRef: string
   readonly stateText: string
@@ -152,7 +135,6 @@ export interface TaskRunCandidateFacts {
   readonly branchName: string | null
 }
 
-/** The latest-Apply row, derived from the candidate's last ledger receipt. */
 export interface TaskRunApplyFacts {
   readonly result: ControlPlaneCandidateApplyResult
   readonly resultText: string
@@ -163,7 +145,6 @@ export interface TaskRunApplyFacts {
   readonly recordedAt: string
 }
 
-/** The WorkContract row bound to this WorkItem. */
 export interface TaskRunContractFacts {
   readonly contractId: string
   readonly objective: string
@@ -171,7 +152,6 @@ export interface TaskRunContractFacts {
   readonly authorityText: string
 }
 
-/** One acceptance criterion selected by this WorkItem. */
 export interface TaskRunCriterionFacts {
   readonly id: string
   readonly description: string
@@ -179,14 +159,12 @@ export interface TaskRunCriterionFacts {
   readonly verificationMethod: string | null
 }
 
-/** One Evidence record bound to this exact WorkRun. */
 export interface TaskRunEvidenceItemFacts {
   readonly evidenceId: string
   readonly typeText: string
   readonly sourceRef: string
 }
 
-/** The identity rows projected from the canonical WorkRun and Delivery reads. */
 export interface TaskRunIdentityFacts {
   readonly workerSessions: readonly TaskRunWorkerSessionFacts[]
   readonly contract: TaskRunContractFacts | null
@@ -199,19 +177,11 @@ export interface TaskRunIdentityFacts {
   readonly evidence: readonly TaskRunEvidenceItemFacts[]
   readonly candidate: TaskRunCandidateFacts | null
   readonly apply: TaskRunApplyFacts | null
-  /** Preview route anchor derived only after the canonical projection has a candidate. */
   readonly previewHref: string | null
 }
 
 export type TaskRunZoneStatus = 'loading' | 'ready' | 'unavailable'
 
-/**
- * One §16.7 run-page snapshot.  Client, Occupancy, and Repository facts are
- * projected live from the shell-owned models; the WorkerSession and
- * Candidate/Apply rows come from the run identity port (fake-first until the
- * FLOW routing lands).  A row that has no fact yet stays `null` so the page
- * can name the gap instead of inventing state.
- */
 export interface TaskRunState {
   readonly status: 'loading' | 'ready' | 'partial'
   readonly anchor: ControlPlaneTaskAnchor
@@ -225,7 +195,6 @@ export interface TaskRunState {
 
 export type TaskRunListener = (state: TaskRunState) => void
 
-/** The one copy per WorkerSession state; every badge also carries the tone. */
 export function runWorkerSessionStateText(state: ControlPlaneRunWorkerSessionState): string {
   switch (state) {
     case 'reserving': return '正在预留容量'
@@ -237,7 +206,6 @@ export function runWorkerSessionStateText(state: ControlPlaneRunWorkerSessionSta
   }
 }
 
-/** Non-color tone of a WorkerSession state badge (ADR-0029). */
 export function runWorkerSessionStateTone(
   state: ControlPlaneRunWorkerSessionState,
 ): CandidateTone {
@@ -326,7 +294,6 @@ function applyFacts(
   })
 }
 
-// 设计稿 05:身份折叠行来自 WorkRun 运行投影(WorkRunState → 会话状态映射)。
 const WORK_RUN_STATE_TO_SESSION_STATE = Object.freeze({
   queued: 'reserving',
   leased: 'launching',
@@ -394,20 +361,12 @@ function identityFacts(
   })
 }
 
-/** The short commit form the Apply row shows; the full SHA stays in the title. */
 export function taskRunCommitText(commit: string | null): string | null {
   return commit === null ? null : shortCommitText(commit)
 }
 
-/**
- * Own the §16.7 run-page projection: the started-task anchor from the route,
- * the live Client/Occupancy/Repository facts from the shell-owned models, and
- * the WorkerSession/Candidate/Apply rows from the run identity port.  The
- * model creates no task state of its own.
- */
 export function createTaskRunViewModel(options: {
   readonly anchor: ControlPlaneTaskAnchor
-  /** Optional task description re-read from the task port (fake-first). */
   readonly taskDescription?: string | null
   readonly clients: ClientsViewModel
   readonly repositories: RepositoriesViewModel
@@ -452,9 +411,6 @@ export function createTaskRunViewModel(options: {
 
   function project(): TaskRunState {
     const live = liveFacts()
-    // Every live row and the identity zone report independently; the snapshot
-    // is ready only when both sides have served facts, partial when the
-    // identity read failed, and loading while the first facts are in flight.
     const status: TaskRunState['status'] = live.client === null && identityStatus === 'loading'
       ? 'loading'
       : identityStatus === 'unavailable'
@@ -508,8 +464,6 @@ export function createTaskRunViewModel(options: {
       identityStatus = 'ready'
     } catch {
       if (closed || epoch !== identityEpoch) return
-      // An unavailable identity read keeps the live rows and names the gap;
-      // it never invents WorkerSession or Candidate state.
       identity = null
       identityStatus = 'unavailable'
     }
@@ -557,12 +511,9 @@ export function createTaskRunViewModel(options: {
 }
 
 export interface TaskRunViewModel {
-  /** The current run snapshot; every listener receives it on subscribe. */
   readonly state: TaskRunState
   subscribe(listener: TaskRunListener): () => void
-  /** First read: live facts plus the identity zone. */
   start(): Promise<void>
-  /** Re-read every source; a failed read keeps the shown rows. */
   refresh(): Promise<void>
   close(): void
 }

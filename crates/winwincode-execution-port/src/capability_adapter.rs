@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Worker-side MCP and migrated plugin capability boundary.
-//!
-//! Discovery is declarative: it records the MCP target exposed by embedded
-//! Codex Core, its version, health, and provenance. This module does not load a
-//! plugin or implement an MCP runtime. Every authorized invocation is forwarded
-//! to the canonical [`WorkerActionGateway`], so the existing deterministic Gate,
-//! trace recorder, and Codex Core executor remain the only side-effect path.
-
 use std::fmt;
 
 use serde::Serialize;
@@ -24,67 +14,43 @@ use crate::generated::{
     ActionEnforcementReceiptMessage, WorkerCapabilityFeature, WorkerCapabilitySet,
 };
 
-/// Version of the canonical Worker capability discovery contract.
 pub const CAPABILITY_ADAPTER_VERSION: &str = "winwincode-worker-capability/v1";
 
-/// Declarative origin of a discovered capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityOrigin {
-    /// MCP tool discovered directly from embedded Codex Core.
     CodexCoreMcp,
-    /// A retained plugin feature mapped to an embedded Codex Core MCP tool.
-    ///
-    /// This is manifest provenance only; no plugin runtime is loaded here.
     MappedPluginManifest,
-    /// A discovered capability whose side effects cannot be fully governed.
     Unmanaged,
 }
 
-/// Current health reported for one discovered capability version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityHealth {
-    /// Capability is ready for invocation.
     Healthy,
-    /// Capability is usable, but the caller must receive a warning.
     Degraded,
-    /// Capability must fail closed before reaching Codex Core.
     Unavailable,
 }
 
-/// Policy applied to a capability explicitly marked unmanaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnmanagedCapabilityPolicy {
-    /// Run through the normal Action Gateway and return a visible warning.
     Warn,
-    /// Reject before any Gate or tool side effect.
     Deny,
 }
 
-/// Stable catalog validation category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityCatalogErrorCode {
-    /// Worker Registry capability digest is malformed.
     InvalidRegistryCapabilityDigest,
-    /// The Worker Registry profile does not advertise MCP support.
     McpFeatureNotRegistered,
-    /// Capability version is blank or not a portable identifier.
     InvalidCapabilityVersion,
-    /// Two entries claim the same canonical MCP target.
     DuplicateCapability,
-    /// Deterministic discovery fingerprinting failed.
     CatalogDigestFailure,
-    /// Requested capability is absent from the discovered catalog.
     UnknownCapability,
 }
 
-/// Secret-free catalog construction failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityCatalogError {
-    /// Stable machine-readable category.
     pub code: CapabilityCatalogErrorCode,
-    /// Secret-free explanation.
     pub reason: String,
 }
 
@@ -96,7 +62,6 @@ impl fmt::Display for CapabilityCatalogError {
 
 impl std::error::Error for CapabilityCatalogError {}
 
-/// One versioned MCP target advertised by the Worker.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CapabilityDescriptor {
     id: String,
@@ -106,10 +71,6 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
-    /// Builds a descriptor for one server resource method exposed by Core.
-    ///
-    /// # Errors
-    /// Rejects invalid server identifiers or capability versions.
     pub fn mcp_resource(
         server: &str,
         operation: crate::mcp_resource::McpResourceOperation,
@@ -128,12 +89,6 @@ impl CapabilityDescriptor {
         })
     }
 
-    /// Builds a descriptor from secret-free MCP server and tool identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Returns a catalog validation error for an invalid capability version, or
-    /// the normalizer's invalid-identifier error for an invalid MCP target.
     pub fn mcp(
         server: &str,
         tool: &str,
@@ -152,37 +107,30 @@ impl CapabilityDescriptor {
         })
     }
 
-    /// Canonical `mcp://server/tool` target used by Action Normalization.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// Exact discovered capability version.
     #[must_use]
     pub fn version(&self) -> &str {
         &self.version
     }
 
-    /// Current discovered health.
     #[must_use]
     pub const fn health(&self) -> CapabilityHealth {
         self.health
     }
 
-    /// Declarative discovery provenance.
     #[must_use]
     pub const fn origin(&self) -> CapabilityOrigin {
         self.origin
     }
 }
 
-/// Descriptor construction failure without echoing input values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityDescriptorError {
-    /// MCP server or tool name is invalid.
     InvalidMcpTarget,
-    /// Version is invalid.
     Catalog(CapabilityCatalogError),
 }
 
@@ -197,7 +145,6 @@ impl fmt::Display for CapabilityDescriptorError {
 
 impl std::error::Error for CapabilityDescriptorError {}
 
-/// Deterministic Worker discovery snapshot bound to its Registry capability set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCapabilityCatalog {
     registry_capability_digest: Sha256Digest,
@@ -206,12 +153,6 @@ pub struct WorkerCapabilityCatalog {
 }
 
 impl WorkerCapabilityCatalog {
-    /// Validates, sorts, and fingerprints one Worker capability discovery result.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fail-closed catalog error for a malformed Registry digest,
-    /// missing MCP feature, invalid version, or duplicate canonical MCP target.
     pub fn discover(
         registered: &WorkerCapabilitySet,
         mut capabilities: Vec<CapabilityDescriptor>,
@@ -259,36 +200,26 @@ impl WorkerCapabilityCatalog {
         })
     }
 
-    /// Exact adapter contract version used for this snapshot.
     #[must_use]
     pub const fn adapter_version(&self) -> &'static str {
         CAPABILITY_ADAPTER_VERSION
     }
 
-    /// Worker Registry capability digest this discovery snapshot extends.
     #[must_use]
     pub const fn registry_capability_digest(&self) -> &Sha256Digest {
         &self.registry_capability_digest
     }
 
-    /// Deterministic digest of the Registry profile and sorted descriptors.
     #[must_use]
     pub const fn catalog_digest(&self) -> &Sha256Digest {
         &self.catalog_digest
     }
 
-    /// Sorted discovered capabilities. No endpoint, argument, credential, or
-    /// plugin configuration is present in this observable snapshot.
     #[must_use]
     pub fn capabilities(&self) -> &[CapabilityDescriptor] {
         &self.capabilities
     }
 
-    /// Issues an exact session-and-envelope grant for one discovered version.
-    ///
-    /// # Errors
-    ///
-    /// Returns `UnknownCapability` when `capability_id` is absent.
     pub fn authorize(
         &self,
         capability_id: &str,
@@ -315,7 +246,6 @@ impl WorkerCapabilityCatalog {
     }
 }
 
-/// Exact authority for one discovered capability version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityGrant {
     capability_id: String,
@@ -326,104 +256,71 @@ pub struct CapabilityGrant {
 }
 
 impl CapabilityGrant {
-    /// Canonical MCP capability target authorized by this grant.
     #[must_use]
     pub fn capability_id(&self) -> &str {
         &self.capability_id
     }
 
-    /// Exact discovered version authorized by this grant.
     #[must_use]
     pub fn capability_version(&self) -> &str {
         &self.capability_version
     }
 
-    /// `WorkerSession` to which this grant is confined.
     #[must_use]
     pub const fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
     }
 
-    /// Execution Envelope to which this grant is confined.
     #[must_use]
     pub const fn envelope(&self) -> &ExecutionEnvelopeToken {
         &self.envelope
     }
 }
 
-/// Explicit versioned capability claim accompanying one MCP action.
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityInvocationRequest<'action> {
-    /// Canonical `mcp://server/tool` identifier claimed by the caller.
     pub capability_id: &'action str,
-    /// Exact descriptor version claimed by the caller.
     pub capability_version: &'action str,
-    /// Canonical Action Gateway request containing the actual MCP request.
     pub action: &'action WorkerActionRequest,
-    /// Control Plane-issued permit for this exact action invocation.
     pub enforcement_receipt: &'action ActionEnforcementReceiptMessage,
 }
 
-/// Non-secret warning returned with an invocation that policy allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityWarning {
-    /// The capability is explicitly unmanaged.
     UnmanagedCapability,
-    /// Discovery reported degraded health.
     DegradedCapability,
 }
 
-/// Successful capability invocation routed through the Action Gateway.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityInvocation<Output> {
-    /// Warning determined before invoking the normal Action Gateway.
     pub warnings: Vec<CapabilityWarning>,
-    /// Existing gateway result proving Gate and Codex execution were used.
     pub executed: ExecutedAction<Output>,
 }
 
-/// Stable adapter rejection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityRejectionCode {
-    /// The Action Gateway request is not an MCP request.
     RequestFamilyMismatch,
-    /// Caller claim does not match the actual normalized MCP target.
     CapabilityTargetMismatch,
-    /// Capability is absent from the current discovery snapshot.
     UnknownCapability,
-    /// Caller claim is for a different discovered version.
     CapabilityVersionMismatch,
-    /// Capability is currently unavailable.
     CapabilityUnavailable,
-    /// Current policy rejects explicitly unmanaged capabilities.
     UnmanagedCapabilityDenied,
-    /// No grant exists for this capability.
     CapabilityNotAuthorized,
-    /// Grant is bound to another `WorkerSession`.
     StaleWorkerSession,
-    /// Grant is bound to another Execution Envelope.
     StaleExecutionEnvelope,
-    /// Grant is bound to a replaced discovery snapshot or capability version.
     StaleCapabilityCatalog,
 }
 
-/// Capability adapter failure. Gateway errors retain their original typed cause.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapabilityAdapterError<RecorderError, ExecutorError> {
-    /// Stable secret-free capability rejection before Gate execution.
     Rejected {
-        /// Machine-readable rejection category.
         code: CapabilityRejectionCode,
-        /// Secret-free explanation.
         reason: String,
     },
-    /// The actual MCP target itself is invalid.
     InvalidMcpTarget,
-    /// Request reached the canonical Action Gateway and failed there.
     Gateway(Box<ActionGatewayError<RecorderError, ExecutorError>>),
 }
 
-/// Result returned by the Worker Capability Adapter invocation point.
 pub type CapabilityAdapterResult<Output, RecorderError, ExecutorError> =
     Result<CapabilityInvocation<Output>, CapabilityAdapterError<RecorderError, ExecutorError>>;
 
@@ -449,7 +346,6 @@ where
 {
 }
 
-/// Declarative capability authority layered over the single Action Gateway.
 pub struct WorkerCapabilityAdapter<Policy, Gate, Recorder, Executor> {
     catalog: WorkerCapabilityCatalog,
     grants: Vec<CapabilityGrant>,
@@ -463,7 +359,6 @@ where
     Recorder: PreActionDecisionRecorder<Policy>,
     Executor: CodexToolExecutor,
 {
-    /// Creates an adapter around the existing canonical Action Gateway.
     #[must_use]
     pub fn new(
         catalog: WorkerCapabilityCatalog,
@@ -479,30 +374,19 @@ where
         }
     }
 
-    /// Replaces discovery atomically. Existing grants become stale because they
-    /// retain the old catalog digest and must be explicitly re-authorized.
     pub fn replace_catalog(&mut self, catalog: WorkerCapabilityCatalog) {
         self.catalog = catalog;
     }
 
-    /// Replaces the complete current capability authorization set.
     pub fn replace_grants(&mut self, grants: Vec<CapabilityGrant>) {
         self.grants = grants;
     }
 
-    /// Returns the current explicit discovery snapshot.
     #[must_use]
     pub const fn catalog(&self) -> &WorkerCapabilityCatalog {
         &self.catalog
     }
 
-    /// Validates discovery, version, health, and session-scoped authorization,
-    /// then invokes the existing Action Gateway.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fail-closed capability rejection before Gate execution, or the
-    /// original typed Action Gateway failure after routing the request there.
     pub fn invoke(
         &mut self,
         now: &Instant,

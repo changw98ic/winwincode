@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Central, secret-safe Provider request routing.
-//!
-//! The Gateway validates the Worker envelope, resolves the configured
-//! [`ModelRoute`], selects one exact Provider adapter, and settles terminal
-//! outcomes once. Secret bytes exist only for the duration of the adapter
-//! call. The Gateway owns no Codex conversation state and emits no durable
-//! events; streaming conversion belongs to the `ModelPort` layer.
-
 use winwincode_provider::{
     ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
     ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGatewayErrorKind,
@@ -45,7 +35,6 @@ use crate::{
 const MAX_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MODEL_CANCELLATION_MESSAGE: &str = "model exchange cancelled by Worker";
 
-/// Bounded Gateway error which never retains Provider diagnostics or secrets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayError {
     kind: ProviderGatewayErrorKind,
@@ -97,13 +86,11 @@ impl ProviderGatewayError {
         )
     }
 
-    /// Returns bounded transport facts without upstream text or credentials.
     #[must_use]
     pub const fn network_failure(&self) -> Option<winwincode_network::NetworkFailure> {
         self.network
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn kind(&self) -> ProviderGatewayErrorKind {
         self.kind
@@ -144,14 +131,12 @@ impl From<StorageError> for ProviderGatewayError {
     }
 }
 
-/// Trusted routing target returned after Worker identity and lease validation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderGatewayIdentity {
     target: ModelSettingsTarget,
 }
 
 impl ProviderGatewayIdentity {
-    /// Constructs the only Gateway target accepted for a model-open envelope.
     #[must_use]
     pub const fn product_session(
         repository_scope: winwincode_domain::RepositoryScope,
@@ -165,21 +150,18 @@ impl ProviderGatewayIdentity {
         }
     }
 
-    /// Returns the trusted target used for settings resolution.
     #[must_use]
     pub const fn target(&self) -> &ModelSettingsTarget {
         &self.target
     }
 }
 
-/// Stable identity validation failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderGatewayIdentityErrorKind {
     Denied,
     Unavailable,
 }
 
-/// Secret-free identity port failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayIdentityError {
     kind: ProviderGatewayIdentityErrorKind,
@@ -217,20 +199,13 @@ impl fmt::Display for ProviderGatewayIdentityError {
 
 impl std::error::Error for ProviderGatewayIdentityError {}
 
-/// Validates the authoritative Worker session, lease, and fencing identity.
 pub trait ProviderGatewayIdentityPort: Send + Sync {
-    /// Returns a trusted settings target for one exact open envelope.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable denial or dependency-unavailable categories.
     fn authorize(
         &self,
         message: &ModelOpenMessage,
     ) -> Result<ProviderGatewayIdentity, ProviderGatewayIdentityError>;
 }
 
-/// Ordered durable checkpoint around each terminal external side effect.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProviderGatewayTerminalProgressStage {
     Prepared,
@@ -244,7 +219,6 @@ pub enum ProviderGatewayTerminalProgressStage {
     SettlementSettled,
 }
 
-/// Rehydratable secret-free terminal saga checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayTerminalProgress {
     pub stage: ProviderGatewayTerminalProgressStage,
@@ -252,23 +226,12 @@ pub struct ProviderGatewayTerminalProgress {
     pub terminal: Option<ProviderGatewayTerminalReceipt>,
 }
 
-/// Durable terminal progress authority used by the production runtime.
 pub trait ProviderGatewayTerminalProgressPort: Send + Sync {
-    /// Loads the current checkpoint for an exact exchange.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable error for corrupt or unavailable durable state.
     fn load(
         &self,
         model_exchange_id: &ModelExchangeId,
     ) -> Result<Option<ProviderGatewayTerminalProgress>, ProviderGatewayError>;
 
-    /// Records one checkpoint before or after an external side effect.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed commands, invalid ordering, or unavailable storage.
     fn record(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -280,14 +243,12 @@ pub trait ProviderGatewayTerminalProgressPort: Send + Sync {
     ) -> Result<(), ProviderGatewayError>;
 }
 
-/// Idempotent result of one Provider transport control transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderStreamControlReceipt {
     pub action: ProviderStreamControlAction,
     pub replayed: bool,
 }
 
-/// Safe terminal facts sent to the owner of billing or pool settlement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderGatewaySettlement {
     pub model_exchange_id: ModelExchangeId,
@@ -356,7 +317,6 @@ impl Serialize for SerializableAttemptCharge<'_> {
     }
 }
 
-/// Stable settlement dependency error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderGatewaySettlementError;
 
@@ -368,20 +328,13 @@ impl fmt::Display for ProviderGatewaySettlementError {
 
 impl std::error::Error for ProviderGatewaySettlementError {}
 
-/// Settles one exchange. `model_exchange_id` is its idempotency identity.
 pub trait ProviderGatewaySettlementPort: Send + Sync {
-    /// Settles terminal facts.
-    ///
-    /// # Errors
-    ///
-    /// The Gateway leaves the exchange retryable when settlement fails.
     fn settle(
         &self,
         settlement: &ProviderGatewaySettlement,
     ) -> Result<(), ProviderGatewaySettlementError>;
 }
 
-/// Secret-free durable Gateway exchange authority used only for crash restore.
 #[derive(Clone)]
 pub struct ProviderGatewayDurableExchange {
     gateway_open_digest: [u8; 32],
@@ -393,56 +346,37 @@ pub struct ProviderGatewayDurableExchange {
 }
 
 impl ProviderGatewayDurableExchange {
-    /// Returns the exact frozen route authority admitted before Provider open.
     #[must_use]
     pub const fn route_authority(&self) -> &FrozenModelRouteAuthority {
         &self.route_authority
     }
 
-    /// Returns the secret-free open receipt.
     #[must_use]
     pub const fn open_receipt(&self) -> &ProviderGatewayOpenReceipt {
         &self.open_receipt
     }
 
-    /// Returns the original exact execution lease.
     #[must_use]
     pub const fn lease(&self) -> &ExecutionLeaseStamp {
         &self.lease
     }
 
-    /// Returns the original Worker session identity.
     #[must_use]
     pub const fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
     }
 
-    /// Returns the original product session identity.
     #[must_use]
     pub const fn session_identity(&self) -> &SessionIdentity {
         &self.session_identity
     }
 
-    /// Encodes canonical secret-free receipt, lease, and session facts.
-    ///
-    /// The frozen route authority is persisted separately through its narrow
-    /// durable API, so Credential reference metadata has one authority copy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an inconsistent snapshot or serialization failure.
     pub fn to_durable_receipt_json(&self) -> Result<Vec<u8>, ProviderGatewayError> {
         validate_durable_exchange(self)?;
         serde_json::to_vec(&DurableGatewayOpenReceipt::from_exchange(self)?)
             .map_err(|_| ProviderGatewayError::invalid())
     }
 
-    /// Rehydrates canonical secret-free receipt, lease, and session facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical JSON, a changed frozen authority, or malformed
-    /// receipt identity.
     pub fn from_durable_parts(
         route_authority: FrozenModelRouteAuthority,
         receipt_json: &[u8],
@@ -538,7 +472,6 @@ impl DurableGatewayOpenReceipt {
     }
 }
 
-/// Result of one terminal settlement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayTerminalReceipt {
     pub model_exchange_id: ModelExchangeId,
@@ -593,8 +526,6 @@ fn admission_is_exact_replay(
         && actual_reservation == expected_reservation
 }
 
-/// Central request router. Exchange bookkeeping is process-local and contains
-/// only safe identifiers and digests; no request or Credential bytes are kept.
 pub struct ProviderGateway<'a> {
     storage: &'a mut dyn ProductStateStorage,
     secret_store: &'a dyn SecretStorePort,
@@ -625,11 +556,6 @@ impl<'a> ProviderGateway<'a> {
         }
     }
 
-    /// Registers exactly one adapter for its canonical Provider identifier.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid or duplicate Provider identifier.
     pub fn register_adapter(
         &mut self,
         adapter: Box<dyn ProviderAdapterPort>,
@@ -646,11 +572,6 @@ impl<'a> ProviderGateway<'a> {
         Ok(())
     }
 
-    /// Copies the secret-free authority required to restore one open exchange.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown, terminating, terminal, or corrupt exchange.
     pub fn durable_exchange(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -674,13 +595,6 @@ impl<'a> ProviderGateway<'a> {
         Ok(exchange)
     }
 
-    /// Restores one already accepted durable exchange without resolving a
-    /// Credential or invoking a Provider adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed authority, an unregistered Provider, or a changed
-    /// in-memory exchange with the same identity.
     pub fn restore_durable_exchange(
         &mut self,
         exchange: &ProviderGatewayDurableExchange,
@@ -738,15 +652,6 @@ impl<'a> ProviderGateway<'a> {
         Ok(receipt)
     }
 
-    /// Validates and routes one Worker model request.
-    ///
-    /// The Worker-supplied route must exactly equal the current configured
-    /// route. Secret bytes are resolved only after route and payload checks and
-    /// are borrowed only by the selected adapter call.
-    ///
-    /// # Errors
-    ///
-    /// Returns stable Gateway categories without Provider or secret text.
     pub fn open(
         &mut self,
         message: &ModelOpenMessage,
@@ -756,12 +661,6 @@ impl<'a> ProviderGateway<'a> {
         self.open_inner(message, worker_route, adapter_request_id, None)
     }
 
-    /// Opens only after exact replay of a previously durable reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a changed or newly-created admission before resolving a secret
-    /// or invoking a Provider adapter, in addition to [`Self::open`] errors.
     pub fn open_after_reservation(
         &mut self,
         message: &ModelOpenMessage,
@@ -866,18 +765,6 @@ impl<'a> ProviderGateway<'a> {
         Ok(receipt)
     }
 
-    /// Durably reserves the current route before retry context persistence.
-    ///
-    /// This step reads only secret-free settings, catalog, and Credential
-    /// reference authority. It decodes the bounded model payload solely to
-    /// reject unsupported strict JSON Schema requests before a reservation,
-    /// secret read, or Provider call. [`Self::open`] must later replay this
-    /// exact reservation with the returned route authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid Worker authority, unavailable route metadata, or a
-    /// denied/conflicting durable admission reservation.
     pub fn reserve_before_open(
         &mut self,
         message: &ModelOpenMessage,
@@ -1056,15 +943,6 @@ impl<'a> ProviderGateway<'a> {
         Ok((adapter_receipt, leak_gate))
     }
 
-    /// Pauses or resumes reads from the selected Provider transport.
-    ///
-    /// Identical requests replay without invoking the adapter again. A
-    /// terminal exchange cannot resume Provider reads.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown or terminal exchanges and maps adapter failures to a
-    /// stable secret-free Gateway category.
     pub fn set_provider_read_paused(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -1100,12 +978,6 @@ impl<'a> ProviderGateway<'a> {
         })
     }
 
-    /// Validates an authoritative Worker cancellation acknowledgement and
-    /// terminates the exact exchange.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed cancellation signals and stale Worker authority.
     pub fn cancel_from_worker(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1119,13 +991,6 @@ impl<'a> ProviderGateway<'a> {
         )
     }
 
-    /// Validates a normal Worker stream acknowledgement against the original
-    /// durable exchange and session identity without applying Provider control.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign, malformed, replay-request, or error acknowledgements.
-    /// A receipt does not grant execution authority and remains valid after lease expiry.
     pub fn validate_worker_acknowledgement(
         &self,
         acknowledgement: &ModelAckMessage,
@@ -1147,11 +1012,6 @@ impl<'a> ProviderGateway<'a> {
         Ok(())
     }
 
-    /// Validates Worker cancellation and durably checkpoints terminal effects.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or stale Worker authority and any progress/Gateway failure.
     pub fn cancel_from_worker_with_progress(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1167,14 +1027,6 @@ impl<'a> ProviderGateway<'a> {
         )
     }
 
-    /// Applies one trusted terminal command to an opened exchange at most once.
-    ///
-    /// A duplicate identical terminal is replayed without calling settlement
-    /// again. A failed settlement remains retryable.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown exchanges and conflicting terminal outcomes.
     pub fn apply_terminal(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -1184,12 +1036,6 @@ impl<'a> ProviderGateway<'a> {
         self.settle_terminal(model_exchange_id, command, None, observed_at)
     }
 
-    /// Releases a reservation after an opening tombstone is recovered without
-    /// resolving a Credential or invoking a Provider adapter.
-    ///
-    /// # Errors
-    ///
-    /// Propagates exact durable admission identity or settlement failures.
     pub fn release_interrupted_open(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1206,16 +1052,6 @@ impl<'a> ProviderGateway<'a> {
             .map_err(|error| map_admission_terminal_error(&error))
     }
 
-    /// Fences a precommitted but incompletely persisted Provider open.
-    ///
-    /// The adapter idempotency identity is written before the original open,
-    /// so exact Cancel and Release are safe whether the process stopped before
-    /// or after the upstream accepted it. No Credential is resolved here.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed Provider identity and propagates adapter or exact
-    /// admission cleanup failure.
     pub fn cleanup_interrupted_open(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1235,12 +1071,6 @@ impl<'a> ProviderGateway<'a> {
         self.release_interrupted_open(authority, original_request_id, model_exchange_id)
     }
 
-    /// Applies a terminal command while durably fencing every external step.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown/conflicting exchanges and fails closed when a durable
-    /// checkpoint or external terminal operation fails.
     pub fn apply_terminal_with_progress(
         &mut self,
         model_exchange_id: &ModelExchangeId,

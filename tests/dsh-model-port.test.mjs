@@ -74,7 +74,6 @@ function fixtureRuntime(streamFactory) {
 async function* streamedAnswer() {
   yield { type: 'block-start', index: 0, blockType: 'reasoning' }
   yield { type: 'reasoning-delta', index: 0, text: 'checked' }
-  // DSH adapters may defer block-end until the provider terminal frame.
   yield { type: 'block-start', index: 1, blockType: 'text' }
   yield { type: 'text-delta', index: 1, text: 'hel' }
   yield { type: 'text-delta', index: 1, text: 'lo' }

@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Production model-policy snapshot boundary.
-//!
-//! Policy lookup is deliberately keyed only by organization and the exact
-//! already-resolved Provider route. User and session preferences cannot enter
-//! this boundary, so they cannot widen the configured policy.
-
 use std::fmt;
 
 use winwincode_domain::OrganizationId;
@@ -15,7 +7,6 @@ use crate::{
     ModelAdmissionPolicyLayer,
 };
 
-/// Secret-free key sent to the external policy authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelPolicyRouteKey {
     organization_id: OrganizationId,
@@ -28,11 +19,6 @@ pub struct ModelPolicyRouteKey {
 }
 
 impl ModelPolicyRouteKey {
-    /// Builds the only policy lookup key from a verified route authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects incomplete route/version authority.
     pub fn try_from_authority(
         authority: &FrozenModelRouteAuthority,
     ) -> Result<Self, ModelPolicyResolutionError> {
@@ -90,9 +76,6 @@ impl ModelPolicyRouteKey {
     }
 }
 
-/// One atomic Community policy authority result.
-/// Construction freezes the layer immediately, retaining its revision and
-/// decision as auditable sources.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPolicyAuthoritySnapshot {
     key: ModelPolicyRouteKey,
@@ -100,11 +83,6 @@ pub struct ModelPolicyAuthoritySnapshot {
 }
 
 impl ModelPolicyAuthoritySnapshot {
-    /// Freezes one policy authority response for the exact requested route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid policy layers or a mismatched budget period.
     pub fn freeze(
         key: ModelPolicyRouteKey,
         base: ModelAdmissionPolicyLayer,
@@ -125,7 +103,6 @@ impl ModelPolicyAuthoritySnapshot {
     }
 }
 
-/// Stable failure returned by the external policy authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelPolicyAuthorityError;
 
@@ -144,39 +121,23 @@ impl fmt::Display for ModelPolicyAuthorityError {
 
 impl std::error::Error for ModelPolicyAuthorityError {}
 
-/// External organization policy authority. There is no personal or session
-/// policy input.
 pub trait ModelPolicyAuthorityPort: Send + Sync {
-    /// Resolves the exact organization/route/version key.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable dependency error without copying authority diagnostics.
     fn snapshot(
         &self,
         key: &ModelPolicyRouteKey,
     ) -> Result<ModelPolicyAuthoritySnapshot, ModelPolicyAuthorityError>;
 }
 
-/// Immutable local production configuration.
 #[derive(Clone, Debug)]
 pub struct LocalModelPolicyAuthorityConfig {
     pub base: ModelAdmissionPolicyLayer,
 }
 
-/// Local production adapter for deployments whose audited policy snapshots
-/// are supplied in immutable host configuration. The adapter owns no billing
-/// ledger and never accepts user or session overrides.
 pub struct LocalModelPolicyAuthority {
     base: ModelAdmissionPolicyLayer,
 }
 
 impl LocalModelPolicyAuthority {
-    /// Validates the configured policy at startup.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate organizations or invalid layer intersections.
     pub fn try_new(
         config: LocalModelPolicyAuthorityConfig,
     ) -> Result<Self, ModelPolicyResolutionError> {
@@ -205,7 +166,6 @@ impl fmt::Debug for LocalModelPolicyAuthority {
     }
 }
 
-/// Verified production policy resolution used by durable admission.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPolicyResolution {
     key: ModelPolicyRouteKey,
@@ -224,7 +184,6 @@ impl ModelPolicyResolution {
     }
 }
 
-/// Stable production policy-resolution failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelPolicyResolutionErrorKind {
     InvalidAuthority,
@@ -232,7 +191,6 @@ pub enum ModelPolicyResolutionErrorKind {
     AuthorityUnavailable,
 }
 
-/// Bounded policy-source error containing no route payload or upstream text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelPolicyResolutionError {
     kind: ModelPolicyResolutionErrorKind,
@@ -265,8 +223,6 @@ impl fmt::Display for ModelPolicyResolutionError {
 
 impl std::error::Error for ModelPolicyResolutionError {}
 
-/// Production freezer joining the exact resolved route with one atomic policy
-/// authority snapshot.
 pub struct ProductionModelPolicySource<'authority> {
     authority: &'authority dyn ModelPolicyAuthorityPort,
 }
@@ -277,12 +233,6 @@ impl<'authority> ProductionModelPolicySource<'authority> {
         Self { authority }
     }
 
-    /// Resolves and verifies the immutable policy used by one reservation.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the authority is unavailable or returns another
-    /// organization, route, catalog, Provider, Credential, or route revision.
     pub fn resolve(
         &self,
         route_authority: &FrozenModelRouteAuthority,

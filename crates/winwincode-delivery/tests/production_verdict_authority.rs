@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_arguments)]
 
 use std::fs;
@@ -112,8 +110,6 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         run.worker_id = binding.worker_id.clone().expect("worker");
         run.worker_instance_id = binding.worker_instance_id.clone().expect("worker instance");
         if binding.execution_profile.as_deref() == Some("executor") {
-            // Production freezes Commit evidence only after the writer candidate
-            // is sealed into CandidateReady/Settled.
             run.state = winwincode_domain::WorkRunState::CandidateReady;
         }
     }
@@ -219,8 +215,6 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     let (candidate, verification, evidence, produced_at_millis) = first.into_parts();
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
     assert_eq!(verification.settlements().len(), 2);
-    // Runtime command evidence plus one executor Commit sealed from the frozen
-    // candidate that freeze_source rebuilt from the real Worker artifact.
     assert_eq!(evidence.len(), 3);
     assert!(
         evidence

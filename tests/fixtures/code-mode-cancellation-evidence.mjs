@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,8 +10,6 @@ function readDatabase(path, read) {
     database.exec('PRAGMA busy_timeout = 1000')
     return read(database)
   } catch {
-    // Keep a failed diagnostic distinct from empty evidence. Never expose SQL,
-    // paths or raw records, which can contain credentials and model content.
     return { unavailable: 'read-failed' }
   } finally { database?.close() }
 }
@@ -78,7 +75,6 @@ function intakeFailures(path) {
   finally { if (descriptor !== undefined) closeSync(descriptor) }
 }
 
-/** Read bounded metadata at the Device -> Worker -> Core cancellation seams. */
 export function cancellationEvidence(deviceData) {
   return readDatabase(join(deviceData, 'device-client.sqlite3'), device => {
     const workers = device.prepare(`SELECT worker_session_id, state, exit_code, data_directory

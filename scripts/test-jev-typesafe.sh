@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# Smoke-test Jev remote (TypeSafe SystemOne) using local .env contract.
-# Does NOT invent PASS if the endpoint rejects the key.
-#
-# Real TypeSafe contract (from https://api.typesafe.ai/openapi.json):
-#   POST {JEV_ENDPOINT}
-#   Authorization: Bearer ${JEV_API_KEY}
-#   body: { model, state, questions: { <name>: { type, instructions, criteria? } } }
-#   question type: noul | choice | score
-#   GET https://api.typesafe.ai/v1/models lists valid model names
-#
-# Local OpenJev adapter (OpenJevRemoteProvider / OpenJevRemoteSettings) is a
-# SEPARATE contract (TOML camelCase providerId/endpoint/apiKey/...). This
-# script proves network+key; it does not claim the Rust transport speaks
-# SystemOne JSON yet.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck disable=SC1091
 [ -f "$ROOT/.env" ] && set -a && . "$ROOT/.env" && set +a
 
 ENDPOINT="${JEV_ENDPOINT:-${TYPESAFE_ENDPOINT:-}}"
@@ -32,7 +17,6 @@ echo "Endpoint: $ENDPOINT"
 echo "Key: set (length ${#KEY}, last4=...${KEY_LAST4})"
 
 AUTH_BASE="https://api.typesafe.ai"
-# Derive models URL from endpoint when possible
 MODELS_URL="${AUTH_BASE}/v1/models"
 
 echo
@@ -51,7 +35,6 @@ fi
 MODEL="${MODEL:-jev-latest}"
 echo "Using model: $MODEL"
 
-# SystemOneRequest — Jev-style noul (yes/true probability) + choice (3-way)
 body="$(JEV_MODEL_RESOLVED="$MODEL" python3 - <<'PY'
 import json, os
 model = os.environ["JEV_MODEL_RESOLVED"]
@@ -92,7 +75,6 @@ code="$(curl -sS -o /tmp/jev-typesafe-probe.json -w '%{http_code}' \
 echo "HTTP $code"
 head -c 800 /tmp/jev-typesafe-probe.json 2>/dev/null; echo
 
-# 2) Unit tests: mock + interface (no network required)
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/winwincode-jev-test-target}"
 export RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
 echo
@@ -100,7 +82,6 @@ echo "=== cargo jev unit/integration (mock, offline) ==="
 cargo test -p winwincode-provider jev --locked --offline 2>&1 | tail -20
 cargo test -p winwincode-provider --test jev_openjev --locked --offline 2>&1 | tail -20
 
-# 3) Replay harness (fixture only; never Phase1 production evidence)
 echo
 echo "=== replay harness (fixture, not Phase1) ==="
 node --test tests/jev-session-replay.test.mjs 2>&1 | tail -15

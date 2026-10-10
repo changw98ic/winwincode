@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Trusted Device exit and launch lineage authorize replacement of an exact
-//! execution attempt. Original launch and reservation facts remain immutable.
 use crate::{DeviceExecutionReservationFacts, ExecutionLeaseRecord, SqliteStorage, StorageError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -96,10 +92,6 @@ fn append(
     Ok(())
 }
 
-/// Stages a consumed launch successor. A never-claimed queued route is replaced
-/// atomically without manufacturing a lease; active work waits for lease expiry.
-/// # Errors
-/// Rejects changed launch, Device, occupancy, role, attempt or cancellation facts.
 #[allow(clippy::too_many_lines)]
 pub fn stage_device_execution_recovery(
     storage: &mut SqliteStorage,
@@ -242,7 +234,7 @@ pub(crate) fn recovery_ready(
 ) -> Result<bool, StorageError> {
     let facts =
         crate::device_execution_binding::load_facts(connection, &lease.job_id.0).map_err(sql)?;
-    let Some(facts) = facts else { return Ok(true) }; // Existing non-Device replacement rules.
+    let Some(facts) = facts else { return Ok(true) };
     let intent:Option<(String,String)>=connection.query_row("SELECT predecessor_facts_digest,successor_grant_id FROM device_execution_recovery_intents WHERE job_id=?1 AND predecessor_attempt=?2 AND applied_at IS NULL",params![lease.job_id.0,i64::try_from(lease.attempt).map_err(|_|invalid())?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
     let Some((original, grant_id)) = intent else {
         return Ok(false);

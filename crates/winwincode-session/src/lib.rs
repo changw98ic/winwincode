@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control Plane `ProductSession` lifecycle and exact execution identity seam.
-//!
-//! This crate deliberately contains no Delivery, API DTO, Worker, Codex Core,
-//! storage adapter, or Control Plane composition dependency.
-
 mod binding;
 mod interaction_routing;
 mod product_session;

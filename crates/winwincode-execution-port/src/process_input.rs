@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Input to a live process retains its original invocation and exact bytes.
-
 use serde::{Deserialize, Serialize};
 
 use crate::action_normalizer::{
@@ -40,8 +36,6 @@ pub(crate) fn observe(
             message: "requires a live process, its origin, and nonempty input".into(),
         });
     }
-    // Terminal input can invoke arbitrary commands. Its bytes stay in the
-    // signed request; normalized targets must not expose terminal secrets.
     Ok(ObservedAction {
         source: ActionSource::Shell,
         objects: vec![ActionObject::ExternalResource],

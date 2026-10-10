@@ -1,24 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Server-side `RepositoryBinding` registry and per-repository
-//! `RepositoryAccessGrant` ledger.
-//!
-//! This module stores the persisted Control Plane projection of Device
-//! Client-reported repository facts (ADR-0030, plan 7.6, 13): binding
-//! identity, safe Git metadata (kind, default branch, head commit, dirty
-//! state), the seven-state availability projection, and the explicit
-//! per-user `RepositoryAccessGrant` relationships (plan 7.7). The absolute
-//! local path is Device-Client-only knowledge and is never stored here;
-//! availability states follow the non-transactional projection machine in
-//! `docs/contracts/client-control-state-machines.md` contract 7: every
-//! rescan may recompute any state, there are no terminal states, and only
-//! `available` and `dirty` allow a Worker launch.
-//!
-//! Visibility follows plan 13.4: a user sees a repository binding only when
-//! an `active` `ClientAccessGrant` (which always includes `use`) exists for
-//! the client node AND an `active` `RepositoryAccessGrant` exists for the
-//! binding.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -72,30 +51,14 @@ CREATE INDEX IF NOT EXISTS repository_access_grants_by_user
     ON repository_access_grants (user_id, state);
 ";
 
-/// Seven-state availability projection of one `RepositoryBinding`
-/// (plan 13.5, contract 7).
-///
-/// This is not a transactional state machine: it is the Device Client's
-/// local scan projection. Any state may move to any other state after a
-/// re-verification; there are no terminal states. Only [`Self::Available`]
-/// and [`Self::Dirty`] allow a Worker launch, and every launch must
-/// re-canonicalize and re-verify locally before it starts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryAvailability {
-    /// Canonicalize passed, the directory exists and is readable, the Git
-    /// common directory is valid, and the work tree is clean.
     Available,
-    /// The same checks passed but the work tree carries uncommitted changes.
     Dirty,
-    /// The directory does not exist or is not readable.
     Unavailable,
-    /// The canonical path no longer resolves to the original directory.
     Moved,
-    /// The Git checks failed and the user has not confirmed initialization.
     InvalidGit,
-    /// The operating system denied access to the directory.
     PermissionDenied,
-    /// The scan itself failed for an undetermined reason.
     ScanFailed,
 }
 
@@ -129,8 +92,6 @@ impl RepositoryAvailability {
         }
     }
 
-    /// True when the projected state permits a Worker launch (contract 7
-    /// gate effect): only `available` and `dirty` do.
     #[must_use]
     pub const fn allows_launch(self) -> bool {
         matches!(self, Self::Available | Self::Dirty)
@@ -143,13 +104,9 @@ impl fmt::Display for RepositoryAvailability {
     }
 }
 
-/// Device-reported work-tree cleanliness of one `RepositoryBinding`
-/// (plan 7.6 `dirtyState`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryDirtyState {
-    /// The work tree has no uncommitted changes.
     Clean,
-    /// The work tree carries uncommitted changes.
     Dirty,
 }
 
@@ -180,16 +137,9 @@ impl fmt::Display for RepositoryDirtyState {
     }
 }
 
-/// Permission set of one `RepositoryAccessGrant` (plan 7.7).
-///
-/// `use` is mandatory because a grant only ever expresses permission to use
-/// the repository; `manage` adds the right to administer the binding. The
-/// canonical stored form is the fixed-order token string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryGrantPermissions {
-    /// The user may launch Workers and read this repository binding.
     Use,
-    /// `use` plus the right to administer the binding and its grants.
     UseManage,
 }
 
@@ -220,12 +170,9 @@ impl fmt::Display for RepositoryGrantPermissions {
     }
 }
 
-/// Lifecycle state of one `RepositoryAccessGrant` (plan 7.7).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryGrantState {
-    /// The user may see and use the repository subject to the client ACL.
     Active,
-    /// Terminal: the grant was revoked; visibility ends immediately.
     Revoked,
 }
 
@@ -256,11 +203,6 @@ impl fmt::Display for RepositoryGrantState {
     }
 }
 
-/// Device-reported `RepositoryBinding` projection command (plan 7.6).
-///
-/// The Device Client owns these facts; the Control Plane persists the
-/// projection. There is intentionally no absolute-path field: paths are
-/// Device-Client-local knowledge (plan 7.6, contract 7).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryBindingProjection {
     repository_binding_id: String,
@@ -274,14 +216,6 @@ pub struct RepositoryBindingProjection {
 }
 
 impl RepositoryBindingProjection {
-    /// Builds one validated binding projection command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, out-of-range fields, a
-    /// contradictory dirty state (`available` with a dirty work tree or
-    /// `dirty` with a clean one), or a fingerprint collision risk before any
-    /// durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         repository_binding_id: impl Into<String>,
@@ -369,7 +303,6 @@ impl RepositoryBindingProjection {
         &self.repository_fingerprint
     }
 
-    /// True when every projected field equals the other projection's fields.
     fn is_idempotent_replay_of(
         &self,
         record: &RepositoryBindingRecord,
@@ -387,9 +320,6 @@ impl RepositoryBindingProjection {
     }
 }
 
-/// Rescan outcome command for one already-registered `RepositoryBinding`
-/// (contract 7: every rescan recomputes the projection; any state may move
-/// to any other state).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepositoryScanOutcome {
     availability: RepositoryAvailability,
@@ -397,12 +327,6 @@ pub struct RepositoryScanOutcome {
 }
 
 impl RepositoryScanOutcome {
-    /// Builds one validated scan outcome.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a contradictory dirty state (`available` with a dirty work
-    /// tree or `dirty` with a clean one).
     pub fn try_new(
         availability: RepositoryAvailability,
         dirty_state: RepositoryDirtyState,
@@ -425,51 +349,28 @@ impl RepositoryScanOutcome {
     }
 }
 
-/// Durable `RepositoryBinding` projection row (plan 7.6).
-///
-/// There is deliberately no absolute-path field on this record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryBindingRecord {
-    /// Stable Server-side binding identifier.
     pub repository_binding_id: String,
-    /// Client device the repository is bound to.
     pub client_node_id: String,
-    /// Human-readable repository name.
     pub display_name: String,
-    /// Repository kind; currently only `git`.
     pub repository_kind: String,
-    /// Device-reported default branch, if known.
     pub default_branch: Option<String>,
-    /// Device-reported head commit of the scanned branch, if known.
     pub head_commit: Option<String>,
-    /// Device-reported work-tree cleanliness.
     pub dirty_state: RepositoryDirtyState,
-    /// Seven-state availability projection (contract 7).
     pub availability: RepositoryAvailability,
-    /// Device-computed repository identity; unique per client node.
     pub repository_fingerprint: String,
-    /// Instant of the last accepted scan report, if any.
     pub last_scanned_at: Option<Instant>,
-    /// Instant the binding record was created.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Result of a binding projection upsert.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryBindingReceipt {
-    /// Exact durable projection after the upsert.
     pub record: RepositoryBindingRecord,
-    /// True when a new binding row was created; false when an existing
-    /// binding id had its projection refreshed or replayed.
     pub enrolled: bool,
 }
 
-/// Command that creates one `RepositoryAccessGrant` (plan 7.7).
-///
-/// The `_id` postfix on every field is the plan's own domain vocabulary, so
-/// the lint against repeated field suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryAccessGrantIssuance {
@@ -480,11 +381,6 @@ pub struct RepositoryAccessGrantIssuance {
 }
 
 impl RepositoryAccessGrantIssuance {
-    /// Builds one validated grant issuance command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities before any durable write.
     pub fn try_new(
         repository_access_grant_id: impl Into<String>,
         repository_binding_id: impl Into<String>,
@@ -530,53 +426,31 @@ impl RepositoryAccessGrantIssuance {
     }
 }
 
-/// Durable `RepositoryAccessGrant` row (plan 7.7).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryAccessGrantRecord {
-    /// Stable Server-side grant identifier.
     pub repository_access_grant_id: String,
-    /// Repository binding the grant applies to.
     pub repository_binding_id: String,
-    /// User holding the grant.
     pub user_id: String,
-    /// Permission set; always includes `use`.
     pub permissions: RepositoryGrantPermissions,
-    /// Machine-level grant state.
     pub state: RepositoryGrantState,
-    /// User that created the grant.
     pub granted_by_user_id: String,
-    /// Instant the grant was created.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Stable repository-domain failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryBindingStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// No repository binding matches the requested identity.
     UnknownRepositoryBinding,
-    /// No repository access grant matches the requested identity.
     UnknownAccessGrant,
-    /// The repository fingerprint is already bound to another binding on the
-    /// same client node, or the binding id is already used elsewhere.
     FingerprintConflict,
-    /// An active grant for the user and binding already exists, or the grant
-    /// id is already used.
     AccessGrantConflict,
-    /// The supplied `expectedRevision` no longer matches the durable revision.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free repository-domain storage error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryBindingStoreError {
     kind: RepositoryBindingStoreErrorKind,
@@ -598,23 +472,11 @@ impl fmt::Display for RepositoryBindingStoreError {
 
 impl std::error::Error for RepositoryBindingStoreError {}
 
-/// Repository binding and access-grant ledger borrowing the sole
-/// product-state `SQLite` authority.
 pub struct RepositoryBindingLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable repository binding ledger on this same product-state
-    /// database.
-    ///
-    /// Visibility queries read the `client_access_grants` table owned by the
-    /// connect ledger; in a product database every ledger is opened at
-    /// startup, so both tables exist.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn repository_binding_ledger(
         &mut self,
     ) -> Result<RepositoryBindingLedger<'_>, RepositoryBindingStoreError> {
@@ -634,23 +496,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Upserts the Device Client-reported binding projection (plan 7.6):
-    /// idempotent by binding id, guarded by `expectedRevision` CAS on the
-    /// update path.
-    ///
-    /// A first report creates the binding at revision 1. A re-report of the
-    /// same binding id refreshes the projected fields under CAS; reporting a
-    /// byte-identical projection (including the scan instant) is an accepted
-    /// idempotent replay that leaves the revision untouched. A fingerprint
-    /// already bound to a different binding id on the same client node is
-    /// rejected as [`RepositoryBindingStoreErrorKind::FingerprintConflict`];
-    /// the unique index on `(client_node_id, repository_fingerprint)` is the
-    /// durable backstop against concurrent registrations.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid projection facts, an unknown client node, a
-    /// fingerprint conflict, a stale `expectedRevision`, or storage failure.
     pub fn upsert(
         &mut self,
         projection: &RepositoryBindingProjection,
@@ -702,20 +547,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(receipt)
     }
 
-    /// Applies one rescan outcome to an existing binding (contract 7): the
-    /// seven availability states may move to any state after re-verification
-    /// and there are no terminal states. The scan instant is replaced.
-    ///
-    /// A report identical to the stored projection (same availability, dirty
-    /// state, and scan instant) is an accepted idempotent replay that leaves
-    /// the revision untouched; any other report advances the revision under
-    /// `expectedRevision` CAS. Head commit and default branch are owned by
-    /// the full projection upsert and are not touched here.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown binding, a stale `expectedRevision`, or storage
-    /// failure.
     pub fn update_availability(
         &mut self,
         repository_binding_id: &str,
@@ -762,17 +593,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(updated)
     }
 
-    /// Removes one binding (`client.repository.removed`, contract 7 note):
-    /// the binding row is deleted and its access grants cascade with it.
-    ///
-    /// The `(client_node_id, repository_fingerprint)` uniqueness is freed by
-    /// the delete, so the device may re-register the same repository under a
-    /// fresh binding id. Removing an absent binding is an accepted idempotent
-    /// replay that reports `false`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical binding identity or storage failure.
     pub fn remove(
         &mut self,
         repository_binding_id: &str,
@@ -789,12 +609,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(deleted == 1)
     }
 
-    /// Returns one durable repository binding projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical binding identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot(
         &self,
         repository_binding_id: &str,
@@ -803,11 +617,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         load_binding(self.connection()?, repository_binding_id)
     }
 
-    /// Returns every durable binding projection of one client node.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn bindings_for_client(
         &self,
         client_node_id: &str,
@@ -829,16 +638,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         records.into_iter().map(binding_from_row).collect()
     }
 
-    /// Creates one `RepositoryAccessGrant` in the `active` state (plan 7.7).
-    ///
-    /// At most one active grant per user and binding exists (the partial
-    /// unique index is the durable backstop); a revoked grant does not block
-    /// a fresh re-grant under a new grant id.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown binding, an already-active grant for the user and
-    /// binding, a reused grant id, or storage failure.
     pub fn create_grant(
         &mut self,
         issuance: &RepositoryAccessGrantIssuance,
@@ -882,15 +681,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(record)
     }
 
-    /// Revokes one access grant (plan 7.7): visibility and use end
-    /// immediately without waiting for the Device Client.
-    ///
-    /// Revoking an already-`revoked` grant is an accepted idempotent replay.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a stale `expectedRevision`, or storage
-    /// failure.
     pub fn revoke_grant(
         &mut self,
         repository_access_grant_id: &str,
@@ -925,11 +715,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         Ok(updated)
     }
 
-    /// Returns one durable access grant projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity or storage failure.
     pub fn grant_snapshot(
         &self,
         repository_access_grant_id: &str,
@@ -938,11 +723,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         load_grant(self.connection()?, repository_access_grant_id)
     }
 
-    /// Returns every active grant on one repository binding.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical binding identity or storage failure.
     pub fn active_grants_for_binding(
         &self,
         repository_binding_id: &str,
@@ -951,11 +731,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         self.active_grants_filtered("rag.repository_binding_id = ?1", repository_binding_id)
     }
 
-    /// Returns every active grant of one user across all bindings.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical user identity or storage failure.
     pub fn active_grants_for_user(
         &self,
         user_id: &str,
@@ -985,14 +760,6 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         records.into_iter().map(grant_from_row).collect()
     }
 
-    /// Returns the repository bindings of one client node that the user may
-    /// see (plan 13.4): an `active` `ClientAccessGrant` carrying `use` on the
-    /// client node AND an `active` `RepositoryAccessGrant` on the binding
-    /// must both exist. Bindings without either grant are invisible.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or storage failure.
     pub fn visible_bindings(
         &self,
         user_id: &str,
@@ -1043,18 +810,14 @@ impl<'storage> RepositoryBindingLedger<'storage> {
     }
 }
 
-/// Selected columns of `repository_bindings`, in `read_binding_row` order.
 const BINDING_COLUMNS: &str = "rb.repository_binding_id, rb.client_node_id, rb.display_name,
     rb.repository_kind, rb.default_branch, rb.head_commit, rb.dirty_state, rb.availability,
     rb.repository_fingerprint, rb.last_scanned_at, rb.created_at, rb.revision";
 
-/// Selected columns of `repository_access_grants`, in `read_grant_row` order.
 const GRANT_COLUMNS: &str = "rag.repository_access_grant_id, rag.repository_binding_id,
     rag.user_id, rag.permissions, rag.state, rag.granted_by_user_id, rag.created_at,
     rag.revision";
 
-/// `available` always pairs with a clean work tree and `dirty` with a dirty
-/// one; scan-failed states keep the last determined cleanliness.
 fn ensure_dirty_state_consistent(
     availability: RepositoryAvailability,
     dirty_state: RepositoryDirtyState,
@@ -1097,8 +860,6 @@ fn require_client_node(
     }
 }
 
-/// Refuses a `(client node, fingerprint)` pair already bound to a different
-/// binding id; the caller's own row (update path) is excluded.
 fn ensure_fingerprint_free(
     transaction: &Transaction<'_>,
     projection: &RepositoryBindingProjection,
@@ -1162,7 +923,6 @@ fn insert_binding(
     Ok(())
 }
 
-/// Refreshes every projected field of an existing binding under CAS.
 fn refresh_binding(
     transaction: &Transaction<'_>,
     projection: &RepositoryBindingProjection,
@@ -1486,8 +1246,6 @@ const fn is_crockford_base32(byte: u8) -> bool {
     )
 }
 
-/// The fingerprint algorithm is Device-Client-owned; the Server only bounds
-/// it to a non-empty printable token so stored identities stay canonical.
 fn validate_fingerprint(value: &str) -> Result<(), RepositoryBindingStoreError> {
     let valid = !value.is_empty()
         && value.len() <= MAX_FINGERPRINT_BYTES
@@ -1516,7 +1274,6 @@ fn validate_default_branch(value: &str) -> Result<(), RepositoryBindingStoreErro
     }
 }
 
-/// Accepts a full SHA-1 or SHA-256 repository commit hash in lowercase hex.
 fn validate_head_commit(value: &str) -> Result<(), RepositoryBindingStoreError> {
     let valid = matches!(value.len(), 40 | 64)
         && value
@@ -1532,7 +1289,6 @@ fn validate_head_commit(value: &str) -> Result<(), RepositoryBindingStoreError> 
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), RepositoryBindingStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1686,8 +1442,6 @@ fn map_grant_insert_sql(sql: &rusqlite::Error) -> RepositoryBindingStoreError {
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the partial one-active-per-
-            // user-and-binding index.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 RepositoryBindingStoreErrorKind::AccessGrantConflict,
                 "an active repository access grant already exists for this user and binding",
@@ -1778,7 +1532,6 @@ mod tests {
             )
             .is_err()
         );
-        // Scan-failed states may keep either last-determined cleanliness.
         assert!(
             RepositoryScanOutcome::try_new(
                 RepositoryAvailability::Unavailable,

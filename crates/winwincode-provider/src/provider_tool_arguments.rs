@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Admission of JSON wrappers used to represent custom tools on function-only
-//! provider protocols. A model's invalid wrapper is still a function call;
-//! it must reach Core's payload validation without becoming executable input
-//! or a retryable failure of the entire model response.
-
 use serde_json::{Map, Value};
 
 use crate::provider_anthropic::{AnthropicCodecError, validate_text};
@@ -23,9 +16,6 @@ pub(crate) fn translated_custom_arguments(
         return Ok(raw_input.to_owned());
     }
 
-    // These adapters buffer the entire response before canonical conversion.
-    // Change the original start, so added/done items retain the same payload
-    // kind and identity. No field is guessed, dropped, or coerced into code.
     let identity = events
         .iter_mut()
         .find_map(|event| match event {

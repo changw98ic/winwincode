@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
-// UI-608 key-page visual regression, in a real browser.
-//
-// Every key page is baselined at a desktop and a narrow viewport, plus the
-// shell chrome both viewports share and the offline and route-failure states.
-// Nothing here walks a flow: a functional E2E failure means a scenario broke,
-// while a failure in this lane means a page started looking different.
-
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -43,10 +34,6 @@ const DESKTOP = Object.freeze({ width: 1280, height: 900 })
 const NARROW = Object.freeze({ width: 420, height: 900 })
 
 const POPULATED_PAGES = Object.freeze(['home', 'chat', 'settings'])
-/**
- * One page load per fixture-data slice.  Inside a load the shell routes on the
- * hash, so every populated page is captured from a single mount.
- */
 const LOAD_ROUTES = Object.freeze([
   { hash: '#/home', pages: POPULATED_PAGES, offline: true },
   { hash: '#/chat-empty', pages: [{ name: 'chat', id: 'chat-empty' }] },
@@ -151,8 +138,6 @@ test('every key page matches its committed visual baseline on desktop and at a n
     `each capture must have a unique id: ${JSON.stringify(ids)}`,
   )
 
-  // Both viewports must have baselined the same key pages, which is what makes
-  // a narrow-screen regression reviewable next to the desktop one.
   for (const name of POPULATED_PAGES) {
     for (const viewport of Object.entries({ desktop: DESKTOP, narrow: NARROW })) {
       const [label, size] = viewport

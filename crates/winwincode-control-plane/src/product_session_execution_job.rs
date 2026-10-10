@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Trusted `ProductSession` Chat `ExecutionJob` construction.
-
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::ModelRoute;
@@ -24,7 +20,6 @@ const MAX_GOAL_BYTES: usize = 20_000;
 const MAX_RUNTIME_SECONDS: i64 = 604_800;
 const MAX_ARTIFACT_BYTES: i64 = 1_099_511_627_776;
 
-/// Restore conversation context when a Device starts a fresh Worker for a turn.
 pub(super) fn chat_goal<'a>(
     message: &str,
     history: impl DoubleEndedIterator<Item = &'a winwincode_api::generated::ChatMessageProjection>,
@@ -33,8 +28,6 @@ pub(super) fn chat_goal<'a>(
     const CURRENT: &str = "\n\nCurrent user message:\n";
     let mut remaining = MAX_GOAL_BYTES.saturating_sub(PREFIX.len() + CURRENT.len() + message.len());
     let mut entries = Vec::new();
-    // ponytail: keep the newest complete messages within the existing 20 KB
-    // execution goal; add context retrieval when longer history is needed.
     for previous in history.rev() {
         let text_files = previous
             .attachments
@@ -62,8 +55,6 @@ pub(super) fn chat_goal<'a>(
     format!("{PREFIX}{}{CURRENT}{message}", entries.join("\n"))
 }
 
-/// Trusted repository snapshot and bounded execution policy installed by the
-/// production composition root.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionExecutionConfig {
     repository_scope: RepositoryScope,
@@ -74,10 +65,6 @@ pub struct ProductSessionExecutionConfig {
 }
 
 impl ProductSessionExecutionConfig {
-    /// Pins a turn to the HEAD reported by its authorized Device repository.
-    ///
-    /// # Errors
-    /// Rejects an invalid revision using the execution policy's constructor.
     pub fn with_checkout_revision(
         &self,
         revision: String,
@@ -90,12 +77,6 @@ impl ProductSessionExecutionConfig {
             self.max_artifact_bytes,
         )
     }
-    /// Builds one immutable Chat execution policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid repository scope, unresolved revision, profile, or
-    /// resource limits before any Chat command can be accepted.
     pub fn try_new(
         repository_scope: RepositoryScope,
         checkout_revision: impl Into<String>,
@@ -300,9 +281,6 @@ fn deterministic_job_id(
     ExecutionJobId(format!("job_{}", &encoded[..26]))
 }
 
-/// The canonical `ExecutionJob` identity of one committed Chat turn, derived
-/// exactly like `prepare` derives it (FLOW-100.4). The Quick device dispatch
-/// glue names the queued turn job without re-encoding the dispatch payload.
 #[must_use]
 pub(crate) fn chat_turn_execution_job_id(
     request_id: &RequestId,

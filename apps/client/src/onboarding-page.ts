@@ -1,19 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   mountPageHeader,
 } from '@winwincode/browser-ui'
 
-/**
- * Design page 02: 首次设置 第 1 步 — 连接执行设备. A bare-canvas flow page
- * (no sidebar): brand row, step eyebrow, the display title, the pairing-code
- * form, the 「如何启动 Client」 disclosure, and the what's-next footer.
- */
 export interface OnboardingPageOptions {
   readonly root: HTMLElement
-  /** Submits the pairing code; resolves on success, rejects with a message. */
   readonly connect: (clientId: string, connectionCode: string) => Promise<void>
-  /** Signed-out entry in the brand row (设计稿 02 右上角). */
   readonly onSignOut: () => void
 }
 

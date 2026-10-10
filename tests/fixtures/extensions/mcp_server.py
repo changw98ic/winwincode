@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
 """Small real MCP server for stdio/HTTP discovery and model invocation checks."""
 import argparse
 import json

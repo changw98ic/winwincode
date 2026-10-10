@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 #[cfg(unix)]
@@ -196,10 +194,6 @@ impl ExecutionPortActionGate {
         Ok(())
     }
 
-    /// Installs a descendant binding without allowing it to overwrite an
-    /// existing session alias. Root lease replacement uses
-    /// [`Self::install_binding`] and is the only operation allowed to fence a
-    /// previous run's aliases.
     pub(crate) fn install_child_binding(
         &self,
         binding: ModelRunBinding,
@@ -223,10 +217,6 @@ impl ExecutionPortActionGate {
             if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
                 return Ok(());
             }
-            // Re-installing the exact root authority is an idempotent
-            // recovery operation, not a new fencing event.  Preserve its
-            // already-discovered child aliases; only a changed root may
-            // invalidate the complete run lineage.
             let fence_lineage = replace_fenced_run
                 && !bindings
                     .get(&thread_id)
@@ -258,10 +248,6 @@ impl ExecutionPortActionGate {
                 })
                 .collect::<HashSet<_>>();
             if fence_lineage {
-                // A replacement root fences the complete run lineage.  Do not
-                // preserve descendants merely because they share the run key:
-                // their old lease must not resolve a tool request after the
-                // replacement is installed.
                 bindings.retain(|_, existing| {
                     existing.authority.lease.job_id != binding.authority.lease.job_id
                         || same_binding(existing, &binding)
@@ -274,10 +260,6 @@ impl ExecutionPortActionGate {
                         || same_binding(existing, &binding)
                 });
             }
-            // Core tool-gate requests identify the live Core thread, while
-            // model and runtime envelopes may use the registered session key.
-            // Keep both aliases bound to the same immutable authority,
-            // especially for spawned child threads.
             bindings.insert(binding.kernel_session_id.clone(), binding.clone());
             bindings.insert(binding.canonical_thread_id.0.clone(), binding);
             stale_session_ids
@@ -341,9 +323,6 @@ impl ExecutionPortActionGate {
             .trusted_now
             .lock()
             .map_err(|_| ActionBridgeError::Unavailable)?;
-        // Control-plane responses can arrive out of order.  Treat the clock
-        // as a high-water mark so an older receipt cannot move trusted time
-        // backwards and reopen an expired lease or permit.
         if trusted_now
             .as_ref()
             .is_none_or(|current| current.0.as_str() < now.0.as_str())
@@ -440,9 +419,6 @@ impl ExecutionPortActionGate {
             .get(session_id)
             .cloned();
         let stale = current_binding.as_ref().is_none_or(|binding| {
-            // This request is retained in the pending map and its signature
-            // remains bound to the original stamp. Only the current deadline
-            // may have advanced while the exact request was in flight.
             !winwincode_execution_port::execution_identity::retained_lease_matches_current(
                 &action.authority.lease,
                 &binding.authority.lease,
@@ -486,10 +462,6 @@ impl ExecutionPortActionGate {
         pending_generation: u64,
         received_at: &Instant,
     ) -> Result<(PendingAction, u64), ActionBridgeError> {
-        // Keep the generation lock while taking the pending request.  The
-        // cancellation path acquires these same locks in this order, so a
-        // cancel racing with a receipt cannot observe the old generation and
-        // then lose the race after the permit has been accepted.
         let mut generations = self
             .state
             .session_generations
@@ -1049,8 +1021,6 @@ fn is_core_control_tool(request: &KernelActionRequest) -> bool {
     matches!(request.payload, KernelActionPayload::CoreControl { .. })
 }
 
-// The registered process manager certifies this output-only interaction after
-// resolving and locking the exact process owned by the current Core session.
 fn is_process_output_poll(request: &KernelActionRequest) -> bool {
     matches!(&request.payload, KernelActionPayload::ProcessInteraction {
         process_id, origin_call_id, input,
@@ -1396,8 +1366,6 @@ fn canonical_tool_requests(
     request: &KernelActionRequest,
 ) -> Result<Vec<ToolRequest>, ActionBridgeError> {
     const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
-    // Core controls authorize orchestration. Each nested operation still goes
-    // through its own action request, including in delegated read-only runs.
     if is_core_control_tool(request) || is_process_output_poll(request) {
         return Ok(Vec::new());
     }

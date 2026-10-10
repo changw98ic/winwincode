@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Isolated, short-lived preview access over an outbound Device Client tunnel.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
@@ -1187,7 +1183,6 @@ mod tests {
         );
     }
 
-    /// Deterministic canonical identifier for fixture records.
     fn canonical(prefix: &str, seed: &str) -> String {
         use sha2::Digest as _;
         let digest = Sha256::digest(seed.as_bytes());
@@ -1201,8 +1196,6 @@ mod tests {
         format!("{prefix}{}", String::from_utf8_lossy(&suffix))
     }
 
-    /// Named identifiers shared by the frozen-preview authorize fixture and its
-    /// assertions. Every value is deterministic.
     struct PreviewAuthorizeIds {
         delivery_id: String,
         executor_job: String,
@@ -1237,7 +1230,6 @@ mod tests {
         }
     }
 
-    /// `WorkContract` section of the canonical frozen Delivery document.
     fn preview_authorize_spec_json(ids: &PreviewAuthorizeIds) -> Value {
         use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
         let PreviewAuthorizeIds {
@@ -1277,7 +1269,6 @@ mod tests {
         })
     }
 
-    /// `SessionBinding` section: one executor binding and one verifier binding.
     fn preview_authorize_session_bindings_json(ids: &PreviewAuthorizeIds) -> Vec<Value> {
         use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
         let PreviewAuthorizeIds {
@@ -1374,7 +1365,6 @@ mod tests {
         ]
     }
 
-    /// `Evidence` section: exactly one executor Commit Evidence.
     fn preview_authorize_evidence_json(ids: &PreviewAuthorizeIds) -> Vec<Value> {
         use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
         let PreviewAuthorizeIds {
@@ -1402,7 +1392,6 @@ mod tests {
         })]
     }
 
-    /// `workRunAggregate` section: contract, one item, and the two settled runs.
     fn preview_authorize_work_run_aggregate_json(ids: &PreviewAuthorizeIds) -> Value {
         let PreviewAuthorizeIds {
             executor_run,
@@ -1486,7 +1475,6 @@ mod tests {
         })
     }
 
-    /// Canonical frozen Delivery document with sealed Commit evidence.
     fn preview_authorize_delivery_json(ids: &PreviewAuthorizeIds) -> Value {
         use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
         serde_json::json!({
@@ -1505,7 +1493,6 @@ mod tests {
         })
     }
 
-    /// Seeds the fixture Delivery into a fresh `SQLite` store and returns it.
     fn seed_preview_authorize_storage(
         root: &std::path::Path,
         ids: &PreviewAuthorizeIds,
@@ -1571,7 +1558,6 @@ mod tests {
         storage
     }
 
-    /// Completed verifier execution-job record backing the frozen preview.
     fn preview_authorize_job_record(
         ids: &PreviewAuthorizeIds,
     ) -> winwincode_storage::ExecutionJobRecord {
@@ -1622,7 +1608,6 @@ mod tests {
         }
     }
 
-    /// Frozen verifier `ExecutionJob` dispatching against the sealed candidate.
     fn preview_authorize_dispatch_job(ids: &PreviewAuthorizeIds) -> ExecutionJob {
         let PreviewAuthorizeIds {
             verifier_run,
@@ -1698,7 +1683,6 @@ mod tests {
         .expect("frozen verifier ExecutionJob")
     }
 
-    /// Overwrites the Delivery with one that carries no Commit evidence.
     fn overwrite_without_commit_evidence(
         storage: &mut SqliteStorage,
         ids: &PreviewAuthorizeIds,
@@ -1740,8 +1724,6 @@ mod tests {
             .expect("overwrite Delivery without Commit evidence");
     }
 
-    /// Frozen preview authorize succeeds only when the Delivery carries exactly
-    /// one executor Commit Evidence sealed from the real frozen candidate.
     #[test]
     fn authorize_current_frozen_candidate_succeeds_with_sealed_commit_evidence() {
         use winwincode_delivery::domain::Delivery;
@@ -1796,7 +1778,6 @@ mod tests {
         )
         .expect("frozen preview authorize accepts sealed executor Commit evidence");
 
-        // Fail closed when the sealed Commit evidence is absent.
         overwrite_without_commit_evidence(&mut storage, &ids, &delivery);
         let error = authorize_current_frozen_candidate(
             &storage,

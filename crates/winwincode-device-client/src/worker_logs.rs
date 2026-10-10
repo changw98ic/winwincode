@@ -1,97 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Bounded, redacted Worker subprocess logs and safe diagnostic references
-//! (WORKER-100.5).
-//!
-//! The Device Client retains what a managed Worker process wrote to
-//! stdout/stderr plus the process exit facts, so a crash can be diagnosed
-//! locally and correlated to its unique WorkerSession — without ever
-//! persisting credentials, local absolute paths, or model bodies, and
-//! without exposing any of them through the diagnostics API.
-//!
-//! # Storage layout (all local, mode 0600 files / 0700 directories)
-//!
-//! ```text
-//! <logs_root>/<worker_session_id>/meta.json     exit facts + lifetime counters
-//! <logs_root>/<worker_session_id>/stdout.log    active stdout segment
-//! <logs_root>/<worker_session_id>/stdout.1.log  … rotated segments
-//! <logs_root>/<worker_session_id>/stderr.log    active stderr segment
-//! ```
-//!
-//! The directory name is the `worker_session_id`, so even a raw file reader
-//! keeps the WorkerSession correlation the acceptance criteria require.
-//!
-//! # Explicit bounds
-//!
-//! - Per stream: at most [`WorkerLogConfig::max_segments_per_stream`]
-//!   segments of at most [`WorkerLogConfig::max_segment_bytes`] bytes each
-//!   (`stdout` and `stderr` are bounded independently). When the active
-//!   segment would overflow, it rotates: the oldest segment is deleted and
-//!   the rest shift down. The retained size of one session is therefore
-//!   capped at `2 streams × segments × segment bytes`.
-//! - Per line: diagnostic lines longer than
-//!   [`WorkerLogConfig::max_diagnostic_line_bytes`] are omitted entirely and
-//!   counted — the model-body backstop, because transcripts and message
-//!   payloads show up as overlong lines, not as diagnostics.
-//! - Per device: sessions older than
-//!   [`WorkerLogConfig::retention_window`] (0 disables time-based expiry)
-//!   or beyond [`WorkerLogConfig::max_retained_sessions`] are pruned when an
-//!   exit fact is recorded or [`WorkerLogRecorder::prune`] runs.
-//!
-//! # Redaction rules (applied at ingest, before any byte is stored)
-//!
-//! Every diagnostic line is processed in this order:
-//!
-//! 1. UTF-8 is applied losslessly (`from_utf8_lossy`) and C0/C1 control
-//!    bytes (ANSI escapes included) are stripped, `\t` excepted.
-//! 2. Overlong lines are omitted (see above) and counted.
-//! 3. A line containing credential material is replaced wholesale with
-//!    `[REDACTED credential]` and counted. Credential material is matched by
-//!    case-insensitive markers (token/key/secret/password/bearer/authorization
-//!    assignments, provider key prefixes such as `ghp_`/`sk-proj-`/`xoxb-`,
-//!    PEM private-key headers, `Set-Cookie`, the Worker Session Credential
-//!    shapes), by URL userinfo (`scheme://user:password@…`), and by any run
-//!    of 32+ hexadecimal characters — the shape of the issued 64-hex Worker
-//!    Session Credential material (and of other digests, which are equally
-//!    worthless in a safe summary).
-//! 4. Absolute paths are masked to `[PATH]` and counted: POSIX `/…` (single
-//!    slash, path-character run), Windows drive `X:\…` and `X:/…`, UNC
-//!    `\\host\share…`, `file://…` URLs, and `~/…` home-relative references.
-//!    Scheme-bearing `https://host/path` URLs are deliberately left intact,
-//!    and relative paths such as `src/main.rs` survive — masking is
-//!    selective, not a whole-line refusal.
-//!
-//! Model content has no ingest path at all:
-//! [`WorkerLogContentKind::ModelContent`] payloads are counted
-//! (`model_content_bytes_omitted`) and never written.
-//!
-//! # Diagnostics surface
-//!
-//! [`WorkerLogRecorder::summary`] answers a [`WorkerLogSummary`] — identity
-//! ids, byte/line counts, redaction counters, and the terminal exit fact.
-//! [`WorkerLogRecorder::crash_reference`] answers a
-//! [`WorkerLogCrashReference`] for an abnormally exited session. Neither
-//! carries log content, absolute paths, or credential material; the raw
-//! (already redacted) segment files stay local for a human at the device.
-//!
-//! # Exit facts and idempotent recovery
-//!
-//! [`WorkerLogRecorder::record_exit`] stores the terminal observation
-//! (`exited`/`crashed`/`missing`, with the exit code when the platform
-//! supplied one) in the session meta and appends one machine-generated
-//! marker line to the stdout stream. Repeated recovery for the same boot is
-//! a no-op ([`WorkerExitRecordOutcome::AlreadyRecorded`]): the marker line
-//! and the meta fact are written exactly once. A replacement boot of the
-//! same session records a fresh fact under its own `worker_instance_id`.
-//!
-//! Exit facts are retained even for a worker that died without producing
-//! output: recording an exit for an unknown session creates the session
-//! record first.
-//!
-//! This module is pure `std` (no async runtime, no tracing dependency) and
-//! shares the crate's secret-boundary rules: the Worker Session Credential
-//! never appears here in any form.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -106,49 +12,31 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::supervisor::{WORKER_STATE_CRASHED, WORKER_STATE_EXITED, WORKER_STATE_MISSING};
 
-/// Schema version of the per-session `meta.json` diagnostics record.
 pub const WORKER_LOG_SCHEMA_VERSION: &str = "winwincode.worker-logs.v1";
 
-/// File stem of the stdout segment files.
 const STDOUT_STEM: &str = "stdout";
-/// File stem of the stderr segment files.
 const STDERR_STEM: &str = "stderr";
-/// Per-session metadata file name.
 const META_FILE: &str = "meta.json";
-/// Temporary suffix used for the atomic meta write (write + rename).
 const META_TMP_SUFFIX: &str = ".tmp";
-/// Replacement marker for every masked absolute path.
 const PATH_MARKER: &str = "[PATH]";
-/// Replacement marker for a credential-bearing line.
 const CREDENTIAL_MARKER: &str = "[REDACTED credential]";
-/// Prefix of the machine-generated terminal marker line.
 const TERMINAL_MARKER_PREFIX: &str = "[winwincode] worker process exit";
 
-/// Smallest accepted [`WorkerLogConfig::max_diagnostic_line_bytes`].
 pub const MIN_DIAGNOSTIC_LINE_BYTES: usize = 64;
-/// Largest accepted [`WorkerLogConfig::max_diagnostic_line_bytes`].
 pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 1_048_576;
-/// Largest accepted [`WorkerLogConfig::max_segment_bytes`].
 pub const MAX_SEGMENT_BYTES: u64 = 67_108_864;
-/// Largest accepted [`WorkerLogConfig::max_segments_per_stream`].
 pub const MAX_SEGMENTS_PER_STREAM: usize = 64;
-/// Largest accepted [`WorkerLogConfig::max_retained_sessions`].
 pub const MAX_RETAINED_SESSIONS: usize = 100_000;
-/// Largest accepted worker-session id (also the log directory name).
 const MAX_SESSION_ID_BYTES: usize = 200;
 
-/// Which subprocess output stream one append belongs to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WorkerLogStream {
-    /// The worker's standard output.
     #[default]
     Stdout,
-    /// The worker's standard error.
     Stderr,
 }
 
 impl WorkerLogStream {
-    /// Segment file stem of this stream.
     #[must_use]
     pub fn file_stem(self) -> &'static str {
         match self {
@@ -158,32 +46,18 @@ impl WorkerLogStream {
     }
 }
 
-/// Kind of payload one append carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerLogContentKind {
-    /// Diagnostic subprocess output; stored redacted and bounded.
     Diagnostic,
-    /// Model transcript/message body; never stored, only counted.
     ModelContent,
 }
 
-/// Static bounds of one [`WorkerLogRecorder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerLogConfig {
-    /// Byte cap of one stream segment; the active segment rotates when the
-    /// next line would overflow it. Must be at least
-    /// [`WorkerLogConfig::max_diagnostic_line_bytes`] so a line always fits.
     pub max_segment_bytes: u64,
-    /// Segment files kept per stream (the active one included); the oldest
-    /// is deleted on rotation.
     pub max_segments_per_stream: usize,
-    /// Diagnostic lines longer than this are omitted (model-body backstop).
     pub max_diagnostic_line_bytes: usize,
-    /// Sessions whose last activity is older than this are pruned; `0`
-    /// disables time-based expiry (the retained-session cap still applies).
     pub retention_window: Duration,
-    /// Maximum number of session log directories kept; the oldest are
-    /// pruned beyond it.
     pub max_retained_sessions: usize,
 }
 
@@ -193,136 +67,75 @@ impl Default for WorkerLogConfig {
             max_segment_bytes: 64 * 1_024,
             max_segments_per_stream: 4,
             max_diagnostic_line_bytes: 1_024,
-            // Seven days.
             retention_window: Duration::from_hours(24 * 7),
             max_retained_sessions: 64,
         }
     }
 }
 
-/// Counters of one append call — also the delta vocabulary of the lifetime
-/// meta counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerLogAppendStats {
-    /// Stream the append targeted.
     pub stream: WorkerLogStream,
-    /// Diagnostic lines stored (model content writes none).
     pub lines_written: u64,
-    /// Stored payload bytes including newline separators.
     pub bytes_written: u64,
-    /// Lines omitted by the overlong-line (model-body) backstop.
     pub lines_omitted_oversize: u64,
-    /// Lines replaced with the credential redaction marker.
     pub lines_redacted_credential: u64,
-    /// Absolute path occurrences masked to `[PATH]`.
     pub absolute_paths_masked: u64,
-    /// Control bytes (ANSI escapes included) stripped before storage.
     pub control_bytes_stripped: u64,
-    /// Model-content bytes counted but never stored.
     pub model_content_bytes_omitted: u64,
-    /// Segment rotations this append triggered.
     pub rotations: u64,
 }
 
-/// Outcome of one [`WorkerLogRecorder::record_exit`] call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerExitRecordOutcome {
-    /// The terminal fact was recorded (first observation for this boot).
     Recorded,
-    /// The same boot's exit was already recorded; nothing was appended or
-    /// changed (repeated recovery is idempotent).
     AlreadyRecorded,
 }
 
-/// The terminal process observation of one worker boot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerExitFact {
-    /// Terminal registry state: `exited`, `crashed`, or `missing`.
     pub state: String,
-    /// Exit status when the platform supplied one (`None` for signal deaths
-    /// and unobserved exits).
     pub exit_code: Option<i64>,
-    /// `workerInstanceId` of the boot that terminated.
     pub worker_instance_id: String,
-    /// RFC 3339 stamp of the observation.
     pub recorded_at: String,
 }
 
-/// Safe diagnostic summary of one worker session's retained logs: identity
-/// ids, counts, and the terminal exit fact — never content, never paths,
-/// never credential material. The serde shape is the diagnostics wire form.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerLogSummary {
-    /// The one `WorkerSession` the logs belong to.
     pub worker_session_id: String,
-    /// `workerInstanceId` of the latest boot seen.
     pub worker_instance_id: Option<String>,
-    /// RFC 3339 stamp of the first recorded activity.
     pub created_at: String,
-    /// RFC 3339 stamp of the last recorded activity.
     pub last_activity_at: String,
-    /// Retained (on disk, post-rotation) stdout bytes.
     pub stdout_bytes: u64,
-    /// Retained (on disk, post-rotation) stderr bytes.
     pub stderr_bytes: u64,
-    /// Lifetime stored stdout lines across all segments.
     pub stdout_lines: u64,
-    /// Lifetime stored stderr lines across all segments.
     pub stderr_lines: u64,
-    /// Lifetime lines omitted by the overlong-line backstop.
     pub lines_omitted_oversize: u64,
-    /// Lifetime lines replaced with the credential redaction marker.
     pub lines_redacted_credential: u64,
-    /// Lifetime absolute path occurrences masked.
     pub absolute_paths_masked: u64,
-    /// Lifetime control bytes stripped.
     pub control_bytes_stripped: u64,
-    /// Lifetime model-content bytes counted but never stored.
     pub model_content_bytes_omitted: u64,
-    /// Lifetime segment rotations.
     pub rotations: u64,
-    /// Terminal process observation, when one was recorded.
     pub terminal: Option<WorkerExitFact>,
 }
 
-/// Safe reference tying an abnormal worker exit to its unique
-/// `WorkerSession`: enough to pull the local log directory for a human,
-/// with no content, no absolute path, and no credential material.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerLogCrashReference {
-    /// The unique `WorkerSession` the crashed process authenticated.
     pub worker_session_id: String,
-    /// The boot instance that crashed.
     pub worker_instance_id: String,
-    /// Exit status when the platform supplied one.
     pub exit_code: Option<i64>,
-    /// RFC 3339 stamp of the crash observation.
     pub recorded_at: String,
-    /// Name of the session's log directory, relative to the logs root
-    /// (equal to the `worker_session_id`).
     pub log_directory: String,
 }
 
-/// Failure of one worker-log operation. Messages never contain log content
-/// or credential material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerLogError {
-    /// A caller-supplied field is invalid.
     InvalidInput(String),
-    /// The session's `meta.json` exists but cannot be parsed; failing closed
-    /// instead of resetting it preserves the recorded terminal facts.
-    CorruptMeta {
-        /// The session whose meta is unreadable.
-        worker_session_id: String,
-    },
-    /// A filesystem operation failed.
-    Io {
-        /// What the operation was doing.
-        context: String,
-    },
+    CorruptMeta { worker_session_id: String },
+    Io { context: String },
 }
 
 impl WorkerLogError {
@@ -356,7 +169,6 @@ impl fmt::Display for WorkerLogError {
 
 impl std::error::Error for WorkerLogError {}
 
-/// The durable per-session record (`meta.json`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionMeta {
@@ -404,17 +216,13 @@ impl SessionMeta {
     }
 }
 
-/// One line after the ingest pipeline ran.
 struct ProcessedLine {
-    /// Stored text, or `None` when the line was omitted.
     output: Option<String>,
     credential_redacted: bool,
     paths_masked: u64,
     control_bytes_stripped: u64,
 }
 
-/// In-memory remainder of a line whose newline has not been seen yet, kept
-/// so a credential can never straddle two appends. Bounded by the line cap.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StreamPending {
     stdout: String,
@@ -441,19 +249,13 @@ impl StreamPending {
     }
 }
 
-/// Shared state of one recorder handle.
 struct RecorderState {
     logs_root: PathBuf,
     config: WorkerLogConfig,
-    // ponytail: one recorder-wide lock keeps file and meta updates atomic;
-    // shard by session only if measured log throughput makes this a bottleneck.
     operation_lock: Mutex<()>,
     pending: Mutex<BTreeMap<String, StreamPending>>,
 }
 
-/// The Device Client's bounded, redacted worker-subprocess log recorder.
-///
-/// Cheap to clone; every method is `&self`. Pure `std`, no async runtime.
 #[derive(Clone)]
 pub struct WorkerLogRecorder {
     state: Arc<RecorderState>,
@@ -470,13 +272,6 @@ impl fmt::Debug for WorkerLogRecorder {
 }
 
 impl WorkerLogRecorder {
-    /// Opens (and creates when missing) the worker logs root.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an out-of-bounds [`WorkerLogConfig`] (a line must always fit
-    /// one segment) and a logs root that cannot be created or is not a
-    /// directory.
     pub fn open(logs_root: &Path, config: WorkerLogConfig) -> Result<Self, WorkerLogError> {
         validate_config(&config)?;
         create_private_directory(logs_root)?;
@@ -495,29 +290,11 @@ impl WorkerLogRecorder {
         })
     }
 
-    /// The static bounds configuration.
     #[must_use]
     pub fn config(&self) -> WorkerLogConfig {
         self.state.config
     }
 
-    /// Appends one chunk of worker output for one worker session.
-    ///
-    /// [`WorkerLogContentKind::Diagnostic`] chunks are line-processed
-    /// through the redaction pipeline and stored bounded; a chunk may end
-    /// mid-line — the fragment is buffered until its newline arrives (or is
-    /// flushed by [`WorkerLogRecorder::record_exit`]), so credential
-    /// material can never straddle two appends.
-    /// [`WorkerLogContentKind::ModelContent`] chunks are never stored; only
-    /// their byte count is retained.
-    ///
-    /// An unknown session creates its record on first append; a non-empty
-    /// `worker_instance_id` updates the latest-boot fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid session id or an unparsable RFC 3339 `stamp`, and
-    /// reports storage failures.
     pub fn append(
         &self,
         worker_session_id: &str,
@@ -566,9 +343,6 @@ impl WorkerLogRecorder {
                     )?;
                     meta.touch_stream(stream, lines);
                 }
-                // The trailing fragment has no newline yet: buffer it, or —
-                // when it already exceeds the line cap — omit it now so the
-                // buffer stays bounded.
                 let fragment = rest.trim_end_matches('\r');
                 if fragment.len() > self.state.config.max_diagnostic_line_bytes {
                     let processed =
@@ -584,21 +358,6 @@ impl WorkerLogRecorder {
         Ok(stats)
     }
 
-    /// Records the terminal process observation of one worker boot.
-    ///
-    /// The fact is stored in the session meta and one machine-generated
-    /// marker line is appended to the stdout stream. Recording for an
-    /// unknown session creates the session record first, so even a worker
-    /// that died without output keeps its exit fact. A repeat record for a
-    /// boot that already has its terminal fact is the idempotent
-    /// [`WorkerExitRecordOutcome::AlreadyRecorded`] no-op; a replacement
-    /// boot (a different `worker_instance_id`) records a fresh fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid session id or instance id, a `state` outside the
-    /// terminal vocabulary (`exited`/`crashed`/`missing`), an unparsable
-    /// RFC 3339 `stamp`, and storage failures.
     pub fn record_exit(
         &self,
         worker_session_id: &str,
@@ -632,7 +391,6 @@ impl WorkerLogRecorder {
             return Ok(WorkerExitRecordOutcome::AlreadyRecorded);
         }
 
-        // Flush any buffered partial line first so the marker stays last.
         let pending = self
             .lock_pending()
             .remove(worker_session_id)
@@ -677,12 +435,6 @@ impl WorkerLogRecorder {
         Ok(WorkerExitRecordOutcome::Recorded)
     }
 
-    /// The safe diagnostic summary of one session's retained logs, or
-    /// `None` for a session without a record.
-    ///
-    /// # Errors
-    ///
-    /// Reports storage and corrupt-meta failures.
     pub fn summary(
         &self,
         worker_session_id: &str,
@@ -719,12 +471,6 @@ impl WorkerLogRecorder {
         }))
     }
 
-    /// The safe reference for one abnormally exited (`crashed`) session, or
-    /// `None` when the session has no record or terminated normally.
-    ///
-    /// # Errors
-    ///
-    /// Reports storage and corrupt-meta failures.
     pub fn crash_reference(
         &self,
         worker_session_id: &str,
@@ -748,11 +494,6 @@ impl WorkerLogRecorder {
         }))
     }
 
-    /// Every session id that currently has a log record, sorted.
-    ///
-    /// # Errors
-    ///
-    /// Reports storage failures.
     pub fn session_ids(&self) -> Result<Vec<String>, WorkerLogError> {
         let _operation_guard = self.lock_operations();
         self.session_ids_unlocked()
@@ -779,18 +520,6 @@ impl WorkerLogRecorder {
         Ok(sessions)
     }
 
-    /// Drops session records beyond the retention policy: sessions whose
-    /// last activity is older than [`WorkerLogConfig::retention_window`]
-    /// (when enabled), then the oldest beyond
-    /// [`WorkerLogConfig::max_retained_sessions`]. Answers how many session
-    /// directories were removed. A session with an unparsable meta is left
-    /// untouched (fail closed; its recorded facts must not be silently
-    /// destroyed), and such sessions do not count toward the retained cap.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unparsable RFC 3339 `now` stamp and reports storage
-    /// failures.
     pub fn prune(&self, now: &str) -> Result<usize, WorkerLogError> {
         let now = parse_stamp(now)?;
         let _operation_guard = self.lock_operations();
@@ -817,9 +546,6 @@ impl WorkerLogRecorder {
                         retained.push((session, last));
                     }
                 }
-                // A session without a durable meta yet, and one with an
-                // unparsable meta (fail closed: its recorded facts must not
-                // be silently destroyed), are left untouched.
                 Ok(None) | Err(WorkerLogError::CorruptMeta { .. }) => {}
                 Err(error) => return Err(error),
             }
@@ -880,9 +606,6 @@ impl WorkerLogRecorder {
         }
     }
 
-    /// Processes one complete line through the redaction pipeline, applies
-    /// the counters to `meta` and `stats`, writes the line when it
-    /// survives, and answers the stored line count (0 or 1).
     fn process_and_write_line(
         &self,
         session_dir: &Path,
@@ -949,7 +672,6 @@ impl WorkerLogRecorder {
     }
 }
 
-/// Validates the static bounds configuration.
 fn validate_config(config: &WorkerLogConfig) -> Result<(), WorkerLogError> {
     if config.max_diagnostic_line_bytes < MIN_DIAGNOSTIC_LINE_BYTES
         || config.max_diagnostic_line_bytes > MAX_DIAGNOSTIC_LINE_BYTES
@@ -982,8 +704,6 @@ fn validate_config(config: &WorkerLogConfig) -> Result<(), WorkerLogError> {
     Ok(())
 }
 
-/// Validates a worker-session id: it doubles as the log directory name, so
-/// it must be a single safe path component.
 fn validate_session_id(worker_session_id: &str) -> Result<(), WorkerLogError> {
     let valid = !worker_session_id.is_empty()
         && worker_session_id.len() <= MAX_SESSION_ID_BYTES
@@ -1006,7 +726,6 @@ fn parse_stamp(stamp: &str) -> Result<OffsetDateTime, WorkerLogError> {
         .map_err(|_| WorkerLogError::invalid("stamp must be an RFC 3339 timestamp"))
 }
 
-/// Creates one directory with mode 0700 on unix.
 fn create_private_directory(path: &Path) -> Result<(), WorkerLogError> {
     fs::create_dir_all(path).map_err(|_| WorkerLogError::io("directory create"))?;
     #[cfg(unix)]
@@ -1023,8 +742,6 @@ fn create_private_directory(path: &Path) -> Result<(), WorkerLogError> {
     Ok(())
 }
 
-/// Writes one file with exactly mode 0600 on unix (the crate's private-file
-/// rule; these logs carry redacted-but-local worker content).
 fn write_private_file(path: &Path, contents: &str) -> Result<(), WorkerLogError> {
     #[cfg(unix)]
     {
@@ -1055,9 +772,6 @@ fn write_private_file(path: &Path, contents: &str) -> Result<(), WorkerLogError>
     }
 }
 
-/// Appends one finished line (newline included) to a stream's active
-/// segment, rotating first when the line would overflow the segment cap.
-/// Answers how many rotations happened (0 or 1).
 fn write_line_to_stream(
     session_dir: &Path,
     stem: &str,
@@ -1108,7 +822,6 @@ fn write_line_bytes(file: &mut fs::File, line: &str) -> Result<(), WorkerLogErro
         .map_err(|_| WorkerLogError::io("segment append"))
 }
 
-/// Shifts a stream's segments down by one, deleting the oldest.
 fn rotate_stream(
     session_dir: &Path,
     stem: &str,
@@ -1131,7 +844,6 @@ fn rotate_stream(
         .map_err(|_| WorkerLogError::io("segment rotation"))
 }
 
-/// Sum of the retained segment sizes of one stream.
 fn retained_stream_bytes(session_dir: &Path, stem: &str, max_segments: usize) -> u64 {
     (0..max_segments)
         .map(|index| {
@@ -1153,7 +865,6 @@ fn remove_session_directory(
         .map_err(|_| WorkerLogError::io("session prune"))
 }
 
-/// Applies one processed line's counters to the meta and the append stats.
 fn apply_line(meta: &mut SessionMeta, stats: &mut WorkerLogAppendStats, processed: &ProcessedLine) {
     let omitted = u64::from(processed.output.is_none());
     let credential = u64::from(processed.credential_redacted);
@@ -1171,7 +882,6 @@ fn apply_line(meta: &mut SessionMeta, stats: &mut WorkerLogAppendStats, processe
     stats.control_bytes_stripped += processed.control_bytes_stripped;
 }
 
-/// Runs one complete diagnostic line through the ingest pipeline.
 fn process_line(line: &str, max_line_bytes: usize) -> ProcessedLine {
     let mut text = String::with_capacity(line.len());
     let mut control_bytes = 0u64;
@@ -1207,9 +917,6 @@ fn process_line(line: &str, max_line_bytes: usize) -> ProcessedLine {
     }
 }
 
-/// Case-insensitive credential markers adapted from the delivery
-/// projection's secret scanner, extended with the Worker Session Credential
-/// shapes (`wsc-`/`wsc_`, `workerCredential…`) and cookie/key headers.
 const CREDENTIAL_MARKERS: &[&str] = &[
     "--api-key ",
     "--password ",
@@ -1252,10 +959,6 @@ const CREDENTIAL_MARKERS: &[&str] = &[
     "xoxp-",
 ];
 
-/// Whether one line carries credential material: a known marker, URL
-/// userinfo, or a hexadecimal run of 32+ characters (the shape of the
-/// issued Worker Session Credential material, and of digests — equally
-/// worthless in a safe summary).
 fn contains_credential_material(line: &str) -> bool {
     let lowered = line.to_ascii_lowercase();
     CREDENTIAL_MARKERS
@@ -1280,7 +983,6 @@ fn contains_long_hex(line: &str) -> bool {
     false
 }
 
-/// Whether a URL in the line embeds userinfo (`scheme://user:password@…`).
 fn contains_url_userinfo(line: &str) -> bool {
     let mut remainder = line;
     while let Some(scheme_end) = remainder.find("://") {
@@ -1300,21 +1002,15 @@ fn contains_url_userinfo(line: &str) -> bool {
     false
 }
 
-/// Masks every absolute path occurrence in one line with `[PATH]` and
-/// answers the number of masked occurrences. Selective by design: URLs with
-/// a scheme authority survive, relative paths survive.
 fn mask_absolute_paths(line: &str) -> (String, u64) {
     let bytes = line.as_bytes();
     let mut masked = String::with_capacity(line.len());
     let mut count = 0u64;
     let mut position = 0usize;
-    // The character immediately before `position`; a masked run counts as a
-    // path character (never a boundary).
     let mut previous: Option<char> = None;
     while position < bytes.len() {
         let byte = bytes[position];
 
-        // `file://…` — the whole URL is one local path reference.
         if matches!(byte, b'f' | b'F')
             && line[position..].len() >= 7
             && line[position..position + 7].eq_ignore_ascii_case("file://")
@@ -1326,7 +1022,6 @@ fn mask_absolute_paths(line: &str) -> (String, u64) {
             position = end;
             continue;
         }
-        // UNC `\\host\share…`.
         if byte == b'\\'
             && position + 2 < bytes.len()
             && bytes[position + 1] == b'\\'
@@ -1342,7 +1037,6 @@ fn mask_absolute_paths(line: &str) -> (String, u64) {
                 continue;
             }
         }
-        // Windows drive `X:\…` / `X:/…`.
         if byte.is_ascii_alphabetic()
             && position + 2 < bytes.len()
             && bytes[position + 1] == b':'
@@ -1358,7 +1052,6 @@ fn mask_absolute_paths(line: &str) -> (String, u64) {
                 continue;
             }
         }
-        // Home-relative `~/…`.
         if byte == b'~'
             && position + 1 < bytes.len()
             && bytes[position + 1] == b'/'
@@ -1373,8 +1066,6 @@ fn mask_absolute_paths(line: &str) -> (String, u64) {
                 continue;
             }
         }
-        // POSIX `/…` — a single leading slash (so `https://…` authorities do
-        // not match) whose run carries at least one path character.
         if byte == b'/'
             && position + 1 < bytes.len()
             && bytes[position + 1] != b'/'
@@ -1402,10 +1093,6 @@ fn mask_absolute_paths(line: &str) -> (String, u64) {
     (masked, count)
 }
 
-/// Whether the character before a candidate path start allows one. A `:`
-/// is a boundary (PATH-style dumps: `/usr/bin:/usr/local/bin`), while a
-/// path character before the candidate keeps a relative reference intact
-/// (`src/main.rs`, `https://host/path`).
 fn is_path_boundary(previous: Option<char>) -> bool {
     match previous {
         None => true,
@@ -1415,7 +1102,6 @@ fn is_path_boundary(previous: Option<char>) -> bool {
     }
 }
 
-/// End of a `file://` URL: the first whitespace, quote, or bracket.
 fn url_end(bytes: &[u8], start: usize) -> usize {
     let mut end = start;
     while end < bytes.len() {
@@ -1428,9 +1114,6 @@ fn url_end(bytes: &[u8], start: usize) -> usize {
     end
 }
 
-/// Path-character run of a POSIX absolute path. Non-ASCII bytes count as
-/// path characters, so a non-ASCII file name (`/tmp/时钟.txt`) is masked
-/// completely; whitespace always terminates the run.
 fn consume_posix_run(bytes: &[u8], start: usize) -> usize {
     let mut end = start;
     while end < bytes.len()
@@ -1443,8 +1126,6 @@ fn consume_posix_run(bytes: &[u8], start: usize) -> usize {
     end
 }
 
-/// Path-character run of a Windows drive or UNC path (see
-/// [`consume_posix_run`] for the non-ASCII rule).
 fn consume_windows_run(bytes: &[u8], start: usize) -> usize {
     let mut end = start;
     while end < bytes.len()

@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Unique Worker `ModelPort` runtime over the durable Provider Gateway.
-//!
-//! Local and remote execution-port adapters invoke the same typed core. The
-//! runtime writes an opening tombstone before any Credential or Provider side
-//! effect, persists only secret-free authority and retry context, restores an
-//! accepted exchange without reopening the Provider, and joins all chunks and
-//! acknowledgements through the one flow-control coordinator.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -77,7 +67,6 @@ struct PoolReadinessState<'scope> {
     scope: &'scope ProjectScope,
 }
 
-/// Stable production runtime failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelExecutionRuntimeErrorKind {
     InvalidInput,
@@ -93,7 +82,6 @@ pub enum ModelExecutionRuntimeErrorKind {
     Storage,
 }
 
-/// Bounded error that never retains model payload or Provider diagnostics.
 #[derive(Debug)]
 pub struct ModelExecutionRuntimeError {
     kind: ModelExecutionRuntimeErrorKind,
@@ -147,18 +135,12 @@ impl From<ModelStreamFlowError> for ModelExecutionRuntimeError {
     }
 }
 
-/// Durable exchange store and canonical retry-settlement context source.
 pub struct DurableModelExchangeAuthority {
     storage: Mutex<SqliteStorage>,
     database_path: PathBuf,
 }
 
 impl DurableModelExchangeAuthority {
-    /// Opens the internal exchange authority over the product database.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the database or restricted table cannot be opened.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, ModelExecutionRuntimeError> {
         let mut storage = SqliteStorage::open(data_directory).map_err(|_| {
             ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
@@ -171,17 +153,11 @@ impl DurableModelExchangeAuthority {
         })
     }
 
-    /// Returns the exact canonical database path for composition checks.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
 
-    /// Deterministically checkpoints and closes the owned database connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable storage failure if the mutex is poisoned or close fails.
     pub fn close(self) -> Result<(), ModelExecutionRuntimeError> {
         let storage = self.storage.into_inner().map_err(|_| {
             ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
@@ -563,7 +539,6 @@ impl fmt::Debug for DurableModelExchangeAuthority {
     }
 }
 
-/// Result of one `ModelOpen` through the durable production path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelExecutionOpenReceipt {
     Queued {
@@ -578,7 +553,6 @@ pub enum ModelExecutionOpenReceipt {
     },
 }
 
-/// Result of one Provider batch and the generated Worker chunks.
 #[derive(Debug)]
 pub struct ModelExecutionBatchReceipt {
     pub chunks: Vec<ModelChunkMessage>,
@@ -604,13 +578,6 @@ impl ModelExecutionBatchReceipt {
     }
 }
 
-/// Rebuilds terminal Worker batches which are durable in the Provider pool but
-/// have not necessarily crossed the `ProductSession` projection boundary yet.
-///
-/// # Errors
-///
-/// Fails closed when the pool authority, exchange authority, or frozen Worker
-/// binding disagree.
 pub(crate) fn recover_terminal_model_execution_batches(
     storage: &mut SqliteStorage,
     config: ModelRequestPoolConfig,
@@ -715,22 +682,18 @@ const fn terminal_outcomes_match(
     )
 }
 
-/// Result of one Worker acknowledgement.
 #[derive(Debug)]
 pub enum ModelExecutionAckReceipt {
     Acknowledged(ModelStreamFlowAckReceipt),
     Cancelled(ModelStreamFlowCancellationReceipt),
 }
 
-/// Shared typed execution-port result used by local and remote adapters.
 #[derive(Debug)]
 pub enum ModelExecutionPortReceipt {
     Opened(ModelExecutionOpenReceipt),
     Acknowledged(ModelExecutionAckReceipt),
 }
 
-/// Unique production runtime joining durable exchange authority, Gateway, and
-/// stream flow control. It owns no second Provider or retry ledger.
 pub struct ModelExecutionRuntime<'a, 'storage> {
     exchanges: &'a DurableModelExchangeAuthority,
     planner: &'a mut dyn ModelRetryPreOpenPlannerPort,
@@ -763,12 +726,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         }
     }
 
-    /// Accepts one Worker model-open message using its durable retry plan.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for missing/corrupt context, changed input, interrupted
-    /// opening, Gateway failure, or pool failure.
     #[allow(clippy::too_many_lines)]
     pub fn open(
         &mut self,
@@ -931,13 +888,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         })
     }
 
-    /// Converts one Provider batch, applies flow control, and produces the
-    /// canonical Control Plane-to-Worker model-chunk messages.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown/terminal exchanges, inconsistent terminal facts, or
-    /// flow/storage failures.
     pub fn offer_provider_batch(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -975,12 +925,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         seal_batch_receipt(chunks, flow)
     }
 
-    /// Applies a Worker acknowledgement to the same Gateway/flow instance.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, unknown exchanges, invalid sequence, or
-    /// flow/storage failure.
     pub fn acknowledge(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1046,9 +990,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 ModelExecutionRuntimeErrorKind::ExchangeConflict,
             ));
         }
-        // Legacy rows retain only a raw transport hash. Reconstruct the
-        // success fact from the validated immutable open plus the durable
-        // final receipt; never infer authority from the incoming ACK.
         let snapshot = self
             .exchanges
             .snapshot(&stored.model_exchange_id)?

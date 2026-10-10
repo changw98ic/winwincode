@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use serde_json::json;
 use winwincode_domain::Sha256Digest;
 use winwincode_execution_port::generated::{

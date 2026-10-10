@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Renewable, fenced ownership for local Control Plane temporary roots.
-
 use std::{
     fmt, fs,
     fs::OpenOptions,
@@ -32,7 +28,6 @@ const DEFAULT_LEASE_MILLIS: u64 = 60_000;
 const DEFAULT_STALE_GRACE_MILLIS: u64 = 60_000;
 const DEFAULT_RENEW_INTERVAL_MILLIS: u64 = 20_000;
 
-/// Supported local release target whose path lifecycle uses this lease.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TemporaryRootTarget {
@@ -57,7 +52,6 @@ impl TemporaryRootTarget {
     }
 }
 
-/// Bounded lease timing and platform configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TemporaryRootLeaseConfig {
     lease_millis: u64,
@@ -67,11 +61,6 @@ pub struct TemporaryRootLeaseConfig {
 }
 
 impl TemporaryRootLeaseConfig {
-    /// Creates a bounded configuration. Renewal must occur before expiry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero durations, renewal at/after expiry, or arithmetic overflow.
     pub fn try_new(
         lease_millis: u64,
         stale_grace_millis: u64,
@@ -104,7 +93,6 @@ impl TemporaryRootLeaseConfig {
     }
 }
 
-/// Stable temporary-root lease failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TemporaryRootLeaseErrorKind {
     InvalidConfiguration,
@@ -118,7 +106,6 @@ pub enum TemporaryRootLeaseErrorKind {
     RenewalTask,
 }
 
-/// Bounded temporary-root lease error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TemporaryRootLeaseError {
     kind: TemporaryRootLeaseErrorKind,
@@ -158,7 +145,6 @@ impl TemporaryRootLeaseError {
         )
     }
 
-    /// Creates the stable failure returned by an injected clock authority.
     #[must_use]
     pub const fn clock_unavailable() -> Self {
         Self::new(
@@ -167,7 +153,6 @@ impl TemporaryRootLeaseError {
         )
     }
 
-    /// Creates the stable failure returned by an injected entropy authority.
     #[must_use]
     pub const fn entropy_unavailable() -> Self {
         Self::new(
@@ -190,21 +175,9 @@ impl fmt::Display for TemporaryRootLeaseError {
 
 impl std::error::Error for TemporaryRootLeaseError {}
 
-/// Clock and entropy authority. Production uses `SystemTime` and OS entropy;
-/// deterministic tests inject both without relying on PID or file timestamps.
 pub trait TemporaryRootLeaseRuntime: Send + Sync {
-    /// Returns the current Unix epoch millisecond.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ClockUnavailable` when time cannot be read safely.
     fn now_millis(&self) -> Result<u64, TemporaryRootLeaseError>;
 
-    /// Returns a fresh 128-bit random identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EntropyUnavailable` when OS entropy cannot be read.
     fn random_128(&self) -> Result<[u8; 16], TemporaryRootLeaseError>;
 }
 
@@ -280,7 +253,6 @@ impl fmt::Debug for TemporaryRootLeaseManager {
     }
 }
 
-// Other UIDs must neither replace the parent nor unlink/recreate its lock inode.
 fn open_lifecycle_parent(parent: &Path) -> Result<fs::File, TemporaryRootLeaseError> {
     let directory = fs::File::from(
         rustix::fs::open(
@@ -306,11 +278,6 @@ fn open_lifecycle_parent(parent: &Path) -> Result<fs::File, TemporaryRootLeaseEr
 }
 
 impl TemporaryRootLeaseManager {
-    /// Opens the manager under one exact canonical parent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects symlinked, foreign-owned or writable-by-others parents and filesystem failures.
     pub fn open(
         parent: impl AsRef<Path>,
         config: TemporaryRootLeaseConfig,
@@ -347,11 +314,6 @@ impl TemporaryRootLeaseManager {
         })
     }
 
-    /// Opens the production manager for the current release target.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable configuration or filesystem failure.
     pub fn system(parent: impl AsRef<Path>) -> Result<Self, TemporaryRootLeaseError> {
         Self::open(
             parent,
@@ -360,11 +322,6 @@ impl TemporaryRootLeaseManager {
         )
     }
 
-    /// Reclaims proven-stale roots, then creates one manually renewable lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns a clock, entropy, lease validation, or filesystem failure.
     pub fn acquire(&self) -> Result<TemporaryRootLease, TemporaryRootLeaseError> {
         self.reclaim_expired()?;
         let now = self.runtime.now_millis()?;
@@ -421,20 +378,10 @@ impl TemporaryRootLeaseManager {
         ))
     }
 
-    /// Creates a lease renewed by one lifecycle-owned thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an acquisition or renewal-thread startup failure.
     pub fn acquire_renewing(&self) -> Result<OwnedTemporaryRoot, TemporaryRootLeaseError> {
         OwnedTemporaryRoot::start(self.acquire()?)
     }
 
-    /// Reclaims only roots whose exact canonical lease is beyond expiry plus grace.
-    ///
-    /// # Errors
-    ///
-    /// Returns a parent scan, clock, entropy, or atomic takeover failure.
     pub fn reclaim_expired(&self) -> Result<TemporaryRootReclaimReport, TemporaryRootLeaseError> {
         let _lifecycle_lock = self.lock_lifecycle()?;
         let mut report = TemporaryRootReclaimReport::default();
@@ -462,10 +409,6 @@ impl TemporaryRootLeaseManager {
     }
 
     fn lock_lifecycle(&self) -> Result<fs::File, TemporaryRootLeaseError> {
-        // Keep the exclusion inode outside all removable roots. A readable
-        // parent directory cannot carry the lock: another UID can flock it
-        // without write access. Open this owner-only file relative to a verified
-        // parent descriptor, reject aliases, and let process exit release it.
         let parent = open_lifecycle_parent(&self.parent)?;
         let flags =
             rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
@@ -477,9 +420,6 @@ impl TemporaryRootLeaseManager {
                 rustix::fs::Mode::empty(),
             )
         };
-        // On macOS a concurrent O_CREAT | O_NOFOLLOW open can return ENOENT
-        // even when the parent and lock inode remain valid. Create exclusively
-        // only after a missing-file result, then open the winning stable inode.
         let lock = fs::File::from(
             open()
                 .or_else(|error| {
@@ -838,7 +778,6 @@ struct LeaseHandle {
     record: LeaseRecord,
 }
 
-/// Manually renewable lease useful to a launcher that owns its scheduler.
 pub struct TemporaryRootLease {
     manager: TemporaryRootLeaseManager,
     path: PathBuf,
@@ -851,11 +790,6 @@ impl TemporaryRootLease {
         &self.path
     }
 
-    /// Renews this exact instance/fence generation atomically.
-    ///
-    /// # Errors
-    ///
-    /// Returns `OwnershipLost` for takeover, tampering, or another generation.
     pub fn renew(&mut self) -> Result<(), TemporaryRootLeaseError> {
         let mut handle = LeaseHandle {
             path: self.path.clone(),
@@ -866,11 +800,6 @@ impl TemporaryRootLease {
         Ok(())
     }
 
-    /// Immediately removes this exact owned root through a fenced rename.
-    ///
-    /// # Errors
-    ///
-    /// Returns `OwnershipLost` rather than deleting a changed root.
     pub fn release(self) -> Result<(), TemporaryRootLeaseError> {
         let handle = LeaseHandle {
             path: self.path,
@@ -897,7 +826,6 @@ struct RenewalStatus {
     changed: Condvar,
 }
 
-/// Lifecycle-owned root with a renewable lease and joinable renewal task.
 pub struct OwnedTemporaryRoot {
     path: PathBuf,
     handle: Arc<Mutex<Option<LeaseHandle>>>,
@@ -949,12 +877,6 @@ impl OwnedTemporaryRoot {
         })
     }
 
-    /// Returns the root only while the renewal task remains healthy.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first renewal failure so callers stop using an unfenced
-    /// root instead of silently continuing after the lease stopped advancing.
     pub fn path(&self) -> Result<&Path, TemporaryRootLeaseError> {
         let state = self
             .status
@@ -967,11 +889,6 @@ impl OwnedTemporaryRoot {
         Ok(&self.path)
     }
 
-    /// Stops renewal and immediately removes the exact still-owned root.
-    ///
-    /// # Errors
-    ///
-    /// Returns a renewal-task, fencing, clock, entropy, or filesystem failure.
     pub fn release(mut self) -> Result<(), TemporaryRootLeaseError> {
         self.stop_task()?;
         let handle = self
@@ -1047,7 +964,6 @@ fn record_renewal_failure(status: &RenewalStatus, error: TemporaryRootLeaseError
     }
 }
 
-/// Result of one bounded stale-root scan.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TemporaryRootReclaimReport {
     pub reclaimed: u64,

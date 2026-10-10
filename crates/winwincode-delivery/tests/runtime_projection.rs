@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_delivery::{
     application::session_binding::{
         SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
@@ -22,8 +20,6 @@ use winwincode_domain::{
     WorkRunId, WorkRunState, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
 
-// This tests concurrent independent writers. Candidate verification is covered by
-// the same-item writer/reviewer/verifier transaction test, not a second WorkItem.
 fn scheduled_delivery_with_independent_writers() -> Delivery {
     let delivery = Delivery::decode_json(include_bytes!("fixtures/delivery-main.json"))
         .expect("canonical Delivery fixture");

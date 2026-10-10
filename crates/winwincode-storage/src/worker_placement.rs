@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic `Worker` placement over one registry capacity snapshot.
-//!
-//! Placement is deliberately a pure decision. It consumes registry-owned
-//! `Worker` facts plus caller-owned reachability and quota snapshots, then
-//! returns an explainable choice. It cannot create a lease, reserve durable
-//! capacity, or replace [`crate::ExecutionRegistry`] as the authority that
-//! decides whether the resulting claim commits.
-
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -19,7 +9,6 @@ use winwincode_domain::{
 
 use crate::{WorkerCapacityEntry, WorkerHealth, WorkerPlatform, WorkerPoolId};
 
-/// Exact tenant and workspace in which a `Worker` may reach one repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerRepositoryAccess {
     pub organization_id: OrganizationId,
@@ -28,8 +17,6 @@ pub struct WorkerRepositoryAccess {
     pub repository_id: RepositoryId,
 }
 
-/// Registry capacity plus non-registry reachability facts for one current
-/// `Worker` process instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementCandidate {
     pub worker: WorkerCapacityEntry,
@@ -37,7 +24,6 @@ pub struct WorkerPlacementCandidate {
     pub repository_access: Vec<WorkerRepositoryAccess>,
 }
 
-/// Exact scope bound to a reusable `ProductSession` workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSessionAffinity {
     pub organization_id: OrganizationId,
@@ -49,7 +35,6 @@ pub struct WorkerSessionAffinity {
     pub worker_instance_id: WorkerInstanceId,
 }
 
-/// One job's hard placement requirements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementRequest {
     pub job_id: ExecutionJobId,
@@ -66,7 +51,6 @@ pub struct WorkerPlacementRequest {
     pub affinity: Option<WorkerSessionAffinity>,
 }
 
-/// Caller-owned running quota for one exact placement scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementQuota {
     pub organization_id: OrganizationId,
@@ -78,7 +62,6 @@ pub struct WorkerPlacementQuota {
     pub running_slots: u64,
 }
 
-/// One hard condition that excluded a `Worker` process instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerPlacementFailure {
     ProtocolVersionMismatch {
@@ -113,7 +96,6 @@ pub enum WorkerPlacementFailure {
     NoAvailableCapacity,
 }
 
-/// Batch-wide condition that prevents every otherwise valid `Worker` choice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerPlacementGlobalFailure {
     ScopeQuotaExhausted {
@@ -122,7 +104,6 @@ pub enum WorkerPlacementGlobalFailure {
     },
 }
 
-/// Explicit reason an existing `ProductSession` workspace was not reused.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerAffinityFailure {
     ScopeMismatch,
@@ -135,7 +116,6 @@ pub enum WorkerAffinityFailure {
     },
 }
 
-/// Rejection details for one current `Worker` process instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementCandidateRejection {
     pub worker_id: WorkerId,
@@ -143,8 +123,6 @@ pub struct WorkerPlacementCandidateRejection {
     pub failures: Vec<WorkerPlacementFailure>,
 }
 
-/// Explainable selected placement. The remaining-slot values are only the
-/// batch calculation; a subsequent registry lease claim remains authoritative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementSelection {
     pub job_id: ExecutionJobId,
@@ -156,7 +134,6 @@ pub struct WorkerPlacementSelection {
     pub scope_available_slots_after: u64,
 }
 
-/// Explainable failure after every current `Worker` was evaluated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementRejection {
     pub job_id: ExecutionJobId,
@@ -165,14 +142,12 @@ pub struct WorkerPlacementRejection {
     pub workers: Vec<WorkerPlacementCandidateRejection>,
 }
 
-/// Closed placement outcome for one requested execution job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerPlacementDecision {
     Selected(WorkerPlacementSelection),
     Rejected(WorkerPlacementRejection),
 }
 
-/// Structurally invalid or ambiguous placement snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlacementError {
     message: String,
@@ -251,19 +226,6 @@ struct QuotaState {
     running_slots: u64,
 }
 
-/// Places a batch against one immutable registry snapshot.
-///
-/// Jobs are evaluated in ascending `ExecutionJobId` order, independent of
-/// caller slice order. A valid affinity wins before capacity ranking; fallback
-/// selects the most available eligible `Worker`, then the lowest stable
-/// `WorkerId` and `WorkerInstanceId`. Batch-local capacity and quota are
-/// decremented after every selection so one visible slot selects at most one
-/// job. No durable state is changed.
-///
-/// # Errors
-///
-/// Rejects duplicate identities, impossible capacity/quota values, a missing
-/// exact-scope quota, and empty hard requirement values.
 pub fn place_worker_batch(
     requests: &[WorkerPlacementRequest],
     candidates: &[WorkerPlacementCandidate],

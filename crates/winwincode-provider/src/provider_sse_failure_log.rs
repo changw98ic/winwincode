@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Private raw response logs, separate from secret-free runtime diagnostics.
-
 use std::{
     fs,
     io::{self, Write as _},
@@ -11,8 +7,6 @@ use std::{
 
 use sha2::{Digest as _, Sha256};
 
-/// The first line is JSON metadata; all remaining bytes are the original body.
-/// No response text is decoded, normalized or printed to the process log.
 pub(crate) fn retain(
     directory: &Path,
     metadata: &serde_json::Value,

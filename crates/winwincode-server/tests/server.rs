@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::SocketAddr;
@@ -70,8 +68,6 @@ fn fixture_scope(seed: u8) -> Scope {
     })
 }
 
-/// Opens one account authority plus its session manager on a shared
-/// directory so restarts observe the same durable state.
 fn open_auth(
     directory: &std::path::Path,
     proof: &str,
@@ -364,7 +360,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// One password login exchange; returns the raw HTTP response.
 async fn login_response(address: SocketAddr, username: &str, password: &str) -> String {
     http_request(
         address,
@@ -377,7 +372,6 @@ async fn login_response(address: SocketAddr, username: &str, password: &str) -> 
     .await
 }
 
-/// One password login exchange; asserts a created session.
 async fn login_as(address: SocketAddr, username: &str, password: &str) -> (String, Value) {
     let response = login_response(address, username, password).await;
     assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
@@ -1967,7 +1961,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     .expect("start server");
     let address = running.local_address();
 
-    // A wrong proof while the gate is open is a plain authentication failure.
     let wrong_proof =
         initialize_owner(address, "wrong-proof", "third", "third-owner-password").await;
     assert!(
@@ -1987,8 +1980,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     assert!(manager.initialized_owner().is_some());
     drop(accounts);
 
-    // After initialization every proof is refused with the explicit
-    // wrong-state rejection, including on the same live Server.
     let second = initialize_owner(
         address,
         "proof-initialization",
@@ -2007,8 +1998,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     running.shutdown().await.expect("shutdown");
     drop(manager);
 
-    // After restart the durable marker keeps initialization closed even for a
-    // fresh proof, while the durable Owner logs in normally.
     let (restarted_accounts, restarted_manager) =
         open_auth(&directory, "proof-after-restart", vec![fixture_scope(1)]);
     assert!(restarted_manager.initialized_owner().is_some());
@@ -2067,8 +2056,6 @@ async fn login_rate_limiting_returns_an_explicit_error() {
     );
     assert!(limited.contains("RATE_LIMITED"), "{limited}");
 
-    // An unknown username has its own budget and still receives a generic
-    // authentication failure rather than the Owner's rate-limit response.
     let unknown = login_response(address, "ada", OWNER_PASSWORD).await;
     assert!(
         unknown.starts_with("HTTP/1.1 401 Unauthorized"),
@@ -2204,7 +2191,6 @@ async fn unauthenticated_requests_are_rejected() {
         "{no_cookie_password_change}"
     );
 
-    // An uninitialized Server refuses password logins outright.
     let early_login = login_response(address, "owner", OWNER_PASSWORD).await;
     assert!(
         early_login.starts_with("HTTP/1.1 401 Unauthorized"),
@@ -2224,8 +2210,6 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
     .expect("start server");
     let address = running.local_address();
 
-    // Unauthenticated and credential-free: the probe publishes exactly the
-    // schema version, initialization state, and authentication mode.
     let before = http_request(
         address,
         &origin_get("/api/v1/server/initialization", "https://client.example"),
@@ -2256,9 +2240,6 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
 #[tokio::test]
 async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     let directory = test_directory("winwincode-cli-owner-bootstrap-test");
-    // The CLI's first-Owner command writes the account without the
-    // session-store marker; the Server must still refuse a browser bootstrap
-    // and report itself initialized through the shared active-Owner fact.
     let accounts = Arc::new(UserAccountService::open(&directory).expect("account service"));
     accounts
         .initialize_owner(
@@ -2268,7 +2249,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
         )
         .expect("CLI first owner");
     let (_, manager) = open_auth(&directory, "proof-late-bootstrap", vec![fixture_scope(1)]);
-    // The CLI path leaves no durable session-store marker behind.
     assert!(manager_marker_is_absent(&directory));
     let running = start_server(
         config("127.0.0.1:0".parse().expect("address")),
@@ -2287,7 +2267,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
     assert_eq!(response_json(&status)["initialized"], json!(true));
 
-    // A fresh bootstrap proof cannot create a second Owner.
     let bootstrap = initialize_owner(
         address,
         "proof-late-bootstrap",
@@ -2301,7 +2280,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     );
     assert!(bootstrap.contains("WRONG_STATE"), "{bootstrap}");
 
-    // The closed loop: the CLI-created Owner signs in normally.
     let (cookie, session) = login_as(address, OWNER_USERNAME, OWNER_PASSWORD).await;
     assert_eq!(session["actor"]["kind"], "user");
     assert!(
@@ -2314,7 +2292,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     fs::remove_dir_all(directory).expect("remove CLI-owner directory");
 }
 
-/// Reads whether the session store carries a durable initialization marker.
 fn manager_marker_is_absent(directory: &std::path::Path) -> bool {
     let database_path = directory
         .join("auth-sessions")

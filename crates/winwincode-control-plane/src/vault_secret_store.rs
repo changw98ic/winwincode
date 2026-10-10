@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Customer-key encrypted loopback Vault/KMS adapter.
-//!
-//! This module implements the canonical [`SecretStorePort`] without claiming a
-//! connection to a cloud service. It is the deterministic offline contract for
-//! a future network Vault/KMS transport: reference identities are opaque,
-//! values are envelope-encrypted at rest, leases are short lived, rotations
-//! keep the metadata-selected version readable, and revocation is deny-first.
-
 use std::{
     collections::BTreeMap,
     fmt,
@@ -53,21 +43,12 @@ const MAX_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
-/// Customer-controlled AES-256 key material used only at the KMS boundary.
-///
-/// Debug output is redacted, cloning and serialization are absent, and the
-/// owned key bytes are cleared on drop.
 pub struct VaultKmsKeyMaterial {
     version: u64,
     bytes: [u8; KEY_BYTES],
 }
 
 impl VaultKmsKeyMaterial {
-    /// Constructs one explicitly versioned customer-controlled key.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero/out-of-range versions or a key of the wrong size.
     pub fn try_new(version: u64, bytes: Vec<u8>) -> Result<Self, SecretStoreError> {
         if version == 0 || version > MAX_KEY_VERSION || bytes.len() != KEY_BYTES {
             return Err(SecretStoreError::corrupt());
@@ -104,7 +85,6 @@ impl Drop for VaultKmsKeyMaterial {
     }
 }
 
-/// Keyring supplied by the customer or deployment KMS configuration.
 pub struct VaultKmsKeyring {
     active_version: u64,
     keys: BTreeMap<u64, VaultKmsKeyMaterial>,
@@ -120,11 +100,6 @@ impl VaultKmsKeyring {
         }
     }
 
-    /// Adds an older decrypt-only key needed during crash-safe rewrap recovery.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a duplicate key version or the active version.
     pub fn add_decryption_key(
         mut self,
         key: VaultKmsKeyMaterial,
@@ -147,17 +122,10 @@ impl fmt::Debug for VaultKmsKeyring {
     }
 }
 
-/// Clock used only to bound one Vault read lease.
 pub trait VaultKmsClock: Send + Sync {
-    /// Returns the current Unix time in milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable failure when the deployment clock is unavailable.
     fn now_ms(&self) -> Result<u64, VaultKmsClockError>;
 }
 
-/// Stable clock failure with no backend or key diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultKmsClockError;
 
@@ -169,7 +137,6 @@ impl fmt::Display for VaultKmsClockError {
 
 impl std::error::Error for VaultKmsClockError {}
 
-/// Production wall clock for Vault read leases.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemVaultKmsClock;
 
@@ -183,7 +150,6 @@ impl VaultKmsClock for SystemVaultKmsClock {
     }
 }
 
-/// Secret-free proof that one bounded Vault read lease was issued.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultSecretLeaseReceipt {
     lease_id: String,
@@ -220,7 +186,6 @@ impl VaultSecretLeaseReceipt {
     }
 }
 
-/// Owned plaintext plus its short-lived secret-safe lease receipt.
 pub struct VaultLeasedSecret {
     secret: ResolvedSecret,
     receipt: VaultSecretLeaseReceipt,
@@ -248,7 +213,6 @@ impl fmt::Debug for VaultLeasedSecret {
     }
 }
 
-/// Secret-free write receipt for an immutable encrypted Credential version.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultSecretWriteReceipt {
     credential_reference_id: CredentialReferenceId,
@@ -279,7 +243,6 @@ impl VaultSecretWriteReceipt {
     }
 }
 
-/// Secret-free cleanup or revocation result.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct VaultSecretCleanupReceipt {
     removed_versions: u64,
@@ -292,7 +255,6 @@ impl VaultSecretCleanupReceipt {
     }
 }
 
-/// Secret-free customer-key rewrap result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultKmsRewrapReceipt {
     key_version: u64,
@@ -311,11 +273,6 @@ impl VaultKmsRewrapReceipt {
     }
 }
 
-/// Encrypted local loopback for the remote Vault/KMS contract.
-///
-/// This adapter deliberately performs no cloud or network call. A deployment
-/// supplies the customer-managed keyring out of band; only canonical encrypted
-/// envelopes and deny-first revocation tombstones are persisted.
 pub struct VaultKmsSecretStoreAdapter {
     root: PathBuf,
     lock_path: PathBuf,
@@ -325,11 +282,6 @@ pub struct VaultKmsSecretStoreAdapter {
 }
 
 impl VaultKmsSecretStoreAdapter {
-    /// Opens the encrypted loopback store with an out-of-band keyring.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsafe paths, invalid lease bounds, or an inconsistent keyring.
     pub fn open(
         root: impl AsRef<Path>,
         keyring: VaultKmsKeyring,
@@ -361,11 +313,6 @@ impl VaultKmsSecretStoreAdapter {
         Ok(store)
     }
 
-    /// Publishes the exact encrypted version selected by metadata.
-    ///
-    /// # Errors
-    ///
-    /// Exact retries replay; changed bytes for an existing version conflict.
     pub fn store(
         &self,
         reference: &CredentialReferenceResolution,
@@ -376,12 +323,6 @@ impl VaultKmsSecretStoreAdapter {
         result
     }
 
-    /// Stages the next encrypted Credential version before metadata advances.
-    ///
-    /// # Errors
-    ///
-    /// Returns a version conflict at the supported boundary or on changed
-    /// replay input.
     pub fn rotate_secret(
         &self,
         current: &CredentialReferenceResolution,
@@ -397,12 +338,6 @@ impl VaultKmsSecretStoreAdapter {
         result
     }
 
-    /// Resolves one exact version and returns its bounded Vault read lease.
-    ///
-    /// # Errors
-    ///
-    /// Revoked, missing, corrupt, or undecryptable envelopes fail with stable
-    /// secret-safe categories.
     pub fn resolve_lease(
         &self,
         reference: &CredentialReferenceResolution,
@@ -448,11 +383,6 @@ impl VaultKmsSecretStoreAdapter {
         })
     }
 
-    /// Activates a new customer key while retaining old decrypt-only keys.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-monotonic or duplicate key versions.
     pub fn activate_key(&self, key: VaultKmsKeyMaterial) -> Result<(), SecretStoreError> {
         let mut keyring = self
             .keyring
@@ -466,14 +396,6 @@ impl VaultKmsSecretStoreAdapter {
         Ok(())
     }
 
-    /// Re-encrypts every current envelope with the active customer key.
-    ///
-    /// A crash may leave a mix of old and new envelopes; reopening with both
-    /// keys remains readable and replaying this operation converges.
-    ///
-    /// # Errors
-    ///
-    /// Corrupt envelopes or missing decrypt-only keys fail closed.
     pub fn rewrap_all(&self) -> Result<VaultKmsRewrapReceipt, SecretStoreError> {
         let lock = self.acquire_lock()?;
         let keyring = self
@@ -513,11 +435,6 @@ impl VaultKmsSecretStoreAdapter {
         })
     }
 
-    /// Retires a decrypt-only key after every envelope has been rewrapped.
-    ///
-    /// # Errors
-    ///
-    /// The active key or any key still referenced by an envelope cannot retire.
     pub fn retire_key(&self, key_version: u64) -> Result<(), SecretStoreError> {
         let lock = self.acquire_lock()?;
         let mut keyring = self
@@ -538,11 +455,6 @@ impl VaultKmsSecretStoreAdapter {
         Ok(())
     }
 
-    /// Removes obsolete Credential versions after metadata commits rotation.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable secret-safe failures.
     pub fn cleanup(
         &self,
         current: &CredentialReferenceResolution,
@@ -575,14 +487,6 @@ impl VaultKmsSecretStoreAdapter {
         Ok(VaultSecretCleanupReceipt { removed_versions })
     }
 
-    /// Persists a deny-first tombstone before removing encrypted versions.
-    ///
-    /// Already-issued [`ResolvedSecret`] values remain owned by their accepted
-    /// request; every later adapter lookup is rejected immediately.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable secret-safe failures.
     pub fn revoke(
         &self,
         reference: &CredentialReferenceResolution,

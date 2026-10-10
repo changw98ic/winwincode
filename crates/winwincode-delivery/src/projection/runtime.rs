@@ -1,20 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exact-bound runtime projection over accepted, sealed Worker/Codex facts.
-//!
-//! Accepted bindings and events are capabilities with private fields and no
-//! deserializer. Production callers therefore cannot promote raw Worker input
-//! into trusted projection facts.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::projection::runtime::AcceptedRuntimeEvent;
-//!
-//! let _forged = AcceptedRuntimeEvent {
-//!     sequence: 1,
-//!     ..todo!()
-//! };
-//! ```
-
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
@@ -121,7 +104,6 @@ enum AcceptedRuntimeFact {
     LiveDiff(RuntimeDiffSummaryProjection),
 }
 
-/// One already-accepted ledger fact decoded by the Control Plane's trusted source seam.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PersistedRuntimeFact {
     Checkpoint,
@@ -337,12 +319,6 @@ pub struct RuntimeProjection {
 }
 
 impl RuntimeProjection {
-    /// Opens a read-only projection over exact accepted runtime bindings.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a sealed binding is not current and exact for the
-    /// supplied canonical Delivery.
     pub fn new(
         delivery: &Delivery,
         bindings: Vec<AcceptedRuntimeBinding>,
@@ -411,13 +387,6 @@ impl RuntimeProjection {
         &self.snapshot
     }
 
-    /// Rebuilds a Delivery-stage projection from accepted runtime-ledger facts
-    /// decoded and bounded by the Control Plane source seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the current Delivery binding, `WorkRun`, scheduler
-    /// authority, or accepted sequence positions are not exact.
     #[allow(clippy::too_many_arguments)]
     pub fn from_persisted_facts(
         delivery: &Delivery,
@@ -475,12 +444,6 @@ impl RuntimeProjection {
         Self::replay(delivery, vec![binding], &events)
     }
 
-    /// Rebuilds the projection from a complete ordered accepted-fact stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid binding or fact, or when the supplied
-    /// stream contains a sequence gap.
     pub fn replay(
         delivery: &Delivery,
         bindings: Vec<AcceptedRuntimeBinding>,
@@ -515,12 +478,6 @@ impl RuntimeProjection {
         Ok(projection)
     }
 
-    /// Folds one already accepted and sealed runtime fact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error before mutation when the event is not exact for one
-    /// accepted binding.
     pub fn apply(
         &mut self,
         event: &AcceptedRuntimeEvent,
@@ -681,11 +638,6 @@ fn fold_fact(
     Ok(())
 }
 
-/// Folds accepted activities with the same identity, terminal and window rules
-/// for Delivery sessions and standalone product sessions.
-///
-/// # Errors
-/// Rejects invalid activities, identity changes and terminal status regression.
 pub fn fold_runtime_activities(
     events: &[PersistedRuntimeEvent],
 ) -> Result<Vec<RuntimeActivityProjection>, RuntimeProjectionError> {
@@ -1269,9 +1221,6 @@ fn projection_error(
     }
 }
 
-/// Narrow fixture-only constructor for accepted runtime capabilities. The
-/// real persisted-fact adapter is a Phase 4 gate and production builds do not
-/// enable this module.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
@@ -1322,13 +1271,6 @@ pub mod test_support {
         },
     }
 
-    /// Seals one fixture binding after checking it against the canonical
-    /// Delivery. A settled run requires a positive final event sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the canonical binding is incomplete or the
-    /// supplied scheduler authority is outside the accepted contract.
     pub fn accepted_binding(
         delivery: &Delivery,
         session_binding_id: &SessionBindingId,
@@ -1403,13 +1345,6 @@ pub mod test_support {
         Ok(accepted)
     }
 
-    /// Seals one safe semantic event under an already accepted fixture
-    /// binding. Raw logs, process output, tool payloads, and provider traffic
-    /// have no representable variant.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the fixture fact is invalid or cannot be sealed.
     pub fn accepted_event(
         binding: &AcceptedRuntimeBinding,
         sequence: u64,

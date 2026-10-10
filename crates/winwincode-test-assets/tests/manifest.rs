@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_delivery::domain::{
     AcceptanceCriterionId, CriterionResult, CriterionResultId, CriterionVerdict, DeliveryId,
     DeliverySpecId, DeliveryVerdict, DeliveryVerdictId, EvidenceId, EvidenceRef, EvidenceRefType,

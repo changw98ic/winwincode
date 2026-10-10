@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_fusion::evidence::{
     ClaimVerification, EvidenceLedger, ModelClaim, SourceReceipt, SourceReceiptKind,
     VerificationConclusion,

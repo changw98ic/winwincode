@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Worker-private, replay-idempotent storage for raw validation command output.
-
 use std::{
     fs::{self, File, OpenOptions},
     io::Write as _,
@@ -28,7 +24,6 @@ const MAX_ARTIFACT_BYTES: usize = 16_777_216;
 const ARTIFACT_ID_DOMAIN: &[u8] = b"winwincode.validation-artifact-id.v1";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Authority and exact reference required to consume one retained validation stream.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidationArtifactReadRequest<'request> {
     pub identity: &'request winwincode_execution_port::generated::ChangeBatchIdentity,
@@ -38,7 +33,6 @@ pub struct ValidationArtifactReadRequest<'request> {
     pub reference: &'request ArtifactReference,
 }
 
-/// Production private Artifact store for bounded validation stdout/stderr.
 #[derive(Debug)]
 pub struct DurableValidationArtifactStore {
     connection: Connection,
@@ -46,11 +40,6 @@ pub struct DurableValidationArtifactStore {
 }
 
 impl DurableValidationArtifactStore {
-    /// Opens the private store and its single canonical schema.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsafe paths, unsupported schemas, and unavailable durable storage.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ValidationArtifactError> {
         let root = root.into();
         ensure_private_directory(&root)?;
@@ -96,11 +85,6 @@ impl DurableValidationArtifactStore {
         })
     }
 
-    /// Reads one exact stream after revalidating its full batch authority and reference.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, changed references, missing blobs, and digest drift.
     pub fn read(
         &self,
         request: ValidationArtifactReadRequest<'_>,

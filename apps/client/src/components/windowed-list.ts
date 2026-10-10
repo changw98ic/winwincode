@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted } from '@winwincode/browser-ui'
 import {
   mountKeyedCollection,
@@ -7,18 +5,12 @@ import {
   type KeyedCollectionView,
 } from './keyed-collection.js'
 
-/**
- * Half-open `[start, end)` index range of the one rendered window inside the
- * full loaded list.  `total` is the complete loaded count, so callers can
- * report how many records stay out of the DOM instead of hiding them.
- */
 export interface WindowedListWindow {
   readonly start: number
   readonly end: number
   readonly total: number
 }
 
-/** Largest accepted overscan, so a bad budget cannot enlarge the DOM cap. */
 const WINDOW_OVERSCAN_LIMIT = 100
 
 function requireNonNegativeInteger(name: string, value: number): void {
@@ -27,12 +19,6 @@ function requireNonNegativeInteger(name: string, value: number): void {
   }
 }
 
-/**
- * Resolve the rendered window for one scroll position.  The window keeps a
- * constant size whenever the list is longer than the window, so the DOM budget
- * never depends on how far the user has scrolled and no loaded record is ever
- * dropped: records outside the window stay reachable through the spacers.
- */
 export function windowBounds(
   total: number,
   viewportRows: number,
@@ -47,8 +33,6 @@ export function windowBounds(
     throw new RangeError(`overscan must not exceed ${String(WINDOW_OVERSCAN_LIMIT)}.`)
   }
   const windowRows = viewportRows + 2 * overscan
-  // A host that cannot measure its scroll position yet still renders the head
-  // of the list instead of an empty window.
   const measuredRows = Number.isFinite(scrollTopRows) ? Math.max(0, scrollTopRows) : 0
   const requestedStart = Math.floor(measuredRows) - overscan
   const start = Math.min(Math.max(requestedStart, 0), Math.max(0, total - windowRows))
@@ -61,17 +45,13 @@ export interface WindowedListMountOptions<
   Node extends globalThis.Node & ChildNode,
 > {
   readonly document: Document
-  /** The scroll container. It becomes `root` and hosts both spacers. */
   readonly scroller: HTMLElement
-  /** The keyed row host. It holds exactly the rendered window. */
   readonly content: HTMLElement
   readonly key: (item: Item) => Key
   readonly create: (item: Item) => Node
   readonly update: (node: Node, item: Item) => void
   readonly remove?: (node: Node) => void
-  /** Exact rendered row height in CSS pixels; the scroll math depends on it. */
   readonly rowHeight: number
-  /** Rows rendered for the viewport, independent of the real viewport height. */
   readonly viewportRows: number
   readonly overscan?: number
   readonly onWindowChange?: (window: WindowedListWindow) => void
@@ -82,11 +62,8 @@ export interface WindowedListView<Item, Key extends KeyedCollectionKey, Node> {
   readonly content: HTMLElement
   update(items: readonly Item[]): void
   node(key: Key): Node | null
-  /** The currently rendered window, including how many records stay hidden. */
   window(): WindowedListWindow
-  /** Re-read the scroll position and re-render the window. */
   refresh(): void
-  /** Scroll the row with this key into the window; false when it is absent. */
   reveal(key: Key): boolean
   close(): void
 }
@@ -95,13 +72,6 @@ function setCustomProperty(node: HTMLElement, name: string, value: string): void
   node.style?.setProperty?.(name, value)
 }
 
-/**
- * One keyed, windowed list.  Rows keep their DOM identity across equivalent
- * snapshots because the window is rendered through `mountKeyedCollection`; only
- * the rows entering or leaving the window are created or removed.  Sizing the
- * two spacers to the hidden record count keeps native scrolling exact without
- * ever mounting the whole list.
- */
 export function mountWindowedList<
   Item,
   Key extends KeyedCollectionKey,
@@ -185,8 +155,6 @@ export function mountWindowedList<
     },
     reveal(key) {
       assertMounted(open, 'WindowedList')
-      // Only this control pays the full-key scan, and only when an active
-      // identity changes; the hot update path stays independent of list length.
       let index = -1
       for (let position = 0; position < items.length; position += 1) {
         const item = items[position]

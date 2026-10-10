@@ -21,10 +21,6 @@ const packageRoot = resolve(import.meta.dirname, '..')
 const repositoryRoot = resolve(packageRoot, '../..')
 const outputRoot = join(packageRoot, 'dist')
 const publicOutputRoot = join(outputRoot, 'public')
-// Every browser suite rebuilds this bundle, and the TypeScript lane runs those
-// suites concurrently.  A rebuild empties `dist` before writing it again, so
-// two overlapping builds used to race inside that tree and fail on `rmSync`.
-// The build therefore holds one exclusive lock for its whole write phase.
 const buildLockPath = join(packageRoot, '.client-build.lock')
 const buildLockStaleMillis = 5 * 60_000
 const buildLockWaitMillis = 50
@@ -76,7 +72,6 @@ function acquireBuildLock() {
       try {
         unlinkSync(buildLockPath)
       } catch {
-        // Another waiter removed it first; retry the acquisition.
       }
       continue
     }

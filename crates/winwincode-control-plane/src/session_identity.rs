@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control Plane seam for accepting the generated `session.binding` message.
-
 use winwincode_delivery::application::{
     session_binding::SessionBindingIdentity as DeliverySessionBindingIdentity,
     workrun_execution::SessionBindingAuthority,
@@ -13,7 +9,6 @@ use winwincode_session::{
     SessionBindingIdentity,
 };
 
-/// A validated message/authority pair ready for canonical session and Delivery writes.
 #[derive(Debug)]
 pub struct SessionBindingAcceptance<'a> {
     binding: SessionBinding,
@@ -22,7 +17,6 @@ pub struct SessionBindingAcceptance<'a> {
     authority: &'a SessionBindingAuthority,
 }
 
-/// Failure at the generated-message/session identity seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionIdentityAdapterError {
     InvalidMessage(&'static str),
@@ -61,15 +55,6 @@ impl From<SessionBindingError> for SessionIdentityAdapterError {
     }
 }
 
-/// Accept one generated `session.binding` only when it matches the scheduler-owned authority and
-/// the durable Delivery execution scope. The scope is supplied separately because the
-/// `session.binding` wire message carries `workRunId` and `ProductSessionId`; the durable
-/// `WorkRun` scope supplies the complete contract/item identity and revisions.
-///
-/// # Errors
-///
-/// Returns a typed error when the message discriminator, identity joins, lease window, scheduler
-/// authority, or durable Delivery scope is not exact.
 pub fn validate_session_binding<'a>(
     message: &'a SessionBindingMessage,
     authority: &'a SessionBindingAuthority,
@@ -388,25 +373,21 @@ fn validate_revision(
 }
 
 impl SessionBindingAcceptance<'_> {
-    /// Returns the canonical session binding value.
     #[must_use]
     pub const fn binding(&self) -> &SessionBinding {
         &self.binding
     }
 
-    /// Returns the Delivery identity required by its canonical write methods.
     #[must_use]
     pub const fn delivery_identity(&self) -> &DeliverySessionBindingIdentity {
         &self.delivery_identity
     }
 
-    /// Returns the generated message retained for Delivery provenance.
     #[must_use]
     pub const fn message(&self) -> &SessionBindingMessage {
         self.message
     }
 
-    /// Returns the one scheduler-owned authority used for acceptance.
     #[must_use]
     pub const fn authority(&self) -> &SessionBindingAuthority {
         self.authority

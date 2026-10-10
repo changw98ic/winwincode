@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Pure claim analysis for blind Fusion candidates.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use winwincode_delivery::domain::{EvidenceRefType, verification::VerificationFindingConclusion};
@@ -11,14 +7,12 @@ const MAX_CLAIMS: usize = 1_000;
 const MAX_TEXT_BYTES: usize = 65_536;
 const MAX_REFERENCE_BYTES: usize = 4_096;
 
-/// One candidate's already-extracted claims. The analyzer does no model or text inference.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionCandidateClaims {
     pub candidate_id: String,
     pub claims: Vec<FusionClaim>,
 }
 
-/// One canonical claim made by a candidate.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionClaim {
     pub claim_key: String,
@@ -28,14 +22,12 @@ pub struct FusionClaim {
     pub required_evidence: Vec<EvidenceRefType>,
 }
 
-/// A candidate's position on one canonical claim.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FusionClaimPosition {
     Supports,
     Opposes,
 }
 
-/// Evidence cited by a candidate. A validated verification finding outranks an observation.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionEvidence {
     pub evidence_type: EvidenceRefType,
@@ -43,7 +35,6 @@ pub struct FusionEvidence {
     pub verified_conclusion: Option<VerificationFindingConclusion>,
 }
 
-/// Evidence strength used by analysis. Candidate counts never increase this value.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FusionEvidenceQuality {
     Unsupported,
@@ -51,7 +42,6 @@ pub enum FusionEvidenceQuality {
     VerifiedFact,
 }
 
-/// Complete claim analysis. Categories may overlap: a unique claim can also be unsupported.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionAnalysis {
     pub consensus: Vec<FusionFinding>,
@@ -61,7 +51,6 @@ pub struct FusionAnalysis {
     pub missing_evidence: Vec<FusionMissingEvidence>,
 }
 
-/// One consensus or unique finding and its strongest evidence quality.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionFinding {
     pub claim_key: String,
@@ -71,8 +60,6 @@ pub struct FusionFinding {
     pub strongest_evidence: FusionEvidenceQuality,
 }
 
-/// How a conflict leader was chosen. JEV can only fill an undecided slot
-/// (ADR-0035); it never outranks tool/verified evidence.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConflictLeadingSource {
     Evidence,
@@ -81,7 +68,6 @@ pub enum ConflictLeadingSource {
     Undecided,
 }
 
-/// Opposing positions on one claim. `leading_position` is evidence-ranked, never vote-ranked.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionConflict {
     pub claim_key: String,
@@ -94,7 +80,6 @@ pub struct FusionConflict {
     pub verification_basis: Option<String>,
 }
 
-/// Verifier conclusion applied to a reversible JEV provisional decision.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JevVerificationConclusion {
     Supports,
@@ -102,7 +87,6 @@ pub enum JevVerificationConclusion {
     Insufficient,
 }
 
-/// Candidates and evidence quality behind one side of a conflict.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionPositionFinding {
     pub position: FusionClaimPosition,
@@ -110,7 +94,6 @@ pub struct FusionPositionFinding {
     pub strongest_evidence: FusionEvidenceQuality,
 }
 
-/// One claim assertion that cites no evidence.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionUnsupportedClaim {
     pub candidate_id: String,
@@ -118,7 +101,6 @@ pub struct FusionUnsupportedClaim {
     pub position: FusionClaimPosition,
 }
 
-/// One evidence type explicitly required by a claim but not cited for it.
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionMissingEvidence {
     pub candidate_id: String,
@@ -126,7 +108,6 @@ pub struct FusionMissingEvidence {
     pub evidence_type: EvidenceRefType,
 }
 
-/// Invalid fixture/input shape.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionAnalysisError {
     InvalidInput,
@@ -142,11 +123,6 @@ struct ClaimGroup<'input> {
     assertions: Vec<(&'input str, &'input FusionClaim)>,
 }
 
-/// Analyzes normalized candidate claims without model calls, persistence, or majority voting.
-///
-/// # Errors
-///
-/// Rejects empty, oversized, duplicate, or inconsistently keyed fixture input.
 pub fn analyze_fusion(
     candidates: &[FusionCandidateClaims],
 ) -> Result<FusionAnalysis, FusionAnalysisError> {
@@ -164,10 +140,7 @@ pub fn analyze_fusion(
                 summary: &claim.summary,
                 assertions: Vec::new(),
             });
-            // Same claim identity (normalized key). Wording drift is absorbed
-            // (ADR-0035); prefer `claim:`-prefixed display key.
             let _compatible = summaries_compatible(group.summary, claim.summary.as_str());
-            // Prefer a `claim:`-prefixed display key when seats disagree.
             if claim.claim_key.trim_start().starts_with("claim:")
                 && !group.display_key.trim_start().starts_with("claim:")
             {
@@ -262,7 +235,6 @@ pub fn analyze_fusion(
     })
 }
 
-/// Soft-normalized summary used only for wording-drift compatibility.
 fn normalize_summary(value: &str) -> String {
     value
         .split_whitespace()
@@ -281,10 +253,6 @@ fn summaries_compatible(left: &str, right: &str) -> bool {
     normalize_summary(left) == normalize_summary(right)
 }
 
-/// Canonical grouping key for claim identity (ADR-0035 claimKey alignment).
-///
-/// Collapses whitespace, drops an optional `claim:` prefix, and casefolds so
-/// `claim:root-race` and `root-race` are one claim, not two.
 #[must_use]
 pub fn claim_group_key(claim_key: &str) -> String {
     let collapsed = claim_key.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -296,7 +264,6 @@ pub fn claim_group_key(claim_key: &str) -> String {
     stripped.to_ascii_lowercase()
 }
 
-/// Display form: prefer a `claim:`-prefixed spelling when seats disagree.
 #[allow(dead_code)]
 fn prefer_claim_key(left: &str, right: &str) -> String {
     let left_prefixed = left.trim_start().starts_with("claim:");
@@ -308,22 +275,15 @@ fn prefer_claim_key(left: &str, right: &str) -> String {
     }
 }
 
-/// Multi-round Fusion phase (ADR-0036). Each round has a distinct goal.
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionRound {
-    /// R1 maximize claim/root-cause/evidence/edge-case coverage → Union.
     Discovery,
-    /// R2 classify CONSENSUS/DISPUTED/UNIQUE/UNVERIFIED/CONTRADICTED; do not drop claims.
     ConflictDetection,
-    /// R3 targeted debate on disputes only; requires new evidence (no restating).
     TargetedInvestigation,
-    /// R4 JEV/Verifier over evidence packs (not vote counts) → CONFIRMED/REFUTED/UNRESOLVED.
     Verification,
-    /// R5 final synthesis over verified knowledge.
     Synthesis,
 }
 
-/// Why multi-round Fusion stopped (ADR-0036 terminal conditions).
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionStopReason {
     ConsensusConvergence,
@@ -332,24 +292,13 @@ pub enum FusionStopReason {
     Unresolvable,
 }
 
-/// Next control-plane action for the Fusion state machine (ADR-0036).
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum FusionNextAction {
-    Finish {
-        reason: FusionStopReason,
-    },
-    /// Round1 disputes must investigate; JEV direct ruling is forbidden here.
-    TargetedInvestigation {
-        claim_keys: Vec<String>,
-    },
-    /// After R3 produced new evidence (or budget forces verify).
-    Verify {
-        claim_keys: Vec<String>,
-    },
+    Finish { reason: FusionStopReason },
+    TargetedInvestigation { claim_keys: Vec<String> },
+    Verify { claim_keys: Vec<String> },
 }
 
-/// Hard rule (ADR-0036): same-tier disputes after Discovery go to targeted
-/// investigation — never straight to JEV majority/direct ruling.
 #[must_use]
 pub fn fusion_next_action(
     analysis: &FusionAnalysis,
@@ -377,7 +326,6 @@ pub fn fusion_next_action(
             reason: if analysis.conflicts.is_empty() {
                 FusionStopReason::ConsensusConvergence
             } else {
-                // Conflicts exist but all have a leader (evidence or post-R3 JEV).
                 FusionStopReason::EvidenceConvergence
             },
         };
@@ -399,8 +347,6 @@ pub fn fusion_next_action(
                     claim_keys: disputed,
                 }
             } else {
-                // No increment does not add weight, but the next meaningful
-                // source/tool/reproduction action still has to be attempted.
                 FusionNextAction::TargetedInvestigation {
                     claim_keys: disputed,
                 }
@@ -420,11 +366,6 @@ pub fn fusion_next_action(
     }
 }
 
-/// Applies a JEV provisional leading side to an evidence-tied conflict.
-///
-/// Returns `false` when the claim is unknown, evidence already decided it,
-/// or `post_investigation` is false (ADR-0036: R1 disputes must not be JEV-ruled).
-/// Confidence is 0–100. This never overrides [`ConflictLeadingSource::Evidence`].
 pub fn apply_jev_conflict_leading(
     analysis: &mut FusionAnalysis,
     claim_key: &str,
@@ -442,7 +383,6 @@ pub fn apply_jev_conflict_leading(
     )
 }
 
-/// Applies a reversible JEV provisional decision with an auditable reason.
 pub fn apply_jev_conflict_leading_with_reason(
     analysis: &mut FusionAnalysis,
     claim_key: &str,
@@ -472,8 +412,6 @@ pub fn apply_jev_conflict_leading_with_reason(
     false
 }
 
-/// Replaces a JEV provisional in either direction, or returns it to the
-/// unresolved set when verification remains insufficient.
 pub fn resolve_jev_conflict_with_verification(
     analysis: &mut FusionAnalysis,
     claim_key: &str,
@@ -506,7 +444,6 @@ pub fn resolve_jev_conflict_with_verification(
     false
 }
 
-/// Provisional decisions that must still reach a verifier before completion.
 #[must_use]
 pub fn awaiting_verification_conflicts(analysis: &FusionAnalysis) -> Vec<&FusionConflict> {
     analysis
@@ -516,7 +453,6 @@ pub fn awaiting_verification_conflicts(analysis: &FusionAnalysis) -> Vec<&Fusion
         .collect()
 }
 
-/// Conflicts still waiting for a judge or verifier (ADR-0035 disputed set).
 #[must_use]
 pub fn undecided_conflicts(analysis: &FusionAnalysis) -> Vec<&FusionConflict> {
     analysis
@@ -887,7 +823,6 @@ mod tests {
                 }],
             },
         ];
-        // Wording drift on the same claim_key is absorbed (ADR-0035).
         let analysis = analyze_fusion(&mismatched).expect("wording drift is not fatal");
         assert_eq!(analysis.conflicts.len(), 1);
         assert_eq!(analysis.conflicts[0].summary, "The tests pass");
@@ -997,7 +932,6 @@ mod tests {
         );
         assert_eq!(analysis.conflicts[0].jev_confidence, Some(82));
 
-        // ADR-0036 hard rule: R1 dispute must not be JEV-ruled without investigation.
         let mut fresh = analyze_fusion(&undecided).expect("fixture is valid");
         assert!(!apply_jev_conflict_leading(
             &mut fresh,
@@ -1080,8 +1014,6 @@ mod tests {
                 claim_keys: vec!["claim:tests-pass".to_owned()]
             }
         );
-        // No new evidence does not add weight, but it still gets the next
-        // meaningful investigation action before any terminal decision.
         assert_eq!(
             fusion_next_action(&analysis, FusionRound::TargetedInvestigation, false, false),
             FusionNextAction::TargetedInvestigation {

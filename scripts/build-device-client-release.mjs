@@ -1,35 +1,5 @@
 #!/usr/bin/env node
 
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device Client four-target release package builder (OPS-100.1).
-//!
-//! Builds and packages the Device Client release bundle for one of the four
-//! supported release targets (`RELEASE_TARGETS`): the `wwc` CLI that embeds
-//! the `winwincode-device-client` daemon library, the Worker binary the
-//! Device Client supervisor spawns, and the Worker-internal Kernel helper,
-//! plus the legal files, a versioned package manifest, and a Cargo-lock
-//! derived SBOM.
-//!
-//! The script reuses the existing release mechanism: the same target set,
-//! deterministic build environment, staging layout, canonical JSON manifest,
-//! and SHA256SUMS conventions as `run-release-artifact-gate.mjs`. It never
-//! publishes; it only produces and verifies one target directory.
-//!
-//! Usage:
-//!
-//! ```bash
-//! node scripts/build-device-client-release.mjs \
-//!   --target aarch64-apple-darwin \
-//!   --source-commit SOURCE_COMMIT \
-//!   --source-date-epoch SOURCE_DATE_EPOCH \
-//!   --output release-device-client-artifacts
-//! ```
-//!
-//! `--dry-run` prints the canonical build/package plan without building or
-//! writing anything. `CARGO_TARGET_DIR` selects the physical Cargo target
-//! directory, exactly like `scripts/build-community.mjs`.
-
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -79,13 +49,6 @@ const SERVICE_FILES = Object.freeze({
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 
-/**
- * The shipped Device Client package binaries. The `wwc` CLI is the Device
- * Client user surface and statically embeds the `winwincode-device-client`
- * daemon library (see `deviceClientLibraryIdentity`); the supervisor spawns
- * the Worker binary located next to the current executable, and the Worker
- * carries the Kernel helper as its internal file.
- */
 export const DEVICE_CLIENT_COMPONENTS = Object.freeze([
   Object.freeze({
     packageName: 'winwincode-cli',
@@ -181,7 +144,6 @@ export function parseDeviceClientReleaseArguments(argv) {
   })
 }
 
-/** Digest the `winwincode-device-client` crate sources the CLI embeds. */
 export function deviceClientLibraryIdentity(root) {
   const crateRoot = resolve(root, 'crates/winwincode-device-client')
   const paths = [join(crateRoot, 'Cargo.toml')]
@@ -207,10 +169,6 @@ function digestPaths(root, paths) {
   return hash.digest('hex')
 }
 
-/**
- * Mechanical SBOM inventory derived from the pinned Cargo lock: one
- * `{name, version}` entry per `[[package]]` block, canonically sorted.
- */
 export function cargoLockPackages(lockText) {
   const packages = []
   let current = null
@@ -511,10 +469,6 @@ export function verifyDeviceClientReleaseDirectory({ root, artifactRoot, expecte
     .toSorted((left, right) => left.localeCompare(right))
   assertExactIdentity(actualPaths, expectedPaths, 'ARTIFACT_SET_MISMATCH', 'package contains an unlisted file')
   for (const relativePath of actualPaths) {
-    // Legal files are byte-bound to the project legal files above; NOTICE
-    // legitimately carries third-party attribution text the legacy rules
-    // match, so like `createReleaseArtifactSecurityReport` they are not
-    // content-scanned.
     if (relativePath.startsWith('legal/')) continue
     const binary = relativePath.startsWith('bin/') && !relativePath.endsWith('.json')
     contentScanFindings(artifactRoot, targetIdentity.target, resolve(artifactRoot, relativePath), binary)
@@ -536,10 +490,6 @@ function packageFilesBelow(rootDirectory) {
   return files
 }
 
-/**
- * Pure dry-run plan: everything the build would do, computed without
- * building or writing anything.
- */
 export function buildDeviceClientReleasePlan({
   root,
   target,
@@ -632,10 +582,6 @@ function run(command, arguments_, options = {}) {
   return result.stdout
 }
 
-/**
- * Release builds bind the exact candidate: HEAD must be the requested
- * commit, `SOURCE_DATE_EPOCH` its commit time, and the checkout clean.
- */
 function assertReleaseSource(sourceCommit, sourceDateEpoch) {
   assertSourceCommit(sourceCommit)
   assertSourceDateEpoch(sourceDateEpoch)

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 use super::{MAX_SAFE_INTEGER, portable_value, safe_public_text};
 use winwincode_domain::{CoreToolCallReference, CoreToolRuntimeProjection, ExecutionSequence};
 

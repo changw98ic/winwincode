@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! CLIENT-200.2 coverage: the dynamic connect code lifecycle (plan 11.1,
-//! 11.3) and the daemon policy updates —
-//! answering, `client.client_lock` application, and repository rescan commands.
-
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,8 +50,6 @@ fn seed() -> DeviceIdentitySeed {
     }
 }
 
-/// The server-issued enrollment fixture (canonical `cnd_` + 26 Crockford,
-/// 10 public digits, one 32-byte credential).
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
 const ISSUED_SECRET: [u8; 32] = [0xcd; 32];
@@ -77,8 +69,6 @@ fn issued_credential_digest() -> String {
     format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
 }
 
-/// Opens a store whose identity already adopted the server-issued
-/// enrollment, so daemon sessions start in the enrolled phase.
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
     ensure_device_identity(&mut store, &seed(), STAMP).expect("device identity should load");
@@ -106,7 +96,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// One client-to-server frame the fake server received.
 #[derive(Clone, Debug)]
 struct SimFrame {
     kind: String,
@@ -119,9 +108,6 @@ struct ServerState {
     sequences: BTreeSet<u64>,
 }
 
-/// In-memory fake of the exchange endpoint: it records every frame,
-/// acknowledges the contiguous prefix, and delivers the queued downlink
-/// batches with the responses.
 struct ServerSim {
     state: Mutex<ServerState>,
     downlink: Mutex<VecDeque<Vec<Value>>>,
@@ -234,7 +220,6 @@ fn started_daemon(name: &str, root: &Path, sim: &Arc<ServerSim>) -> DeviceDaemon
         .expect("daemon should start enrolled")
 }
 
-/// Drives ticks until `condition` holds or the budget runs out.
 fn drive_until(daemon: &mut DeviceDaemon, condition: impl Fn(&DeviceDaemon) -> bool) {
     for _ in 0..600 {
         if condition(daemon) {
@@ -265,10 +250,6 @@ fn now_utc() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
-// ---------------------------------------------------------------------------
-// Code generation shape and weak-form rejection.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn generated_codes_have_the_canonical_strong_shape() {
     for _ in 0..64 {
@@ -284,8 +265,6 @@ fn generated_codes_have_the_canonical_strong_shape() {
             "published shape must be strong: {raw}"
         );
         assert_eq!(code.grouped(), format!("{} {}", &raw[..4], &raw[4..]));
-        // The redacted Debug and absence of Display keep the plaintext out
-        // of logs.
         assert!(!format!("{code:?}").contains(raw));
     }
 }
@@ -293,14 +272,14 @@ fn generated_codes_have_the_canonical_strong_shape() {
 #[test]
 fn weak_shapes_are_rejected() {
     for weak in [
-        "11111111",  // all identical
-        "12345678",  // full ascending run
-        "87654321",  // full descending run
-        "01234567",  // ascending from zero
-        "1234567",   // too short
-        "123456789", // too long
-        "1234 678",  // not pure digits
-        "1234567a",  // letter
+        "11111111",
+        "12345678",
+        "87654321",
+        "01234567",
+        "1234567",
+        "123456789",
+        "1234 678",
+        "1234567a",
     ] {
         assert!(is_weak_connect_code(weak), "{weak} must be rejected");
     }
@@ -308,10 +287,6 @@ fn weak_shapes_are_rejected() {
         assert!(!is_weak_connect_code(strong), "{strong} must be accepted");
     }
 }
-
-// ---------------------------------------------------------------------------
-// Publication lifecycle: digest-only durability, generation supersession.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn publication_persists_digest_state_and_never_the_plaintext() {
@@ -337,8 +312,6 @@ fn publication_persists_digest_state_and_never_the_plaintext() {
         published.record.connect_code_id
     );
 
-    // The plaintext never entered durable state: neither the connect-code
-    // row nor any outbox payload carries it.
     let stored = store
         .connect_code_state()
         .expect("stored state")
@@ -398,7 +371,6 @@ fn refresh_supersedes_the_previous_generation_monotonically() {
         "the refresh invalidates the old digest"
     );
 
-    // A racing publisher at the same generation is refused.
     let stale = ConnectCodeStateRecord {
         generation: first.record.generation,
         ..second.record.clone()
@@ -417,11 +389,6 @@ fn refresh_supersedes_the_previous_generation_monotonically() {
     store.close().expect("store close");
     cleanup(&root);
 }
-
-// ---------------------------------------------------------------------------
-// Daemon end-to-end: published frames, client lock, unknown
-// downlink kinds.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn published_frames_reach_the_outbox_without_the_plaintext() {
@@ -454,7 +421,6 @@ fn published_frames_reach_the_outbox_without_the_plaintext() {
         "the wire frame must not carry the plaintext: {serialized}"
     );
 
-    // The durable outbox is plaintext-free as well.
     let pending = daemon.store_mut().pending_outbox_envelopes().expect("rows");
     for row in &pending {
         let blob = String::from_utf8_lossy(&row.payload);
@@ -476,7 +442,6 @@ fn locked_nodes_persist_and_report_the_policy() {
     let mut daemon = started_daemon("lock", &root, &sim);
     daemon.publish_connect_code().expect("publication");
 
-    // Local lock: acceptingConnections=false + lockState=locked, durable.
     let policy = daemon.lock_client().expect("local lock");
     assert!(!policy.accepting_connections);
     assert_eq!(policy.lock_state, ClientLockState::Locked);
@@ -484,7 +449,6 @@ fn locked_nodes_persist_and_report_the_policy() {
     assert!(!reopened.accepting_connections);
     assert_eq!(reopened.lock_state, ClientLockState::Locked);
 
-    // The durable policy rides every subsequent heartbeat report.
     drive_until(&mut daemon, |daemon| {
         daemon.status().heartbeats_enqueued >= 1
     });
@@ -493,7 +457,6 @@ fn locked_nodes_persist_and_report_the_policy() {
     assert_eq!(heartbeat.frame["payload"]["acceptingConnections"], false);
     assert_eq!(heartbeat.frame["payload"]["lockState"], "locked");
 
-    // Unlock restores the open policy.
     let unlocked = daemon.unlock_client().expect("local unlock");
     assert!(unlocked.accepting_connections);
     assert_eq!(unlocked.lock_state, ClientLockState::Unlocked);
@@ -527,8 +490,6 @@ fn server_client_lock_commands_persist_and_acknowledge() {
     assert!(!policy.accepting_connections);
     assert_eq!(policy.lock_state, ClientLockState::Locked);
 
-    // The server command is acknowledged with client.command_ack, echoing
-    // the command's message id.
     let acks = sim.frames_with_kind("client.command_ack");
     assert_eq!(acks.len(), 1, "{acks:?}");
     assert_eq!(
@@ -538,7 +499,6 @@ fn server_client_lock_commands_persist_and_acknowledge() {
     assert_eq!(acks[0].frame["payload"]["commandMessageId"], "srv-down-1");
     assert_eq!(acks[0].frame["payload"]["status"], "accepted");
 
-    // Unlock via the same command path.
     sim.queue_downlink(vec![downlink_envelope(
         2,
         ServerToClientMessage::ClientLock(ServerClientLockPayload {
@@ -569,8 +529,6 @@ fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
     let mut daemon = started_daemon("unhandled", &root, &sim);
     daemon.publish_connect_code().expect("publication");
 
-    // An unknown binding is a handled rescan rejection before a lock
-    // command; it must not terminate or block the daemon.
     sim.queue_downlink(vec![
         downlink_envelope(
             1,
@@ -605,8 +563,6 @@ fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
     );
     assert_eq!(daemon.status().repository_rescans_applied, 0);
     assert_eq!(daemon.status().unhandled_downlink_commands, 0);
-    // The cursor advanced across the refused rescan; the following lock
-    // command at sequence 2 was still applied and acknowledged.
     let cursor = daemon
         .store_mut()
         .inbox_cursor(daemon_config("unhandled").server_profile_id.as_str())

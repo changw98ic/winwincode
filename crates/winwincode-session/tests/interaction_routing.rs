@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_domain::{
     ApprovalId, AttentionItemId, ExecutionJobId, FencingToken, InputRequestId, Instant, LeaseId,
     ModelExchangeId, ProductSessionId, RequestId, Revision, Sha256Digest, UserId, WorkContractId,
@@ -347,7 +345,6 @@ fn product_session_cancel_propagates_to_exact_jobs_worker_and_model_stream() {
             product_session_id: ProductSessionId(id("psn", 1)),
             revision: 15,
             authorized_actor: actor(1),
-            // Reverse order proves output does not depend on registration order.
             active_executions: vec![active_execution(1, 20), queued_execution(1, 10)],
         })
         .expect("first session must register");

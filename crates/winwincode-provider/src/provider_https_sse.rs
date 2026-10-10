@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Verified HTTPS Server-Sent Events transport for external model Providers.
-//!
-//! The adapter borrows a resolved Credential only while opening TLS, stores the
-//! authenticated response body rather than the Credential, and converts its
-//! bounded Provider-neutral SSE stream through the canonical stream converter.
-
 use std::{
     collections::BTreeMap,
     fmt,
@@ -35,8 +27,6 @@ use crate::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PROVIDER_ID_BYTES: usize = 128;
-/// Authority-owned endpoint size bound, shared with the Provider modules that
-/// must accept exactly the endpoints this adapter accepts.
 pub const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ADAPTER_REQUEST_ID_BYTES: usize = 200;
 const AUTHORIZATION_PREFIX: &[u8] = b"Bearer ";
@@ -45,16 +35,12 @@ const CONTROL_RESUME: u8 = 2;
 const CONTROL_CANCEL: u8 = 4;
 const CONTROL_RELEASE: u8 = 8;
 
-/// TLS trust used by one external Provider endpoint.
 #[derive(Clone)]
 pub enum ProviderTlsRoots {
-    /// Mozilla `WebPKI` roots shipped by the pinned HTTP stack.
     WebPki,
-    /// Explicit DER roots used by private deployments and deterministic TLS gates.
     Specific(Vec<Vec<u8>>),
 }
 
-/// All transport deadlines applied to one HTTPS/SSE exchange.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpsSseProviderTimeouts {
     pub connect: Duration,
@@ -62,7 +48,6 @@ pub struct HttpsSseProviderTimeouts {
     pub total: Duration,
 }
 
-/// Hard memory and event-count bounds for one HTTPS/SSE exchange.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpsSseProviderLimits {
     pub response_bytes: usize,
@@ -82,7 +67,6 @@ impl fmt::Debug for ProviderTlsRoots {
     }
 }
 
-/// Bounded HTTPS/SSE transport configuration.
 #[derive(Clone)]
 pub struct HttpsSseProviderConfig {
     provider_id: String,
@@ -144,14 +128,10 @@ enum ResponsesStructuredOutput {
     Text,
 }
 
-/// Maximum number of extra request headers accepted on one Provider.
 pub const MAX_CUSTOM_HEADERS: usize = 32;
-/// Maximum custom header name length in bytes.
 pub const MAX_CUSTOM_HEADER_NAME_BYTES: usize = 128;
-/// Maximum custom header value length in bytes.
 pub const MAX_CUSTOM_HEADER_VALUE_BYTES: usize = 2_048;
 
-/// Hop-by-hop and credential-bearing headers that custom headers may never set.
 const FORBIDDEN_CUSTOM_HEADERS: &[&str] = &[
     "authorization",
     "content-type",
@@ -172,12 +152,6 @@ const FORBIDDEN_CUSTOM_HEADERS: &[&str] = &[
 ];
 
 impl HttpsSseProviderConfig {
-    /// Creates one WebPKI-verified external Provider configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-HTTPS/credential-bearing endpoints and unsafe timeout or
-    /// response limits.
     pub fn try_new(
         provider_id: String,
         endpoint: String,
@@ -204,11 +178,6 @@ impl HttpsSseProviderConfig {
         Ok(config)
     }
 
-    /// Routes verified HTTPS through one explicitly configured HTTP CONNECT proxy.
-    /// No ambient proxy environment variables are read by this configuration.
-    ///
-    /// # Errors
-    /// Rejects malformed URLs, unsupported proxy protocols and URL paths or queries.
     pub fn with_http_connect_proxy(
         mut self,
         proxy_url: &str,
@@ -235,11 +204,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Replaces `WebPKI` roots with an explicit non-empty DER trust set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty certificates, empty sets, or excessive certificate bytes.
     pub fn with_specific_tls_roots(
         mut self,
         roots: Vec<Vec<u8>>,
@@ -259,15 +223,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects the Anthropic Messages request and streaming protocol.
-    ///
-    /// The configured Provider route remains authoritative for the exact
-    /// upstream model ID. Local display annotations such as `[1m]` must not be
-    /// included in that ID.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero output limits or unsafe token pricing.
     pub fn with_anthropic_messages(
         mut self,
         max_output_tokens: u32,
@@ -283,12 +238,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects the `OpenAI` chat/completions request and `chat.completion.chunk`
-    /// streaming protocol. The configured endpoint is used verbatim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero output limits or unsafe token pricing.
     pub fn with_openai_chat_completions(
         mut self,
         max_output_tokens: u32,
@@ -304,11 +253,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects the native Responses API with a bounded output and ordinary API credentials.
-    /// The configured HTTPS endpoint and extra headers remain authoritative.
-    ///
-    /// # Errors
-    /// Rejects a zero output limit or invalid transport configuration.
     pub fn with_openai_responses(
         mut self,
         max_output_tokens: u32,
@@ -321,10 +265,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects Responses JSON-object compatibility for structured final output.
-    ///
-    /// # Errors
-    /// Rejects invalid transport configuration or a zero output limit.
     pub fn with_openai_responses_json_object(
         mut self,
         max_output_tokens: u32,
@@ -337,10 +277,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects native Responses text with local structured final-output validation.
-    ///
-    /// # Errors
-    /// Rejects invalid transport configuration or a zero output limit.
     pub fn with_openai_responses_text(
         mut self,
         max_output_tokens: u32,
@@ -353,13 +289,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Replaces any previous extra request headers with a bounded validated set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects more than [`MAX_CUSTOM_HEADERS`] entries, names or values outside
-    /// their bounds, CR/LF in values, and hop-by-hop or credential-bearing
-    /// header names (`Authorization`, `Host`, `Content-Length`, `Connection`, …).
     pub fn with_custom_headers(
         mut self,
         headers: impl IntoIterator<Item = (String, String)>,
@@ -371,17 +300,12 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Lets an active task keep a provider stream open until it completes or is cancelled.
     #[must_use]
     pub fn without_deadlines(mut self) -> Self {
         self.deadlines_enabled = false;
         self
     }
 
-    /// Selects the fixed `ChatGPT` Codex endpoint with an account-bound OAuth token.
-    ///
-    /// # Errors
-    /// Rejects custom endpoints and invalid account header values.
     pub fn with_codex_chatgpt(mut self, account_id: String) -> Result<Self, HttpsSseProviderError> {
         if self.endpoint != crate::codex_login::CODEX_ENDPOINT || !valid_token(&account_id, 200) {
             return Err(HttpsSseProviderError::new(
@@ -394,10 +318,6 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
-    /// Selects the official public Responses endpoint for a `WinWinCode` OAuth grant.
-    ///
-    /// # Errors
-    /// Rejects any custom endpoint to keep the account credential on its intended origin.
     pub fn with_chatgpt_plan(mut self) -> Result<Self, HttpsSseProviderError> {
         if self.endpoint != crate::chatgpt_oauth::ENDPOINT {
             return Err(HttpsSseProviderError::new(
@@ -466,7 +386,6 @@ impl HttpsSseProviderConfig {
     }
 }
 
-/// Stable transport failure categories without upstream response text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HttpsSseProviderErrorKind {
     InvalidConfiguration,
@@ -484,7 +403,6 @@ pub enum HttpsSseProviderErrorKind {
     CredentialLeak,
 }
 
-/// Secret-free HTTPS/SSE error.
 #[derive(Clone, Eq, PartialEq)]
 pub struct HttpsSseProviderError {
     kind: HttpsSseProviderErrorKind,
@@ -605,7 +523,6 @@ impl HttpsSseProviderError {
         self
     }
 
-    /// Produces the stable terminal fact used when an accepted stream breaks.
     #[must_use]
     pub const fn failure_terminal(&self) -> ProviderGatewayTerminal {
         let failure_kind = match self.kind {
@@ -650,7 +567,6 @@ impl fmt::Display for HttpsSseProviderError {
 
 impl std::error::Error for HttpsSseProviderError {}
 
-/// Canonical frames and terminal facts drained from one verified SSE response.
 pub struct HttpsSseProviderCompletion {
     pub frames: Vec<CanonicalModelStreamFrame>,
     pub terminal: ProviderGatewayTerminal,
@@ -666,7 +582,6 @@ impl fmt::Debug for HttpsSseProviderCompletion {
     }
 }
 
-/// External Provider adapter using pinned rustls verification and bounded SSE.
 #[derive(Clone)]
 pub struct HttpsSseProviderAdapter {
     shared: Arc<SharedAdapter>,
@@ -863,7 +778,6 @@ impl HttpsSseProviderAdapter {
                     return Ok(ack);
                 }
                 Err(error) => {
-                    // Only an exact failed drain can reopen. Terminal controls remain fences.
                     let mut streams = self.shared.streams.lock().map_err(|_| storage())?;
                     if let Some(record) = streams.get(invocation.adapter_request_id())
                         && matches!(record.state, StreamState::Drained)
@@ -898,7 +812,6 @@ impl HttpsSseProviderAdapter {
                     {
                         record.io.cancel();
                     }
-                    // Observe until open has installed its cancellable record.
                     std::thread::sleep(Duration::from_millis(
                         winwincode_network::defaults().authority_check_ms,
                     ));
@@ -936,15 +849,10 @@ impl HttpsSseProviderAdapter {
             .max_redirects(0)
             .proxy(config.http_connect_proxy.clone())
             .timeout_connect(Some(config.connect_timeout))
-            // ureq 3.1.4 also applies recv_response's deadline while reading the body.
-            // When enabled, the global deadline bounds headers and the complete stream.
             .timeout_resolve(Some(config.connect_timeout))
             .timeout_global(config.deadlines_enabled.then_some(config.total_timeout))
             .tls_config(tls)
             .build();
-        // CONNECT recursively opens its proxy through this same chain without
-        // proxy settings. ExchangeConnector retains that TCP socket for real
-        // cancellation, then preserves the tunnel for target TLS verification.
         let connector = ConnectProxyConnector::default()
             .chain(crate::provider_transport::ExchangeConnector(io))
             .chain(RustlsConnector::default());
@@ -955,11 +863,6 @@ impl HttpsSseProviderAdapter {
         )
     }
 
-    /// Builds a verified HTTP agent from one validated, explicitly routed configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots or transport configuration.
     pub fn try_new(config: HttpsSseProviderConfig) -> Result<Self, HttpsSseProviderError> {
         config.validate()?;
         Ok(Self {
@@ -974,7 +877,6 @@ impl HttpsSseProviderAdapter {
         })
     }
 
-    /// Attaches the durable logical-request attempt journal.
     #[must_use]
     pub fn with_journal(self, journal: winwincode_network::journal::RequestJournal) -> Self {
         if let Ok(mut current) = self.shared.journal.lock() {
@@ -983,7 +885,6 @@ impl HttpsSseProviderAdapter {
         self
     }
 
-    /// Retains private failed response bytes with a payload-free log reference.
     #[must_use]
     pub fn with_sse_failure_log(self, directory: std::path::PathBuf) -> Self {
         if let Ok(mut current) = self.shared.sse_failure_log.lock() {
@@ -1014,13 +915,6 @@ impl HttpsSseProviderAdapter {
         io
     }
 
-    /// Drains the accepted response once and converts it through the unique
-    /// canonical stream converter carried by the Gateway receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign identities, paused/replayed drains, TLS/body failures,
-    /// malformed or oversized SSE, and Credential leakage.
     pub fn drain_canonical(
         &self,
         receipt: &ProviderGatewayOpenReceipt,
@@ -1087,7 +981,6 @@ impl HttpsSseProviderAdapter {
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut receipt = receipt.clone();
         for (name, value) in &self.shared.config.custom_headers {
-            // This public protocol switch is a literal boolean, not a credential.
             if matches!(
                 self.shared.config.protocol,
                 HttpsSseProviderProtocol::OpenAiResponses { .. }
@@ -1715,9 +1608,6 @@ impl HttpsSseProviderAdapter {
         {
             return failure;
         }
-        // Capture is bounded even when successful inference streams have no total limit.
-        // ExchangeIo remains in its finite opening stage; cancellation and ureq's
-        // original global deadline continue to bound each read.
         let limit = self.shared.config.max_response_bytes.min(64 * 1024);
         let mut bytes = Vec::new();
         let result = response
@@ -1780,8 +1670,6 @@ impl HttpsSseProviderAdapter {
             return Err(ProviderAdapterError::from_network(failure).with_metadata(metadata));
         }
         let content_type = response.headers().get("content-type");
-        // These fixed official endpoints can omit MIME; the bounded Responses parser
-        // still validates every event before it reaches the embedded Core.
         let responses_without_mime = content_type.is_none()
             && matches!(
                 self.shared.config.protocol,
@@ -2097,7 +1985,6 @@ fn canonical_events(wire: Vec<ProviderWireEvent>) -> Result<ParsedStream, HttpsS
 struct CanonicalEvents {
     events: Vec<ProviderStreamEvent>,
     usage: Option<ProviderTokenUsage>,
-    // Outer None means no cost meter; inner None means an explicit unknown cost.
     #[allow(clippy::option_option)]
     cost_micros: Option<Option<u64>>,
     terminal: Option<ProviderGatewayTerminal>,
@@ -2610,9 +2497,6 @@ fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
     String::from_utf8(value).map_err(|_| ProviderAdapterError::rejected())
 }
 
-/// Derive routing headers from the kernel's original request envelope before
-/// protocol translation removes it. Never mutate shared Provider configuration:
-/// concurrent conversations and physical retries retain their own identities.
 fn native_request_headers(
     payload: &[u8],
     endpoint: &str,
@@ -2631,7 +2515,6 @@ fn native_request_headers(
         "User-Agent",
         concat!("WinWinCode/", env!("CARGO_PKG_VERSION")),
     );
-    // Raw canonical payloads are also supported; they have no Core envelope.
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
         return Ok(headers);
     };
@@ -2659,8 +2542,6 @@ fn native_request_headers(
     let thread_id = identity("threadId")?;
     append("session-id", session_id);
     append("thread-id", thread_id);
-    // OpenCode Go/Zen expects an explicit per-conversation routing alias from
-    // clients with their own User-Agent. Restrict it to the official HTTPS origin.
     let opencode_origin = ureq::http::Uri::from_str(endpoint).is_ok_and(|uri| {
         uri.scheme_str() == Some("https")
             && uri.authority().is_some_and(|authority| {
@@ -2674,12 +2555,6 @@ fn native_request_headers(
     Ok(headers)
 }
 
-/// Canonical HTTPS endpoint shape for every Provider module: a trimmed
-/// `https` URI with a host, no embedded userinfo, and no query or fragment.
-/// The fragment guard is explicit because `Uri::from_str` strips a fragment
-/// instead of rejecting it. Other Provider modules validate through this
-/// check, so an endpoint can never be accepted at preset time and rejected at
-/// request time, or the reverse.
 pub fn canonical_https_endpoint(value: &str) -> bool {
     if value.trim() != value || value.contains('#') {
         return false;
@@ -2697,7 +2572,6 @@ pub fn canonical_https_endpoint(value: &str) -> bool {
 }
 
 fn canonical_event_stream_content_type(value: &str) -> bool {
-    // SSE is always decoded as UTF-8; MIME parameters do not alter that.
     value
         .split(';')
         .next()
@@ -4453,7 +4327,6 @@ mod tests {
                     .with_codex_chatgpt("account-fixture".into())
                     .unwrap()
             };
-            // Only this private TLS test substitutes a local endpoint after validating production settings.
             settings.endpoint = fixture.endpoint.clone();
             let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
             let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
@@ -4523,7 +4396,6 @@ mod tests {
                 .with_codex_chatgpt("account-fixture".into())
                 .unwrap()
         };
-        // Validate the production origin before substituting this private TLS fixture.
         settings.endpoint = fixture.endpoint.clone();
         let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
         let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
@@ -4718,8 +4590,6 @@ mod tests {
             }]);
             let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
             assert_eq!(fixture.finish().len(), 1);
-            // Set the late task cancellation flag without interrupting the already-sent
-            // fixture bytes, so the recovery gate must reject a complete Failed body.
             let cancellation = Arc::new(crate::provider_transport::ExchangeCancellation::default());
             let adapter = adapter.with_cancellation(Arc::clone(&cancellation));
             cancellation.cancel();
@@ -4804,7 +4674,6 @@ mod tests {
             let mut settings = config(&fixture);
             settings.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
             let mut settings = settings.with_chatgpt_plan().unwrap();
-            // Production pins are validated before substituting this private TLS fixture.
             settings.endpoint = fixture.endpoint.clone();
             let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
             let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());

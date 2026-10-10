@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Pre-open retry planning from durable job and admission authority.
-
 use std::{fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
@@ -30,23 +26,13 @@ const MAX_TOTAL_ATTEMPTS: u64 = 16;
 const FAILURE_SCHEMA: &str = "winwincode.model-retry-pre-open-failure.v1";
 const FAILURE_STREAM_PREFIX: &str = "model-retry-pre-open-failure:";
 
-/// A trusted policy source which freezes the complete retry/fallback plan.
 pub trait ModelRetryPlanAuthorityPort: Send + Sync {
-    /// Freezes the plan whose first step is the already-admitted primary route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable policy or a plan that does not begin with `primary`.
     fn freeze_plan(
         &self,
         primary: FrozenModelRouteAuthority,
     ) -> Result<FrozenModelRetryPlan, ModelRetryPlannerError>;
 }
 
-/// Explicit deployment policy for one admitted route and a hard attempt cap.
-///
-/// This is a real policy value, not an implicit fallback. Deployments that
-/// support alternate routes provide another [`ModelRetryPlanAuthorityPort`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfiguredModelRetryPlanAuthority {
     policy_id: String,
@@ -55,11 +41,6 @@ pub struct ConfiguredModelRetryPlanAuthority {
 }
 
 impl ConfiguredModelRetryPlanAuthority {
-    /// Creates an explicit immutable single-route retry policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed policy identity, revision, or attempt limits.
     pub fn try_new(
         policy_id: String,
         policy_revision: u64,
@@ -96,7 +77,6 @@ impl ModelRetryPlanAuthorityPort for ConfiguredModelRetryPlanAuthority {
     }
 }
 
-/// Stable pre-open planning failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRetryPlannerErrorKind {
     InvalidRequest,
@@ -106,7 +86,6 @@ pub enum ModelRetryPlannerErrorKind {
     Storage,
 }
 
-/// Exact durable admission identity that composition is permitted to release.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRetryAdmissionReleaseAuthority {
     model_exchange_id: ModelExchangeId,
@@ -128,7 +107,6 @@ impl ModelRetryAdmissionReleaseAuthority {
         })
     }
 
-    /// Checks that a release still names the exact admitted receipt and route.
     #[must_use]
     pub fn authorizes(&self, admission: &ProviderAdmissionOpenReceipt) -> bool {
         admission.reservation.model_exchange_id == self.model_exchange_id
@@ -159,7 +137,6 @@ fn normalized_reservation_digest(
     Ok(format!("sha256:{:x}", Sha256::digest(payload)))
 }
 
-/// Bounded failure that retains no model input, credential, or Provider text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRetryPlannerError {
     kind: ModelRetryPlannerErrorKind,
@@ -199,7 +176,6 @@ impl ModelRetryPlannerError {
         self.kind
     }
 
-    /// Exact authority for an idempotent admission release, when one is safe.
     #[must_use]
     pub const fn release_authority(&self) -> Option<&ModelRetryAdmissionReleaseAuthority> {
         self.release_authority.as_ref()
@@ -220,14 +196,7 @@ impl From<winwincode_storage::StorageError> for ModelRetryPlannerError {
     }
 }
 
-/// Prepares the canonical context after admission and before Provider access.
 pub trait ModelRetryPreOpenPlannerPort: Send {
-    /// Commits or replays one exact retry context for an admitted open.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign job/actor/scope/route authority, changed replay, corrupt
-    /// durable state, invalid policy, or unavailable storage.
     fn prepare(
         &mut self,
         message: &ModelOpenMessage,
@@ -235,18 +204,12 @@ pub trait ModelRetryPreOpenPlannerPort: Send {
     ) -> Result<ModelRetrySettlementContext, ModelRetryPlannerError>;
 }
 
-/// Production planner over the same canonical Control Plane database.
 pub struct DurableModelRetryPreOpenPlanner<'policy> {
     storage: SqliteStorage,
     policy: &'policy dyn ModelRetryPlanAuthorityPort,
 }
 
 impl<'policy> DurableModelRetryPreOpenPlanner<'policy> {
-    /// Opens the canonical product database used by job and retry authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Storage` when the database cannot be opened.
     pub fn open(
         data_directory: impl AsRef<Path>,
         policy: &'policy dyn ModelRetryPlanAuthorityPort,
@@ -257,17 +220,11 @@ impl<'policy> DurableModelRetryPreOpenPlanner<'policy> {
         })
     }
 
-    /// Returns the exact database path for composition-root equality checks.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         self.storage.database_path()
     }
 
-    /// Deterministically checkpoints and closes the owned connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Storage` when close or checkpoint fails.
     pub fn close(self) -> Result<(), ModelRetryPlannerError> {
         Box::new(self.storage).close().map_err(Into::into)
     }

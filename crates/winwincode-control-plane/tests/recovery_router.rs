@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::BTreeMap;
 
 use winwincode_control_plane::recovery_router::{

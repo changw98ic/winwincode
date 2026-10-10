@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device-private Provider settings. The server relays authenticated ciphertext only.
-
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::{collections::BTreeMap, fmt, fs, path::Path, time::Duration};
 
@@ -38,7 +34,6 @@ mod concurrency_tests;
 #[path = "device_provider_refresh_tests.rs"]
 mod refresh_tests;
 
-/// Bounded failure: database and crypto errors never expose configuration or keys.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceProviderError;
 
@@ -74,8 +69,6 @@ struct Mutation {
     custom_headers: Option<BTreeMap<String, String>>,
 }
 
-/// One private database, shared by the Device daemon and its managed Workers.
-/// Configuration and the decryption key are committed together; only public snapshots leave it.
 pub struct DeviceProviderStore {
     pub(crate) connection: Connection,
     key: SecretKey,
@@ -94,10 +87,6 @@ impl DeviceProviderStore {
         )
     }
 
-    /// Opens or creates the device-private database. Existing unsafe permissions fail closed.
-    ///
-    /// # Errors
-    /// Rejects symbolic links, public files, unknown schemas, and unavailable storage.
     pub fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
         fs::DirBuilder::new()
             .recursive(true)
@@ -131,9 +120,6 @@ impl DeviceProviderStore {
         let key = if version == 13 {
             load_device_key(&connection)?
         } else {
-            // Only an actual migration needs the writer lock. Worker polling,
-            // model startup and accounting readers share this database; opening
-            // its current schema must not contend with an accounting transaction.
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             migrate_device_store(&transaction)?;
@@ -144,10 +130,6 @@ impl DeviceProviderStore {
         Ok(Self { connection, key })
     }
 
-    /// Returns configuration metadata and the encryption public key, never a credential.
-    ///
-    /// # Errors
-    /// Returns a bounded failure for invalid local state.
     pub fn snapshot(
         &self,
         client_node_id: &str,
@@ -188,10 +170,6 @@ impl DeviceProviderStore {
         )?)
     }
 
-    /// Decrypts and applies one command. Exact replays return the durable receipt.
-    ///
-    /// # Errors
-    /// Rejects changed replay identities and storage failures; ordinary user errors are receipts.
     pub fn apply(
         &mut self,
         device: &str,
@@ -204,7 +182,6 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(envelope)?));
-        // Serialize mutation and receipt publication. No network work occurs inside this transaction.
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = self.apply_transaction(envelope, &digest);
         match result {
@@ -285,10 +262,6 @@ impl DeviceProviderStore {
         self.decrypt_configuration(envelope, CONTEXT)
     }
 
-    /// Opens a configuration encrypted for this Device and operation namespace.
-    ///
-    /// # Errors
-    /// Rejects invalid keys, altered payloads, and invalid decoded data.
     pub fn decrypt_configuration<T: serde::de::DeserializeOwned>(
         &self,
         envelope: &DeviceConfigurationEnvelope,
@@ -466,8 +439,6 @@ impl DeviceProviderStore {
         &self,
         config: &DeviceProviderConfig,
     ) -> Result<ResolvedSecret, DeviceProviderError> {
-        // Configuration saves hold SQLite's writer transaction. Read only local
-        // state here, preserving the credential bytes used by rotation's CAS.
         let (stored_config, bytes): (String, Vec<u8>) = self.connection.query_row(
             "SELECT config, secret FROM providers WHERE provider_id=?1",
             [&config.provider_id],
@@ -481,7 +452,6 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         if config.protocol == DeviceProviderProtocol::ChatgptPlan {
-            // Validate the protected record without re-encoding an unchanged grant.
             let _: crate::chatgpt_oauth::Credentials = serde_json::from_slice(secret.expose())?;
         }
         Ok(secret)
@@ -645,10 +615,6 @@ impl DeviceProviderStore {
         })
     }
 
-    /// Reads one configured route for a device-local request.
-    ///
-    /// # Errors
-    /// Rejects a missing or corrupt Provider. The caller must check enabled/model selection.
     pub fn resolve(
         &self,
         provider_id: &str,
@@ -702,7 +668,6 @@ impl DeviceProviderStore {
             &locks.join(format!("{:x}", Sha256::digest(provider_id.as_bytes()))),
         )?;
         owner.lock()?;
-        // Reload under the credential lock. Network I/O holds no SQLite transaction.
         let (current_config, mut previous): (String, Vec<u8>) = self.connection.query_row(
             "SELECT config, secret FROM providers WHERE provider_id=?1",
             [provider_id],
@@ -718,9 +683,6 @@ impl DeviceProviderStore {
             let mut record: crate::chatgpt_oauth::Credentials = serde_json::from_slice(&previous)?;
             if record.needs_refresh()? {
                 refresh(&mut record)?;
-                // Ordinary saves may change configuration while the grant is in flight.
-                // Serialize only this local check/write, preserving the newest config
-                // whenever the credential itself and the protocol are still current.
                 let transaction = rusqlite::Transaction::new_unchecked(
                     &self.connection,
                     rusqlite::TransactionBehavior::Immediate,
@@ -933,7 +895,6 @@ fn valid_provider_structured_output_json(plaintext: &[u8]) -> bool {
     })
 }
 
-/// Validates public Provider configuration at Device and projection boundaries.
 #[must_use]
 pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
     valid_token(&config.provider_id, 128)
@@ -962,8 +923,6 @@ pub(crate) fn adapter(
     headers: BTreeMap<String, String>,
     codex_account: Option<String>,
 ) -> Result<HttpsSseProviderAdapter, DeviceProviderError> {
-    // Reasoning tokens count toward this per-response limit. The previous
-    // 8,192-token value truncated real Fusion review responses mid-turn.
     const MAX_OUTPUT_TOKENS: u32 = 32_768;
     let mut transport = HttpsSseProviderConfig::try_new(
         config.provider_id.clone(),
@@ -980,7 +939,6 @@ pub(crate) fn adapter(
         },
     )
     .map_err(|_| DeviceProviderError)?;
-    // Task progress has no total development deadline; opening and progress idle timeouts stay finite.
     transport = transport.without_deadlines();
     if let Some(proxy_url) = std::env::var_os(DEVICE_PROVIDER_HTTPS_PROXY_ENVIRONMENT) {
         transport = transport

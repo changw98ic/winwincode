@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 use crate::{DeviceProviderStore, JevContextRequest, StoredJevContext};
 use std::{

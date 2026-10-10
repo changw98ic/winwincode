@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Observer decisions and their product-visible lifecycle.
-//!
-//! The service consumes only structured Control Plane facts. It stores no
-//! model transcript, hidden reasoning, tool payload, or Agent lifecycle. A
-//! blocking decision becomes effective only at an explicit safe checkpoint;
-//! recording or replaying that decision never closes a `ProductSession`, a
-//! Worker slot, an admission reservation, or its worktree.
-
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
@@ -34,7 +24,6 @@ use crate::{
     ProductSessionServiceError,
 };
 
-/// Current durable schema for the Observer decision catalog and receipts.
 pub const OBSERVER_DECISION_SERVICE_SCHEMA_VERSION: u8 = 1;
 
 const OBSERVER_DECISION_RECEIPT_TOPIC: &str = "observer-decision.receipt.internal.v1";
@@ -43,26 +32,13 @@ const MAX_REASON_CODE_LENGTH: usize = 100;
 const MAX_SUMMARY_LENGTH: usize = 2_000;
 const MAX_EVIDENCE_REFERENCES: usize = 256;
 
-/// Storage seam joining Observer state to existing session, Worker-slot, and
-/// admission authorities.
 pub trait ObserverDecisionPersistence: ProductStateStorage {
-    /// Loads the canonical `ProductSession` projection in one exact scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the canonical session catalog is corrupt
-    /// or unavailable.
     fn load_observer_product_session(
         &mut self,
         scope: &ReceiptScopeKey,
         product_session_id: &ProductSessionId,
     ) -> Result<Option<ProductSessionRecord>, StorageError>;
 
-    /// Loads the canonical Worker slot and its exact-scope admission record.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when either existing authority cannot be read.
     fn load_observer_worker_source(
         &mut self,
         scope: &ExecutionQueueScope,
@@ -97,17 +73,14 @@ impl ObserverDecisionPersistence for SqliteStorage {
     }
 }
 
-/// Common idempotency, optimistic-concurrency, and event facts for one command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObserverDecisionCommandContext {
     pub receipt_identity: ReceiptIdentity,
-    /// Observer-session revision, independent from the `ProductSession` revision.
     pub expected_revision: u64,
     pub event_id: ControlPlaneEventId,
     pub occurred_at: Instant,
 }
 
-/// The four structured decisions understood by the Control Plane.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverDecisionKind {
@@ -118,7 +91,6 @@ pub enum ObserverDecisionKind {
 }
 
 impl ObserverDecisionKind {
-    /// Maps the Action Gateway outcome into the Observer vocabulary.
     #[must_use]
     pub const fn from_gate_decision(decision: &GateDecision) -> Option<Self> {
         match decision {
@@ -130,7 +102,6 @@ impl ObserverDecisionKind {
         }
     }
 
-    /// Maps the secret-safe runtime trace outcome into the Observer vocabulary.
     #[must_use]
     pub const fn from_trace_gate_outcome(outcome: TraceGateOutcome) -> Option<Self> {
         match outcome {
@@ -142,7 +113,6 @@ impl ObserverDecisionKind {
         }
     }
 
-    /// Maps failure-router actions which require an Observer lifecycle change.
     #[must_use]
     pub const fn from_failure_route(route: FailureRoute) -> Option<Self> {
         match route {
@@ -158,7 +128,6 @@ impl ObserverDecisionKind {
     }
 }
 
-/// Trusted subsystem which produced one structured decision.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverDecisionOrigin {
@@ -168,7 +137,6 @@ pub enum ObserverDecisionOrigin {
     FailureRouter,
 }
 
-/// Structured decision input. It deliberately has no transcript or reasoning field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObserverDecisionInput {
     kind: ObserverDecisionKind,
@@ -180,7 +148,6 @@ pub struct ObserverDecisionInput {
 }
 
 impl ObserverDecisionInput {
-    /// Builds a bounded result emitted by the embedded Codex Observer seam.
     #[must_use]
     pub fn codex(
         kind: ObserverDecisionKind,
@@ -198,7 +165,6 @@ impl ObserverDecisionInput {
         }
     }
 
-    /// Builds an input directly from the existing Action Gateway result.
     #[must_use]
     pub fn from_gate_decision(
         decision: &GateDecision,
@@ -222,7 +188,6 @@ impl ObserverDecisionInput {
         })
     }
 
-    /// Builds an input from the secret-safe gate fact in the runtime trace.
     #[must_use]
     pub fn from_trace_gate_outcome(
         outcome: TraceGateOutcome,
@@ -241,7 +206,6 @@ impl ObserverDecisionInput {
         })
     }
 
-    /// Builds an input from the existing Delivery failure router's immutable packet.
     #[must_use]
     pub fn from_failure_decision(decision: &FailureRoutingDecision) -> Option<Self> {
         let route = decision.next_action();
@@ -288,7 +252,6 @@ impl ObserverDecisionInput {
     }
 }
 
-/// Content-addressed reference to one accepted runtime-trace fact.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObserverRuntimeTraceRef {
@@ -297,8 +260,6 @@ pub struct ObserverRuntimeTraceRef {
     pub digest: Sha256Digest,
 }
 
-/// Exact structured source joined from the interaction route and durable
-/// ProductSession/Worker authorities.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObserverExecutionSource {
@@ -326,11 +287,6 @@ pub struct ObserverExecutionSource {
 }
 
 impl ObserverExecutionSource {
-    /// Copies an already sealed interaction route into the Observer source.
-    ///
-    /// # Errors
-    ///
-    /// Rejects queued routes without an exact runtime authority or slot revision.
     pub fn from_interaction_route(
         route: &ExecutionRoute,
         product_session_revision: u64,
@@ -377,7 +333,6 @@ impl ObserverExecutionSource {
     }
 }
 
-/// Safe point after which the Control Plane may expose a blocking state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverCheckpointKind {
@@ -387,7 +342,6 @@ pub enum ObserverCheckpointKind {
     WorkerParked,
 }
 
-/// Exact runtime fact proving one safe checkpoint.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObserverSafeCheckpoint {
@@ -396,7 +350,6 @@ pub struct ObserverSafeCheckpoint {
     pub observed_at: Instant,
 }
 
-/// Creates one decision, optionally already at a proven safe checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordObserverDecisionCommand {
     pub context: ObserverDecisionCommandContext,
@@ -405,7 +358,6 @@ pub struct RecordObserverDecisionCommand {
     pub safe_checkpoint: Option<ObserverSafeCheckpoint>,
 }
 
-/// Advances the current pending decision at one later safe checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplyObserverCheckpointCommand {
     pub context: ObserverDecisionCommandContext,
@@ -414,7 +366,6 @@ pub struct ApplyObserverCheckpointCommand {
     pub safe_checkpoint: ObserverSafeCheckpoint,
 }
 
-/// Product-visible state of the current structured Observer decision.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverDecisionState {
@@ -428,7 +379,6 @@ pub enum ObserverDecisionState {
 }
 
 impl ObserverDecisionState {
-    /// Whether another action must wait for this decision to be resolved.
     #[must_use]
     pub const fn blocks_new_actions(self) -> bool {
         !matches!(self, Self::Watching)
@@ -442,7 +392,6 @@ impl ObserverDecisionState {
     }
 }
 
-/// Exact resources retained while a decision is pending or paused.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObserverRetainedResources {
@@ -455,7 +404,6 @@ pub struct ObserverRetainedResources {
     pub worktree_key: Option<String>,
 }
 
-/// Read-only, explainable projection for one decision lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObserverDecisionProjection {
     decision_event_id: ExecutionEventId,
@@ -545,14 +493,12 @@ impl ObserverDecisionProjection {
         &self.updated_at
     }
 
-    /// True for every projection because this service emits no resource mutation.
     #[must_use]
     pub const fn preserves_session_worker_and_worktree(&self) -> bool {
         true
     }
 }
 
-/// Replay-safe result of one decision or checkpoint command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObserverDecisionMutationReceipt {
     pub projection: ObserverDecisionProjection,
@@ -560,7 +506,6 @@ pub struct ObserverDecisionMutationReceipt {
     pub replayed: bool,
 }
 
-/// Stable machine-readable service error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObserverDecisionServiceErrorCode {
     InvalidInput,
@@ -575,7 +520,6 @@ pub enum ObserverDecisionServiceErrorCode {
     Storage,
 }
 
-/// Bounded Observer application-service failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObserverDecisionServiceError {
     code: ObserverDecisionServiceErrorCode,
@@ -602,7 +546,6 @@ impl fmt::Display for ObserverDecisionServiceError {
 
 impl std::error::Error for ObserverDecisionServiceError {}
 
-/// Durable command and read service for structured Observer decisions.
 pub struct ObserverDecisionService<'storage> {
     storage: &'storage mut dyn ObserverDecisionPersistence,
 }
@@ -614,7 +557,6 @@ impl<'storage> ObserverDecisionService<'storage> {
         Self { storage }
     }
 
-    /// Stores one structured decision after joining its existing authorities.
     pub fn record_decision(
         &mut self,
         command: &RecordObserverDecisionCommand,
@@ -697,7 +639,6 @@ impl<'storage> ObserverDecisionService<'storage> {
         )
     }
 
-    /// Advances one pending decision only after an explicit safe checkpoint.
     pub fn apply_checkpoint(
         &mut self,
         command: &ApplyObserverCheckpointCommand,
@@ -754,7 +695,6 @@ impl<'storage> ObserverDecisionService<'storage> {
         )
     }
 
-    /// Reads the current decision for one exact `ProductSession` and scope.
     pub fn get_current(
         &self,
         scope: &ReceiptScopeKey,
@@ -768,7 +708,6 @@ impl<'storage> ObserverDecisionService<'storage> {
             .transpose()
     }
 
-    /// Reads deterministic decision history ordered by observer-session revision.
     pub fn history(
         &self,
         scope: &ReceiptScopeKey,

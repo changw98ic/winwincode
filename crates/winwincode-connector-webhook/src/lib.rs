@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Provider-neutral signed webhook mapping and HTTPS delivery adapter.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -20,7 +16,6 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical protocol identifier for provider-neutral webhook connectors.
 pub const WEBHOOK_CONNECTOR_PROTOCOL: &str = "webhook.v1";
 
 const MAX_HMAC_SECRET_BYTES: usize = 4_096;
@@ -32,14 +27,12 @@ const MAX_RESOLVED_ADDRESSES: usize = 16;
 const ABSOLUTE_MAX_BODY_BYTES: usize = 1_048_576;
 const ABSOLUTE_MAX_RESPONSE_BYTES: usize = 2_097_152;
 
-/// Supported generic webhook authentication boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebhookAuthenticationMode {
     HmacSha256,
     MutualTls,
 }
 
-/// Bounded raw-body and network limits applied before protocol mapping or I/O.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebhookLimits {
     inbound_body_bytes: usize,
@@ -49,11 +42,6 @@ pub struct WebhookLimits {
 }
 
 impl WebhookLimits {
-    /// Builds closed webhook size and timeout limits.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or values beyond the framework's absolute resource bounds.
     pub fn try_new(
         inbound_body_bytes: usize,
         outbound_body_bytes: usize,
@@ -111,7 +99,6 @@ impl Default for WebhookLimits {
     }
 }
 
-/// Timestamp validation applied before a credential verifier is called.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebhookInboundPolicy {
     authentication: WebhookAuthenticationMode,
@@ -120,11 +107,6 @@ pub struct WebhookInboundPolicy {
 }
 
 impl WebhookInboundPolicy {
-    /// Builds a bounded signed-request time window.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero, unsafe, or future-skew values wider than the accepted age.
     pub fn try_new(
         authentication: WebhookAuthenticationMode,
         maximum_age_millis: u64,
@@ -149,7 +131,6 @@ impl WebhookInboundPolicy {
     }
 }
 
-/// One exact HTTPS destination plus an explicit hostname allowlist.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookEndpoint {
     url: String,
@@ -158,12 +139,6 @@ pub struct WebhookEndpoint {
 }
 
 impl WebhookEndpoint {
-    /// Validates a credential-free HTTPS endpoint against exact allowed hosts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects HTTP, user information, queries, fragments, private literal
-    /// addresses, wildcard hosts, or a host outside the allowlist.
     pub fn try_new(
         value: impl Into<String>,
         allowed_hosts: impl IntoIterator<Item = String>,
@@ -225,7 +200,6 @@ impl WebhookEndpoint {
     }
 }
 
-/// One JSON-pointer to canonical output-field mapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookMappingField {
     output_name: String,
@@ -234,11 +208,6 @@ pub struct WebhookMappingField {
 }
 
 impl WebhookMappingField {
-    /// Builds a required mapping field.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid output names or JSON pointers.
     pub fn required(
         output_name: impl Into<String>,
         input_pointer: impl Into<String>,
@@ -246,11 +215,6 @@ impl WebhookMappingField {
         Self::try_new(output_name.into(), input_pointer.into(), true)
     }
 
-    /// Builds an optional mapping field.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid output names or JSON pointers.
     pub fn optional(
         output_name: impl Into<String>,
         input_pointer: impl Into<String>,
@@ -274,7 +238,6 @@ impl WebhookMappingField {
     }
 }
 
-/// Versioned, deterministic provider-payload mapping into one formal command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookMappingTemplate {
     version: u16,
@@ -284,12 +247,6 @@ pub struct WebhookMappingTemplate {
 }
 
 impl WebhookMappingTemplate {
-    /// Builds a canonical mapping template.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported versions, duplicate outputs, invalid names, or an
-    /// empty/oversized mapping.
     pub fn try_new(
         version: u16,
         event_type: impl Into<String>,
@@ -358,15 +315,9 @@ impl WebhookMappingTemplate {
     }
 }
 
-/// Secret-bearing HMAC key returned only to the signature authority.
 pub struct WebhookHmacSecret(Vec<u8>);
 
 impl WebhookHmacSecret {
-    /// Builds a bounded HMAC secret.
-    ///
-    /// # Errors
-    ///
-    /// Rejects keys shorter than 256 bits or beyond the bounded secret size.
     pub fn try_new(value: impl Into<Vec<u8>>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if value.len() < 32 || value.len() > MAX_HMAC_SECRET_BYTES {
@@ -388,7 +339,6 @@ impl Drop for WebhookHmacSecret {
     }
 }
 
-/// Credential resolution failure category for a generic webhook.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebhookCredentialErrorKind {
     Rejected,
@@ -396,7 +346,6 @@ pub enum WebhookCredentialErrorKind {
     Unavailable,
 }
 
-/// Secret-safe webhook credential failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebhookCredentialError {
     kind: WebhookCredentialErrorKind,
@@ -438,23 +387,12 @@ impl fmt::Display for WebhookCredentialError {
 
 impl std::error::Error for WebhookCredentialError {}
 
-/// Credential boundary used by the default HMAC/mTLS signature authority.
 pub trait WebhookCredentialPort {
-    /// Resolves the exact current HMAC secret for a credential reference.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe rejection, revocation, or availability failure.
     fn resolve_hmac_secret(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<WebhookHmacSecret, WebhookCredentialError>;
 
-    /// Authorizes one SHA-256 peer-certificate fingerprint for mutual TLS.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe rejection, revocation, or availability failure.
     fn authorize_mtls_peer(
         &mut self,
         reference: &CredentialReferenceId,
@@ -462,13 +400,7 @@ pub trait WebhookCredentialPort {
     ) -> Result<(), WebhookCredentialError>;
 }
 
-/// Credential-isolated HMAC and mTLS operation seam.
 pub trait WebhookSignaturePort {
-    /// Verifies an HMAC-SHA256 over the timestamp-bound exact raw body.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn verify_hmac_sha256(
         &mut self,
         reference: &CredentialReferenceId,
@@ -477,11 +409,6 @@ pub trait WebhookSignaturePort {
         presented_signature: &[u8],
     ) -> Result<(), WebhookCredentialError>;
 
-    /// Produces an HMAC-SHA256 over the timestamp-bound exact outbound body.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn sign_hmac_sha256(
         &mut self,
         reference: &CredentialReferenceId,
@@ -489,11 +416,6 @@ pub trait WebhookSignaturePort {
         payload: &[u8],
     ) -> Result<[u8; 32], WebhookCredentialError>;
 
-    /// Verifies one peer certificate fingerprint for mutual TLS.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn verify_mtls_peer(
         &mut self,
         reference: &CredentialReferenceId,
@@ -501,7 +423,6 @@ pub trait WebhookSignaturePort {
     ) -> Result<(), WebhookCredentialError>;
 }
 
-/// Default signature authority that keeps HMAC key access behind one port.
 pub struct CredentialWebhookSignaturePort<Credentials> {
     credentials: Credentials,
 }
@@ -555,7 +476,6 @@ where
     }
 }
 
-/// Transport-authenticated proof kept only in the raw inbound request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WebhookInboundProof {
     HmacSha256 {
@@ -569,11 +489,6 @@ pub enum WebhookInboundProof {
 }
 
 impl WebhookInboundProof {
-    /// Builds an exact HMAC proof.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unsafe timestamp.
     pub fn hmac_sha256(
         signed_at_millis: u64,
         signature: [u8; 32],
@@ -585,11 +500,6 @@ impl WebhookInboundProof {
         })
     }
 
-    /// Builds an exact mutual-TLS peer proof.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unsafe timestamp.
     pub fn mutual_tls(
         signed_at_millis: u64,
         peer_certificate_sha256: [u8; 32],
@@ -665,7 +575,6 @@ impl WebhookInboundProof {
     }
 }
 
-/// Builds bounded generic inbound requests without retaining authentication proof.
 #[derive(Clone, Debug)]
 pub struct WebhookRequestFactory {
     integration_id: IntegrationId,
@@ -683,11 +592,6 @@ impl WebhookRequestFactory {
         }
     }
 
-    /// Builds a framework request from transport-authenticated facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the wrong authentication mode or an oversized/invalid request.
     pub fn build(
         &self,
         scope: IntegrationScope,
@@ -713,13 +617,11 @@ impl WebhookRequestFactory {
     }
 }
 
-/// Trusted request-time source used for signature windows and outbound signing.
 pub trait WebhookClock {
     #[must_use]
     fn now_millis(&self) -> u64;
 }
 
-/// Existing-framework verifier for HMAC and mTLS generic webhook proofs.
 pub struct GenericWebhookVerifier<Signature, Clock> {
     integration_id: IntegrationId,
     policy: WebhookInboundPolicy,
@@ -784,7 +686,6 @@ where
     }
 }
 
-/// Provider-neutral webhook configuration shared by inbound and outbound paths.
 #[derive(Clone, Debug)]
 pub struct WebhookConnectorConfig {
     integration_id: IntegrationId,
@@ -795,11 +696,6 @@ pub struct WebhookConnectorConfig {
 }
 
 impl WebhookConnectorConfig {
-    /// Builds a closed generic webhook configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identity, missing/duplicate mappings, or unsafe limits.
     pub fn try_new(
         integration_id: IntegrationId,
         endpoint: WebhookEndpoint,
@@ -848,17 +744,10 @@ impl WebhookConnectorConfig {
     }
 }
 
-/// DNS seam whose result is pinned into the subsequent HTTPS request.
 pub trait WebhookAddressResolverPort {
-    /// Resolves the configured host exactly once for one delivery attempt.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable connector error on lookup failure.
     fn resolve(&mut self, host: &str, port: u16) -> Result<Vec<IpAddr>, ConnectorCallError>;
 }
 
-/// Authentication material prepared for one exact outbound attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WebhookOutboundAuthentication {
     HmacSha256 {
@@ -870,8 +759,6 @@ pub enum WebhookOutboundAuthentication {
     },
 }
 
-/// Fully validated HTTPS call. Implementations must connect only to one of the
-/// pinned addresses while retaining the endpoint host for TLS SNI validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookHttpRequest {
     endpoint: WebhookEndpoint,
@@ -914,7 +801,6 @@ impl WebhookHttpRequest {
     }
 }
 
-/// Bounded provider response returned by the HTTPS port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookHttpResponse {
     status: u16,
@@ -923,11 +809,6 @@ pub struct WebhookHttpResponse {
 }
 
 impl WebhookHttpResponse {
-    /// Builds a provider response for generic status handling.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid status, absolute response size, or retry delay.
     pub fn try_new(
         status: u16,
         body: Vec<u8>,
@@ -952,20 +833,13 @@ impl WebhookHttpResponse {
     }
 }
 
-/// HTTPS port consuming only an allowlisted host and pinned public addresses.
 pub trait WebhookHttpPort {
-    /// Performs one outbound call without following redirects.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable, secret-free connector error.
     fn send(
         &mut self,
         request: &WebhookHttpRequest,
     ) -> Result<WebhookHttpResponse, ConnectorCallError>;
 }
 
-/// Provider-neutral webhook protocol mapper and outbound adapter.
 pub struct GenericWebhookConnector<Resolver, Transport, Signature, Clock> {
     config: WebhookConnectorConfig,
     resolver: Resolver,

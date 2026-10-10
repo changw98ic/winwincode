@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Parallel blind panel runner.
-//!
-//! Guarantees encoded here:
-//! - at least three distinct Providers must be present in the canonical input;
-//! - every candidate receives the same blind prompt in an isolated request;
-//! - candidates are sent in parallel;
-//! - timeout, Provider failure, missing route, invalid answer, or token
-//!   overrun becomes one failure row and never cancels successful siblings.
-
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
@@ -39,7 +28,6 @@ use crate::MIN_PROVIDER_COUNT;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 const MAX_CONSTRAINTS: usize = 128;
 
-/// Invalid canonical input detected before any Provider request is sent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FusionPanelError(&'static str);
 
@@ -51,12 +39,6 @@ impl fmt::Display for FusionPanelError {
 
 impl std::error::Error for FusionPanelError {}
 
-/// Sends the same blind prompt to every candidate route in parallel.
-///
-/// # Errors
-///
-/// Returns a typed panel error only for invalid canonical input. Runtime
-/// Provider failures are retained as [`FusionCandidateFailure`] rows.
 pub async fn run_blind_panel(
     panel_id: &str,
     input: FusionInput,
@@ -103,11 +85,6 @@ enum CandidateOutcome {
     Failure(FusionCandidateFailure),
 }
 
-/// Checks a collected panel against the original input without calling Providers.
-/// This binds identities and request digests, not the truth of model claims.
-///
-/// # Errors
-/// Rejects incomplete, duplicate, foreign or changed member records.
 pub fn validate_panel_result(
     panel_id: &str,
     input: &FusionInput,

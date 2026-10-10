@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import type { RuntimeActivityProjection } from './generated/contracts.js'
 import { redactPublicText } from './public-redaction.js'
 
@@ -12,7 +11,6 @@ const DIAGNOSIS = {
   unavailable_wait: '等待对象已失效',
 } as const
 
-/** Both product surfaces render the same accepted Core relationships. */
 export function runtimeActivityPresentation(activity: RuntimeActivityProjection) {
   const meta = activity.coreTool
   const call = meta?.call

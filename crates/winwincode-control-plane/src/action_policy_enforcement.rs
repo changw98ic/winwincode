@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Control Plane issuance of Worker action enforcement receipts.
-//!
-//! Worker input contributes only the normalized action facts and stable
-//! invocation identity. Tenant, actor, Job, lease, and session authority are
-//! reloaded from the canonical durable execution records before Policy is
-//! evaluated or a receipt is signed.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +40,6 @@ struct FrozenActionEvaluationTime {
     evaluated_at: winwincode_domain::Instant,
 }
 
-/// Stable action receipt issuance failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionPolicyEnforcementErrorKind {
     InvalidRequest,
@@ -59,7 +49,6 @@ pub enum ActionPolicyEnforcementErrorKind {
     CorruptReceipt,
 }
 
-/// Secret-free action receipt issuance error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionPolicyEnforcementError {
     kind: ActionPolicyEnforcementErrorKind,
@@ -70,7 +59,6 @@ impl ActionPolicyEnforcementError {
         Self { kind }
     }
 
-    /// Returns the stable failure category.
     #[must_use]
     pub const fn kind(&self) -> ActionPolicyEnforcementErrorKind {
         self.kind
@@ -97,13 +85,6 @@ struct ResolvedActionAuthority {
     receipt_identity: ReceiptIdentity,
 }
 
-/// Issues or exactly replays one immutable action receipt.
-///
-/// # Errors
-///
-/// Rejects malformed Worker input, a stale/foreign lease or session, a
-/// non-User durable actor, changed request reuse, unavailable Policy/storage,
-/// or altered durable receipt bytes.
 pub fn issue_action_enforcement_receipt(
     storage: &mut SqliteStorage,
     issuer: &ActionEnforcementIssuer,

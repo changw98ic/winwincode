@@ -80,8 +80,6 @@ export function benchmarkDeviceProfiles(plan, options = {}) {
   const selected = options.selectedConfigurationIds === undefined ? null : new Set(options.selectedConfigurationIds)
   const profiles = [...new Map(plan.cells.filter(cell => selected === null || selected.has(cell.configurationId))
     .map(cell => [deviceBenchmarkProfileKey(cell), cell])).values()]
-  // Validate the profiles being admitted before claiming work. The full frozen
-  // plan stays in the ledger, including profiles awaiting real JEV settings.
   for (const profile of profiles) benchmarkDeviceEnvironment(profile,
     options.agentSettings, options.providerEnvironment ?? process.env)
   return profiles
@@ -97,7 +95,6 @@ export async function executeDeviceBenchmark(options) {
   const providerEnvironment = options.providerEnvironment ?? process.env
   const profiles = benchmarkDeviceProfiles(plan, { ...options, providerEnvironment })
   const ledgerPath = resolve(options.evidenceRoot, 'benchmark.sqlite3')
-  // Invalid first-run configuration must not freeze an unused experiment.
   validateFormalBenchmarkOptions({ providerEvidence: options.providerEvidence, ledgerPath,
     experimentBinding: { experimentId: options.experimentId } })
   const source = await validateFrozenTaskSource({ repositoryRoot: options.sourceRoot,
@@ -119,8 +116,6 @@ export async function executeDeviceBenchmark(options) {
   const evidenceRoot = resolve(options.evidenceRoot)
   mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 })
   const experimentBinding = deviceBenchmarkExperimentBinding(options, source, catalog)
-  // Reject changed experiment policy before opening Device/Worker services.
-  // The execution driver rechecks the same identity before claiming work.
   verifyBenchmarkLedgerIdentity(plan, { providerEvidence: options.providerEvidence, ledgerPath, experimentBinding,
     concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds })
   const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
@@ -150,9 +145,6 @@ export async function executeDeviceBenchmark(options) {
     })
   })
   const result = shared.flow.scenario
-  // A selected cohort leaves real unclaimed rows in the full experiment. The
-  // public publisher requires a completely finalized ledger, so defer it while
-  // another profile is still planned instead of fabricating failure records.
   if (result.records.every(record => ['completed', 'failed'].includes(record.status))) {
     publishBenchmarkLedger({ ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
       preparedInputsDirectory: options.preparedInputsDirectory,
@@ -197,8 +189,6 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
     constraints: ['遵守任务的全部业务规则和 JSONL 协议', '保持 TASK.md 和 PROTOCOL.md 不变',
       `只提交 ${artifact.spec.allowed_suffixes.join('、')} 源文件，最多 ${artifact.spec.max_submission_files} 个、合计 ${artifact.spec.max_submission_bytes} 字节`],
     outOfScope: ['任务题面、验证工具、环境镜像和凭据'],
-    // Public execution belongs to the configured host MCP tool. Independent
-    // read-only roles verify its source-bound receipt without host writes.
     verificationCommand: ['/usr/bin/python3', ...args, '--verify-source', '.'].map(shellWord).join(' '),
     acceptanceCriteria: [{ id: 'public-examples', title: '官方公开示例在冻结环境通过', required: true }],
     files: { ...artifact.files },
@@ -217,7 +207,6 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
   }
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const taskInputPath = resolve(directory, 'task-input.json')
-  // Preparing a launch never overwrites another attempt, even in a different ledger.
   writeFileSync(taskInputPath, `${JSON.stringify(task, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   const input = loadDeviceAgentTask(taskInputPath)
   writeFileSync(resolve(directory, 'task-source-binding.json'), `${JSON.stringify({
@@ -288,8 +277,6 @@ export async function runBenchmarkDeviceAggregation(request, runner, options) {
     if (error.code === 'FUSION_NO_SUCCESSFUL_MEMBERS') throw error
     throw evidenceFailure()
   }
-  // The aggregation is one product execution using an existing model seat,
-  // with separate receipts; it never calls executeBenchmarkCell recursively.
   const result = await runBenchmarkDeviceModel({ ...request, provider: aggregationProvider,
     reasoningEffort: 'max', budgetLimits: null }, runner, { ...options, aggregation })
   return { ...result, aggregationInputDigest: request.inputDigest, aggregationProvider }
@@ -350,7 +337,6 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       }))
     } catch (unresolved) {
       if (unresolved.unresolvedDeviceExecution === true) throw unresolved
-      // Report, identity or read-cursor conflicts remain evidence failures.
       throw evidenceFailure()
     }
   }
@@ -371,9 +357,6 @@ export function persistedBenchmarkDeviceFailure(report, launch, error) {
     observation = persistedDeviceObservation(report, launch)
     if (terminalBenchmarkDeviceFailure(observation)) return observation
   }
-  // Transport/driver interruption is not a terminal product outcome, including
-  // when the last persisted observation still contains active execution.
-  // Retain the original typed cause so recovery can query the original launch.
   const code = error.code ?? report.errorCode
   throw Object.assign(new Error('Device execution has no authoritative terminal outcome', { cause: error }), {
     code: typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code)
@@ -383,8 +366,6 @@ export function persistedBenchmarkDeviceFailure(report, launch, error) {
   })
 }
 
-// A failed call can still have a running role or an unresolved projection. Only
-// current, matching terminal product facts allow removing its own MCP server.
 export async function removeTerminalBenchmarkPublicSmoke(launch, runtime) {
   const report = JSON.parse(readFileSync(resolve(launch.directory, 'device-task-result.json'), 'utf8'))
   assert.equal(report.productSessionId, launch.productSessionId)
@@ -516,8 +497,6 @@ function loopbackUnavailable(error) {
   return false
 }
 
-// Reconcile a launched product task after its transport/driver has been
-// interrupted. The current terminal product authorities decide the outcome.
 export async function resolveRegisteredDeviceTask(request, launch, options = {}, persisted = null) {
     const originalBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
     const original = JSON.parse(originalBytes)
@@ -537,9 +516,6 @@ export async function resolveRegisteredDeviceTask(request, launch, options = {},
     if (original.errorCode === 'DEVICE_WORKER_CRASHED') {
       return crashedDeviceResult(request, launch, options)
     }
-    // Old reports may have classified a cancelled scheduler row as a dispatch
-    // failure. Preserve those bytes, but let current durable dispatch facts
-    // decide whether that failure still applies before using product recovery.
     if ((original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure)
       && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
         .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {

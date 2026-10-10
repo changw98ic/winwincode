@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Anthropic Messages protocol translation for the external HTTPS/SSE adapter.
-//!
-//! This module is the only boundary which understands both the Codex
-//! `ModelStreamRequest` JSON shape and Anthropic Messages request/stream
-//! shapes. It never receives a Provider Credential and never retains request
-//! or response bodies after one conversion.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
@@ -197,8 +188,6 @@ impl AnthropicCodecError {
     }
 
     fn in_response(mut self, event_type: &'static str) -> Self {
-        // The shared helpers remain strict for canonical requests. Malformed
-        // upstream values are protocol failures rather than invalid requests.
         if self.kind == AnthropicCodecErrorKind::InvalidRequest {
             self.kind = AnthropicCodecErrorKind::Protocol;
         }
@@ -270,9 +259,6 @@ impl AnthropicToolBindings {
         if let Some(identity) = self.identity(exposed_name) {
             return Ok(identity.clone());
         }
-        // Core returns unsupported-call feedback from a reserved unavailable
-        // namespace. A hidden tool with the same bare name gains no authority.
-        // Never infer a real namespace or custom capability from a wire alias.
         ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
             exposed_name.to_owned(),
@@ -340,7 +326,6 @@ pub(crate) fn prepare_anthropic_request(
     })
 }
 
-/// Shared request validation and normalized message blocks before wire projection.
 pub(crate) struct NormalizedMessagesRequest {
     pub body: Value,
     pub tool_bindings: AnthropicToolBindings,
@@ -902,8 +887,6 @@ fn translate_tool_output(
         return Err(AnthropicCodecError::invalid_request());
     }
     let output = tool_output(required(item, "output")?)?;
-    // Some Messages providers do not expose tool_use_id to the model as text.
-    // Keep the original output intact and make its transport identity copyable.
     let mut content =
         vec![json!({"type":"text", "text":format!("Tool call source_id: {call_id}")})];
     match output {
@@ -947,11 +930,6 @@ fn translate_reasoning_item(
     }
     let text = fragments.join("\n");
     validate_text(&text)?;
-    // Anthropic requires provider-signed thinking blocks when replaying prior
-    // thinking. Canonical Codex history does not carry that signature, so the
-    // validated visible reasoning is retained as assistant text instead of
-    // forging or dropping a thinking block. Adjacent tool calls are appended
-    // to this same assistant message in their original order.
     push_message_block(messages, "assistant", json!({"type":"text", "text":text}))
 }
 
@@ -1005,14 +983,9 @@ fn exposed_history_tool_name<'bindings>(
         )
         .map_err(|_| AnthropicCodecError::invalid_request())?;
         if let Some(exposed_name) = tool_bindings.exposed_name(&custom_identity) {
-            // A rejected custom wrapper retains its original function payload
-            // in history. Replay that exact binding and object alongside Core's
-            // error result. This does not advertise or authorize another tool.
             return Ok(exposed_name);
         }
     }
-    // Keep Core's unsupported-call feedback in the next request without
-    // adding this historical function to the advertised tool catalogue.
     if kind == ProviderToolKind::Function && namespace == Some(UNADVERTISED_TOOL_NAMESPACE) {
         return Ok(name);
     }
@@ -1079,7 +1052,6 @@ fn translate_message(
     Ok(())
 }
 
-// Anthropic Messages image source: https://platform.claude.com/docs/en/build-with-claude/vision
 fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError> {
     exact_keys(value, &["type", "image_url", "detail"])?;
     if value.get("detail").is_some_and(|detail| {
@@ -1305,7 +1277,6 @@ impl<'a> AnthropicStreamParser<'a> {
         value: &Map<String, Value>,
         event_name: &str,
     ) -> Result<(), AnthropicCodecError> {
-        // Transport heartbeats do not advance the message lifecycle.
         if event_name == "ping" {
             return Ok(());
         }
@@ -1648,8 +1619,6 @@ fn anthropic_usage(
     value: &Value,
     previous: Option<ProviderTokenUsage>,
 ) -> Result<ProviderTokenUsage, AnthropicCodecError> {
-    // Providers may add usage metadata. Only the counters we consume and
-    // known service/server-tool facts affect the canonical receipt.
     let value = response_object(value, "$.usage")?;
     validate_usage_extensions(value)?;
     let prior = previous.unwrap_or(ProviderTokenUsage {
@@ -1692,8 +1661,6 @@ fn anthropic_usage(
         .checked_add(cached_input_tokens)
         .and_then(|value| value.checked_add(cache_write_input_tokens))
         .ok_or_else(|| AnthropicCodecError::protocol().at_response_field("$.usage"))?;
-    // Input categories are a snapshot and may be reclassified. Validate the
-    // cumulative total, rather than requiring each category to increase.
     if previous.is_some()
         && (input_tokens < prior.input_tokens || output_tokens < prior.output_tokens)
     {
@@ -1775,8 +1742,6 @@ fn safe_anthropic_event_type(event_type: &str) -> &'static str {
         "message_delta" => "message_delta",
         "message_stop" => "message_stop",
         "error" => "error",
-        // Upstream values may contain arbitrary data. Never copy them into
-        // diagnostics, even when a provider reports an unknown event type.
         _ => "unknown",
     }
 }
@@ -1831,10 +1796,6 @@ fn response_index(value: &Map<String, Value>) -> Result<u32, AnthropicCodecError
         .ok_or_else(|| AnthropicCodecError::protocol().at_response_field("$.index"))
 }
 
-// A malformed content block can invalidate the converted stream while the
-// provider still reports a genuine final usage receipt. Keep that observed
-// receipt for attempt accounting without declaring the stream completed or
-// forwarding any partial tool call to Core.
 pub(crate) fn observed_anthropic_receipt(
     bytes: &[u8],
     max_event_bytes: usize,
@@ -1848,8 +1809,6 @@ pub(crate) fn observed_anthropic_receipt(
     for frame in frames {
         let mut event = frame.event.filter(|event| !event.is_empty());
         let mut data = frame.data;
-        // An invalid suffix does not erase a usage receipt already observed
-        // in the valid prefix. This is accounting only, never stream success.
         if dispatch_envelope(
             &mut envelopes,
             &mut event,
@@ -1901,8 +1860,6 @@ pub(crate) fn observed_anthropic_receipt(
                 }
                 let usage_value = response_required(value, "usage", "$.usage").ok()?;
                 let usage = anthropic_usage(usage_value, Some(*initial_usage)).ok()?;
-                // A final receipt must itself report output usage. Inherited
-                // initial counters are not a substitute for that fact.
                 response_required(
                     response_object(usage_value, "$.usage").ok()?,
                     "output_tokens",
@@ -2009,8 +1966,6 @@ fn optional_u64(
 }
 
 pub(crate) fn validate_text(value: &str) -> Result<(), AnthropicCodecError> {
-    // Tool output is arbitrary JSON text. serde_json escapes NUL on the wire;
-    // control characters do not imply that the request exceeds its byte limit.
     if value.len() > MAX_REQUEST_TEXT_BYTES {
         return Err(AnthropicCodecError::size_limit());
     }

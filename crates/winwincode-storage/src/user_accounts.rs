@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable storage for the one local Owner account.
-//!
-//! `SQLite` enforces the singleton rule with a fixed primary key. An older
-//! `users` table is migrated only when it is empty or contains exactly one
-//! active Owner; any other identity set is left untouched and rejected.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -49,24 +41,16 @@ const LEGACY_COLUMNS: [&str; 9] = [
     "revision",
 ];
 
-/// Stable failure categories exposed by the Owner account ledger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserAccountStoreErrorKind {
-    /// Rejected input, such as a malformed identifier or password hash.
     InvalidInput,
-    /// No durable Owner matches the requested identity.
     NotFound,
-    /// The local Owner has already been initialized.
     AlreadyInitialized,
-    /// The account changed after the supplied revision expectation.
     RevisionConflict,
-    /// Durable account data or schema is not valid for Community.
     CorruptState,
-    /// The storage operation itself failed.
     Storage,
 }
 
-/// Secret-free Owner account ledger failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserAccountStoreError {
     kind: UserAccountStoreErrorKind,
@@ -88,18 +72,11 @@ impl fmt::Display for UserAccountStoreError {
 
 impl std::error::Error for UserAccountStoreError {}
 
-/// Owner account ledger borrowing the product-state `SQLite` authority.
 pub struct UserAccountLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the local Owner account on this product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable storage, an incompatible schema, or legacy data
-    /// containing anything other than zero or one active Owner.
     pub fn user_account_ledger(&mut self) -> Result<UserAccountLedger<'_>, UserAccountStoreError> {
         UserAccountLedger::new(self)
     }
@@ -128,11 +105,6 @@ impl<'storage> UserAccountLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Stores the local Owner account.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, a second account, or storage failure.
     pub fn create(&mut self, account: &UserAccount) -> Result<UserAccount, UserAccountStoreError> {
         let account = validate(account)?;
         let transaction = self.transaction()?;
@@ -163,11 +135,6 @@ impl<'storage> UserAccountLedger<'storage> {
         Ok(account)
     }
 
-    /// Loads the Owner by exact user identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed identity, unavailable storage, or corrupt data.
     pub fn find(&self, user_id: &UserId) -> Result<Option<UserAccount>, UserAccountStoreError> {
         require_canonical_user_id(user_id)?;
         load_by_user_id(
@@ -178,11 +145,6 @@ impl<'storage> UserAccountLedger<'storage> {
         )
     }
 
-    /// Loads the Owner by normalized username.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty username, unavailable storage, or corrupt data.
     pub fn find_by_normalized_username(
         &self,
         normalized_username: &str,
@@ -211,11 +173,6 @@ impl<'storage> UserAccountLedger<'storage> {
             .transpose()
     }
 
-    /// Loads the local Owner, if initialization has completed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable storage or corrupt data.
     pub fn owner(&self) -> Result<Option<UserAccount>, UserAccountStoreError> {
         load_owner(
             self.storage
@@ -224,11 +181,6 @@ impl<'storage> UserAccountLedger<'storage> {
         )
     }
 
-    /// Replaces the Owner password hash under an exact revision expectation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, a missing or changed Owner, or storage failure.
     pub fn set_password_hash(
         &mut self,
         user_id: &UserId,

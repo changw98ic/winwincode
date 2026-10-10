@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! `RepositoryBindingService` and `RepositoryAccessGrantService` vertical
-//! tests (plan 7.6, 7.7, 13.4, 13.5; contract 7).
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -78,7 +73,6 @@ fn issuance(seed: u64, binding: &str, user: &str) -> RepositoryAccessGrantIssuan
     RepositoryAccessGrantIssuance::try_new(grant_id(seed), binding, user, user).expect("issuance")
 }
 
-/// Builds one validated scan outcome for the projection-machine tests.
 fn outcome(
     availability: RepositoryAvailability,
     dirty_state: RepositoryDirtyState,
@@ -90,7 +84,6 @@ fn expect_kind(error: &RepositoryBindingServiceError, kind: RepositoryBindingSer
     assert_eq!(error.kind(), kind);
 }
 
-/// Seeds one registered, `online` client node and returns its id.
 fn seed_client(storage: &mut SqliteStorage, seed: u64) -> String {
     let registration = ClientNodeRegistration::try_new(
         node_id(seed),
@@ -116,7 +109,6 @@ fn seed_client(storage: &mut SqliteStorage, seed: u64) -> String {
     node_id(seed)
 }
 
-/// Creates one active `use` client access grant for `holder`.
 fn seed_client_grant(storage: &mut SqliteStorage, seed: u64, client: &str, holder: &str) {
     let issuance = AccessGrantIssuance::try_new(
         client_grant_id(seed),
@@ -157,7 +149,6 @@ fn service_upsert_is_idempotent_by_binding_id_and_cas_guarded() {
     assert_eq!(first.record.revision, 1);
     assert_eq!(first.record.client_node_id, client);
 
-    // The identical re-report is an accepted replay: the revision stays 1.
     let replay = service
         .upsert(
             &projection(10, &client, "fingerprint-a"),
@@ -169,7 +160,6 @@ fn service_upsert_is_idempotent_by_binding_id_and_cas_guarded() {
     assert!(!replay.enrolled);
     assert_eq!(replay.record.revision, 1);
 
-    // A changed projection advances the revision once under CAS.
     let changed = RepositoryBindingProjection::try_new(
         binding_id(10),
         &client,
@@ -192,7 +182,6 @@ fn service_upsert_is_idempotent_by_binding_id_and_cas_guarded() {
     assert_eq!(refreshed.record.revision, 2);
     assert_eq!(refreshed.record.availability, RepositoryAvailability::Dirty);
 
-    // A stale expectedRevision fails closed.
     let error = service
         .upsert(
             &projection(10, &client, "fingerprint-a"),
@@ -203,8 +192,6 @@ fn service_upsert_is_idempotent_by_binding_id_and_cas_guarded() {
         .expect_err("stale CAS must fail");
     expect_kind(&error, RepositoryBindingServiceErrorKind::RevisionConflict);
 
-    // Removal is idempotent: the first call reports removal, the replay
-    // reports nothing left to remove.
     assert!(service.remove(binding_id(10).as_str()).expect("remove"));
     assert!(
         !service
@@ -235,8 +222,6 @@ fn service_updates_availability_across_all_seven_states() {
     let binding = binding_id(10);
     let mut revision = enrolled.record.revision;
 
-    // The projection machine is non-transactional: any state may move to any
-    // other state after re-verification, and there are no terminal states.
     let chain = [
         (
             outcome(
@@ -291,7 +276,6 @@ fn service_updates_availability_across_all_seven_states() {
         assert_eq!(updated.revision, revision);
     }
 
-    // An identical report is an accepted idempotent replay.
     let replay = service
         .update_availability(
             binding.as_str(),
@@ -305,7 +289,6 @@ fn service_updates_availability_across_all_seven_states() {
         .expect("availability replay");
     assert_eq!(replay.revision, revision);
 
-    // An unknown binding fails closed.
     let error = service
         .update_availability(
             binding_id(99).as_str(),
@@ -349,10 +332,8 @@ fn service_visibility_requires_both_client_and_repository_grants() {
             )
             .expect("binding two");
     }
-    // Grant phase through the grant service.
     {
         let mut grants = RepositoryAccessGrantService::new(&mut storage);
-        // A repository grant alone never makes a binding visible.
         grants
             .create_grant(
                 &issuance(40, binding_id(10).as_str(), outsider.as_str()),
@@ -369,7 +350,6 @@ fn service_visibility_requires_both_client_and_repository_grants() {
             .expect("member repo grant");
     }
 
-    // No client grant: invisible even with a repository grant.
     {
         let mut bindings = RepositoryBindingService::new(&mut storage);
         assert!(
@@ -379,7 +359,6 @@ fn service_visibility_requires_both_client_and_repository_grants() {
                 .is_empty()
         );
     }
-    // Client grant plus one repository grant: exactly that binding shows up.
     {
         let mut bindings = RepositoryBindingService::new(&mut storage);
         let visible = bindings
@@ -394,7 +373,6 @@ fn service_visibility_requires_both_client_and_repository_grants() {
         );
     }
 
-    // Second repository grant widens the visible set.
     {
         let mut grants = RepositoryAccessGrantService::new(&mut storage);
         grants
@@ -461,7 +439,6 @@ fn service_repo_grant_revoke_is_immediate_and_duplicates_conflict() {
             .expect("member repo grant on binding one");
     }
 
-    // Revocation ends visibility immediately; the replay is accepted.
     {
         let mut grants = RepositoryAccessGrantService::new(&mut storage);
         let revoked = grants
@@ -479,7 +456,6 @@ fn service_repo_grant_revoke_is_immediate_and_duplicates_conflict() {
                 .len(),
             1
         );
-        // A duplicate active grant for the same user and binding conflicts.
         let duplicate = grants
             .create_grant(
                 &issuance(43, binding_id(11).as_str(), member.as_str()),
@@ -575,8 +551,6 @@ fn service_multi_users_hold_disjoint_sets_and_removal_cascades() {
             vec![binding_id(11)]
         );
 
-        // Removing binding one cascades its grants away: Alice's visible set
-        // and her active grants both empty out, while Bob is untouched.
         assert!(bindings.remove(binding_id(10).as_str()).expect("remove"));
         assert!(
             bindings

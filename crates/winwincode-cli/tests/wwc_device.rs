@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Coverage for the `wwc device` local display surface (plan 11.1, 16.8):
-//! status is secret-free, `refresh-code` reveals the plaintext exactly once
-//! and publishes only its digest, and lock/unlock persist the durable policy.
-
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,8 +50,6 @@ impl Fixture {
         )
     }
 
-    /// Creates the device identity and adopts the enrollment, the state the
-    /// Device Client reaches after its first accepted exchange.
     fn enroll(&self) {
         let mut store = DeviceStore::open(&self.data_directory).expect("device store opens");
         ensure_device_identity(&mut store, &seed(), STAMP).expect("identity loads");
@@ -87,7 +79,6 @@ impl Fixture {
         store.close().expect("store closes");
     }
 
-    /// The pending durable outbox rows (the publication frame's home).
     fn pending_kinds(&self) -> Vec<String> {
         let store = DeviceStore::open(&self.data_directory).expect("device store opens");
         let kinds = store
@@ -122,7 +113,6 @@ fn status_reports_not_initialized_before_the_first_device_boot() {
     let result = device_status(&fixture.data_directory);
     assert_eq!(result.unwrap_err(), DeviceAdminError::NotInitialized);
 
-    // The CLI surface maps the same state onto the action-required exit.
     let exit = fixture.cli(&["status"]);
     assert_eq!(exit.code, 3);
     assert!(exit.stdout.contains("尚未初始化"), "{}", exit.stdout);
@@ -174,7 +164,6 @@ fn refresh_code_reveals_the_plaintext_once_and_publishes_only_the_digest() {
         Some(true)
     );
 
-    // The durable outbox carries the publication frame: digest only.
     assert!(
         fixture
             .pending_kinds()
@@ -200,7 +189,6 @@ fn refresh_code_reveals_the_plaintext_once_and_publishes_only_the_digest() {
     }
     store.close().expect("store closes");
 
-    // A later status never reveals the plaintext, in any rendering.
     let status = device_status(&fixture.data_directory).expect("status");
     let rendered = serde_json::to_string(&status).expect("status json");
     assert!(!rendered.contains(connect_code.as_str()));
@@ -208,7 +196,6 @@ fn refresh_code_reveals_the_plaintext_once_and_publishes_only_the_digest() {
     assert_eq!(exit.code, 0);
     assert!(!exit.stdout.contains(connect_code.as_str()));
 
-    // A refresh supersedes the previous generation.
     let second = refresh_device_connect_code(&fixture.data_directory).expect("second refresh");
     let DeviceAdminOutcome::CodeRefreshed { code, .. } = &second else {
         panic!("expected CodeRefreshed: {second:?}");
@@ -272,8 +259,6 @@ fn lock_and_unlock_persist_the_policy_for_status() {
 #[test]
 fn lock_requires_an_existing_device_identity() {
     let fixture = Fixture::new();
-    // A lock on a never-booted directory must fail loudly instead of
-    // silently locking a nonexistent device.
     assert_eq!(
         set_device_lock(&fixture.data_directory, true).unwrap_err(),
         DeviceAdminError::NotInitialized
@@ -297,7 +282,6 @@ fn unknown_device_actions_are_usage_errors() {
     assert_eq!(exit.code, 2);
     assert!(exit.stderr.contains("未知 device 命令"), "{}", exit.stderr);
 
-    // Missing --data-dir is a usage error, not a service failure.
     let mut full = vec!["device".to_owned(), "status".to_owned()];
     let exit = run_cli(&full, &SystemLocalLauncher::new(std::env::temp_dir()));
     full.clear();

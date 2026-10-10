@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Versioned normalization of bounded validation diagnostics.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
@@ -18,16 +14,13 @@ use crate::generated::{
     DiagnosticComparisonEntry, DiagnosticParserVersion, DiagnosticSeverity, NormalizedDiagnostic,
 };
 
-/// Maximum bytes accepted from one command stream.
 pub const MAX_DIAGNOSTIC_INPUT_BYTES: usize = 16_777_216;
-/// Maximum diagnostics retained in one exact baseline.
 pub const MAX_DIAGNOSTICS: usize = 4096;
 
 const DIAGNOSTIC_ID_DOMAIN: &[u8] = b"winwincode.diagnostic-id.v1";
 const DIAGNOSTIC_SET_DOMAIN: &[u8] = b"winwincode.diagnostic-set.v1";
 const DIAGNOSTIC_OCCURRENCE_DOMAIN: &[u8] = b"winwincode.diagnostic-occurrence.v1";
 
-/// Stable diagnostic parser failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticParseErrorCode {
     InputTooLarge,
@@ -39,7 +32,6 @@ pub enum DiagnosticParseErrorCode {
     InvalidBaseline,
 }
 
-/// Bounded parser failure that never includes raw tool output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticParseError {
     code: DiagnosticParseErrorCode,
@@ -47,7 +39,6 @@ pub struct DiagnosticParseError {
 }
 
 impl DiagnosticParseError {
-    /// Returns the stable failure category.
     pub const fn code(&self) -> DiagnosticParseErrorCode {
         self.code
     }
@@ -61,21 +52,18 @@ impl fmt::Display for DiagnosticParseError {
 
 impl std::error::Error for DiagnosticParseError {}
 
-/// One parsed command output before it is bound to a workspace revision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticParseBatch {
     pub parser_version: DiagnosticParserVersion,
     pub diagnostics: Vec<NormalizedDiagnostic>,
 }
 
-/// Whether the supplied diagnostic stream is complete.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticInputCompleteness {
     Complete,
     Truncated,
 }
 
-/// One unique diagnostic together with its exact occurrence count.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticOccurrence {
     pub diagnostic: NormalizedDiagnostic,
@@ -83,7 +71,6 @@ pub struct DiagnosticOccurrence {
     pub occurrence_digest: Sha256Digest,
 }
 
-/// Bounded unique diagnostics accumulated from one complete parser input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticOccurrenceBatch {
     pub parser_version: DiagnosticParserVersion,
@@ -91,8 +78,6 @@ pub struct DiagnosticOccurrenceBatch {
     pub total_occurrences: u64,
 }
 
-/// Accumulates repeated diagnostics without applying the unique-diagnostic
-/// limit to every raw occurrence.
 #[derive(Debug)]
 pub struct DiagnosticOccurrenceAccumulator {
     parser_version: DiagnosticParserVersion,
@@ -101,7 +86,6 @@ pub struct DiagnosticOccurrenceAccumulator {
 }
 
 impl DiagnosticOccurrenceAccumulator {
-    /// Creates an empty accumulator for one exact parser version.
     #[must_use]
     pub const fn new(parser_version: DiagnosticParserVersion) -> Self {
         Self {
@@ -111,12 +95,6 @@ impl DiagnosticOccurrenceAccumulator {
         }
     }
 
-    /// Records one validated occurrence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identities, parser-version drift, conflicting values,
-    /// occurrence overflow, or a 4,097th unique diagnostic.
     pub fn record(&mut self, diagnostic: NormalizedDiagnostic) -> Result<(), DiagnosticParseError> {
         if diagnostic.parser_version != self.parser_version
             || !valid_normalized_diagnostic(&diagnostic)
@@ -144,7 +122,6 @@ impl DiagnosticOccurrenceAccumulator {
         Ok(())
     }
 
-    /// Seals the accumulator into diagnostic-ID order.
     #[must_use]
     pub fn finish(self) -> DiagnosticOccurrenceBatch {
         let occurrences = self
@@ -167,10 +144,6 @@ impl DiagnosticOccurrenceAccumulator {
     }
 }
 
-/// Selects the canonical stream for every supported parser.
-///
-/// All v1 formats are required on stdout. Stderr is retained as a separate raw
-/// Artifact but is never guessed to be structured diagnostic input.
 pub const fn diagnostic_input<'output>(
     _version: &DiagnosticParserVersion,
     stdout: &'output [u8],
@@ -179,7 +152,6 @@ pub const fn diagnostic_input<'output>(
     stdout
 }
 
-/// Returns the canonical media type for the selected structured stdout Artifact.
 pub const fn diagnostic_media_type(version: &DiagnosticParserVersion) -> &'static str {
     match version {
         DiagnosticParserVersion::EslintJsonV1 | DiagnosticParserVersion::PytestJsonV1 => {
@@ -193,11 +165,6 @@ pub const fn diagnostic_media_type(version: &DiagnosticParserVersion) -> &'stati
     }
 }
 
-/// Normalizes one explicitly versioned structured command output.
-///
-/// # Errors
-///
-/// Rejects oversized, malformed, non-UTF-8, path-escaping, or overfull input.
 pub fn parse_diagnostics(
     version: DiagnosticParserVersion,
     input: &[u8],
@@ -219,12 +186,6 @@ pub fn parse_diagnostics(
     })
 }
 
-/// Normalizes a complete parser input while retaining duplicate frequencies.
-///
-/// # Errors
-///
-/// Rejects truncated, oversized, malformed, non-UTF-8, path-escaping, or
-/// overfull unique diagnostic input.
 pub fn parse_diagnostic_occurrences(
     version: DiagnosticParserVersion,
     input: &[u8],
@@ -265,11 +226,6 @@ pub fn parse_diagnostic_occurrences(
     Ok(accumulator.finish())
 }
 
-/// Binds parsed batches to one exact workspace tree and canonical set digest.
-///
-/// # Errors
-///
-/// Rejects an empty or oversized batch set or too many diagnostics.
 pub fn build_diagnostic_baseline(
     revision: WorkspaceRevision,
     batches: &[DiagnosticParseBatch],
@@ -320,11 +276,6 @@ pub fn build_diagnostic_baseline(
     Ok(baseline)
 }
 
-/// Compares two validated baselines into deterministic new/resolved/unchanged entries.
-///
-/// # Errors
-///
-/// Rejects a baseline whose stored digest or parser inventory is not canonical.
 pub fn compare_diagnostic_baselines(
     baseline: &DiagnosticBaseline,
     result: &DiagnosticBaseline,
@@ -386,11 +337,6 @@ pub fn compare_diagnostic_baselines(
     })
 }
 
-/// Revalidates a persisted comparison against its two exact baselines.
-///
-/// # Errors
-///
-/// Rejects any revision, digest, entry, status, ordering, or count drift.
 pub fn validate_diagnostic_baseline_comparison(
     comparison: &DiagnosticBaselineComparison,
     baseline: &DiagnosticBaseline,
@@ -402,7 +348,6 @@ pub fn validate_diagnostic_baseline_comparison(
     Ok(())
 }
 
-/// Returns the stable repair reason for the highest-priority new diagnostic.
 pub fn dominant_diagnostic_repair_reason(
     comparison: &DiagnosticBaselineComparison,
 ) -> &'static str {
@@ -854,11 +799,6 @@ fn diagnostic_set_digest(
     Sha256Digest(format!("sha256:{:x}", digest.finalize()))
 }
 
-/// Revalidates a persisted diagnostic baseline before replay or comparison.
-///
-/// # Errors
-///
-/// Rejects revision, ordering, bounds, identity, parser inventory, or digest drift.
 pub fn validate_diagnostic_baseline(
     baseline: &DiagnosticBaseline,
 ) -> Result<(), DiagnosticParseError> {
@@ -927,11 +867,6 @@ fn valid_normalized_diagnostic(diagnostic: &NormalizedDiagnostic) -> bool {
     }) == diagnostic.diagnostic_id
 }
 
-/// Revalidates one persisted normalized diagnostic before it enters another bounded contract.
-///
-/// # Errors
-///
-/// Rejects path, bounds, digest, or derived identity drift.
 pub fn validate_normalized_diagnostic(
     diagnostic: &NormalizedDiagnostic,
 ) -> Result<(), DiagnosticParseError> {

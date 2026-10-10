@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, Instant};

@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Business Attention transitions.
-
 use std::ops::Deref;
 
 use winwincode_domain::{AttentionItemId, WorkRunId};
@@ -33,8 +29,6 @@ pub enum AttentionDecision {
 pub struct ResolveAttentionInput {
     pub expected_revision: u64,
     pub attention_item_id: AttentionItemId,
-    /// Canonical machine run that produced the item. Human review identity is
-    /// recovered from the validated solution-review context.
     pub work_run_id: Option<WorkRunId>,
     pub expected_context: String,
     pub actor: String,
@@ -43,7 +37,6 @@ pub struct ResolveAttentionInput {
     pub now_millis: u64,
 }
 
-/// One application-owned Attention resolution ready for its dedicated journal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAttentionTransition {
     source_delivery: Delivery,
@@ -88,16 +81,6 @@ impl Deref for ResolvedAttentionTransition {
     }
 }
 
-/// Resolves one current business Attention item without starting execution.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, actor, item, `WorkRun`, `Spec`, frozen context,
-/// time, or decision state. No snapshot is returned on error.
-///
-/// # Panics
-/// This transition does not intentionally panic; all indexed data is checked
-/// before use.
 pub fn resolve_attention(
     delivery: &Delivery,
     input: ResolveAttentionInput,
@@ -368,11 +351,6 @@ fn apply_resolution(
         if actions.is_empty() {
             next_delivery_status(item_type, review_decision)?
         } else {
-            // A computed-verdict Attention (CompleteVerification /
-            // RetryVerification) is resolved only to collect missing direct
-            // evidence.  The previous verdict cannot authorize a second
-            // computation, so invalidate the current verdict while the
-            // append-only journal retains the prior revision history.
             if input.decision == AttentionDecision::Resolved
                 && item_type == AttentionItemType::VerificationBlocked
                 && actions.contains(&VerdictAttentionAction::RetryVerification)

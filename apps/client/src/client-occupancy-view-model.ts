@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { ControlPlaneDeviceSummary } from './community-control-plane-client.js'
 import {
   clientOccupancyErrorCategory,
@@ -7,52 +5,23 @@ import {
 } from './client-occupancy-facade.js'
 import type { ClientsViewModel } from './clients-view-model.js'
 
-/**
- * The occupancy seam the controls consume, derived from the frozen
- * claim/get/release/force-release browser facade (CLIENT-300.4). Every method
- * resolves when the Server accepted the request and rejects with the one
- * `ControlPlaneClientError` identity; the resulting occupancy fact always
- * arrives through the next device-list snapshot, never from this return value.
- */
 export interface ClientOccupancyPort {
-  /** Claim the free device for the signed-in identity; the same holder repeats idempotently. */
   claim(input: { readonly clientId: string }): Promise<void>
-  /**
-   * Release the held device. The Server frees an idle device immediately and
-   * moves a busy one to `draining`; `mode: 'drain'` stamps the confirmed
-   * busy-release path so the downlink frame tells the device to let the
-   * running tasks finish instead of abandoning them.
-   */
   release(input: {
     readonly clientId: string
     readonly mode?: 'release' | 'drain'
   }): Promise<void>
-  /** Stop the running tasks and release the device immediately. */
   cancelAndRelease(input: { readonly clientId: string }): Promise<void>
-  /**
-   * UI-100.3: the Owner's safe cleanup of a recovery-pending lease. Present
-   * only when the composed facade exposes the force-release seam; the Server
-   * stays the one authority that decides who an Owner is.
-   */
   forceRelease?(input: { readonly clientId: string }): Promise<void>
 }
 
-/** The one occupancy interaction a device card can be in. */
 export type ClientOccupancyAction = 'claim' | 'release' | 'cancel-and-release' | 'force-release'
 
-/** The actions that must pass an explicit confirmation before they submit. */
 export type ClientOccupancyDangerAction =
   | 'release'
   | 'cancel-and-release'
   | 'force-release'
 
-/**
- * The one presentation-facing occupancy failure taxonomy. Rejections are
- * translated through the facade's stable category union (winwincode-cms.1); the
- * one canonical wire-code table lives in the facade's classifier.
- * `unavailable` stays the honest catch-all for outages, expired sessions,
- * protocol drift, and unknown codes.
- */
 export type ClientOccupancyFailure =
   | 'occupied-by-other'
   | 'not-holder'
@@ -83,46 +52,27 @@ export type ClientOccupancyInteraction =
 
 const REST: ClientOccupancyInteraction = Object.freeze({ kind: 'rest' })
 
-/** Whether the device card may offer the connect (claim) entry right now. */
 export function deviceSupportsClaim(device: ControlPlaneDeviceSummary): boolean {
   return device.presence === 'online' && device.occupancy === 'available'
 }
 
-/** Whether the card belongs to the signed-in holder and can be released. */
 export function deviceSupportsRelease(device: ControlPlaneDeviceSummary): boolean {
   return device.occupancy === 'occupied-by-me'
 }
 
-/**
- * Whether the immediate stop entry applies: the holder still runs tasks, or
- * the device is already draining its last tasks for this holder.
- */
 export function deviceSupportsCancelAndRelease(device: ControlPlaneDeviceSummary): boolean {
   if (device.occupancy === 'draining') return true
   return device.occupancy === 'occupied-by-me' && device.capacityUsed > 0
 }
 
-/**
- * UI-100.3: whether the Owner force-release entry applies. Only an interrupted
- * (recovery-pending) lease offers the cleanup; the Server stays the one
- * authority that decides who an Owner is, and the card never names the holder.
- */
 export function deviceSupportsForceRelease(device: ControlPlaneDeviceSummary): boolean {
   return device.occupancy === 'recovery-pending'
 }
 
-/** Whether releasing this device drains first instead of freeing it directly. */
 export function releaseDrainsFirst(device: ControlPlaneDeviceSummary): boolean {
   return device.capacityUsed > 0
 }
 
-/**
- * The stable-category translation behind the default `classify` seam. Every
- * facade category carries its honest card reason; the holder/Owner denial
- * category (`permission-denied`) is resolved per action by
- * `clientOccupancyFailure` because the Server reuses one code for "only the
- * holder may release" and "only the Owner may force-release".
- */
 const CATEGORY_FAILURES: Readonly<
   Record<ClientOccupancyErrorCategory, ClientOccupancyFailure | 'holder-denial'>
 > = Object.freeze({
@@ -145,13 +95,6 @@ const CATEGORY_FAILURES: Readonly<
   'unavailable': 'unavailable',
 })
 
-/**
- * Translate one occupancy rejection into the presentation taxonomy. The
- * facade's stable classifier owns every wire code; view-models and pages
- * branch only on the returned union. The attempted action sharpens the
- * holder denial: a force-release rejection names the Owner-only rule instead
- * of implying the caller once held the device.
- */
 export function clientOccupancyFailure(
   error: unknown,
   action?: ClientOccupancyAction,
@@ -162,11 +105,6 @@ export function clientOccupancyFailure(
   return resolve(CATEGORY_FAILURES[clientOccupancyErrorCategory(error)])
 }
 
-/**
- * The §12.4 recovery window of one recovery-pending card, as the card prints
- * it: the wire instant stays verbatim, a missing or malformed deadline stays
- * honestly unreported, and a passed deadline names the Owner cleanup.
- */
 export function deviceRecoveryDeadlineText(
   device: ControlPlaneDeviceSummary,
   nowMillis: number,
@@ -183,51 +121,22 @@ export function deviceRecoveryDeadlineText(
 
 export type ClientOccupancyViewModelListener = () => void
 
-/**
- * Own the per-device occupancy interaction state machine for the Clients
- * area. The device-list snapshot stays the single occupancy authority: this
- * model only arms confirmations, submits one deduplicated request per device,
- * and asks the clients model to re-read the snapshot after a request lands.
- */
 export interface ClientOccupancyViewModel {
-  /** The current interaction of one device; unknown devices rest. */
   interaction(clientId: string): ClientOccupancyInteraction
-  /**
-   * Whether the Owner force-release entry can submit at all: the composed
-   * facade exposes the force-release seam. The entry stays hidden otherwise.
-   */
   supportsForceRelease(): boolean
-  /** Connect (claim) the free device; an in-flight request is never repeated. */
   requestClaim(clientId: string): void
-  /**
-   * Release the held device; a busy device first arms the explicit
-   * drain-release confirmation instead of submitting.
-   */
   requestRelease(clientId: string): void
-  /** Arm the explicit cancel-and-release confirmation for the held device. */
   requestCancelAndRelease(clientId: string): void
-  /**
-   * UI-100.3: arm the explicit Owner force-release confirmation for a
-   * recovery-pending device.
-   */
   requestForceRelease(clientId: string): void
-  /** Submit the armed dangerous action; only a confirmation state submits. */
   confirmPending(clientId: string): void
-  /** Drop the armed confirmation or the shown failure of one device. */
   dismiss(clientId: string): void
   subscribe(listener: ClientOccupancyViewModelListener): () => void
   close(): void
 }
 
-/**
- * Create the occupancy interaction model. `port` stays null until the
- * facade-backed adapter is composed; a null port submits nothing and every
- * action resolves to the honest unavailable failure.
- */
 export function createClientOccupancyViewModel(options: {
   readonly port: ClientOccupancyPort | null
   readonly clients: ClientsViewModel
-  /** Facade-owned classifier seam; the default reads stable wire codes only. */
   readonly classify?: (error: unknown, action: ClientOccupancyAction) => ClientOccupancyFailure
 }): ClientOccupancyViewModel {
   const classify = options.classify ?? clientOccupancyFailure
@@ -250,11 +159,6 @@ export function createClientOccupancyViewModel(options: {
     publish()
   }
 
-  /**
-   * A snapshot that moved past the armed intent or the shown failure drops
-   * it: the world changed, so the draft is stale and the card returns to the
-   * actions the new snapshot supports.
-   */
   function pruneStaleInteractions(): void {
     let changed = false
     for (const [clientId, interaction] of interactions) {
@@ -299,10 +203,6 @@ export function createClientOccupancyViewModel(options: {
       const input = { clientId }
       if (action === 'claim') await port.claim(input)
       else if (action === 'release') {
-        // The confirmed busy release is the drain path: the port stamps the
-        // downlink mode so the device lets the running tasks finish, while an
-        // idle device frees immediately. The current Server snapshot stays
-        // the one authority on whether tasks still run.
         const device = findDevice(clientId)
         const mode = device !== undefined && releaseDrainsFirst(device) ? 'drain' : undefined
         await port.release(mode === undefined ? input : { ...input, mode })
@@ -323,16 +223,9 @@ export function createClientOccupancyViewModel(options: {
     }
     if (closed) return
     setInteraction(clientId, REST)
-    // The Server snapshot stays the single occupancy authority, so every
-    // landed request re-reads the device list instead of migrating the card.
     await options.clients.refresh()
   }
 
-  /**
-   * One guard for every entry: an in-flight request is never repeated, and a
-   * request the current snapshot no longer supports is ignored. Returns the
-   * validating device fact so the caller can decide the confirmation path.
-   */
   function requestDevice(
     clientId: string,
     action: ClientOccupancyAction,
@@ -359,8 +252,6 @@ export function createClientOccupancyViewModel(options: {
     requestRelease(clientId) {
       const device = requestDevice(clientId, 'release')
       if (device === null) return
-      // An idle device frees directly; a busy device must pass the explicit
-      // drain-release confirmation first.
       if (releaseDrainsFirst(device)) {
         setInteraction(clientId, { kind: 'confirming', action: 'release' })
         return
@@ -382,8 +273,6 @@ export function createClientOccupancyViewModel(options: {
         void submit(clientId, current.action)
         return
       }
-      // A failed dangerous action keeps its armed draft: the same explicit
-      // accept retries it. A failed claim retries through connect itself.
       if (current.kind === 'failed' && current.action !== 'claim') {
         void submit(clientId, current.action)
       }
@@ -422,17 +311,6 @@ function facadeMethod(value: unknown): OccupancyFacadeMethod | null {
   return value as OccupancyFacadeMethod
 }
 
-/**
- * Adapt the frozen occupancy facade to the port the controls consume, keeping
- * the destructive paths on their own facade seams: the holder's drain-aware
- * release goes through `releaseOccupancy` with the requested mode (defaulting
- * to the immediate release), the holder's cancel-and-release goes through
- * `releaseOccupancy` with the explicit `cancel_and_release` mode, and the
- * Owner's recovery cleanup goes through the dedicated `forceReleaseOccupancy`
- * seam (CLIENT-300.4). `forceRelease` stays optional: a facade without the
- * seam simply hides the Owner entry. Returns null while the base methods have
- * not landed, so hosts compose the port only when the seam exists.
- */
 export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPort | null {
   const methods = facade as Record<string, unknown>
   const claim =
@@ -453,7 +331,6 @@ export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPo
   }
 }
 
-/** Bind the wire release seam to the caller's mode; an idle release stays immediate. */
 function bindOccupancyRelease(value: unknown): OccupancyFacadeMethod | null {
   const method = facadeMethod(value)
   if (method === null) return null

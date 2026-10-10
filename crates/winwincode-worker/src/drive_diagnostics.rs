@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Finite drive boundaries for propagated bridge errors and handled Core poll failures.
-
 use std::{collections::HashSet, io::Write as _, path::Path};
 
 use crate::WorkerErrorCode;
@@ -85,8 +81,6 @@ impl DriveDiagnostics {
             .append(true)
             .open(path)
         {
-            // Only enum constants are emitted. Adapter errors, frames, identities
-            // and Provider content never enter this diagnostic record.
             let _ = writeln!(
                 log,
                 "component=worker stage=drive_{} code={} ",

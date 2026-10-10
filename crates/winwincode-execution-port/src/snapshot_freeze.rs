@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exact request/receipt binding shared by Worker and Control Plane.
-//! The digest detects changed facts; it does not replace authenticated ingress.
-
 use sha2::{Digest, Sha256};
 use winwincode_domain::{SchemaVersion, Sha256Digest, is_canonical_prefixed_id};
 
@@ -11,8 +6,6 @@ use crate::generated::{
     SnapshotFreezeReceiptMessage, SnapshotFreezeRequestMessage,
 };
 
-/// Verification roles require a canonical runtime-injected identity; writer
-/// and conversational jobs must not claim a verification Snapshot.
 #[must_use]
 pub fn snapshot_role_binding_valid(
     profile: &str,
@@ -25,10 +18,6 @@ pub fn snapshot_role_binding_valid(
     }
 }
 
-/// Validates the planned execution before Worker allocates any workspace.
-///
-/// # Errors
-/// Rejects writer jobs, preassigned Snapshot identities and foreign inputs.
 pub fn validate_freeze_request(request: &SnapshotFreezeRequestMessage) -> Result<(), &'static str> {
     let dispatch = &request.dispatch;
     let job = &dispatch.job;
@@ -89,10 +78,6 @@ pub fn validate_freeze_request(request: &SnapshotFreezeRequestMessage) -> Result
     Ok(())
 }
 
-/// Seals all receipt fields except the seal itself in their generated wire shape.
-///
-/// # Errors
-/// Returns a serialization error when the receipt cannot be encoded.
 pub fn seal_freeze_receipt(
     receipt: &SnapshotFreezeReceipt,
 ) -> Result<Sha256Digest, serde_json::Error> {
@@ -105,11 +90,6 @@ pub fn seal_freeze_receipt(
     Ok(Sha256Digest(format!("sha256:{:x}", hash.finalize())))
 }
 
-/// Checks the receipt against the exact durable request, before product identity
-/// allocation. Neither Worker timestamps nor a matching digest grant authority.
-///
-/// # Errors
-/// Rejects another request, Candidate, repository, attempt, lease or code input.
 pub fn validate_freeze_receipt(
     request: &SnapshotFreezeRequestMessage,
     message: &SnapshotFreezeReceiptMessage,

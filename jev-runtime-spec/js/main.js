@@ -25,7 +25,6 @@
     sections.forEach((s) => io.observe(s));
   }
 
-  // EPIC filter
   const filterBar = document.getElementById("epic-filter");
   const cards = Array.from(document.querySelectorAll("[data-epic-card]"));
   const empty = document.getElementById("epic-empty");

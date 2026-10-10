@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! GIT-100.2 coverage: the device-local candidate registry — idempotent
-//! retention recording, the lease-stamped durable `client.candidate.retained`
-//! uplink (and its fail-closed behaviour without an occupancy mirror),
-//! restart recovery of the retained set, and the reconciliation of retained
-//! candidates against the actual Git refs of their bound checkouts. Harness
-//! mirrors `tests/occupancy.rs`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -83,8 +74,6 @@ fn issued_credential_digest() -> String {
     format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
 }
 
-/// Opens a store whose identity already adopted the server-issued
-/// enrollment, so daemon sessions start in the enrolled phase.
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
     ensure_device_identity(&mut store, &seed(), STAMP).expect("device identity should load");
@@ -112,8 +101,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// Opens a store that already carries an adopted enrollment (the restart
-/// scenario: the identity is durable, never re-adopted).
 fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     let store = DeviceStore::open(root).expect("restarted device store should open");
     let record = load_device_identity(&store)
@@ -122,8 +109,6 @@ fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// A transport that must never be called: the registry's uplink is a durable
-/// outbox append, not an exchange.
 struct NeverTransport;
 
 impl ExchangeTransport for NeverTransport {
@@ -172,7 +157,6 @@ fn started_daemon(name: &str, root: &Path) -> DeviceDaemon {
     .expect("daemon should start enrolled")
 }
 
-/// Starts a daemon over an already-enrolled store (restart scenario).
 fn resumed_daemon(name: &str, root: &Path) -> DeviceDaemon {
     let (store, identity) = open_resumed(root);
     DeviceDaemon::start(
@@ -184,8 +168,6 @@ fn resumed_daemon(name: &str, root: &Path) -> DeviceDaemon {
     .expect("restarted daemon should start enrolled")
 }
 
-/// Advances the durable occupancy mirror before the daemon starts, so the
-/// session restores the lease the uplink stamps with.
 fn mirror_the_lease(store: &mut DeviceStore) {
     store
         .advance_occupancy_mirror(&OccupancyMirrorUpdate {
@@ -263,11 +245,6 @@ fn git(repository: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
-/// Creates a repository with one base commit and returns (path, base commit).
-///
-/// The name is folded into the seed content so two repositories created
-/// within the same second never share a commit id (Git timestamps have
-/// one-second granularity).
 fn init_repository(name: &str) -> (PathBuf, String) {
     let root = temporary_directory(name);
     fs::create_dir_all(&root).expect("repository directory should be created");
@@ -293,7 +270,6 @@ fn init_repository(name: &str) -> (PathBuf, String) {
     (root, commit)
 }
 
-/// Creates a follow-up commit and returns its id.
 fn add_commit(repository: &Path, message: &str) -> String {
     fs::write(repository.join("file.txt"), format!("{message}\n")).expect("file should be written");
     git(
@@ -339,7 +315,6 @@ fn a_retention_round_trips_and_survives_a_restart_for_recovery() {
     );
     store.close().expect("store should close");
 
-    // Restart: the recovery surface lists the retained candidate unchanged.
     let store = DeviceStore::open(&root).expect("restarted store should open");
     let recovered = retained_candidates(&store).expect("the retained set should list");
     assert_eq!(recovered, vec![record], "recovery returns the same row");
@@ -359,7 +334,6 @@ fn a_repeated_retention_of_the_same_candidate_is_idempotent() {
     let mut store = DeviceStore::open(&root).expect("store should open");
     let first = record_candidate_retention(&mut store, &retention_for_commit(COMMIT))
         .expect("the first retention records");
-    // A replay may carry a freshly derived stamp; the first stamps stay.
     let replay = record_candidate_retention(
         &mut store,
         &retention(COMMIT, BINDING, SESSION, "2026-09-04T12:00:00.000Z"),
@@ -549,7 +523,6 @@ fn the_retain_uplink_stamps_the_frame_with_the_mirrored_lease() {
         "the retained frame rides the strictly advancing stream"
     );
 
-    // The local-data boundary: no local path rides the frame.
     let frame_text = serde_json::to_string(
         &pending_frames(&mut store)
             .into_iter()
@@ -582,7 +555,6 @@ fn the_uplink_fails_closed_without_a_mirror_and_completes_after_recovery() {
         "the missing lease is the precise failure"
     );
 
-    // The durable retention survives the refused report...
     let mut store = daemon.into_store();
     assert_eq!(
         retained_candidates(&store)
@@ -596,8 +568,6 @@ fn the_uplink_fails_closed_without_a_mirror_and_completes_after_recovery() {
         "nothing was reported without a lease"
     );
 
-    // ...and once occupancy is mirrored, re-invoking the vertical completes
-    // the report for the duplicate row.
     mirror_the_lease(&mut store);
     store.close().expect("store should close");
     let mut daemon = resumed_daemon("fail-closed-resume", &root);
@@ -670,8 +640,6 @@ fn the_retained_frame_reports_only_retained_candidates() {
     let CandidateRetentionOutcome::Recorded(record) = outcome else {
         panic!("the fresh candidate records");
     };
-    // A progressed lifecycle row (the apply lane's business) must never be
-    // reported by the retained frame.
     let mut progressed = record.clone();
     progressed.local_state = LocalCandidateState::Applied;
     let error = enqueue_candidate_retained(&mut daemon, &progressed)

@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exact Evidence source resolution for the current frozen candidate.
-//!
-//! The accepted runtime-ledger source remains internal until its Phase 4
-//! authoritative adapter exists.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::evidence::AcceptedRuntimeSourceFact;
-//! ```
-
 use std::{error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
@@ -65,11 +54,6 @@ pub struct EvidenceRef {
     pub created_at_millis: u64,
 }
 
-/// Outcome classified from one already persisted source fact.
-///
-/// This value is sealed inside [`ResolvedDeliveryEvidence`]. API callers do not
-/// submit it to verdict computation. Read-only projections may expose this
-/// closed classification after rebuilding the same accepted source authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedEvidenceOutcome {
     Observed,
@@ -81,10 +65,6 @@ pub enum VerifiedEvidenceOutcome {
     Cancelled,
 }
 
-/// Sealed checkout attestation rebuilt by the Worker/Artifact adapter.
-///
-/// Fields are private and this type has no public constructor or deserializer.
-/// Until its owning adapter lands, only this module's tests can construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedCheckoutAttestationFact {
     snapshot_id: winwincode_domain::SnapshotId,
@@ -104,10 +84,6 @@ pub(crate) struct ValidatedCheckoutAttestationFact {
     checkout_tree_id: String,
 }
 
-/// One source rebuilt from the accepted append-only runtime ledger.
-///
-/// This sealed fact stores identity, ordering, and direct outcome only. It never
-/// copies a log body, command output, model response, or complete `RuntimeEvent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AcceptedRuntimeSourceFact {
     snapshot_id: winwincode_domain::SnapshotId,
@@ -189,9 +165,6 @@ pub(crate) fn accepted_runtime_source(
     }
 }
 
-/// Fenced execution identity shared by the terminal outcome, source ledger,
-/// and checkout attestation. Comparing this value in one place prevents one
-/// boundary from accidentally omitting an identity component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct FencedExecutionIdentity {
     snapshot_id: winwincode_domain::SnapshotId,
@@ -208,8 +181,6 @@ struct FencedExecutionIdentity {
     codex_thread_id: CodexThreadId,
 }
 
-/// Selects one bounded source. Runtime identity and Git references are derived
-/// by the resolver rather than supplied as canonical Evidence fields.
 #[cfg_attr(
     not(test),
     expect(
@@ -250,7 +221,6 @@ struct ResolvedEvidenceSource {
     identity: VerifiedEvidenceSourceIdentity,
 }
 
-/// Exact identity that was checked before an `EvidenceRef` became canonical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum VerifiedEvidenceSourceIdentity {
     Runtime(Box<VerifiedRuntimeEvidenceSourceIdentity>),
@@ -270,7 +240,6 @@ pub(crate) enum VerifiedEvidenceSourceIdentity {
     },
 }
 
-/// Read-only runtime provenance retained beside canonical bounded Evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     execution: FencedExecutionIdentity,
@@ -282,11 +251,6 @@ pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     command_digest: Sha256Digest,
 }
 
-/// Canonical Evidence plus source facts that were checked by this module.
-///
-/// Fields stay private and this type has no deserializer or public constructor.
-/// Verdict code must consume this value instead of caller-provided Evidence or
-/// caller-provided outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDeliveryEvidence {
     evidence: EvidenceRef,
@@ -315,14 +279,11 @@ impl ResolvedDeliveryEvidence {
         &self.evidence
     }
 
-    /// Returns the closed outcome rebuilt from the accepted source authority.
     #[must_use]
     pub const fn outcome(&self) -> VerifiedEvidenceOutcome {
         self.outcome
     }
 
-    /// Confirms that this Evidence is the exact accepted runtime position a
-    /// structured verification finding cited, under the same terminal lease.
     pub(crate) fn matches_finding_source(
         &self,
         terminal: &AcceptedVerificationJobOutcomeFact,
@@ -340,8 +301,6 @@ impl ResolvedDeliveryEvidence {
         }
     }
 
-    /// Confirms that direct runtime evidence came from the exact approved
-    /// verification command rather than another successful process.
     pub(crate) fn matches_verification_method(&self, method: &str) -> bool {
         let Some(expected) = verification_method_digest(method) else {
             return false;
@@ -412,13 +371,6 @@ fn resolution_error(
     }
 }
 
-/// Resolves one current `EvidenceRef` without starting runtime work.
-///
-/// # Errors
-///
-/// Rejects a stale candidate, foreign `WorkRun` or `SessionBinding`, missing or
-/// ambiguous source facts, identity/type/candidate drift, and sources that do
-/// not strictly precede the resulting Evidence.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the sealed resolver command is single-use application input"
@@ -534,11 +486,6 @@ fn deterministic_evidence_id(
     )))
 }
 
-/// Encodes one sealed Evidence identity digest as the canonical public
-/// Evidence id: `evd_` plus 26 Crockford Base32 characters.
-///
-/// The generated public contract only accepts this exact shape, so resolved
-/// Evidence never transports its internal digest spelling.
 fn canonical_evidence_id(digest: [u8; 32]) -> String {
     const CROCKFORD_BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut value = u128::from_be_bytes([
@@ -744,9 +691,6 @@ fn evidence_work_run_and_binding<'delivery>(
                 "candidate producer WorkRun is missing",
             )
         })?;
-    // Independent reader WorkItems consume a candidate through the sealed
-    // runtime terminal and checkout facts validated below, not by sharing the
-    // producer's mutable WorkItem identity. Direct evidence remains producer-scoped.
     let independent_reader = matches!(&input.source, EvidenceSource::Runtime { .. })
         && matches!(
             binding.execution_profile.as_deref(),
@@ -1075,9 +1019,6 @@ pub(crate) mod test_support {
         test_support::{VerificationFixtureState, independent_verification},
     };
 
-    /// Resolves one current role-scoped runtime Evidence through the production
-    /// resolver. Cross-module tests never construct [`ResolvedDeliveryEvidence`]
-    /// or any accepted source fact directly.
     pub(crate) fn resolved_role_evidence(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1097,9 +1038,6 @@ pub(crate) mod test_support {
         )
     }
 
-    /// Builds a sealed runtime source at a selected accepted-ledger position.
-    /// This narrow fixture lets verdict tests prove that a source reference
-    /// alone cannot substitute for the finding's exact source position.
     pub(crate) fn resolved_role_evidence_at_sequence(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1133,8 +1071,6 @@ pub(crate) mod test_support {
         )
     }
 
-    /// Builds a role Evidence fixture for a command other than the approved
-    /// criterion method so verdict tests can exercise fail-closed binding.
     pub(crate) fn resolved_role_evidence_for_method(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1658,8 +1594,6 @@ mod tests {
         assert_eq!(evidence.evidence_type, EvidenceRefType::Test);
         assert_eq!(evidence.source_ref, "runtime_event:event-verifier-test-7");
         assert_eq!(resolved.outcome(), VerifiedEvidenceOutcome::Succeeded);
-        // The generated public contract only accepts `evd_` followed by 26
-        // Crockford Base32 characters as a public Evidence identity.
         let id = &evidence.id.0;
         assert!(
             id.len() == 30

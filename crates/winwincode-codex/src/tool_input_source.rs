@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Content identity for the source files read by the benchmark public smoke.
-//! Selection belongs to the trusted caller; timestamps only detect an unstable
-//! read and never contribute to the returned identity.
-
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
@@ -39,8 +33,6 @@ pub(crate) fn source_digest(
         .into_iter()
         .map(|(path, digest)| (path, format!("{digest:x}")))
         .collect::<Vec<_>>();
-    // Match Python json.dumps(..., separators=(',', ':')) with ensure_ascii.
-    // UTF-16 escapes also preserve supplementary Unicode path characters.
     let json = serde_json::to_string(&files).map_err(|_| AdapterStoreError::Corrupt)?;
     let mut encoded = String::new();
     for character in json.chars() {
@@ -82,8 +74,6 @@ impl SourceSnapshot {
             let path = entry.path();
             let metadata =
                 fs::symlink_metadata(&path).map_err(|_| AdapterStoreError::Unavailable)?;
-            // The public smoke ignores these directories without traversing
-            // them. Their contents cannot change a source request's identity.
             if name
                 .to_str()
                 .is_some_and(|name| EXCLUDED_DIRECTORIES.contains(&name))
@@ -115,8 +105,6 @@ impl SourceSnapshot {
             }
         }
         let after = checked_metadata(directory)?;
-        // Logs or caches may appear during a read without changing any
-        // selected source. Only replacement of the directory matters here.
         if !after.is_dir() || before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(AdapterStoreError::Conflict);
         }
@@ -150,10 +138,8 @@ pub(crate) fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, A
     let mut options = OpenOptions::new();
     options.read(true);
     options.custom_flags(if cfg!(target_os = "macos") {
-        // Darwin O_NOFOLLOW | O_NONBLOCK.
         0x100 | 0x4
     } else {
-        // Linux O_NOFOLLOW | O_NONBLOCK. Release targets are Darwin and Linux.
         0x20_000 | 0x800
     });
     let file = options
@@ -183,8 +169,6 @@ pub(crate) fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, A
     {
         return Err(AdapterStoreError::Conflict);
     }
-    // Metadata cannot see a same-length rewrite inside one timestamp tick.
-    // For recently modified ("racy") files, confirm the bytes are stable.
     if recently_modified(&after) {
         let mut reread = Vec::new();
         (&file)
@@ -201,7 +185,6 @@ pub(crate) fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, A
     Ok(content)
 }
 
-/// Window covering coarse filesystem timestamp granularity (e.g. 1-2s).
 const RACY_MTIME_WINDOW: Duration = Duration::from_secs(2);
 
 fn recently_modified(metadata: &Metadata) -> bool {
@@ -394,9 +377,6 @@ mod tests {
         fs::write(&source, "original").unwrap();
         let before = checked_metadata(&source).unwrap();
         fs::write(&source, "modified").unwrap();
-        // A same-length rewrite inside one timestamp tick is indistinguishable
-        // by metadata alone (read_source_file re-reads racy files instead), so
-        // advance mtime explicitly to make this assertion deterministic.
         File::options()
             .write(true)
             .open(&source)

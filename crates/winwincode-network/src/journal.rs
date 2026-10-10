@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Secret-free attempt facts and queue budgets survive process restarts.
 use crate::{Acceptance, ErrorKind, NetworkFailure, Phase, Replay, RetryDecision};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -25,7 +22,6 @@ pub enum QueuePermit {
     Stopped(NetworkFailure),
 }
 
-/// Only envelope cursor identities are retained; frame bodies and credentials stay in their source stores.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct EnvelopeCursor {
     pub last_sequence: u64,
@@ -65,9 +61,6 @@ fn key(value: &[u8]) -> String {
 }
 
 impl RequestJournal {
-    /// Opens a private, additive journal. It stores hashes and bounded facts only.
-    /// # Errors
-    /// Rejects unsafe files, unavailable storage and invalid persisted state.
     pub fn open(path: &Path) -> Result<Self, NetworkFailure> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -115,9 +108,6 @@ impl RequestJournal {
         ))
     }
 
-    /// Binds a logical request to stable non-secret envelope cursors across restart.
-    /// # Errors
-    /// Rejects malformed identifiers, changed frame identity and unavailable storage.
     pub fn bind_envelope(
         &self,
         operation: &[u8],
@@ -178,12 +168,6 @@ impl RequestJournal {
         Ok(now.max(monotonic))
     }
 
-    /// Atomically records an unknown attempt before its external effect.
-    /// A crash is counted as unknown acceptance on the next prepare.
-    /// The calling queue must serialize each logical operation. A completed
-    /// inference requires its retained completion; it cannot be charged again.
-    /// # Errors
-    /// Storage failures prohibit the external effect.
     pub fn prepare(
         &self,
         operation: &[u8],
@@ -258,10 +242,6 @@ impl RequestJournal {
         Ok(permit)
     }
 
-    /// Retains the outcome before the queue is allowed to reschedule.
-    /// Call success only after the response has passed protocol validation.
-    /// # Errors
-    /// Rejects a foreign attempt and failed persistence.
     pub fn finish(
         &self,
         operation: &[u8],
@@ -272,13 +252,6 @@ impl RequestJournal {
         self.finish_with_delay_cap(operation, sequence, failure, now, None)
     }
 
-    /// Same as [`Self::finish`], but a caller-owned retry policy may cap the
-    /// rescheduled delay (for example a Device daemon's configured
-    /// `max_backoff`). The cap never extends the shared policy delay, never
-    /// turns a stopped (terminal) operation into a retry, and never shortens a
-    /// server-provided Retry-After floor.
-    /// # Errors
-    /// Rejects a foreign attempt and failed persistence.
     pub fn finish_with_delay_cap(
         &self,
         operation: &[u8],
@@ -309,8 +282,6 @@ impl RequestJournal {
             params![operation, sql_int(sequence)?, if failure.is_some() { "failed" } else { "completed" }, failure_json, sql_int(now)?]).map_err(|_| storage())?;
         if let Some(failure) = failure {
             apply_failure(&mut state, failure, now);
-            // Only the normal backoff is capped: a terminal decision stays
-            // stopped, and a server-provided Retry-After floor is honored.
             if let Some(max_delay) = max_delay
                 && !state.stopped
             {
@@ -344,9 +315,6 @@ impl RequestJournal {
         transaction.commit().map_err(|_| storage())
     }
 
-    /// Indicates that cost/usage is a lower bound after an earlier unknown attempt.
-    /// # Errors
-    /// Returns a storage failure rather than guessing a zero cost.
     pub fn has_unknown_usage(&self, operation: &[u8]) -> Result<bool, NetworkFailure> {
         self.0.lock().map_err(|_| storage())?.query_row(
             "SELECT EXISTS(SELECT 1 FROM network_request_attempts WHERE operation_hash=?1 AND (outcome IN ('in_flight','unknown') OR (outcome='failed' AND json_extract(failure_json,'$.acceptance') != 'not_sent')))",
@@ -460,7 +428,6 @@ mod tests {
         else {
             panic!("first attempt");
         };
-        // Two failures so the uncapped policy delay grows past the cap.
         journal
             .finish_with_delay_cap(b"capped", sequence, Some(failure), now, cap)
             .unwrap();
@@ -500,7 +467,6 @@ mod tests {
         let capped = delay_after_one_failure("small", failure, Some(cap)).unwrap();
         assert!(capped <= cap, "{capped:?}");
         assert!(capped > Duration::ZERO);
-        // A large cap leaves the delay unchanged (modulo monotonic-clock drift).
         let large =
             delay_after_one_failure("large", failure, Some(Duration::from_hours(1))).unwrap();
         assert!(
@@ -683,7 +649,6 @@ mod tests {
                 .unwrap(),
             QueuePermit::Stopped(_)
         ));
-        // A different request gets its own budget. Its interrupted unsafe write requires reconciliation.
         assert!(matches!(
             journal
                 .prepare(b"mutation", Replay::ReconcileFirst, 4, now)

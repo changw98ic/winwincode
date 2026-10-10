@@ -1,36 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
-//
-// UI-608 deterministic visual fingerprints for component states and key pages.
-//
-// This is the "equivalent visual regression" the decision asked for: instead of
-// comparing pixels, which drift with the fonts a runner happens to have, it
-// serialises what a rendered surface actually looks like — the tree in paint
-// order, the state each element carries, the design-token decision each element
-// makes, and where each element sits relative to the captured root.  A committed
-// baseline pins that; a diff against a live capture is a reviewable list of
-// named differences.
-//
-// Layering with the functional lanes:
-//   * `tests/ui608-visual-regression.test.mjs` — this module, no browser.
-//   * `tests/ui608-component-state-visual-browser.test.mjs` — component states.
-//   * `tests/ui608-page-visual-browser.test.mjs` — key pages, desktop and narrow.
-// A visual failure therefore reports as a UI-608 difference list, never as a
-// failed assertion in the middle of a functional scenario.
-
 export const VISUAL_REGRESSION_SCHEMA_VERSION = 1
 
-/** The repository design-token namespace the fingerprints resolve colours to. */
 export const VISUAL_REGRESSION_TOKEN_PREFIX = '--wwc-'
 
-/**
- * The one font stack every visual fixture installs before capturing.  Glyph
- * metrics — and therefore every recorded box — then stop depending on whether
- * a runner ships the product font.
- */
 export const VISUAL_REGRESSION_FONT_STACK
   = "'wwc-visual-regression', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
 
-/** Cross-platform text shaping moves a box by less than this. */
 export const DEFAULT_GEOMETRY_TOLERANCE_PIXELS = 1
 
 export type VisualCaptureKind = 'component' | 'page' | 'shell'
@@ -121,17 +95,10 @@ export interface VisualCaptureOptions {
   readonly kind: VisualCaptureKind
   readonly viewport: VisualViewport
   readonly fontStack: string
-  /** Defaults to the design tokens the captured document defines on `:root`. */
   readonly tokenValues?: Readonly<Record<string, string>>
-  /** Defaults to the real DOM; browser fixtures and unit tests may inject one. */
   readonly inspector?: VisualCaptureInspector
 }
 
-/**
- * The computed properties that carry a component's visual identity.  Inherited
- * values are not repeated on a child that only inherits, so a recorded property
- * is exactly the decision made at that element.
- */
 const STYLE_PROPERTIES: readonly string[] = Object.freeze([
   'background-color',
   'border-bottom-color',
@@ -162,7 +129,6 @@ const STYLE_PROPERTIES: readonly string[] = Object.freeze([
   'z-index',
 ])
 
-/** Properties whose values may name a design token. */
 const TOKENISED_PROPERTIES: ReadonlySet<string> = new Set([
   'background-color',
   'border-bottom-color',
@@ -175,7 +141,6 @@ const TOKENISED_PROPERTIES: ReadonlySet<string> = new Set([
   'z-index',
 ])
 
-/** Properties whose value is one colour, and so may be normalised to a token. */
 const COLOR_PROPERTIES: ReadonlySet<string> = new Set([
   'background-color',
   'border-bottom-color',
@@ -186,7 +151,6 @@ const COLOR_PROPERTIES: ReadonlySet<string> = new Set([
   'outline-color',
 ])
 
-/** Visual state.  Absent attributes are simply not recorded. */
 const STATE_ATTRIBUTES: readonly string[] = Object.freeze([
   'aria-busy',
   'aria-disabled',
@@ -199,7 +163,6 @@ const STATE_ATTRIBUTES: readonly string[] = Object.freeze([
   'open',
 ])
 
-/** Presentation markers the components set alongside their state. */
 const STATE_DATA_ATTRIBUTES: readonly string[] = Object.freeze([
   'data-align',
   'data-orientation',
@@ -212,10 +175,6 @@ const STATE_DATA_ATTRIBUTES: readonly string[] = Object.freeze([
 const COMPONENT_ATTRIBUTE = 'data-wwc-component'
 const ROOT_PATH = '.'
 
-/**
- * The one real-DOM inspector.  Browser fixtures use it; unit tests inject a
- * double so the traversal contract is pinned without Chrome.
- */
 export function createDomVisualInspector(document: Document): VisualCaptureInspector {
   const readAttributes = (element: Element): Readonly<Record<string, string>> => {
     const attributes: Record<string, string> = {}
@@ -263,20 +222,10 @@ function alphaChannel(value: string): number {
   return Number.parseFloat(raw)
 }
 
-/** `color(srgb r g b)` carries 0..1 channels instead of 0..255. */
 function srgbChannel(value: string): number {
   return Math.round(Number.parseFloat(value.trim()) * 255)
 }
 
-/**
- * Rewrites a colour into one canonical `rgb()` / `rgba()` form.
- *
- * Chrome hands back the raw text of a custom property (hex) but the resolved
- * form of a computed colour (`rgb()`), and different runners may hand back
- * either, so a palette comparison has to be done over one spelling.  `NaN`
- * falls through to the input, which keeps an unexpected syntax visible in the
- * baseline instead of silently erasing it.
- */
 export function normaliseColor(value: string): string {
   const input = value.trim()
   if (HEX_COLOR.test(input)) {
@@ -307,8 +256,6 @@ export function normaliseColor(value: string): string {
   if (parts.length === 0) return input
   const channels = parts[0]?.split(/[\s,]+/u).filter(part => part !== '') ?? []
   if (normalisedName === 'color') {
-    // `color(srgb r g b)` carries 0..1 channels; other colour spaces are left
-    // alone because converting them needs a profile the capture does not have.
     if (channels[0]?.toLowerCase() !== 'srgb') return input
     const [red, green, blue] = channels.slice(1, 4).map(srgbChannel)
     const alphaText = parts[1]
@@ -319,8 +266,6 @@ export function normaliseColor(value: string): string {
       : `rgba(${String(red)}, ${String(green)}, ${String(blue)}, ${String(Number(alpha.toFixed(4)))})`
   }
   if (normalisedName === 'hsl' || normalisedName === 'hsla') {
-    // Hue, saturation, and lightness convert with trigonometry; tokens in this
-    // repository are hex, so leave an hsl value readable rather than wrong.
     return input
   }
   const alphaText = parts[1]
@@ -346,12 +291,6 @@ function tokenValuesFrom(document: Document): Readonly<Record<string, string>> {
   return values
 }
 
-/**
- * Maps a resolved value back to the design token that produced it, so a palette
- * change reads as a palette change in review instead of as a mystery rgb value.
- * A value shared by several tokens stays raw: naming one of them would make the
- * baseline depend on which token the resolver happened to meet first.
- */
 function tokenResolver(
   tokenValues: Readonly<Record<string, string>>,
 ): ReadonlyMap<string, string> {
@@ -361,9 +300,6 @@ function tokenResolver(
   for (const name of names) {
     const raw = tokenValues[name]
     if (raw === undefined) continue
-    // Chrome reports a custom property's raw text (hex) but a computed
-    // colour's resolved form, so every candidate value goes through the same
-    // normaliser before it can be recognised again on an element.
     const value = normaliseColor(raw.trim())
     if (value === '' || value === 'none') continue
     if (owners.has(value)) owners.set(value, '')
@@ -419,8 +355,6 @@ export function captureVisualFingerprint(options: VisualCaptureOptions): VisualF
     isRoot: boolean,
   ): void => {
     const styles = readStyles(element, inspector, tokens)
-    // A display:none subtree paints nothing and holds no space, so its absence
-    // from the baseline is the correct picture of it.
     if (styles.display === 'none') return
 
     const attributes = inspector.attributes(element)
@@ -437,8 +371,6 @@ export function captureVisualFingerprint(options: VisualCaptureOptions): VisualF
     const recorded: Record<string, string> = {}
     for (const property of STYLE_PROPERTIES) {
       const value = styles[property]
-      // The root states its whole presentation; a descendant states only what
-      // it decides differently from the parent it would otherwise inherit.
       if (value === undefined) continue
       if (!isRoot && value === inherited[property]) continue
       recorded[property] = value
@@ -472,8 +404,6 @@ export function captureVisualFingerprint(options: VisualCaptureOptions): VisualF
     const counts = new Map<string, number>()
     for (const child of inspector.children(element)) {
       const tag = child.tagName
-      // Paths read like selectors and stay stable across HTML's upper-cased
-      // tagName and the mixed case SVG keeps.
       const pathTag = tag.toLowerCase()
       const indexWithinTag = (counts.get(tag) ?? 0) + 1
       counts.set(tag, indexWithinTag)
@@ -608,8 +538,6 @@ export function compareVisualFingerprints(
     })
   }
 
-  // Membership is unchanged but the paint order moved: report the first
-  // position that diverged rather than every position after it.
   if (baselineNodes.size === actualNodes.size
     && differences.every(difference => difference.reason !== 'missing-node')
     && differences.every(difference => difference.reason !== 'unexpected-node')) {

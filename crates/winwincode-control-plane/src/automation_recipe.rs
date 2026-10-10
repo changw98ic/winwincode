@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Versioned development recipes and deterministic automation occurrences.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr as _;
@@ -14,7 +10,6 @@ const SCHEMA_VERSION: u8 = 1;
 const MAX_IMPORT_BYTES: usize = 256 * 1024;
 const MIN_RANKING_SAMPLE: u32 = 5;
 
-/// The six supported development recipe families.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DevelopmentRecipeKind {
@@ -26,7 +21,6 @@ pub enum DevelopmentRecipeKind {
     Refactor,
 }
 
-/// Closed risk level used by recipes.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeRiskLevel {
@@ -35,7 +29,6 @@ pub enum RecipeRiskLevel {
     High,
 }
 
-/// Minimum gate required before a resolved task may execute.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeGate {
@@ -44,7 +37,6 @@ pub enum RecipeGate {
     HumanApproval,
 }
 
-/// Exact versioned skill or verification-pack reference.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeReference {
@@ -52,7 +44,6 @@ pub struct RecipeReference {
     pub version: u32,
 }
 
-/// Parameter kind. Credentials must remain references and never defaults.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeParameterKind {
@@ -60,7 +51,6 @@ pub enum RecipeParameterKind {
     CredentialReference,
 }
 
-/// One bounded recipe input.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeParameter {
@@ -70,7 +60,6 @@ pub struct RecipeParameter {
     pub default: Option<String>,
 }
 
-/// One immutable recipe revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DevelopmentRecipe {
@@ -88,7 +77,6 @@ pub struct DevelopmentRecipe {
     pub minimum_gate: RecipeGate,
 }
 
-/// Import/export contract for versioned recipes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DevelopmentRecipePack {
@@ -96,14 +84,12 @@ pub struct DevelopmentRecipePack {
     pub recipes: Vec<DevelopmentRecipe>,
 }
 
-/// Exact installed references used during import and preview.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecipeReferenceCatalog {
     pub skills: BTreeSet<RecipeReference>,
     pub verification_packs: BTreeSet<RecipeReference>,
 }
 
-/// Trusted task context used for applicability and risk escalation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeContext {
@@ -113,7 +99,6 @@ pub struct RecipeContext {
     pub external_write: bool,
 }
 
-/// Immutable, side-effect-free recipe preview.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipePreview {
@@ -131,7 +116,6 @@ pub struct RecipePreview {
     pub preview_digest: String,
 }
 
-/// Task creation intent produced only from an exact confirmed preview.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfirmedRecipeTask {
@@ -139,7 +123,6 @@ pub struct ConfirmedRecipeTask {
     pub snapshot: RecipePreview,
 }
 
-/// Daily or interval schedule. Daily schedules use an IANA time zone.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AutomationSchedule {
@@ -153,7 +136,6 @@ pub enum AutomationSchedule {
     },
 }
 
-/// Durable automation rule. Editing creates a new revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationRule {
@@ -170,7 +152,6 @@ pub struct AutomationRule {
     pub max_catch_up: u8,
 }
 
-/// Exact scheduled occurrence and resolved recipe snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationOccurrence {
@@ -183,7 +164,6 @@ pub struct AutomationOccurrence {
     pub task: ConfirmedRecipeTask,
 }
 
-/// Independent status for one batch item.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeBatchItemStatus {
@@ -193,7 +173,6 @@ pub enum RecipeBatchItemStatus {
     Cancelled,
 }
 
-/// One independently cancellable and idempotent batch item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeBatchItem {
@@ -203,7 +182,6 @@ pub struct RecipeBatchItem {
     pub status: RecipeBatchItemStatus,
 }
 
-/// Batch plan whose item outcomes never roll back sibling items.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeBatch {
@@ -211,7 +189,6 @@ pub struct RecipeBatch {
     pub items: BTreeMap<String, RecipeBatchItem>,
 }
 
-/// Statistics for one recipe revision and one task family only.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecipeVersionStatistics {
@@ -224,7 +201,6 @@ pub struct RecipeVersionStatistics {
     pub ranking_eligible: bool,
 }
 
-/// Stable recipe or automation validation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AutomationRecipeError {
     InvalidJson,
@@ -261,11 +237,6 @@ impl fmt::Display for AutomationRecipeError {
 impl std::error::Error for AutomationRecipeError {}
 
 impl DevelopmentRecipePack {
-    /// Parses and validates an imported recipe pack.
-    ///
-    /// # Errors
-    ///
-    /// Rejects oversized JSON, unknown fields, malformed recipes and missing exact references.
     pub fn from_json(
         bytes: &[u8],
         catalog: &RecipeReferenceCatalog,
@@ -279,7 +250,6 @@ impl DevelopmentRecipePack {
         Ok(pack)
     }
 
-    /// Returns the six first-party development recipes.
     #[must_use]
     pub fn built_in() -> Self {
         let verification = vec![RecipeReference {
@@ -362,11 +332,6 @@ impl DevelopmentRecipePack {
         }
     }
 
-    /// Validates every recipe against exact installed references.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first stable validation category.
     pub fn validate(&self, catalog: &RecipeReferenceCatalog) -> Result<(), AutomationRecipeError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(AutomationRecipeError::UnsupportedVersion);
@@ -395,11 +360,6 @@ impl DevelopmentRecipePack {
         Ok(())
     }
 
-    /// Resolves an immutable preview without creating a task or executing a tool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing references, non-applicable recipes and malformed inputs.
     pub fn preview(
         &self,
         recipe_id: &str,
@@ -442,11 +402,6 @@ impl DevelopmentRecipePack {
         Ok(preview)
     }
 
-    /// Converts an exact user-confirmed preview into one idempotent task intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed, stale or fabricated preview confirmation digests.
     pub fn confirm(
         &self,
         preview: &RecipePreview,
@@ -467,15 +422,6 @@ impl DevelopmentRecipePack {
         })
     }
 
-    /// Resolves the first scheduled occurrence strictly after `after`.
-    ///
-    /// The occurrence identity excludes the rule revision. Persisting it through
-    /// the existing idempotent Controller command path keeps an already-resolved
-    /// occurrence pinned when a rule is edited.
-    ///
-    /// # Errors
-    ///
-    /// Rejects disabled or malformed rules, timestamps and recipe inputs.
     pub fn next_occurrence(
         &self,
         rule: &AutomationRule,
@@ -523,11 +469,6 @@ impl DevelopmentRecipePack {
 }
 
 impl RecipeBatch {
-    /// Builds independent idempotent items from confirmed task snapshots.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate input keys.
     pub fn new(
         batch_id: impl Into<String>,
         tasks: impl IntoIterator<Item = (String, ConfirmedRecipeTask)>,
@@ -564,20 +505,10 @@ impl RecipeBatch {
         Ok(Self { batch_id, items })
     }
 
-    /// Cancels one unstarted item without changing completed siblings.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown or already settled items.
     pub fn cancel(&mut self, item_id: &str) -> Result<(), AutomationRecipeError> {
         self.settle(item_id, RecipeBatchItemStatus::Cancelled)
     }
 
-    /// Records one independent item outcome.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown items, `Planned`, or a second settlement.
     pub fn settle(
         &mut self,
         item_id: &str,
@@ -597,7 +528,6 @@ impl RecipeBatch {
         Ok(())
     }
 
-    /// Groups counts by exact recipe revision and task family.
     #[must_use]
     pub fn statistics(&self) -> Vec<RecipeVersionStatistics> {
         let mut groups = BTreeMap::<(String, u32, DevelopmentRecipeKind), (u32, u32, u32)>::new();

@@ -1,8 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::fmt;
 
-/// Stable integration failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntegrationErrorKind {
     Invalid,
@@ -16,7 +13,6 @@ pub enum IntegrationErrorKind {
     CorruptState,
 }
 
-/// Secret-safe integration failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrationError {
     kind: IntegrationErrorKind,

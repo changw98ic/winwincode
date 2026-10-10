@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * WWX-ANN-02 / RUN-09 page-pick and screenshot-degradation annotation model.
- *
- * Element pick is only available on same-origin injectable preview frames.
- * Cross-origin, revoked, or non-injectable pages always degrade to screenshot
- * coordinate annotation. The model never promises that every page is pickable.
- */
-
 export type AnnotationSurfaceKind =
   | 'injectable-element'
   | 'screenshot-coordinate'
@@ -28,7 +18,6 @@ export interface AnnotationElementSummary {
   readonly tagName: string
   readonly role: string | null
   readonly accessibleName: string | null
-  /** Stable, non-HTML locator; never raw innerHTML. */
   readonly locator: string
   readonly bounds: {
     readonly x: number
@@ -105,7 +94,6 @@ export interface PageAnnotationViewModel {
   readonly state: AnnotationState
   subscribe(listener: (state: AnnotationState) => void): () => void
   prepare(input: {
-    /** Stable candidate/source binding; drafts never cross this boundary. */
     readonly bindingKey?: string
     readonly pageUrl: string
     readonly pagePath: string
@@ -139,7 +127,6 @@ function sameOrigin(appOrigin: string, pageUrl: string): boolean {
   }
 }
 
-/** RUN-09: decide injectability; never assume every page can be picked. */
 export function resolveInjectability(input: {
   readonly appOrigin: string
   readonly pageUrl: string

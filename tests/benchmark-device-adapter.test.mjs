@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict'
 import { createDecipheriv, createECDH, hkdfSync } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -63,7 +62,6 @@ async function assertEncryptedDeviceProviderSave(provider, expectedMode) {
 test('encrypted Device Provider save retains the explicit MiMo structured-output capability', async () => {
   for (const name of ['mimo', 'glm', 'deepseek', 'qwen']) {
     const provider = deviceTaskProvider(name, providerEnvironment)
-    // Supply the option explicitly to isolate encrypted transport from profile selection.
     if (name === 'mimo') provider.responsesStructuredOutput = 'json_object'
     await assertEncryptedDeviceProviderSave(provider, name === 'mimo' ? 'json_object' : undefined)
   }

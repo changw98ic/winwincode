@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable multi-`ProductSession` commands and exact runtime bindings.
-//!
-//! The service owns application commands only. `ProductSession` lifecycle and
-//! `SessionBinding` identity rules remain in `winwincode-session`; canonical
-//! state, scoped command receipts, and events remain in `winwincode-storage`;
-//! Worker capacity and runtime identity remain in the existing durable Worker
-//! slot and execution-admission records.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -75,34 +65,17 @@ const PRODUCT_SESSION_CHANGED_TOPIC: &str = "product-session.changed.v1";
 const PRODUCT_SESSION_MESSAGE_APPENDED_TOPIC: &str = "product-session.message.appended.v1";
 const PRODUCT_SESSION_RECEIPT_TOPIC: &str = "product-session.receipt.internal.v3";
 
-/// Storage seam joining canonical state to an already durable Worker slot.
-///
-/// Implementations must return only an exact-scope admission record. A missing
-/// record is an identity mismatch, never permission to infer a scope from the
-/// `ExecutionJobId`.
 pub trait ProductSessionPersistence: ProductStateStorage {
-    /// Reads exact queue revision for cancellation under the bound session scope.
-    /// # Errors
-    /// Returns a storage error when the queue cannot be read.
     fn load_cancellation_job(
         &mut self,
         scope: &ExecutionQueueScope,
         job: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError>;
-    /// Persists the queue cancellation consumed by the Worker scheduler.
-    /// # Errors
-    /// Rejects stale queue revisions, changed replays, and storage failures.
     fn request_product_session_cancellation(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
     ) -> Result<(), StorageError>;
 
-    /// Loads the immutable queue entry and proves its original submission
-    /// receipt still names the same Chat request.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error for a partial/corrupt state-to-job join.
     fn load_product_session_execution_job(
         &mut self,
         scope: &ExecutionQueueScope,
@@ -110,11 +83,6 @@ pub trait ProductSessionPersistence: ProductStateStorage {
         request_id: &RequestId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError>;
 
-    /// Loads one exact Worker slot and its exact-scope running reservation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when either authoritative source cannot be read.
     fn load_worker_binding_source(
         &mut self,
         scope: &ExecutionQueueScope,
@@ -122,13 +90,6 @@ pub trait ProductSessionPersistence: ProductStateStorage {
         worker_session_id: &WorkerSessionId,
     ) -> Result<Option<(WorkerSlotRecord, ExecutionReservationRecord)>, StorageError>;
 
-    /// Loads the same exact Worker binding plus its current durable Job lease.
-    /// Interactive input and approval commands use this stronger read before
-    /// accepting a Worker request or a browser response.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when any authoritative source cannot be read.
     fn load_worker_interaction_source(
         &mut self,
         scope: &ExecutionQueueScope,
@@ -143,32 +104,18 @@ pub trait ProductSessionPersistence: ProductStateStorage {
         StorageError,
     >;
 
-    /// Resolves an accepted historical lease period to the live current lease.
-    ///
-    /// # Errors
-    /// Returns malformed-record, receipt-corruption, or storage errors.
     fn load_live_lease_for_period(
         &mut self,
         period: &ExecutionLeaseRecord,
         now: &Instant,
     ) -> Result<Option<ExecutionLeaseRecord>, StorageError>;
 
-    /// Lists scheduler jobs under a repository scope for cancelled-route recovery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the scheduler cannot be opened or read.
     fn list_scheduler_jobs(
         &mut self,
         scope: &RepositorySchedulerScope,
         states: &[ExecutionJobState],
     ) -> Result<Vec<ExecutionJobRecord>, StorageError>;
 
-    /// Releases a queued/running execution-admission reservation for a cancelled job.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when admission cannot be read or released.
     fn release_cancelled_execution_admission(
         &mut self,
         job_id: &ExecutionJobId,
@@ -190,9 +137,6 @@ impl ProductSessionPersistence for SqliteStorage {
         request: &RepositorySchedulerCancellationRequest,
     ) -> Result<(), StorageError> {
         let receipt = self.repository_scheduler()?.request_cancellation(request)?;
-        // Always reclaim non-terminal admission after a durable cancel, even
-        // when a Worker route exists. Recovery after process exit must free
-        // org concurrency without waiting for a Worker that may be gone.
         let _ = receipt.worker_session_id;
         let mut admission = self
             .execution_admission()
@@ -351,7 +295,6 @@ impl ProductSessionPersistence for SqliteStorage {
     }
 }
 
-/// Common authority and concurrency facts for one mutating command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductSessionCommandContext {
     pub receipt_identity: ReceiptIdentity,
@@ -362,12 +305,6 @@ pub struct ProductSessionCommandContext {
     pub public_scope: PublicEventScope,
 }
 
-/// Builds the canonical service context from one generated repository command
-/// envelope and server-owned event facts.
-///
-/// # Errors
-///
-/// Rejects negative revisions and non-canonical actor, scope, or request IDs.
 pub fn product_session_command_context(
     actor: &Actor,
     scope: &RepositoryScope,
@@ -412,7 +349,6 @@ pub fn product_session_command_context(
     })
 }
 
-/// Creates one independent `ProductSession` in the command scope.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CreateProductSessionCommand {
     pub context: ProductSessionCommandContext,
@@ -424,12 +360,6 @@ pub struct CreateProductSessionCommand {
 }
 
 impl CreateProductSessionCommand {
-    /// Converts the generated `session.create` command without duplicating
-    /// public actor or repository-scope mapping in the transport layer.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid command-envelope authority or revision facts.
     pub fn from_api(
         command: SessionCreateCommand,
         event_id: ControlPlaneEventId,
@@ -454,7 +384,6 @@ impl CreateProductSessionCommand {
     }
 }
 
-/// Continues one `ProductSession` with a new, fully explicit runtime binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContinueProductSessionCommand {
     pub context: ProductSessionCommandContext,
@@ -466,8 +395,6 @@ pub struct ContinueProductSessionCommand {
     pub model_exchange_id: ModelExchangeId,
 }
 
-/// Replaces the one running execution binding using only a scheduler-sealed
-/// predecessor/successor lineage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReplaceProductSessionExecutionBindingCommand {
     pub context: ProductSessionCommandContext,
@@ -480,7 +407,6 @@ pub(crate) struct ReplaceProductSessionExecutionBindingCommand {
     pub replacement: ExecutionScopeReplacementAuthority,
 }
 
-/// Forks session-visible state without copying runtime identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkProductSessionCommand {
     pub context: ProductSessionCommandContext,
@@ -489,7 +415,6 @@ pub struct ForkProductSessionCommand {
     pub title: String,
 }
 
-/// Closes one exact `ProductSession` revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseProductSessionCommand {
     pub context: ProductSessionCommandContext,
@@ -497,11 +422,6 @@ pub struct CloseProductSessionCommand {
 }
 
 impl CloseProductSessionCommand {
-    /// Converts one generated `session.close` command into the canonical service command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid command-envelope authority or revision facts.
     pub fn from_api(
         command: SessionCloseCommand,
         event_id: ControlPlaneEventId,
@@ -522,7 +442,6 @@ impl CloseProductSessionCommand {
     }
 }
 
-/// One durable binding and the exact Worker-slot facts accepted with it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableSessionBinding {
     binding: SessionBinding,
@@ -571,7 +490,6 @@ impl DurableSessionBinding {
     }
 }
 
-/// Complete query result for one `ProductSession`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionRecord {
     session: ProductSession,
@@ -592,7 +510,6 @@ impl ProductSessionRecord {
         &self.session
     }
 
-    /// Returns the actor that created this exact `ProductSession` identity.
     #[must_use]
     pub const fn owner_actor(&self) -> &PublicEventActor {
         &self.owner_actor
@@ -603,8 +520,6 @@ impl ProductSessionRecord {
         self.forked_from.as_ref()
     }
 
-    /// Returns the exact provider-neutral route selected when the session was
-    /// created. It contains only a Credential reference, never secret bytes.
     #[must_use]
     pub const fn model_route(&self) -> &ModelRoute {
         &self.model_route
@@ -615,19 +530,16 @@ impl ProductSessionRecord {
         &self.bindings
     }
 
-    /// Returns the bounded public message ledger in stable sequence order.
     #[must_use]
     pub fn messages(&self) -> &[ChatMessageProjection] {
         &self.messages
     }
 
-    /// Returns every durable turn intent in submission order.
     #[must_use]
     pub fn turn_intents(&self) -> &[ProductSessionTurnIntent] {
         &self.turn_intents
     }
 
-    /// Returns the exact routes emitted by the accepted cancellation, if any.
     #[must_use]
     pub fn cancellation_routes(&self) -> &[ExecutionCancellationRoutes] {
         &self.cancellation_routes
@@ -638,11 +550,6 @@ impl ProductSessionRecord {
         self.cancellation_request_id.as_ref()
     }
 
-    /// Converts the durable aggregate into the generated public projection.
-    ///
-    /// # Errors
-    ///
-    /// Returns corruption when the durable revision exceeds the public integer range.
     pub fn projection(&self) -> Result<ProductSessionProjection, ProductSessionServiceError> {
         Ok(ProductSessionProjection {
             archived: Some(self.archived_at.is_some()),
@@ -662,7 +569,6 @@ impl ProductSessionRecord {
     }
 }
 
-/// Replay-safe mutation result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionMutationReceipt {
     pub record: ProductSessionRecord,
@@ -670,7 +576,6 @@ pub struct ProductSessionMutationReceipt {
     pub replayed: bool,
 }
 
-/// Exact durable `ProductSession` facts used by guarded collaboration writes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionAuthoritySeal {
     pub record: ProductSessionRecord,
@@ -679,16 +584,6 @@ pub struct ProductSessionAuthoritySeal {
     pub state_guard: StateRevisionGuard,
 }
 
-/// Loads one `ProductSession` and the exact repository-catalog guard protecting it.
-///
-/// This read-only entry point needs only canonical product-state storage, so
-/// another aggregate can validate a source-session binding without acquiring
-/// `ProductSession` mutation or Worker authority.
-///
-/// # Errors
-///
-/// Returns not-found, corruption, or storage errors without searching another
-/// repository scope.
 pub fn load_product_session_authority_seal(
     storage: &dyn ProductStateStorage,
     scope: &ReceiptScopeKey,
@@ -730,7 +625,6 @@ pub fn load_product_session_authority_seal(
     })
 }
 
-/// Stable command/read failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductSessionServiceErrorCode {
     InvalidInput,
@@ -751,7 +645,6 @@ pub enum ProductSessionServiceErrorCode {
     Storage,
 }
 
-/// `ProductSession` application-service failure with a bounded message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductSessionServiceError {
     code: ProductSessionServiceErrorCode,
@@ -780,7 +673,6 @@ impl fmt::Display for ProductSessionServiceError {
 
 impl std::error::Error for ProductSessionServiceError {}
 
-/// Application service for scope-isolated `ProductSession` commands and reads.
 pub struct ProductSessionService<'storage> {
     storage: &'storage mut dyn ProductSessionPersistence,
     output_gate: crate::CredentialLeakGate,
@@ -795,8 +687,6 @@ impl<'storage> ProductSessionService<'storage> {
         }
     }
 
-    /// Creates a service whose public message boundary also knows the
-    /// fingerprints of credentials resolved by the Provider Gateway.
     #[must_use]
     pub fn with_output_gate(
         storage: &'storage mut dyn ProductSessionPersistence,
@@ -808,11 +698,6 @@ impl<'storage> ProductSessionService<'storage> {
         }
     }
 
-    /// Creates one session. `expected_revision` must be zero.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, duplicate identities, conflicts, and storage failures.
     pub fn create(
         &mut self,
         command: &CreateProductSessionCommand,
@@ -870,13 +755,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Continues one session using only an exact, currently running Worker
-    /// slot and its exact-scope admission record.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale session revisions, inferred/foreign identities, reused
-    /// bindings, non-running slots, invalid transitions, and storage failures.
     pub fn continue_session(
         &mut self,
         command: &ContinueProductSessionCommand,
@@ -963,7 +841,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Attaches another model call to the same live execution; tools can trigger many calls.
     pub(crate) fn continue_model_exchange(
         &mut self,
         command: &ContinueProductSessionCommand,
@@ -1057,13 +934,6 @@ impl<'storage> ProductSessionService<'storage> {
         self.replay(&command.context, &digest, MutationKind::Continued)
     }
 
-    /// Rotates one existing running binding to the scheduler-sealed successor
-    /// without creating a second Chat turn or binding.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign predecessor, successor, scope, slot, reservation,
-    /// receipt, or `ProductSession` revision before committing any state.
     pub(crate) fn replace_execution_binding(
         &mut self,
         command: &ReplaceProductSessionExecutionBindingCommand,
@@ -1146,12 +1016,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Forks one session without copying any `ExecutionJob`, `WorkerSession`, or
-    /// `CodexThread` identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/stale source, duplicate target, invalid target, and storage failures.
     pub fn fork(
         &mut self,
         command: &ForkProductSessionCommand,
@@ -1218,11 +1082,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Closes one exact session revision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/stale/non-closable sessions and storage failures.
     pub fn close(
         &mut self,
         command: &CloseProductSessionCommand,
@@ -1259,10 +1118,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Updates title and archive visibility in the same durable revision.
-    ///
-    /// # Errors
-    /// Rejects stale revisions, invalid titles, missing sessions and storage failures.
     pub fn update_metadata(
         &mut self,
         context: &ProductSessionCommandContext,
@@ -1304,11 +1159,6 @@ impl<'storage> ProductSessionService<'storage> {
         )
     }
 
-    /// Reads one exact `ProductSession` from one exact command scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns a corruption/storage error when durable state cannot be decoded.
     pub fn get(
         &self,
         scope: &ReceiptScopeKey,
@@ -1321,13 +1171,6 @@ impl<'storage> ProductSessionService<'storage> {
             .transpose()
     }
 
-    /// Loads one exact session together with the catalog revision guard that
-    /// protects its durable record.
-    ///
-    /// # Errors
-    ///
-    /// Returns not-found, corruption, or storage errors without synthesizing
-    /// a revision from the public projection.
     pub fn authority_seal(
         &self,
         scope: &ReceiptScopeKey,
@@ -1336,11 +1179,6 @@ impl<'storage> ProductSessionService<'storage> {
         load_product_session_authority_seal(self.storage, scope, product_session_id)
     }
 
-    /// Lists all sessions in deterministic ProductSession-id order.
-    ///
-    /// # Errors
-    ///
-    /// Returns a corruption/storage error when durable state cannot be decoded.
     pub fn list(
         &self,
         scope: &ReceiptScopeKey,
@@ -1352,20 +1190,6 @@ impl<'storage> ProductSessionService<'storage> {
             .collect()
     }
 
-    /// Replays durable cancelled-session cancel routes onto the queue after a
-    /// process exit between the `ProductSession` catalog commit and the
-    /// `RepositoryScheduler` cancel commit (y2es).
-    ///
-    /// Uses the same request-identity formula as the original cancel. Jobs
-    /// that are still `queued`/`leased`/`running` are cancelled under that
-    /// identity; orphaned admission reservations for every routed job are
-    /// reclaimed. Re-running is idempotent and never rewrites Worker or
-    /// request identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage/corruption error when durable state cannot be read
-    /// or a recovery cancellation cannot be committed.
     pub fn reconcile_cancelled_session_routes(
         &mut self,
         public_scope: &PublicEventScope,
@@ -2236,7 +2060,6 @@ fn derived_public_event_id(base: &ControlPlaneEventId, namespace: &str) -> Contr
     ControlPlaneEventId(format!("evt_{}", &encoded[..26]))
 }
 
-// Metadata revisions do not replace an in-flight execution's sealed turn.
 fn require_execution_revision(
     persisted: &PersistedProductSession,
     job_id: &ExecutionJobId,
@@ -2277,9 +2100,6 @@ pub(crate) fn catalog_stream_id(scope: &ReceiptScopeKey) -> String {
     format!("product-sessions:{:x}", Sha256::digest(scope.as_bytes()))
 }
 
-/// Stable queue-cancellation request identity for one `ProductSession` cancel
-/// route. The original cancel and post-crash recovery share this formula so
-/// recovery never invents a second request identity.
 pub(crate) fn session_route_cancel_request_id(
     session_request_id: &RequestId,
     job_id: &ExecutionJobId,

@@ -1,17 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Wire types for the outbound, device-initiated preview tunnel.
-
 use serde::{Deserialize, Serialize};
 
-/// Current preview-tunnel wire version.
 pub const PREVIEW_TUNNEL_SCHEMA_VERSION: &str = "winwincode/preview-v1";
-/// Largest HTTP body accepted in either direction.
 pub const MAX_PREVIEW_BODY_BYTES: usize = 8 * 1024 * 1024;
-/// Largest header count accepted in either direction.
 pub const MAX_PREVIEW_HEADERS: usize = 64;
 
-/// Returns whether `value` is a full lowercase SHA-1 or SHA-256 Git object id.
 #[must_use]
 pub fn is_canonical_git_commit(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
@@ -20,10 +12,6 @@ pub fn is_canonical_git_commit(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Stable identity of one locally authorized application service.
-///
-/// Local host names and ports never cross the tunnel. The Device Client maps
-/// this identity to one exact loopback socket that its run supervisor owns.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewSourceDescriptor {
@@ -38,8 +26,6 @@ pub struct PreviewSourceDescriptor {
     pub candidate_commit: Option<String>,
 }
 
-/// Whether a source follows a mutable development checkout or one frozen
-/// candidate. The two modes are never interchangeable evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewSourceMode {
@@ -47,7 +33,6 @@ pub enum PreviewSourceMode {
     FrozenCandidate,
 }
 
-/// One safe HTTP header carried by the tunnel.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewHeader {
@@ -55,7 +40,6 @@ pub struct PreviewHeader {
     pub value: String,
 }
 
-/// Device-to-Backend frame on the authenticated tunnel.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum DevicePreviewFrame {
@@ -74,7 +58,6 @@ pub enum DevicePreviewFrame {
     },
 }
 
-/// Backend-to-device frame on the authenticated tunnel.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ServerPreviewFrame {

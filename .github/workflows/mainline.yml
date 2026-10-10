@@ -124,7 +124,7 @@ jobs:
           cargo -V
 
       - name: Install persistent Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
         with:
           version: "v0.17.0"
 

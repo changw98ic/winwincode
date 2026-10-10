@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #[test]
 #[ignore = "mechanism audit: atomic renewal authority history cost baseline"]
 fn m10_real_atomic_renewal_rebuilds_only_this_jobs_authority_history() {
@@ -87,8 +85,6 @@ fn storage_c01_real_enqueue_global_capacity_guard_counts_bounded_cross_authority
         for seed in 1..=(size / 1_000) {
             authorities.push(prepare_authority(&mut storage, seed));
         }
-        // All authorities and rows are admitted by the canonical real methods;
-        // each authority stays below the unchanged default limit of 1,024.
         for sequence in 0..size {
             let authority = &authorities[usize::try_from(sequence / 1_000).unwrap()];
             let frame = request(authority, 2_000_000 + sequence, b"offline-frame");

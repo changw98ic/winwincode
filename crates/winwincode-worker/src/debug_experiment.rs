@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Worker-owned lifecycle for one short-lived `DebugProbe` experiment.
-//!
-//! The workspace and Action Gateway are injected at this seam so production
-//! assembly can use the existing `WorkspaceManager`, change-batch executor,
-//! and `DurableWorkerActionEnforcement` without creating a second execution
-//! authority.  This module never calls candidate snapshot APIs.
-
 use winwincode_domain::{DebugExperimentId, Instant, WorkspaceRevision};
 use winwincode_execution_port::{
     debug_experiment::{
@@ -20,53 +11,20 @@ use winwincode_execution_port::{
     },
 };
 
-/// Workspace seam backed by the existing detached Worker workspace.
-///
-/// `apply_log_probe` is where a production adapter delegates a canonical
-/// change batch. `snapshot_revision` is a tree snapshot, not a candidate
-/// commit; `rollback` and `cleanup` must be durable and idempotent.
 pub trait EphemeralExperimentWorkspace {
-    /// Returns the accepted revision from which this experiment was opened.
     fn base_revision(&self) -> &WorkspaceRevision;
-    /// Applies one validated log probe through the existing change-batch path.
-    ///
-    /// # Errors
-    ///
-    /// Returns a host-adapter error when the canonical change batch is rejected.
     fn apply_log_probe(
         &mut self,
         path: &str,
         symbol: &str,
         expression: &str,
     ) -> Result<(), ExperimentRuntimeError>;
-    /// Returns the current ephemeral tree revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns a host-adapter error when the tree cannot be snapshotted.
     fn snapshot_revision(&mut self) -> Result<WorkspaceRevision, ExperimentRuntimeError>;
-    /// Restores the accepted base tree before cleanup or retry.
-    ///
-    /// # Errors
-    ///
-    /// Returns a host-adapter error when the revision cannot be restored.
     fn rollback(&mut self, base: &WorkspaceRevision) -> Result<(), ExperimentRuntimeError>;
-    /// Removes checkout, process, port, and temporary resources. The returned
-    /// count is the authoritative residual-resource count.
-    ///
-    /// # Errors
-    ///
-    /// Returns a host-adapter error when cleanup cannot be confirmed.
     fn cleanup(&mut self) -> Result<u32, ExperimentRuntimeError>;
 }
 
-/// Action Gateway seam for declared `repeat_test` operations.
 pub trait ExperimentActionGate {
-    /// Executes one exact, host-admitted command. Shell text is never accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns a host-adapter error when the Action Gateway rejects execution.
     fn execute_repeat_test(
         &mut self,
         path: &str,
@@ -74,9 +32,6 @@ pub trait ExperimentActionGate {
     ) -> Result<(), ExperimentRuntimeError>;
 }
 
-/// Adapter for the released detached `WorkerWorkspace` primitive. The
-/// closure is the injected D4/PR3 change-batch application point; all Git
-/// snapshot, rollback, and removal operations stay in `workspace.rs`.
 pub struct WorkerWorkspaceExperimentAdapter<F> {
     workspace: Option<super::workspace::WorkerWorkspace>,
     base_revision: WorkspaceRevision,
@@ -84,7 +39,6 @@ pub struct WorkerWorkspaceExperimentAdapter<F> {
 }
 
 impl<F> WorkerWorkspaceExperimentAdapter<F> {
-    /// Couples one detached workspace to its canonical change-batch adapter.
     #[must_use]
     pub fn new(workspace: super::workspace::WorkerWorkspace, apply_log_probe: F) -> Self {
         Self {
@@ -154,14 +108,12 @@ where
     }
 }
 
-/// Runtime failure with a bounded, secret-free message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExperimentRuntimeError {
     message: &'static str,
 }
 
 impl ExperimentRuntimeError {
-    /// Creates a host-adapter failure without retaining command output.
     #[must_use]
     pub const fn host(message: &'static str) -> Self {
         Self { message }
@@ -176,7 +128,6 @@ impl std::fmt::Display for ExperimentRuntimeError {
 
 impl std::error::Error for ExperimentRuntimeError {}
 
-/// Error returned before an unsafe operation or an invalid state transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EphemeralExperimentError {
     Contract(DebugExperimentError),
@@ -198,8 +149,6 @@ impl From<ExperimentRuntimeError> for EphemeralExperimentError {
     }
 }
 
-/// Result of one bounded run. The revision is intentionally informational and
-/// cannot be promoted by this API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExperimentRunReport {
     pub experiment_id: DebugExperimentId,
@@ -207,16 +156,12 @@ pub struct ExperimentRunReport {
     pub repeated_tests: u32,
 }
 
-/// Ownership state of the experiment's exclusive workspace barrier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExperimentWorkspaceBarrier {
-    /// The detached checkout and declared resources are exclusively held.
     Held,
-    /// Cleanup released the checkout and all associated resources.
     Released,
 }
 
-/// A durable lifecycle record coupled to one isolated workspace.
 pub struct EphemeralExperiment<W, G> {
     workspace: W,
     gate: G,
@@ -230,11 +175,6 @@ where
     W: EphemeralExperimentWorkspace,
     G: ExperimentActionGate,
 {
-    /// Plans an experiment from one accepted workspace revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the DSL, TTL, or workspace identity is invalid.
     pub fn create(
         workspace: W,
         gate: G,
@@ -270,23 +210,16 @@ where
         })
     }
 
-    /// Returns the current durable experiment record.
     #[must_use]
     pub const fn record(&self) -> &DebugExperiment {
         &self.record
     }
 
-    /// Returns whether the exclusive workspace barrier is still held.
     #[must_use]
     pub const fn barrier(&self) -> ExperimentWorkspaceBarrier {
         self.barrier
     }
 
-    /// Moves Planned → Preparing → Ready after the workspace barrier is held.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the workspace revision or lifecycle is stale.
     pub fn prepare(&mut self) -> Result<(), EphemeralExperimentError> {
         self.move_to(DebugExperimentStatus::Preparing)?;
         if self.workspace.base_revision() != &self.record.base_revision {
@@ -295,12 +228,6 @@ where
         self.move_to(DebugExperimentStatus::Ready)
     }
 
-    /// Reconciles a durable record after Worker restart. Any non-terminal
-    /// experiment is quarantined for cleanup; it is never resumed in place.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the persisted lifecycle cannot enter cleanup.
     pub fn recover_after_crash(&mut self) -> Result<(), EphemeralExperimentError> {
         if matches!(
             self.record.status,
@@ -311,12 +238,6 @@ where
         self.move_to(DebugExperimentStatus::CleanupPending)
     }
 
-    /// Applies probes and runs declared tests through the Action Gateway.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the TTL, barrier, lifecycle, workspace, or Action
-    /// Gateway contract rejects the operation.
     pub fn run(&mut self, now: &Instant) -> Result<ExperimentRunReport, EphemeralExperimentError> {
         if now.0 >= self.record.expires_at.0 {
             return Err(EphemeralExperimentError::Expired);
@@ -373,11 +294,6 @@ where
         })
     }
 
-    /// Requests cancellation and performs mandatory cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lifecycle or cleanup contract rejects it.
     pub fn cancel(&mut self, cleaned_at: Instant) -> Result<(), EphemeralExperimentError> {
         if self.record.status != DebugExperimentStatus::CleanupPending {
             self.move_to(DebugExperimentStatus::Cancelled)?;
@@ -385,11 +301,6 @@ where
         self.cleanup(cleaned_at)
     }
 
-    /// Marks TTL expiry and performs mandatory cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lifecycle or cleanup contract rejects it.
     pub fn expire(&mut self, cleaned_at: Instant) -> Result<(), EphemeralExperimentError> {
         if matches!(
             self.record.status,
@@ -401,12 +312,6 @@ where
         self.cleanup(cleaned_at)
     }
 
-    /// Cleans the detached workspace and records the receipt. A failure keeps
-    /// the experiment quarantined and makes reuse impossible.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when rollback or resource cleanup fails.
     pub fn cleanup(&mut self, cleaned_at: Instant) -> Result<(), EphemeralExperimentError> {
         if self.record.status != DebugExperimentStatus::CleanupPending {
             self.move_to(DebugExperimentStatus::CleanupPending)?;

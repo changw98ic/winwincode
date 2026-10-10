@@ -1,5 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-
 @import './dsh-tokens.css' layer(tokens);
 @import './tokens.css' layer(tokens);
 @import './base.css' layer(base);

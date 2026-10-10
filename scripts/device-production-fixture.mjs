@@ -1,14 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * Device-only production acceptance prerequisites.
- *
- * Production Server execution is fixed to Device Worker. These helpers keep
- * the acceptance runners on that path: model secrets belong on the Device,
- * session model routes must match Device-local Provider credentials, and the
- * Server must never receive centralized model environment variables.
- */
-
 import assert from 'node:assert/strict'
 import { withResponseFailure } from '../packages/network-request/src/index.mjs'
 import {
@@ -28,7 +17,6 @@ import { DatabaseSync } from 'node:sqlite'
 import { deviceAgentEnvironment } from './device-agent-environment.mjs'
 import { assertResolvedDeviceProviderCredentials } from './device-provider-credentials.mjs'
 
-/** Runtime children receive platform settings, never the orchestrator's credentials. */
 export function runtimeChildEnvironment(environment = process.env) {
   const keys = [
     'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
@@ -39,13 +27,9 @@ export function runtimeChildEnvironment(environment = process.env) {
     .map(key => [key, environment[key]]))
 }
 
-/** Interpret the task driver's launch response without changing public launch authority. */
 export function deviceTaskLaunchResult({ response, directory, deliveryId, workRunId,
   publicClientId, holderUserId, repositoryBindingId }) {
   if (response.status === 201) return response.json
-  // The scheduler can finish a role while the task driver drains its unused
-  // source anchor. An expired grant is never launch authority here: recover
-  // only the original, accepted and completed execution as an observation.
   if (response.status === 400 && response.json?.error?.code === 'INVALID_REQUEST'
     && [directory, deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId]
       .every(value => typeof value === 'string' && value.length > 0)) {
@@ -92,7 +76,6 @@ export function deviceTaskLaunchResult({ response, directory, deliveryId, workRu
   })
 }
 
-/** Server environment keys that encode the removed Server-local model path. */
 export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
   'WWC_SERVER_MODEL_PROVIDER_ID',
   'WWC_SERVER_MODEL_ID',
@@ -101,11 +84,6 @@ export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
   'WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID',
 ])
 
-/**
- * Ordered Device-only prerequisites that a production vertical must establish
- * before chat/StrongFlow/cancel/restart. Kept as data so unit tests can assert
- * the migration did not invent a parallel Server-local path.
- */
 export const DEVICE_ONLY_PREREQUISITES = Object.freeze([
   'temporary-real-git-repository',
   'device-enroll-pair',
@@ -118,11 +96,6 @@ export const DEVICE_ONLY_PREREQUISITES = Object.freeze([
   'chat-strongflow-cancel-restart',
 ])
 
-/**
- * Device Provider credential reference id used by the Server session route
- * gate. Mirrors `device_providers::route_reference` in
- * crates/winwincode-server/src/device_providers.rs.
- */
 export function deviceCredentialReferenceId({ clientNodeId, providerId }) {
   assert.equal(typeof clientNodeId, 'string')
   assert.equal(typeof providerId, 'string')
@@ -135,10 +108,6 @@ export function deviceCredentialReferenceId({ clientNodeId, providerId }) {
   return `crd_0${digest.slice(0, 25)}`
 }
 
-/**
- * Session model route for Device-local execution. The credential reference
- * must be the Device-bound route id, not a Server-side credential.
- */
 export function configuredDeviceModelRoute({
   clientNodeId,
   providerId,
@@ -151,7 +120,6 @@ export function configuredDeviceModelRoute({
   }
 }
 
-/** Deterministic Device-local test Provider used by acceptance runners. */
 export function deterministicDeviceProvider({
   providerId = 'winwincode-device-deterministic',
   modelId = 'device-deterministic-model',
@@ -177,20 +145,12 @@ export const DETERMINISTIC_PLANNER_PROTOCOL = 'winwincode.planner-solution.v1'
 export const DETERMINISTIC_VERIFICATION_PROTOCOL = 'winwincode.independent-verification-result.v1'
 export const DETERMINISTIC_VERIFICATION_CALL_ID = 'loopback-verification-command'
 export const DETERMINISTIC_VERIFICATION_POLL_CALL_ID = 'loopback-verification-command-poll'
-/** Long enough for contract verification methods (e.g. git rev-parse) to finish. */
 export const DETERMINISTIC_VERIFICATION_YIELD_MS = 30_000
 
-/**
- * Encrypts one Device Provider mutation with the Device public key.
- * The ciphertext is the production Web → Device apply payload; the API key
- * never appears in Server environment maps or public receipts.
- */
 export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
   return encryptDeviceConfigurationEnvelope(DEVICE_PROVIDER_ENCRYPTION_CONTEXT, snapshot, requestId, mutation)
 }
 
-// API and installed-product acceptance run without Client build artifacts.
-// Match the Web client envelope using only Node's standard crypto primitives.
 function encryptDeviceConfigurationEnvelope(context, snapshot, requestId, mutation) {
   assert.equal(typeof snapshot?.clientNodeId, 'string')
   assert.equal(typeof snapshot?.encryptionPublicKey, 'string')
@@ -307,18 +267,11 @@ export function parseProcessExitCode(text) {
   return null
 }
 
-/**
- * Extracts StrongFlow workInput fields the Device deterministic Provider must
- * honor for reviewer/verifier roles: contract criterion ids and the approved
- * verification method. Top-level `criterionIds` / `verificationCommand` remain
- * accepted for older runners; WorkRun dispatch uses nested WorkContract shape.
- */
 export function workInputFromRequest(request) {
   const text = findTextValue(request, 'StrongFlow workInput (canonical JSON):')
   if (text === null) return null
   const start = text.indexOf('{')
   if (start < 0) return null
-  // WorkInput is embedded after the marker; take the first balanced JSON object.
   let depth = 0
   let end = -1
   for (let index = start; index < text.length; index += 1) {
@@ -519,10 +472,6 @@ export function deterministicVerificationProduct({
   })
 }
 
-/**
- * Starts a Device-local deterministic anthropic-messages HTTPS Provider.
- * Trust is the explicit fixture certificate DER only (never system CAs).
- */
 export function startDeterministicDeviceModelServer({
   certificatePath,
   privateKeyPath,
@@ -643,9 +592,6 @@ export function startDeterministicDeviceModelServer({
             evidenceSourceId: verificationEvidenceSourceId,
           })
         } else if (isVerification) {
-          // Still no sealed exit after the poll. Do not invent pass or fail:
-          // Worker bind_verification_evidence requires a sealed command
-          // outcome for the cited source and must fail closed without one.
           text = 'Verification command did not yield a sealed exit code; no independent result emitted.'
         } else if (isPlanner) {
           text = deterministicPlannerProduct(workInput.criterionIds)
@@ -747,8 +693,6 @@ export function startDeterministicDeviceModelServer({
   }
 }
 
-// Revision-bound settings mutations share one queue per Device. Sessions still
-// execute concurrently; only this short configuration transaction is serialized.
 const deviceExtensionMutations = new WeakMap()
 
 function deviceConfigurationApplyError(response, requestId) {
@@ -815,7 +759,6 @@ export async function removeDevicePublicSmoke({ api, publicClientId, id, timeout
     { operation: 'delete', kind: 'mcp', id }, 'deleted', timeoutMillis)).receipt
 }
 
-/** Resolve only approvals belonging to the currently observed Device WorkRuns. */
 export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
   automaticTaskActions = false, approvalOwner = 'core', corePendingApprovalIds = [],
   onPending = () => {}, onDecision }) {
@@ -838,12 +781,8 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
   const pending = await api.query('approval.list', { states: ['pending', 'expired'] })
   assert.equal(pending.page?.hasMore, false, 'Device task approval list must be complete')
   assert.ok(Array.isArray(pending.result?.items), 'Device task approval list is invalid')
-  // Expiry in the query is a deadline projection. Core can still be waiting
-  // for the exact tool response. Keep that wait visible until Core settles it.
   await onPending(pending.result.items.filter(item => currentRun(item)
     && (item.state === 'pending' || corePending.has(item.id))))
-  // Host-owned approval is resolved at the common action boundary. A true
-  // human request must remain visible rather than be approved by this driver.
   if (approvalOwner === 'execution_port') return
   assert.equal(approvalOwner, 'core')
   for (const item of pending.result.items) {
@@ -858,9 +797,6 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
       && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
       && detail.targetSummaries?.length === 1
       && detail.targetSummaries[0] === `server:${publicSmokeId}`
-    // This opt-in represents the operator's authorization for this task's
-    // role Sessions. The server still validates the exact binding, revision,
-    // expiry and one-use decision, and Worker action enforcement still runs.
     const taskAction = automaticTaskActions && approval.effectiveDecisionScope === 'once'
       && detail?.kind === 'available' && detail.targetCount > 0
       && Array.isArray(detail.targetSummaries) && detail.targetSummaries.length > 0
@@ -891,7 +827,6 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
   }
 }
 
-/** Seed a Device-local Provider through the encrypted Web → Device HTTP path. */
 export async function seedDeviceLocalProvider({
   api,
   publicClientId,
@@ -961,10 +896,6 @@ export async function seedDeviceLocalProvider({
   }
 }
 
-/**
- * Rejects Server environments that still encode the removed Server-local
- * model execution path, including real GLM secrets.
- */
 export function assertServerEnvironmentIsDeviceOnly(serverEnvironment = {}) {
   for (const key of FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS) {
     assert.equal(
@@ -975,10 +906,6 @@ export function assertServerEnvironmentIsDeviceOnly(serverEnvironment = {}) {
   }
 }
 
-/**
- * Asserts known model secrets never appear in Server-facing environment maps.
- * Real GLM/modeled secrets belong only on the Device config path.
- */
 export function assertDeviceSecretsNeverOnServer(serverEnvironment = {}, secrets = []) {
   for (const [key, value] of Object.entries(serverEnvironment)) {
     if (value === undefined || value === null) continue
@@ -1082,9 +1009,6 @@ function registeredFixtureWorkers(deviceData, snapshot) {
   } finally { database.close() }
 }
 
-// The source anchor establishes Device authority for Delivery creation but
-// receives no execution job. After dispatch, drain it through the product and
-// interrupt its witnessed process; role Workers shut down after work_drained.
 export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, launched, productSessionId }) {
   const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
   try {
@@ -1113,8 +1037,6 @@ export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, l
     const observed = processSnapshot().get(record.pid)
     const bootIdentity = observed && (process.platform === 'linux' ? observed.start : `darwin-ps-${observed.start}`)
     const row = bootIdentity === record.process_start_identity && !observed.state.startsWith('Z') ? observed : null
-    // Reconciliation can resume after SIGINT but before the exit was projected.
-    // Signal only the same witnessed boot; never a reused PID.
     if (row) {
       try { process.kill(row.pid, 'SIGINT') } catch (error) {
         if (error.code !== 'ESRCH') throw error
@@ -1127,8 +1049,6 @@ export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, l
   } finally { device.close() }
 }
 
-// An exact read has its own protocol page shape. Historical drained Workers
-// remain durable; registration and drain must not depend on their list position.
 export async function getDeviceWorker(api, workerId) {
   try {
     const response = await api.query('worker.get', { workerId }, { cursor: null, limit: 1 })
@@ -1152,13 +1072,11 @@ export function registerOrReuseDeviceRepository({ wwc, repository, deviceData, d
   return checkedWwc(wwc, ['repo', 'add', repository, '--data-dir', deviceData, '--json'], deviceEnvironment).repository
 }
 
-/** Stop the owned tree, including Workers which the Device puts in separate groups. */
 export async function stopProcessGroup(child, { graceMillis = 1000, deviceData } = {}) {
   const parentExited = () => child === null || child.exitCode !== null || child.signalCode !== null
   if (parentExited() && !deviceData) return
   const snapshot = processSnapshot()
   const root = parentExited() ? undefined : snapshot.get(child.pid)
-  // Capture boot identities before TERM reparents descendants to init/launchd.
   const owned = new Map(registeredFixtureWorkers(deviceData, snapshot).map(row => [row.pid, row]))
   if (root?.parent === process.pid) owned.set(root.pid, root)
   if (owned.size === 0) {
@@ -1174,7 +1092,6 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
   }
   const targets = new Map()
   for (const row of [...owned.values()].reverse()) {
-    // A shared parent group is not ours: signal only its witnessed descendants.
     const target = owned.has(row.group) ? -row.group : row.pid
     const witnesses = targets.get(target) ?? []
     witnesses.push(row)
@@ -1198,33 +1115,18 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
   while (!stopped() && Date.now() < deadline) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
   }
-  // A reaped Device is not proof its detached Workers or their tools have exited.
   if (!stopped()) {
     signalOwned('SIGKILL')
     await waitFor(stopped, 'fixture process tree shutdown', 1000, 25)
   }
 }
 
-/**
- * Writes the Device TLS trust root derived from the fixture certificate.
- * Explicit test trust root: Device-side Provider HTTPS uses this file only.
- */
 export function writeDeviceTrustRoot({ certificatePath, destination }) {
   const der = new X509Certificate(readFileSync(certificatePath)).raw
   writeFileSync(destination, der)
   return destination
 }
 
-/**
- * Establishes Device-only production prerequisites against a running Server.
- *
- * Steps: enroll/pair Device Client → connect → occupy → bind repository →
- * optional encrypted/local Device Provider → launch anchor via `/api/v1/sessions`.
- *
- * This function never restores Server-local model execution. When
- * `deviceProvider` secrets are provided they are returned for Device-local
- * configuration only and must not be copied into Server environment.
- */
 export async function establishDeviceOnlyExecutionPath({
   api,
   wwc,
@@ -1325,8 +1227,6 @@ export async function establishDeviceOnlyExecutionPath({
 
     const deviceDatabase = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
     try {
-      // The daemon owns instance takeover. A reconnect command must not be
-      // queued for an instance which has not announced itself to the Server.
       await waitFor(() => {
         if (device.exitCode !== null) throw new Error(`Device Client exited before hello acknowledgement (${device.exitCode})`)
         return deviceHelloAcknowledged(deviceDatabase, previousInstanceId)
@@ -1378,7 +1278,6 @@ export async function establishDeviceOnlyExecutionPath({
     let providerApiKey = deviceSecret
     let seededProvider = null
     if (deviceProvider !== null && seedDeviceProvider) {
-      // Production path: Device-local HTTPS Provider + encrypted Web→Device apply.
       if (deviceProvider.endpoint) {
         assert.ok(deviceSecret, 'External Provider requires a Device-local credential')
       } else {
@@ -1419,9 +1318,6 @@ export async function establishDeviceOnlyExecutionPath({
       report.deviceProvider = {
         providerId: deviceProvider.providerId,
         modelId: deviceProvider.modelId,
-        // Encrypted Web→Device apply is the production path. Acceptance runners
-        // may provision Device-local store state when a live encrypted apply
-        // endpoint is unavailable; secrets never leave Device config.
         configured: 'device-local-unseeded',
       }
       steps.push('device-local-provider')
@@ -1430,9 +1326,6 @@ export async function establishDeviceOnlyExecutionPath({
     const modelRoute = modelRouteSource && seededProvider === null
       ? modelRouteSource
       : configuredDeviceModelRoute({
-        // Server route_reference binds the Device Provider credential to the
-        // Device node id from the public Provider snapshot, not the public
-        // client id used by occupancy HTTP paths.
         clientNodeId: seededProvider?.clientNodeId
           ?? status.publicClientId,
         providerId: deviceProvider?.providerId ?? seededProvider?.providerId
@@ -1471,8 +1364,6 @@ export async function establishDeviceOnlyExecutionPath({
         const response = await api.request('/api/v1/sessions', {
           method: 'POST', timeoutMillis: 30_000, body,
         })
-        // Capacity rejection issues no grant and starts no Provider. Retry
-        // the original launch after the Device observes a drained predecessor.
         return response.json?.error?.code === 'CAPACITY_EXHAUSTED' ? false : response
       }, 'available Device WorkerSession slot', timeoutMillis)
       const anchor = deviceTaskLaunchResult({ response: launched, directory,
@@ -1507,14 +1398,7 @@ export async function establishDeviceOnlyExecutionPath({
       repositoryBindingId,
       schemaVersion,
       wwc,
-      /**
-       * Launches one Device WorkerSession as the durable launch anchor.
-       * Chat/cancel need `productSessionId` so Server creates a
-       * WorkerLaunchGrant bound to that ProductSession; StrongFlow passes
-       * `workRunId` for the Controller-dispatched execution job.
-       */
       launchAnchor,
-      /** Include this task's Controller role Sessions in its stop observation. */
       forProductSession(productSessionId, selectedBindingId = repositoryBindingId) {
         assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
         return Object.freeze({
@@ -1526,7 +1410,6 @@ export async function establishDeviceOnlyExecutionPath({
           try {
             modelServer.close()
           } catch {
-            // Model fixture shutdown is best-effort.
           }
         }
         await stopProcessGroup(device, { deviceData })
@@ -1540,19 +1423,11 @@ export async function establishDeviceOnlyExecutionPath({
   }
 }
 
-/**
- * Builds a Device-only Server environment for production acceptance.
- * Centralized model startup assumptions are removed on purpose.
- */
 export function deviceOnlyServerEnvironment(overrides = {}) {
   assertServerEnvironmentIsDeviceOnly(overrides)
   return { ...overrides }
 }
 
-/**
- * Captures Device-side Provider secret material for Device configuration only.
- * The returned object is never spread into Server environment maps.
- */
 export function deviceProviderSecretBundle({
   providerId,
   modelId,
@@ -1572,7 +1447,6 @@ export function chmodDeviceCredential(path) {
   return path
 }
 
-/** Executes each fixture command through the product's model-facing tool surface. */
 export function deviceFixtureCodeModeCommand(input) {
   const name = input.session_id === undefined ? 'exec_command' : 'write_stdin'
   return `const tool = ALL_TOOLS.find(item => item.name.endsWith(${JSON.stringify(name)}));

@@ -1,53 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Exact identity binding for ProductSession-backed execution.
-//!
-//! Binding values are internal domain facts. They are built by validated
-//! constructors or by the Control Plane's generated-message adapter; they do
-//! not deserialize directly from wire JSON.
-//!
-//! ```compile_fail
-//! use serde::Deserialize;
-//! use winwincode_session::SessionBinding;
-//!
-//! let _binding: SessionBinding = serde_json::from_str("{}").unwrap();
-//! ```
-//!
-//! ```compile_fail
-//! use serde::Deserialize;
-//! use winwincode_session::SessionBindingIdentity;
-//!
-//! let _identity: SessionBindingIdentity = serde_json::from_str("{}").unwrap();
-//! ```
-//!
-//! ```compile_fail
-//! use serde::Serialize;
-//! use winwincode_session::SessionBinding;
-//!
-//! fn serialize_binding(binding: &SessionBinding) {
-//!     let _ = serde_json::to_string(binding).unwrap();
-//! }
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_session::SessionBinding;
-//!
-//! let _binding = SessionBinding::default();
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_session::BindingAuthority;
-//! use winwincode_domain::{FencingToken, LeaseId, WorkerId, WorkerInstanceId};
-//!
-//! let _authority = BindingAuthority::new(
-//!     WorkerId("wrk_00000000000000000000000001".to_owned()),
-//!     WorkerInstanceId("wki_00000000000000000000000001".to_owned()),
-//!     LeaseId("lse_00000000000000000000000001".to_owned()),
-//!     1,
-//!     FencingToken("1".to_owned()),
-//! );
-//! ```
-
 use std::fmt;
 
 use winwincode_domain::{
@@ -55,8 +5,6 @@ use winwincode_domain::{
     WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
-/// Execution scope carried by one binding. Chat has no hidden Delivery or
-/// `WorkRun` identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingScope {
     ProductSession,
@@ -70,7 +18,6 @@ pub enum BindingScope {
     },
 }
 
-/// Immutable ProductSession/Delivery/WorkRun/Job identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingIdentity {
     scope: BindingScope,
@@ -78,11 +25,6 @@ pub struct SessionBindingIdentity {
     execution_job_id: ExecutionJobId,
 }
 
-/// Runtime source identity copied from a validated generated source identity.
-///
-/// This value has no wire representation and carries no authority. Lease
-/// validity remains owned by the scheduler's sealed authority at the Control
-/// Plane seam.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSourceIdentity {
@@ -92,9 +34,6 @@ pub struct RuntimeSourceIdentity {
     lease_id: LeaseId,
 }
 
-/// Exact binding joining independent session identities. The scheduler lease
-/// authority is deliberately not stored here: callers retain the one sealed
-/// authority supplied by the Control Plane adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBinding {
     identity: SessionBindingIdentity,
@@ -103,7 +42,6 @@ pub struct SessionBinding {
     source_identity: Option<RuntimeSourceIdentity>,
 }
 
-/// Binding construction and matching failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionBindingError {
     InvalidIdentity(&'static str),
@@ -213,7 +151,6 @@ impl BindingScope {
 
 #[allow(clippy::missing_errors_doc)]
 impl SessionBindingIdentity {
-    /// Constructs the Chat/ProductSession scope without creating Delivery facts.
     pub fn product_session(
         product_session_id: ProductSessionId,
         execution_job_id: ExecutionJobId,
@@ -225,7 +162,6 @@ impl SessionBindingIdentity {
         )
     }
 
-    /// Constructs a Delivery `WorkRun` scope with its contract, item, and revision identities.
     #[allow(clippy::too_many_arguments)]
     pub fn delivery_work_run(
         delivery_id: DeliveryId,
@@ -251,7 +187,6 @@ impl SessionBindingIdentity {
         )
     }
 
-    /// Constructs and validates an identity for either supported scope.
     pub fn try_new(
         scope: BindingScope,
         product_session_id: ProductSessionId,
@@ -315,7 +250,6 @@ impl SessionBindingIdentity {
 
 #[allow(clippy::missing_errors_doc)]
 impl RuntimeSourceIdentity {
-    /// Creates the source facts emitted by one accepted execution worker.
     pub fn execution_worker(
         lease_id: LeaseId,
         worker_id: WorkerId,
@@ -357,12 +291,10 @@ impl RuntimeSourceIdentity {
 
 #[allow(clippy::missing_errors_doc)]
 impl SessionBinding {
-    /// Creates a binding with pending `WorkerSession` and `CodexThread` attachments.
     pub fn pending(identity: SessionBindingIdentity) -> Result<Self, SessionBindingError> {
         Self::try_new(identity, None, None, None)
     }
 
-    /// Creates and validates a binding with optional owner-reported attachments.
     pub fn try_new(
         identity: SessionBindingIdentity,
         worker_session_id: Option<WorkerSessionId>,
@@ -396,7 +328,6 @@ impl SessionBinding {
         })
     }
 
-    /// Adds or confirms the `WorkerSession` reported by the Worker.
     pub fn accept_worker_session(
         &self,
         worker_session_id: WorkerSessionId,
@@ -423,7 +354,6 @@ impl SessionBinding {
         Ok(next)
     }
 
-    /// Adds or confirms the `CodexThread` reported by the Codex adapter.
     pub fn accept_codex_thread(
         &self,
         codex_thread_id: CodexThreadId,
@@ -444,7 +374,6 @@ impl SessionBinding {
         Ok(next)
     }
 
-    /// Adds or confirms the accepted runtime source identity.
     pub fn with_source_identity(
         &self,
         source_identity: RuntimeSourceIdentity,

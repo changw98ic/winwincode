@@ -1,5 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-
 .wwc-chat-messages, .wwc-chat-composer {
   --dsw-font-family: var(--wwc-font-family);
   --dsw-shadow-lv2: 0 4px 12px rgb(0 0 0 / 2%), 0 2px 8px rgb(0 0 0 / 4%);
@@ -43,7 +41,6 @@
   --shiki-token-link: #90bfff;
 }
 
-/* Shiki token classes keep highlighting within the app CSP. */
 .wwc-syntax-color-text { color: var(--shiki-color-text); }
 .wwc-syntax-token-constant { color: var(--shiki-token-constant); }
 .wwc-syntax-token-string { color: var(--shiki-token-string); }

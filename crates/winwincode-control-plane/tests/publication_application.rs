@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(
     clippy::too_many_lines,
     reason = "black-box application tests keep each durable replay and paging assertion together"

@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Projection of current canonical Delivery-owned facts.
-
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;

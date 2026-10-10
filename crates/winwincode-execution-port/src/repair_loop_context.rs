@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Canonical sealing and validation for one bounded repair-loop context pack.
-
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -17,14 +13,6 @@ use crate::generated::{
 const HASH_DOMAIN: &[u8] = b"winwincode.repair-loop-context.v1\0";
 const MAX_SERIALIZED_BYTES: usize = 131_072;
 
-/// Validates every immutable budget field against the canonical schema bounds.
-///
-/// This check is required for directly constructed Rust values, which do not
-/// pass through JSON Schema validation before use.
-///
-/// # Errors
-///
-/// Returns `InvalidBudget` when any field is outside its canonical range.
 pub fn validate_repair_loop_budget(budget: &RepairLoopBudget) -> Result<(), RepairLoopBoundsError> {
     if budget.max_repair_rounds != 3
         || budget
@@ -50,15 +38,6 @@ pub fn validate_repair_loop_budget(budget: &RepairLoopBudget) -> Result<(), Repa
     Ok(())
 }
 
-/// Validates cumulative counters against the canonical hard ceilings.
-///
-/// The caller still compares the counters with its chosen immutable budget;
-/// this function prevents a larger directly constructed budget from widening
-/// the public protocol's absolute limits.
-///
-/// # Errors
-///
-/// Returns `InvalidCounters` when any count is negative or above its hard cap.
 pub fn validate_repair_loop_counters(
     counters: &RepairLoopCounters,
 ) -> Result<(), RepairLoopBoundsError> {
@@ -76,12 +55,9 @@ pub fn validate_repair_loop_counters(
     Ok(())
 }
 
-/// Stable failures for directly constructed budget and counter values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepairLoopBoundsError {
-    /// One immutable budget field is outside its canonical range.
     InvalidBudget,
-    /// One cumulative counter is outside its canonical range.
     InvalidCounters,
 }
 
@@ -96,20 +72,6 @@ impl fmt::Display for RepairLoopBoundsError {
 
 impl std::error::Error for RepairLoopBoundsError {}
 
-/// Derives the context digest without including either derived field.
-///
-/// The hash starts with [`HASH_DOMAIN`]. Each field below is then appended as
-/// two unsigned 64-bit big-endian length-framed byte strings: its field name,
-/// followed by its generated JSON representation. The exact field order is:
-/// schema version, identity, observed revision, proposal disposition, goal
-/// summary, completed criteria, incomplete criteria, nullable repair envelope,
-/// latest receipt, nullable latest observation, and Artifact references.
-/// `contextDigest` and `serializedByteCount` are deliberately excluded.
-///
-/// # Errors
-///
-/// Returns `Serialization` when a generated field cannot be represented as
-/// JSON.
 pub fn derive_repair_loop_context_digest(
     pack: &RepairLoopContextPack,
 ) -> Result<Sha256Digest, RepairLoopContextError> {
@@ -141,17 +103,6 @@ pub fn derive_repair_loop_context_digest(
     Ok(Sha256Digest(format!("sha256:{:x}", digest.finalize())))
 }
 
-/// Seals one typed context pack and returns its exact canonical JSON payload.
-///
-/// The returned pack has a derived digest and an actual serialized byte count.
-/// The byte count is solved against the final JSON representation rather than
-/// trusted from the caller.
-///
-/// # Errors
-///
-/// Rejects inconsistent identity or revision bindings, invalid acceptance
-/// partitions, an out-of-range repair round, serialization failure, or a final
-/// payload larger than 131,072 bytes.
 pub fn seal_repair_loop_context_pack(
     mut pack: RepairLoopContextPack,
 ) -> Result<(RepairLoopContextPack, Vec<u8>), RepairLoopContextError> {
@@ -173,15 +124,6 @@ pub fn seal_repair_loop_context_pack(
     Err(RepairLoopContextError::SerializedByteCountDidNotConverge)
 }
 
-/// Validates a typed pack against the exact bytes received at the boundary.
-///
-/// The payload must be the generated canonical JSON encoding of `pack`; this
-/// rejects whitespace variants, duplicate-key representations, unknown fields,
-/// caller-supplied byte counts, and payloads over the hard limit.
-///
-/// # Errors
-///
-/// Returns one bounded error describing the first failed boundary rule.
 pub fn validate_repair_loop_context_pack(
     pack: &RepairLoopContextPack,
     payload: &[u8],
@@ -206,17 +148,6 @@ pub fn validate_repair_loop_context_pack(
     Ok(())
 }
 
-/// Validates the exact bindings of one accepted final-candidate fact.
-///
-/// A deterministic hard-check acceptance may carry no Observer receipt. When
-/// an Observer receipt is present, it must accept the same identity and result
-/// revision. The final receipt must be an exact applied receipt for the same
-/// identity, result revision, and delta. Loop counters are checked against the
-/// canonical hard ceilings before the fact may become terminal.
-///
-/// # Errors
-///
-/// Returns a stable error when any final binding or bounded counter differs.
 pub fn validate_final_candidate_freeze_fact(
     fact: &FinalCandidateFreezeFact,
 ) -> Result<(), FinalCandidateFreezeError> {
@@ -265,26 +196,16 @@ pub fn validate_final_candidate_freeze_fact(
     Ok(())
 }
 
-/// Stable failures for final-candidate fact validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FinalCandidateFreezeError {
-    /// `schemaVersion` is not the single supported value.
     InvalidSchemaVersion,
-    /// The final receipt or observation names another `ChangeBatch` identity.
     IdentityMismatch,
-    /// The final receipt is not an exact applied result.
     InexactReceipt,
-    /// A nested result revision differs from the frozen revision.
     RevisionMismatch,
-    /// The final receipt delta differs from the frozen exact delta.
     DeltaMismatch,
-    /// A digest is not canonical lowercase SHA-256.
     InvalidDigest,
-    /// The bounded Observer did not accept the final result.
     ObservationNotAccepted,
-    /// The receipt and top-level final observation contradict one another.
     ObservationMismatch,
-    /// One loop counter exceeds its canonical hard ceiling.
     CounterLimitExceeded,
 }
 
@@ -306,44 +227,25 @@ impl fmt::Display for FinalCandidateFreezeError {
 
 impl std::error::Error for FinalCandidateFreezeError {}
 
-/// Stable failures for context-pack sealing and boundary validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepairLoopContextError {
-    /// A generated field or pack could not be serialized.
     Serialization,
-    /// The boundary payload is not a valid generated context pack.
     InvalidPayload,
-    /// The payload is valid JSON but not the exact generated canonical bytes.
     NonCanonicalPayload,
-    /// The exact payload exceeds 131,072 bytes.
     PayloadTooLarge,
-    /// `serializedByteCount` does not equal the exact boundary payload length.
     SerializedByteCountMismatch,
-    /// The self-sized serialized byte count did not stabilize.
     SerializedByteCountDidNotConverge,
-    /// `schemaVersion` is not the single supported value.
     InvalidSchemaVersion,
-    /// The goal summary is empty, oversized, or contains a line break or NUL.
     InvalidGoalSummary,
-    /// Either acceptance-criterion partition exceeds 64 entries.
     AcceptanceCriteriaLimitExceeded,
-    /// No acceptance criterion is present in either partition.
     MissingAcceptanceCriteria,
-    /// A criterion ID or summary is outside its bounded canonical shape.
     InvalidAcceptanceCriterion,
-    /// One criterion ID occurs more than once across the two partitions.
     DuplicateAcceptanceCriterion,
-    /// The context contains more than 16 Artifact references.
     ArtifactReferenceLimitExceeded,
-    /// A nested receipt, observation, or repair envelope has another identity.
     IdentityMismatch,
-    /// A nested result or observed revision does not match the pack revision.
     RevisionMismatch,
-    /// The latest receipt does not name an exact result revision.
     InexactLatestReceipt,
-    /// A directly constructed repair envelope is outside canonical rounds 1..=3.
     InvalidRepairRound,
-    /// `contextDigest` differs from the canonical length-framed derivation.
     DigestMismatch,
 }
 

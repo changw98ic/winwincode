@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control Plane ownership of the Candidate → freeze → Snapshot transaction.
-
 use sha2::{Digest, Sha256};
 use winwincode_delivery::domain::Delivery;
 use winwincode_domain::{
@@ -36,11 +32,6 @@ pub(crate) const FREEZE_TOPIC: &str = "verification.snapshot.freeze";
 pub(crate) const DISPATCH_TOPIC: &str = "verification.snapshot.dispatch";
 
 impl ControlPlane {
-    /// Seals the current Candidate and persists the freeze command before it
-    /// leaves Control Plane. Ordinary jobs use the existing dispatch path.
-    ///
-    /// # Errors
-    /// Rejects a foreign lease/job, missing source or pin, and changed replay.
     pub fn prepare_snapshot_freeze(
         &mut self,
         registry: &mut SqliteStorage,
@@ -121,11 +112,6 @@ impl ControlPlane {
         Ok(ExecutionPortMessage::SnapshotFreezeRequestMessage(request))
     }
 
-    /// Validates Worker facts against the durable request and current producer,
-    /// then atomically creates Snapshot, runtime binding and dispatch intent.
-    ///
-    /// # Errors
-    /// Rejects missing, stale or foreign authority and any changed code facts.
     #[allow(clippy::too_many_lines)]
     pub fn accept_snapshot_freeze(
         &mut self,
@@ -303,11 +289,6 @@ impl ControlPlane {
         })
     }
 
-    /// Replays committed transport intents until dispatch acceptance. Publication
-    /// to UI subscribers never acknowledges these internal Worker commands.
-    ///
-    /// # Errors
-    /// Rejects corrupted intents or bindings; obsolete leases are never sent.
     pub fn pending_snapshot_commands(
         &mut self,
         registry: &mut SqliteStorage,
@@ -475,8 +456,6 @@ impl ControlPlane {
             &delivery.snapshot().spec.base_revision,
         )
         .map_err(invalid)?;
-        // Apply the same current-writer and authorized rework delta checks used
-        // by candidate review and verdict resolution before requesting a freeze.
         let frozen = crate::delivery_verdict_authority::freeze_source(
             self.storage_ref()?,
             artifacts,

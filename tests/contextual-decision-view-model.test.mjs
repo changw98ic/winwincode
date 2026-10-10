@@ -228,7 +228,6 @@ test('blocking decisions are ordered first, then soonest expiry, then identity',
   assert.deepEqual(view.items.map(item => item.kind), ['approval', 'input', 'attention'])
   assert.equal(view.items[0].id, 'apr_00000000000000000000000002')
   assert.equal(view.items[0].urgency, 'blocking')
-  // One stable order, so a refreshed snapshot never reshuffles the card rows.
   const reversed = orderedContextualDecisions([...view.items].reverse())
   assert.deepEqual(reversed.map(item => item.id), view.items.map(item => item.id))
 })

@@ -33,10 +33,6 @@ function walk(directory, paths) {
   }
 }
 
-/**
- * Digest the source files that determine the Rust product composition.
- * Paths and bytes are both included so a rename cannot reuse an old seal.
- */
 export function projectSourceDigest(root) {
   const paths = SOURCE_ROOT_FILES
     .map(path => join(root, path))

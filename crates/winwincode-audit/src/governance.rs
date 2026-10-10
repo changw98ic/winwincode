@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Fail-closed data-governance policy authority.
-//!
-//! This module evaluates immutable classification, residency, redaction,
-//! retention, and legal-hold facts. It never receives raw content. A deletion
-//! can reach storage only through a sealed [`DeletionPermit`] and the explicit
-//! [`GovernedDeletionPort`]. The policy decision is appended to the canonical
-//! [`AuditStore`] before that port is called.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -25,7 +15,6 @@ const RULES_DOMAIN: &[u8] = b"winwincode.data-governance-rules.v1";
 const DECISION_DOMAIN: &[u8] = b"winwincode.data-governance-decision.v1";
 const AUDIT_DOMAIN: &[u8] = b"winwincode.data-governance-audit.v1";
 
-/// Stable data sensitivity classes, ordered from least to most restricted.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClassification {
@@ -56,16 +45,10 @@ impl DataClassification {
     }
 }
 
-/// Canonical region tag used by residency rules.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ResidencyRegion(String);
 
 impl ResidencyRegion {
-    /// Builds a bounded lower-case region tag such as `cn-north-1`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty, unbounded, or non-canonical tag.
     pub fn try_new(value: impl Into<String>) -> Result<Self, GovernanceError> {
         let value = value.into();
         let valid = (2..=64).contains(&value.len())
@@ -94,7 +77,6 @@ impl ResidencyRegion {
     }
 }
 
-/// The only content transformations that a governance rule can authorize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedactionStrategy {
@@ -115,7 +97,6 @@ impl RedactionStrategy {
     }
 }
 
-/// Minimum retention attached to one classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "duration_millis", rename_all = "snake_case")]
 pub enum RetentionRequirement {
@@ -123,7 +104,6 @@ pub enum RetentionRequirement {
     Indefinite,
 }
 
-/// One complete rule for a sensitivity class.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClassificationRule {
     classification: DataClassification,
@@ -133,12 +113,6 @@ pub struct ClassificationRule {
 }
 
 impl ClassificationRule {
-    /// Builds a rule with an explicit non-empty region allow-list.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate/empty regions, out-of-range retention, or revealing
-    /// confidential, restricted, or secret content.
     pub fn try_new(
         classification: DataClassification,
         allowed_regions: impl IntoIterator<Item = ResidencyRegion>,
@@ -193,16 +167,10 @@ impl ClassificationRule {
     }
 }
 
-/// Stable legal-hold identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct LegalHoldId(String);
 
 impl LegalHoldId {
-    /// Builds `lgh_` plus 26 Crockford characters.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical identity.
     pub fn try_new(value: impl Into<String>) -> Result<Self, GovernanceError> {
         let value = value.into();
         if !canonical_id(&value, "lgh") {
@@ -219,8 +187,6 @@ impl LegalHoldId {
     }
 }
 
-/// Immutable legal-hold fact. An absent source digest applies to every data
-/// object under the hold scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegalHold {
     id: LegalHoldId,
@@ -231,11 +197,6 @@ pub struct LegalHold {
 }
 
 impl LegalHold {
-    /// Builds a scoped legal hold.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed digests/timestamps or release at/before activation.
     pub fn try_new(
         id: LegalHoldId,
         scope: AuditScope,
@@ -282,7 +243,6 @@ impl LegalHold {
     }
 }
 
-/// Secret-free immutable facts used by every governance decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GovernedDataFact {
     scope: AuditScope,
@@ -293,11 +253,6 @@ pub struct GovernedDataFact {
 }
 
 impl GovernedDataFact {
-    /// Builds one governed data fact without accepting raw content.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope, digest, or timestamp facts.
     pub fn try_new(
         scope: AuditScope,
         source_digest: Sha256Digest,
@@ -338,7 +293,6 @@ impl GovernedDataFact {
     }
 }
 
-/// Traceable retention plan for one exact source fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetentionPlan {
     source_digest: Sha256Digest,
@@ -387,7 +341,6 @@ impl RetentionPlan {
     }
 }
 
-/// Secret-free redaction decision that retains the original source digest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RedactionPlan {
     scope: AuditScope,
@@ -454,7 +407,6 @@ impl RedactionPlan {
     }
 }
 
-/// Stable fail-closed policy denial.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GovernanceDenial {
     ResidencyDenied,
@@ -474,7 +426,6 @@ impl GovernanceDenial {
     }
 }
 
-/// Sealed residency authorization for one exact source and destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlacementPermit {
     source_digest: Sha256Digest,
@@ -511,7 +462,6 @@ impl PlacementPermit {
     }
 }
 
-/// Residency evaluation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlacementDecision {
     Allowed(PlacementPermit),
@@ -533,7 +483,6 @@ impl PlacementDecision {
     }
 }
 
-/// Sealed authorization consumed by the only deletion port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeletionPermit {
     scope: AuditScope,
@@ -576,7 +525,6 @@ impl DeletionPermit {
     }
 }
 
-/// Deletion evaluation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeletionDecision {
     Allowed(DeletionPermit),
@@ -607,7 +555,6 @@ impl DeletionDecision {
     }
 }
 
-/// Immutable context used to record one policy decision before deletion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GovernanceAuditContext {
     actor: AuditActor,
@@ -626,26 +573,17 @@ impl GovernanceAuditContext {
     }
 }
 
-/// Storage boundary for a deletion authorized by this module. Implementations
-/// must be idempotent by `decision_digest`.
 pub trait GovernedDeletionPort {
-    /// Applies one sealed deletion permit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error without remote or sensitive text.
     fn delete(&mut self, permit: &DeletionPermit)
     -> Result<DeletionPortOutcome, DeletionPortError>;
 }
 
-/// Idempotent deletion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeletionPortOutcome {
     Deleted,
     AlreadyDeleted,
 }
 
-/// Stable deletion adapter failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeletionPortError;
 
@@ -662,7 +600,6 @@ impl Default for DeletionPortError {
     }
 }
 
-/// Result of the audited policy-to-deletion-port coordinator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GovernedDeletionResult {
     Denied(GovernanceDenial),
@@ -672,8 +609,6 @@ pub enum GovernedDeletionResult {
     },
 }
 
-/// Immutable policy authority for classification, residency, redaction,
-/// retention, and legal holds.
 #[derive(Debug)]
 pub struct DataGovernanceAuthority {
     rule_id: String,
@@ -684,12 +619,6 @@ pub struct DataGovernanceAuthority {
 }
 
 impl DataGovernanceAuthority {
-    /// Builds one complete policy snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Requires one and only one rule for every classification, a canonical
-    /// rule identity/version/digest, and unique legal-hold identities.
     pub fn try_new(
         rule_id: &str,
         rule_version: u64,
@@ -759,12 +688,6 @@ impl DataGovernanceAuthority {
         &self.rule_digest
     }
 
-    /// Computes the traceable retention and legal-hold plan.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the source already resides outside its allow-list or
-    /// a retention timestamp overflows the exact range.
     pub fn retention_plan(
         &self,
         data: &GovernedDataFact,
@@ -801,11 +724,6 @@ impl DataGovernanceAuthority {
         })
     }
 
-    /// Produces a provenance-preserving redaction plan.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the current residency fact violates the rule set.
     pub fn redaction_plan(
         &self,
         data: &GovernedDataFact,
@@ -832,14 +750,6 @@ impl DataGovernanceAuthority {
         })
     }
 
-    /// Computes a redaction plan and appends its source/rule-bound decision to
-    /// the canonical Audit Ledger. Exact request replay returns the same plan
-    /// and does not add another audit sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns before producing a plan when residency is invalid, or when the
-    /// Audit Ledger cannot durably record the decision.
     pub fn record_redaction(
         &self,
         data: &GovernedDataFact,
@@ -873,13 +783,6 @@ impl DataGovernanceAuthority {
         Ok(plan)
     }
 
-    /// Authorizes placement only when both current and destination regions are
-    /// allowed for the exact classification.
-    ///
-    /// # Errors
-    ///
-    /// Returns invalid/corrupt policy facts separately from an ordinary
-    /// residency denial.
     pub fn evaluate_placement(
         &self,
         data: &GovernedDataFact,
@@ -905,12 +808,6 @@ impl DataGovernanceAuthority {
         }))
     }
 
-    /// Evaluates retention and every applicable legal hold before minting the
-    /// only deletion permit.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for malformed time or already-invalid residency facts.
     pub fn evaluate_deletion(
         &self,
         data: &GovernedDataFact,
@@ -953,13 +850,6 @@ impl DataGovernanceAuthority {
         }))
     }
 
-    /// Records the deterministic policy decision in the canonical Audit
-    /// Ledger before invoking the explicit storage deletion port.
-    ///
-    /// # Errors
-    ///
-    /// Returns before the port on invalid facts or an Audit Ledger error. A
-    /// deletion adapter failure is returned without exposing adapter text.
     pub fn execute_deletion(
         &self,
         data: &GovernedDataFact,
@@ -1245,7 +1135,6 @@ fn framed(hash: &mut Sha256, value: &[u8]) {
     hash.update(value);
 }
 
-/// Stable data-governance failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GovernanceErrorKind {
     InvalidInput,
@@ -1255,7 +1144,6 @@ pub enum GovernanceErrorKind {
     Adapter,
 }
 
-/// Secret-safe data-governance failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GovernanceError {
     kind: GovernanceErrorKind,

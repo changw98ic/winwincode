@@ -1,14 +1,4 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * REPO-SPLIT-000.3: verify a Community core lock before a consumer build.
- *
- * Schema-valid locks can still be operationally wrong. This verifier enforces
- * the contract rules beyond JSON Schema: one core version, matching sourceTag,
- * protocol winwincode/v1, and optional byte/digest checks against a local
- * artifact directory. Any failure exits non-zero so the consumer build stops.
- */
 
 import { createHash } from 'node:crypto'
 import { readFileSync, existsSync, statSync } from 'node:fs'
@@ -56,10 +46,6 @@ function sha256Hex(buffer) {
   return createHash('sha256').update(buffer).digest('hex')
 }
 
-/**
- * Beyond-schema rules from ADR-0031 coreLockManifest.validationRulesBeyondSchema.
- * Returns { ok, errors }. Never mutates the lock.
- */
 export function verifyCoreLock(lock, options = {}) {
   const errors = []
   if (!isRecord(lock)) {
@@ -102,7 +88,6 @@ export function verifyCoreLock(lock, options = {}) {
     errors.push(`mixed core versions are rejected: ${[...versions].sort().join(', ')}`)
   }
 
-  // Optional local artifact verification: bytes and sha256 must both match.
   if (typeof options.artifactDir === 'string') {
     const dir = options.artifactDir
     for (const { label, artifact } of collectArtifacts(core)) {
@@ -131,10 +116,6 @@ export function verifyCoreLock(lock, options = {}) {
   return { ok: errors.length === 0, errors }
 }
 
-/**
- * Upgrade rule: a lock update replaces the complete core object. Mixing one
- * package from an older core into a newer lock is rejected.
- */
 export function verifyCoreLockUpgrade(previous, next) {
   const errors = []
   if (!isRecord(previous) || !isRecord(next)) {
@@ -144,7 +125,6 @@ export function verifyCoreLockUpgrade(previous, next) {
   const nextVersion = next.core?.version
   if (typeof previousVersion === 'string' && typeof nextVersion === 'string') {
     if (previousVersion === nextVersion) {
-      // Same version: digests of shared package names must not drift.
       const previousByName = new Map(
         collectArtifacts(previous.core).map(({ artifact }) => [artifact.name, artifact]),
       )

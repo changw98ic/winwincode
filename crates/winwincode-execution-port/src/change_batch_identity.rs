@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Canonical content-derived identity for one `ChangeBatch` intent.
-//!
-//! The generated schema owns the wire shape. This module owns the semantic
-//! relationship between `batchId` and the exact run, turn, optional call, and
-//! patch digest. Job and lease facts deliberately remain outside the digest so
-//! one unchanged intent keeps its content identity while delivery authority is
-//! replayed or renewed.
-
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
@@ -18,17 +8,6 @@ use crate::generated::ChangeBatchIdentity;
 const HASH_DOMAIN: &[u8] = b"winwincode.change-batch-id.v1\0";
 const MAX_IDENTITY_PART_BYTES: usize = 200;
 
-/// Derives the canonical ID for one exact `ChangeBatch` intent.
-///
-/// Every variable-length value is framed with an unsigned 64-bit big-endian
-/// byte length. The optional call ID has a separate absent/present tag before
-/// its length, so absence cannot collide with a present empty value. Public
-/// input still rejects an empty present call ID.
-///
-/// # Errors
-///
-/// Rejects an empty, oversized, or non-canonical run key, turn ID, or present
-/// call ID, and rejects a malformed lowercase SHA-256 patch digest.
 pub fn derive_change_batch_id(
     run_key: &str,
     turn_id: &str,
@@ -51,16 +30,6 @@ pub fn derive_change_batch_id(
     ))
 }
 
-/// Verifies the content-derived fields of one generated identity.
-///
-/// Job, attempt, lease, fence, session, repository, and workspace fields are
-/// authority bindings rather than content-ID inputs and are intentionally not
-/// included in this derivation check.
-///
-/// # Errors
-///
-/// Returns the same canonical-input failures as [`derive_change_batch_id`], or
-/// `BatchIdMismatch` when any derived field was changed independently.
 pub fn validate_change_batch_identity_derivation(
     identity: &ChangeBatchIdentity,
 ) -> Result<(), ChangeBatchIdentityDerivationError> {
@@ -76,18 +45,12 @@ pub fn validate_change_batch_identity_derivation(
     Ok(())
 }
 
-/// Stable, bounded failures for `ChangeBatch` ID derivation and validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChangeBatchIdentityDerivationError {
-    /// `runKey` is empty, oversized, or outside its canonical token alphabet.
     InvalidRunKey,
-    /// `turnId` is empty, oversized, or outside its canonical token alphabet.
     InvalidTurnId,
-    /// A present `callId` is empty, oversized, or outside its token alphabet.
     InvalidCallId,
-    /// `patchDigest` is not `sha256:` followed by 64 lowercase hexadecimal digits.
     InvalidPatchDigest,
-    /// `batchId` does not match the canonical derivation of its content fields.
     BatchIdMismatch,
 }
 

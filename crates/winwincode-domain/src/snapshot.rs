@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Strict runtime identity for immutable verification snapshots.
-
 use std::{error::Error, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -12,7 +8,6 @@ use super::{
     VerificationSessionId, WorkRunId, is_canonical_prefixed_id,
 };
 
-/// Why a generated Snapshot cannot be promoted into a trusted runtime value.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SnapshotIdentityError {
     InvalidIdentity,
@@ -32,21 +27,9 @@ impl fmt::Display for SnapshotIdentityError {
 
 impl Error for SnapshotIdentityError {}
 
-/// A schema-shaped Snapshot whose runtime values passed strict identity checks.
-///
-/// Construction accepts an already allocated identity. This module never
-/// allocates a `SnapshotId`, and the value exposes no mutation API.
-///
-/// ```compile_fail
-/// use winwincode_domain::{CanonicalSnapshot, GitObjectId};
-/// fn rewrite(snapshot: &mut CanonicalSnapshot) {
-///     snapshot.as_contract().candidate_commit_id = GitObjectId("f".repeat(40));
-/// }
-/// ```
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CanonicalSnapshot(Snapshot);
 
-// All validated Snapshot fields have reflexive equality (no floating-point values).
 impl Eq for CanonicalSnapshot {}
 
 impl CanonicalSnapshot {
@@ -122,7 +105,6 @@ pub struct SnapshotVerificationBinding {
     pub verification_session_id: VerificationSessionId,
 }
 
-/// Why one runtime record does not resolve to its bound product Snapshot.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SnapshotBindingError {
     Malformed,
@@ -147,8 +129,6 @@ impl fmt::Display for SnapshotBindingError {
 impl Error for SnapshotBindingError {}
 
 impl SnapshotVerificationBinding {
-    /// # Errors
-    /// Rejects any identity that differs from the bound verification input.
     pub fn accept(
         &self,
         snapshot_id: &SnapshotId,
@@ -183,8 +163,6 @@ impl SnapshotVerificationBinding {
         Ok(())
     }
 
-    /// # Errors
-    /// Rejects malformed JSON and non-canonical identities.
     pub fn from_json(value: &serde_json::Value) -> Result<Self, SnapshotBindingError> {
         let binding: Self =
             serde_json::from_value(value.clone()).map_err(|_| SnapshotBindingError::Malformed)?;
@@ -241,13 +219,11 @@ fn digest(value: &Sha256Digest) -> bool {
     })
 }
 
-/// Recomputes the identity seal without permitting identity mutation.
 #[must_use]
 pub fn verify_snapshot_seal(snapshot: &CanonicalSnapshot) -> bool {
     seal_snapshot(&snapshot.0) == snapshot.0.validation_seal
 }
 
-/// Computes the immutable identity seal for one generated `Snapshot` contract.
 #[must_use]
 pub fn seal_snapshot(snapshot: &Snapshot) -> Sha256Digest {
     let mut hasher = Sha256::new();

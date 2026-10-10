@@ -1,36 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic candidate identity derived from sealed Control Plane facts.
-//!
-//! This module does not read Git, Worker messages, or API payloads. The
-//! Git/Artifact adapter returns storage-neutral durable facts; this module
-//! revalidates their exact successful Worker outcome and converts them into
-//! the private candidate snapshot seal.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::candidate::SealedCandidateSource;
-//!
-//! let _caller_built_snapshot = SealedCandidateSource {
-//!     work_run_id: todo!(),
-//!     ..todo!()
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::candidate::FreezeCandidateFacts;
-//!
-//! let _caller_built_freeze = FreezeCandidateFacts {
-//!     candidate_source: todo!(),
-//!     terminal_outcome: todo!(),
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::candidate::FrozenDeliveryCandidate;
-//!
-//! let _: FrozenDeliveryCandidate = serde_json::from_str("{}").unwrap();
-//! ```
-
 use std::collections::HashSet;
 
 use serde::Serialize;
@@ -80,16 +47,10 @@ pub struct CandidatePathFact {
 #[serde(rename_all = "camelCase")]
 pub struct CandidateHunkFact {
     pub file_path: String,
-    /// Digest of the resulting diff hunk content.
     pub hunk_sha256: String,
-    /// Original reviewed hunk identity whose range this result modifies.
-    ///
-    /// Present only for a remediator old-to-new delta. The trusted Git adapter
-    /// derives this mapping from hunk ranges; it is not copied from a prompt.
     pub source_hunk_sha256: Option<String>,
 }
 
-/// Storage-neutral Artifact facts copied from a trusted source adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DurableCandidateArtifactInput {
     pub artifact_id: ArtifactId,
@@ -105,7 +66,6 @@ pub struct DurableCandidateArtifactInput {
     pub worker_session_id: WorkerSessionId,
 }
 
-/// Storage-neutral Git and Artifact facts rebuilt by a trusted adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DurableCandidateSourceInput {
     pub repository_locator: String,
@@ -120,9 +80,6 @@ pub struct DurableCandidateSourceInput {
     pub artifact: DurableCandidateArtifactInput,
 }
 
-/// Immutable producer source proof. This is not a verification Snapshot:
-/// its authority is the writer's exact Artifact and `SessionBinding`, and it is
-/// consumed only while sealing executor/remediator output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedCandidateSource {
     input: DurableCandidateSourceInput,
@@ -220,7 +177,6 @@ impl SealedCandidateSource {
     }
 }
 
-/// Sealed input accepted by [`freeze_delivery_candidate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreezeCandidateFacts {
     candidate_id: CandidateId,
@@ -234,8 +190,6 @@ impl FreezeCandidateFacts {
     }
 }
 
-/// One immutable candidate identity derived from canonical Delivery and sealed
-/// Git/Worker facts. It is not an eleventh persisted Delivery object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrozenDeliveryCandidate {
@@ -465,18 +419,6 @@ struct CandidateIdentity<'candidate> {
     changed_hunks: &'candidate [CandidateHunkFact],
 }
 
-/// Freezes the current successful executor writer from sealed facts.
-///
-/// Remediator output has a different trust boundary: callers must use the
-/// authorization-bound replacement entry in the rework module. Keeping that
-/// path separate makes it impossible to promote an unchecked rework result to
-/// the current candidate.
-///
-/// # Errors
-///
-/// Rejects stale canonical state, a non-successful or cross-Job terminal
-/// outcome, a modified seal, malformed Git facts, or a snapshot from another
-/// repository, session, attempt, lease, fence, or Worker.
 pub fn freeze_delivery_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
@@ -484,15 +426,6 @@ pub fn freeze_delivery_candidate(
     freeze_candidate_for_profile(delivery, facts, "executor")
 }
 
-/// Freezes a candidate only after the durable source adapter rebuilt all
-/// Git identities and the Delivery-owned terminal authority revalidated the
-/// exact successful producer.
-///
-/// # Errors
-///
-/// Rejects a foreign repository/base revision, Artifact provenance that does
-/// not match the successful Worker outcome, a changed Git source fact, or a
-/// stale/non-successful producer.
 pub fn freeze_delivery_candidate_from_source(
     delivery: &Delivery,
     source: &DurableCandidateSourceInput,
@@ -511,10 +444,6 @@ pub fn freeze_delivery_candidate_from_source(
     )
 }
 
-/// Freezes remediator output only after checking its authorized old-to-new Git delta.
-///
-/// # Errors
-/// Rejects changed Artifact identity, foreign source lineage, or changes outside authorization.
 pub fn freeze_rework_candidate_from_sources(
     delivery: &Delivery,
     authorization: &super::rework::ReworkAuthorization,
@@ -728,12 +657,6 @@ fn freeze_candidate_for_profile(
     Ok(candidate)
 }
 
-/// Rejects a frozen candidate after a spec/fact change or later writer starts.
-///
-/// # Errors
-///
-/// Returns an error when the candidate is no longer the exact current derived
-/// candidate for the Delivery.
 pub(crate) fn assert_frozen_candidate_current(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -883,8 +806,6 @@ fn current_writer<'delivery>(
             "candidate producer WorkRun is not eligible for successful report verification",
         ));
     }
-    // Aggregate append order determines writer succession. Attempts count retries
-    // within one execution job, not different writers of the same WorkItem.
     let newer_writer = runs.iter().skip(producer_index + 1).any(|run| {
         let writer_profile = delivery
             .snapshot()
@@ -1168,11 +1089,6 @@ pub mod test_support {
     };
     use winwincode_domain::{ArtifactId, ExecutionAckSequence, Sha256Digest};
 
-    /// Observable Git and terminal artifact values used by high-level tests.
-    ///
-    /// Execution ownership is intentionally absent. The fixture resolves the
-    /// producer's Job, lease, fence, Worker, and Session identities from the
-    /// canonical [`Delivery`] instead of accepting caller-provided authority.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CandidateFixtureInput {
         pub base_commit_id: String,
@@ -1188,12 +1104,6 @@ pub mod test_support {
         pub finished_at_millis: u64,
     }
 
-    /// Freezes one executor candidate through the production candidate seam.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the producer IDs are missing, foreign, stale, incomplete,
-    /// or the observable Git/artifact input is invalid.
     #[must_use]
     pub fn freeze_candidate_fixture(
         delivery: &Delivery,
@@ -1324,7 +1234,6 @@ pub mod test_support {
         )
     }
 
-    /// Canonical product fixture shared by every verification role.
     pub(crate) fn canonical_snapshot_fixture(
         candidate: &FrozenDeliveryCandidate,
     ) -> winwincode_domain::CanonicalSnapshot {

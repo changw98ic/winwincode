@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Publication domain and durable external-effect coordinator.
-
 mod coordinator;
 mod facts;
 mod github;

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -30,13 +28,6 @@ struct PreparedExport {
     disk_warning: bool,
 }
 
-/// Create an atomic, byte-stable evidence directory and optional archive.
-///
-/// # Errors
-///
-/// Fails before output for invalid inputs, secrets, digest mismatches, existing
-/// destinations, or an insufficient disk budget. I/O failures remove staging
-/// files and never publish a partial package.
 pub fn export_evidence(
     output_root: &Path,
     request: &ExportRequest,

@@ -1,7 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-/* Product aliases for the DSH theme. Font, control and radius values follow
-   DSH ui-theme, Button, Input and InputBar; see upstream/dsh-frontend.json. */
-
 :root {
   color-scheme: light;
   --wwc-color-canvas: var(--dsw-alias-bg-base);
@@ -81,7 +77,6 @@
   --wwc-readable-max: 48rem;
   --wwc-drawer-width: 28rem;
   --wwc-log-preview-max-height: 24rem;
-  /* Screenshots open inside the Evidence drawer, never taller than its body. */
   --wwc-preview-image-max-height: 24rem;
   --wwc-control-min-height: 2.25rem;
   --wwc-graph-viewport-max-height: 28rem;
@@ -90,7 +85,6 @@
   --wwc-graph-node-narrow-width: 9rem;
   --wwc-graph-overview-width: 12rem;
   --wwc-graph-overview-height: 6rem;
-  /* Windowed lists: the scroll math in apps/client/src uses the same value. */
   --wwc-window-row-height: 60px;
   --wwc-shadow-dialog: 0 12px 40px rgb(0 0 0 / 16%);
   --wwc-sidebar-width: 17rem;

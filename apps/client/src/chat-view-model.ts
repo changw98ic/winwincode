@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { ChatAttachment } from './generated/contracts.js'
 
 import {
@@ -113,9 +111,7 @@ export interface ChatViewModelState {
   readonly selectedModelRoute: ModelRoute | null
   readonly modelRouteSelectionIssue: ModelRouteAvailabilityReason | null
   readonly runtime: RuntimeProjectionSnapshot | null
-  /** Exact Control Plane binding used by input.respond. */
   readonly pendingInputs: readonly ChatInputInteractionProjection[]
-  /** Exact Control Plane binding used by approval.decide. */
   readonly pendingApprovals: readonly ApprovalProjection[]
   readonly interaction: ChatInteractionState
   readonly error: ControlPlaneClientError | null
@@ -131,13 +127,11 @@ export interface ChatViewModelOptions {
   readonly clientId?: string
   readonly nextSubscriptionId: () => ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
-  /** Keep the browser route bound to the ProductSession selected by this view-model. */
   readonly onActiveSessionChange?: (productSessionId: ProductSessionId) => void
   readonly messagePageSize?: number
   readonly runtimePageSize?: number
   readonly approvalPageSize?: number
   readonly interactionPageSize?: number
-  /** Deterministic clock used to reject expired interaction bindings. */
   readonly nowMillis?: () => number
   readonly launchDeviceSession?: (input: { readonly clientId: string; readonly repositoryBindingId: string; readonly productSessionId: ProductSessionId }) => Promise<void>
 }
@@ -514,7 +508,6 @@ function assertPendingApprovals(
   return Object.freeze(result)
 }
 
-/** Build the complete Chat read model from HTTP snapshots and one WebSocket subscription. */
 export function createChatViewModel(options: ChatViewModelOptions): ChatViewModel {
   const queryCache = createQueryCacheLifecycle(options)
   const messagePageSize = assertPageSize(
@@ -727,8 +720,6 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
 
   async function querySnapshot(signal: AbortSignal): Promise<ChatSnapshot> {
     if (activeProductSessionId === null) {
-      // 设计稿 03a:「新对话」是空状态——不自动续接最近会话(那会经最近
-      // 对话链接或首条消息创建会话进入),只加载模型路由供 composer 使用。
       const routes = await modelRouteAvailability(signal)
       return Object.freeze({
         sessions: Object.freeze([]),
@@ -1725,7 +1716,6 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       }
       if (cursor !== null) subscribeRealtime(cursor)
     } catch {
-      // completeSnapshot has already published one bounded error.
     }
   }
 

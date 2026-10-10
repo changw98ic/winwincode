@@ -1,24 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * UI-605 large-data fixtures and the recorded performance baseline.
- *
- * The fixture records the DOM, interaction, and scroll budgets used by the
- * shared windowed-list checks.
- */
-
 export const LARGE_DELIVERY_COUNT = 5000
 
 export const LARGE_DATA_CORPUS = Object.freeze({
   deliveries: LARGE_DELIVERY_COUNT,
 })
 
-/**
- * Recorded UI-605 budgets.  `rendered.listRows` is a hard DOM cap: a windowed
- * list renders exactly this many rows no matter how many records are loaded.
- * The millisecond budgets are intentionally wide so they stay stable on
- * shared runners while still failing a page that rebuilds the whole corpus.
- */
 export const LARGE_DATA_PERFORMANCE_BASELINE = Object.freeze({
   rendered: Object.freeze({
     listRows: 36,
@@ -31,7 +16,6 @@ export const LARGE_DATA_PERFORMANCE_BASELINE = Object.freeze({
   }),
 })
 
-/** DOM-counter element that records every allocated node and listener. */
 class Ui605Element {
   constructor(ownerDocument, tagName) {
     this.ownerDocument = ownerDocument
@@ -121,7 +105,6 @@ class Ui605Element {
     )
   }
 
-  /** Dispatch one DOM event to this node and every ancestor. */
   emit(name, values = {}) {
     const event = { target: this, preventDefault() {}, ...values }
     let current = this
@@ -136,7 +119,6 @@ class Ui605Element {
   focus() { this.ownerDocument.activeElement = this }
 }
 
-/** Counting document: every created element is tracked for DOM budgets. */
 export class Ui605Document {
   activeElement = null
   elements = []
@@ -167,7 +149,6 @@ export function findByClass(node, className) {
   return null
 }
 
-/** Depth-first search for one token of a space-separated class attribute. */
 export function findByClassName(node, className) {
   if (node.className.split(/\s+/u).includes(className)) return node
   for (const child of node.children) {
@@ -183,7 +164,6 @@ export function findAllByClass(node, className, matches = []) {
   return matches
 }
 
-/** Count every element reachable from `node`, including `node`. */
 export function treeNodeCount(node) {
   return 1 + node.children.reduce((total, child) => total + treeNodeCount(child), 0)
 }

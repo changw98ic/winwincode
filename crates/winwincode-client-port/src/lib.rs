@@ -1,29 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Shared Rust types for the canonical `WinWinCode` `ClientControlPort`.
-//!
-//! This crate is the hand-written contract skeleton for the shared device
-//! client protocol (plan sections 3.3, 7, and 9). It declares the
-//! ten domain objects, the `Envelope` frame, and the client-to-server and
-//! server-to-client message enums with their exact wire `kind` strings.
-//!
-//! The types are self-contained: they intentionally do not reference schema
-//! JSON files and do not depend on other workspace crates, so the device
-//! client and the control plane can adopt them independently. The wire
-//! encodings (for example the decimal-string occupancy fencing token) live
-//! in the [`wire`] module.
-//!
-//! On top of the frozen wire types, the [`exchange`] module is the
-//! transport-neutral exchange framework for the
-//! `POST /internal/v1/client/exchange` endpoint: bidirectional sequence
-//! allocation, contiguous acknowledgement advancement, gap detection with
-//! `replayFromSequence`, the durable outbox seam, deduplication and
-//! idempotency-conflict judgement, and the bounded envelope codec. It is a
-//! pure synchronous library: no IO and no async runtime.
-
-// The wire contract names many identifiers and brand words (`WinWinCode`,
-// `ClientControlPort`) that the `doc_markdown` lint would demand backticks
-// around; the docs stay readable without them.
 #![allow(clippy::doc_markdown)]
 
 pub mod domain;

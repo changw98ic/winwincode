@@ -127,7 +127,6 @@ test('a real browser renders the Usage, Provider and Worker health summary in th
   assert.equal(refreshed.deliveries.length, summary.deliveries.length)
   assert.equal(refreshed.leak, false)
 
-  // A projection this fixture never implements must mark only its own section.
   const degraded = await evaluate(devtools, sessionId, 'globalThis.blockProviderRead()')
   assert.equal(degraded.providers, 0)
   assert.equal(degraded.models, 0)

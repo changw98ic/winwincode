@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Authenticated Worker claim lifecycle over the canonical local stores.
-
 use std::{fmt, path::Path};
 
 use sha2::{Digest, Sha256};
@@ -14,7 +10,6 @@ use winwincode_storage::{
     LeaseWriteStatus, SqliteStorage, StorageError, WorkerRegistryScope, WorkerSlotState,
 };
 
-/// Stable production Worker lifecycle failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerExecutionLifecycleErrorKind {
     Authority,
@@ -22,7 +17,6 @@ pub enum WorkerExecutionLifecycleErrorKind {
     Storage,
 }
 
-/// Secret-free production Worker lifecycle error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerExecutionLifecycleError {
     kind: WorkerExecutionLifecycleErrorKind,
@@ -53,17 +47,11 @@ impl From<StorageError> for WorkerExecutionLifecycleError {
     }
 }
 
-/// Local production composition for authenticated Worker claims.
 pub struct DurableWorkerExecutionLifecycle {
     storage: SqliteStorage,
 }
 
 impl DurableWorkerExecutionLifecycle {
-    /// Opens and verifies the canonical queue, admission, and Registry stores.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded storage failure when the local database is unavailable.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, WorkerExecutionLifecycleError> {
         let mut storage = SqliteStorage::open(data_directory).map_err(storage_error)?;
         storage.execution_queue().map_err(storage_error)?;
@@ -72,13 +60,6 @@ impl DurableWorkerExecutionLifecycle {
         Ok(Self { storage })
     }
 
-    /// Claims a durable Job after joining its queue, admission, Worker, and
-    /// transport-authenticated placement authority.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for missing or changed authority, unavailable stores, or
-    /// Registry rejection. Registry rejection also releases local admission.
     pub fn claim(
         &mut self,
         claim: &ExecutionLeaseClaim,
@@ -150,13 +131,6 @@ impl DurableWorkerExecutionLifecycle {
         ))
     }
 
-    /// Settles recorded usage for an authenticated terminal Worker outcome.
-    /// Embedded executions have no authenticated placement and return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Missing totals retain unknown accounting. Rejects inconsistent Usage,
-    /// changed placement, or stale session authority.
     #[allow(clippy::too_many_lines)]
     pub fn settle_terminal_outcome(
         &mut self,
@@ -180,7 +154,6 @@ impl DurableWorkerExecutionLifecycle {
                 0,
             )
         };
-        // Verify terminal session authority before retaining any usage fact.
         require_terminal_authority(
             &mut self.storage,
             &WorkerUsageSettlement {
@@ -284,13 +257,6 @@ impl DurableWorkerExecutionLifecycle {
         .map(Some)
     }
 
-    /// Settles known usage or releases admission for an authenticated failed
-    /// or cancelled Worker outcome. Embedded executions return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects successful outcomes, changed placement, changed replay, or
-    /// unavailable durable state.
     pub fn release_terminal_outcome(
         &mut self,
         message: &JobOutcomeMessage,

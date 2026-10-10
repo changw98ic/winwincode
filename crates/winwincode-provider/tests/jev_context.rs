@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

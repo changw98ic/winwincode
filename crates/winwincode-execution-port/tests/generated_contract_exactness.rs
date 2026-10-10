@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use serde_json::{Value, from_value};
 use winwincode_domain::WorkspaceRevision;
 use winwincode_execution_port::generated::{
@@ -125,8 +123,6 @@ fn execution_port_inline_string_enums_reject_unknown_values() {
         ("job.outcome_ack", "status"),
     ];
 
-    // Keep the enum types in the public generated surface, rather than allowing
-    // an inline schema enum to silently regress to an unconstrained String.
     let _: fn(WorkerCapabilitySetPlatform) = |_| {};
     let _: fn(WorkerRegistrationResultMessageStatus) = |_| {};
     let _: fn(WorkerRegistrationResultMessageLeaseRecovery) = |_| {};

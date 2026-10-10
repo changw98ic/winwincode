@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { redactPublicText } from './public-redaction.js'
 import type {
@@ -26,7 +24,6 @@ export interface UsageHealthPresentation {
   readonly providerStateLabel: Readonly<Record<ProviderHealthState, string>>
   readonly credentialStateLabel: Readonly<Record<CredentialHealthRow['secretState'], string>>
   readonly dimensionHeading: Readonly<Record<UsageHealthDimension, string>>
-  /** Every unknown or unreported value carries this exact word, never a blank cell. */
   readonly unknownLabel: string
   readonly unattributedLabel: string
   readonly durationNote: string
@@ -206,8 +203,6 @@ export function mountUsageHealthSummary(
   const heading = element(document, 'h2', 'wwc-usage-health-heading')
   heading.id = 'wwc-usage-health-title'
   heading.textContent = presentation.headingLabel
-  // The host page owns the single polite live region; this read-only panel never
-  // opens a second announcement channel next to it.
   const updated = element(document, 'p', 'wwc-usage-health-updated')
   const refresh = element(document, 'button', 'wwc-usage-health-refresh')
   refresh.type = 'button'
@@ -225,7 +220,6 @@ export function mountUsageHealthSummary(
     readonly sources: readonly UsageHealthSource[]
   }[] = []
 
-  /** A missing fact renders an explicit named marker; known facts render no marker at all. */
   function unknownMarker(known: boolean, label: string): HTMLElement | null {
     if (known) return null
     const marker = element(document, 'span', 'wwc-usage-health-unknown')

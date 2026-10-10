@@ -1,9 +1,6 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { createRoot } from 'react-dom/client'
 import { MarkdownText } from './dsh/markdown/MarkdownText.js'
 
-/** Mount the upstream renderer in the existing conversation message. */
 export function mountChatMarkdown(root: HTMLElement): {
   update(text: string, streaming: boolean): void
   close(): void

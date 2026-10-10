@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type PanelHeadingLevel = 2 | 3
@@ -10,10 +8,6 @@ export interface PanelProps {
   readonly description?: string
   readonly busy?: boolean
   readonly className?: string
-  /**
-   * UI-604: the shell owns the one page heading, so a panel that nests below a
-   * page's own section title moves down a level instead of sitting beside it.
-   */
   readonly headingLevel?: PanelHeadingLevel
 }
 

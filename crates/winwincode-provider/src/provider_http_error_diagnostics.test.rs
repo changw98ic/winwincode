@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 const PRIVATE_HTTP_ERROR: &str = r#"{"error":{"code":"invalid_request","message":"private provider diagnostic https://private.invalid/token provider-https-sse-secret-fixture","param":"reasoning_effort"}}"#;
 
 struct HttpErrorLogDirectory(std::path::PathBuf);

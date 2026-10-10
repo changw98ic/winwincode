@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 export type ClientSurfaceId =
   | 'home'
   | 'chat'
@@ -15,14 +13,9 @@ export interface ClientSurface {
   readonly label: string
   readonly description: string
   readonly default: boolean
-  /** Design shell: only chat, board, projects, extensions render nav links. */
   readonly nav: boolean
 }
 
-/**
- * The community client opens a new Chat by default; every other product area
- * stays one direct surface away.
- */
 export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
   Object.freeze({
     id: 'chat',

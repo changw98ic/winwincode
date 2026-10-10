@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Worker runtime `TraceOutbox` and content-addressed Artifact reference flow.
-//!
-//! Runtime facts are reduced to typed, secret-safe metadata and Artifact
-//! references before they enter the existing durable replay store. Large bytes
-//! go directly to an injected fenced Artifact cache; this module neither owns
-//! another Artifact store nor creates a product or Control Plane event cursor.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -40,17 +31,10 @@ const MAX_SAFE_SEQUENCE: i64 = 9_007_199_254_740_991;
 const MAX_SUMMARY_BYTES: usize = 2_000;
 const MAX_ARTIFACT_BYTES: usize = 1_099_511_627_776;
 
-/// Secret-safe summary accepted into a runtime event row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretSafeTraceSummary(String);
 
 impl SecretSafeTraceSummary {
-    /// Validates a bounded summary which contains no common credential form.
-    ///
-    /// # Errors
-    ///
-    /// Rejects blank, oversized, multiline, control-character, or visibly
-    /// credential-bearing summaries.
     pub fn new(value: impl Into<String>) -> Result<Self, RuntimeTraceInputError> {
         let value = value.into();
         let normalized = value.to_ascii_lowercase();
@@ -80,14 +64,12 @@ impl SecretSafeTraceSummary {
         Ok(Self(value))
     }
 
-    /// Returns the validated summary.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Stage transition retained as a typed runtime fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageTraceState {
@@ -98,7 +80,6 @@ pub enum StageTraceState {
     Failed,
 }
 
-/// Tool result retained without command output or request arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolTraceOutcome {
@@ -107,7 +88,6 @@ pub enum ToolTraceOutcome {
     Cancelled,
 }
 
-/// Worker lifecycle fact retained without provider or tool payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerRuntimeTraceState {
@@ -119,14 +99,9 @@ pub enum WorkerRuntimeTraceState {
     Stopped,
 }
 
-/// Process-level execution strategy selected before a Job starts.
-///
-/// [`Self::React`] remains the default. Structured modes select host-managed
-/// execution paths; selecting a mode never grants candidate workspace writes.
 pub use crate::generated::ExecutionMode;
 
 impl ExecutionMode {
-    /// Parses the canonical configuration spelling.
     #[must_use]
     pub fn from_config(value: &str) -> Option<Self> {
         match value {
@@ -138,7 +113,6 @@ impl ExecutionMode {
         }
     }
 
-    /// Returns the canonical configuration spelling.
     #[must_use]
     pub const fn as_config(self) -> &'static str {
         match self {
@@ -150,7 +124,6 @@ impl ExecutionMode {
     }
 }
 
-/// Policy controlling when the optional one-shot Observer may run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverMode {
@@ -162,7 +135,6 @@ pub enum ObserverMode {
 }
 
 impl ObserverMode {
-    /// Parses the canonical configuration spelling.
     #[must_use]
     pub fn from_config(value: &str) -> Option<Self> {
         match value {
@@ -174,7 +146,6 @@ impl ObserverMode {
         }
     }
 
-    /// Returns the canonical configuration spelling.
     #[must_use]
     pub const fn as_config(self) -> &'static str {
         match self {
@@ -186,15 +157,9 @@ impl ObserverMode {
     }
 }
 
-/// Secret-safe aggregate used to compare one execution attempt with another.
-///
-/// Only bounded counters and durations are retained. Provider content, tool
-/// arguments, commands, paths, patches, source and logs are deliberately
-/// absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceBaselineReport {
-    /// False means token counters are known lower bounds, not settled totals.
     #[serde(default, skip_serializing_if = "usage_incomplete")]
     pub usage_complete: bool,
     pub execution_mode: ExecutionMode,
@@ -218,13 +183,11 @@ pub struct PerformanceBaselineReport {
     pub total_runtime_ms: i64,
 }
 
-// Serde's skip predicate takes a borrowed field.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn usage_incomplete(value: &bool) -> bool {
     !value
 }
 
-/// Stable gate outcome retained without free-form policy details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceGateOutcome {
@@ -262,7 +225,6 @@ impl TraceGateOutcome {
     }
 }
 
-/// Typed trace data. It has no raw paths, arguments, environment, output, or bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeTraceFact {
@@ -304,17 +266,14 @@ pub enum RuntimeTraceFact {
     },
 }
 
-/// Exact JSON payload retained in a runtime event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeTracePayload {
     pub schema_version: String,
     pub fact: RuntimeTraceFact,
-    /// Content-addressed references only; Artifact bytes never enter this payload.
     pub artifacts: Vec<ArtifactReference>,
 }
 
-/// Message and source identity assigned to one runtime trace fact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceIdentity {
     pub lease: ExecutionLeaseStamp,
@@ -327,7 +286,6 @@ pub struct RuntimeTraceIdentity {
     pub sent_at: Instant,
 }
 
-/// One typed trace fact ready for the Worker outbox.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDraft {
     pub identity: RuntimeTraceIdentity,
@@ -338,11 +296,6 @@ pub struct RuntimeTraceDraft {
 }
 
 impl RuntimeTraceDraft {
-    /// Creates a secret-safe normalized Action fact without targets or tool payloads.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the derived secret-safe summary cannot be built.
     pub fn gateway_action<Policy>(
         identity: RuntimeTraceIdentity,
         input: &GateInput<'_, Policy>,
@@ -366,11 +319,6 @@ impl RuntimeTraceDraft {
         })
     }
 
-    /// Creates the mandatory pre-action control event for an Action Gateway decision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the derived secret-safe summary cannot be built.
     pub fn gateway_decision<Policy>(
         identity: RuntimeTraceIdentity,
         input: &GateInput<'_, Policy>,
@@ -398,11 +346,6 @@ impl RuntimeTraceDraft {
         })
     }
 
-    /// Creates the machine-derived post-action hook fact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if its secret-safe summary cannot be built.
     pub fn gateway_post_action<Policy>(
         identity: RuntimeTraceIdentity,
         input: &GateInput<'_, Policy>,
@@ -418,11 +361,6 @@ impl RuntimeTraceDraft {
         )
     }
 
-    /// Creates a post-action fact from a trusted executor completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if its secret-safe summary cannot be built.
     pub fn post_action(
         identity: RuntimeTraceIdentity,
         source: ActionSource,
@@ -452,7 +390,6 @@ impl RuntimeTraceDraft {
     }
 }
 
-/// Trace input rejected before lease authority or durable storage is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTraceInputError {
     InvalidSummary,
@@ -484,26 +421,22 @@ impl fmt::Display for RuntimeTraceInputError {
 
 impl std::error::Error for RuntimeTraceInputError {}
 
-/// Result of retaining a trace fact in the existing Worker replay store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeTraceRetention {
-    /// A sendable original message is durable. Duplicate retries return the
-    /// first stored message rather than rebuilding it.
     Ready {
         message: Box<RuntimeEventMessage>,
         highest_sequence: u64,
         duplicate: bool,
     },
-    /// One or more prior trace facts must be replayed first.
     Gap {
         highest_sequence: u64,
         replay_from_sequence: u64,
     },
-    /// The event id or sequence was reused with another semantic body.
-    Conflict { highest_sequence: u64 },
+    Conflict {
+        highest_sequence: u64,
+    },
 }
 
-/// Trace retention failure from validation, authority, persistence, or recovery.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RuntimeTraceOutboxError<AuthorityError, StoreError> {
     Input(RuntimeTraceInputError),
@@ -530,14 +463,12 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Stateless coordinator over the existing Worker replay store.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WorkerRuntimeTraceOutbox {
     responder: RuntimeReplayResponder,
 }
 
 impl WorkerRuntimeTraceOutbox {
-    /// Creates a coordinator with no in-memory cursor or product authority.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -545,13 +476,6 @@ impl WorkerRuntimeTraceOutbox {
         }
     }
 
-    /// Reduces and durably retains one runtime fact before it is sent.
-    ///
-    /// # Errors
-    ///
-    /// Returns before durable mutation for unsafe summaries, malformed
-    /// identities, invalid references, or serialization failures. Authority and
-    /// store errors are forwarded by the existing replay state machine.
     pub fn retain<S, A>(
         &self,
         store: &mut S,
@@ -598,12 +522,6 @@ impl WorkerRuntimeTraceOutbox {
         }
     }
 
-    /// Replays original trace messages after a reconnect or Worker restart.
-    ///
-    /// # Errors
-    ///
-    /// Forwards request, authority, durable-state, and original-frame errors
-    /// from the existing runtime replay responder.
     pub fn resume<S, A>(
         &self,
         store: &mut S,
@@ -617,12 +535,6 @@ impl WorkerRuntimeTraceOutbox {
         self.responder.resume(store, authority, request)
     }
 
-    /// Applies the Control Plane acknowledgement to the existing Worker cursor.
-    ///
-    /// # Errors
-    ///
-    /// Forwards acknowledgement, authority, and durable-state errors from the
-    /// existing runtime replay responder.
     pub fn acknowledge<S, A>(
         &self,
         store: &mut S,
@@ -827,7 +739,6 @@ fn encode_base64(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Large content supplied directly to the existing Worker Artifact cache.
 pub struct WorkerArtifactDraft<'content> {
     pub artifact_id: ArtifactId,
     pub kind: ArtifactKind,
@@ -836,29 +747,18 @@ pub struct WorkerArtifactDraft<'content> {
     pub content: &'content [u8],
 }
 
-/// Fenced, content-addressed write passed to an existing Artifact cache adapter.
 pub struct FencedArtifactWrite<'write> {
     pub identity: &'write RuntimeReplayIdentity,
     pub descriptor: &'write ArtifactDescriptor,
     pub content: &'write [u8],
 }
 
-/// Existing Worker Artifact cache seam; this module provides no storage implementation.
 pub trait WorkerArtifactCache {
     type Error;
 
-    /// Durably stores exact content under the supplied descriptor and authority.
-    ///
-    /// Implementations must treat exact retries idempotently and reject changed
-    /// bytes, lease, fencing token, or source identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns the existing cache adapter's validation or persistence error.
     fn store(&mut self, write: FencedArtifactWrite<'_>) -> Result<(), Self::Error>;
 }
 
-/// Artifact reference preparation failure.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkerArtifactReferenceError<AuthorityError, CacheError> {
     InvalidArtifact,
@@ -885,15 +785,6 @@ impl<AuthorityError: fmt::Debug, CacheError: fmt::Debug> std::error::Error
 {
 }
 
-/// Writes large bytes to an injected fenced cache and returns only their reference.
-///
-/// Authority is checked before the cache adapter is called. The exact lease,
-/// fencing token, and source identity are also carried into the cache write.
-///
-/// # Errors
-///
-/// Rejects malformed metadata before authority checks, rejects stale authority
-/// before cache mutation, and forwards the existing cache adapter error.
 pub fn persist_artifact_reference<A, Cache>(
     cache: &mut Cache,
     authority: &A,
@@ -942,19 +833,12 @@ where
     })
 }
 
-/// Supplies strictly ordered identities for mandatory gateway decision events.
 pub trait RuntimeTraceIdentitySource {
     type Error;
 
-    /// Allocates the next runtime event and message identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns the caller-owned durable sequence allocation failure.
     fn next_identity(&mut self) -> Result<RuntimeTraceIdentity, Self::Error>;
 }
 
-/// Durable Action Gateway journal backed by the existing Worker replay store.
 pub struct RuntimeTraceActionJournal<Store, Authority, IdentitySource> {
     outbox: WorkerRuntimeTraceOutbox,
     store: Store,
@@ -963,7 +847,6 @@ pub struct RuntimeTraceActionJournal<Store, Authority, IdentitySource> {
 }
 
 impl<Store, Authority, IdentitySource> RuntimeTraceActionJournal<Store, Authority, IdentitySource> {
-    /// Binds the journal to caller-owned durable state and lease authority.
     #[must_use]
     pub const fn new(store: Store, authority: Authority, identities: IdentitySource) -> Self {
         Self {
@@ -974,14 +857,12 @@ impl<Store, Authority, IdentitySource> RuntimeTraceActionJournal<Store, Authorit
         }
     }
 
-    /// Returns caller-owned components for shutdown or Worker restart.
     #[must_use]
     pub fn into_parts(self) -> (Store, Authority, IdentitySource) {
         (self.store, self.authority, self.identities)
     }
 }
 
-/// Mandatory gateway-decision journal failure.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RuntimeTraceActionJournalError<IdentityError, AuthorityError, StoreError> {
     Identity(IdentityError),
@@ -1092,7 +973,6 @@ fn require_durably_ready<IdentityError, AuthorityError, StoreError>(
     }
 }
 
-/// Returns the envelope token retained by a gateway trace fact.
 #[must_use]
 pub fn traced_envelope_token(fact: &RuntimeTraceFact) -> Option<ExecutionEnvelopeToken> {
     match fact {

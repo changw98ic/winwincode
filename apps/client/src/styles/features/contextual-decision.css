@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-
-/* UI-502: one decision card shared by Chat and StrongFlow.  It stays inside the
-   host page grid and keeps every colour on the token layer. */
-
 .wwc-strongflow-decision-host {
   display: block;
   min-width: var(--wwc-space-0);

@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Scope-bound, secret-free Credential reference lifecycle.
-//!
-//! This module persists only the public reference identity and lifecycle
-//! metadata. A vault locator is accepted at the generated write boundary so a
-//! `SecretStore` adapter can complete its own atomic operation, but the locator
-//! is never copied into aggregate state, events, audit records, projections,
-//! resolutions, or errors.
-
 use winwincode_provider::{ResolvedSecret, SecretStoreError};
 
 use std::{collections::BTreeMap, fmt};
@@ -66,7 +56,6 @@ const MAX_CURSOR_BYTES: usize = 2_048;
 const MAX_CATALOG_COMMIT_ATTEMPTS: usize = 32;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable, secret-free failure categories for Credential reference operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialReferenceErrorKind {
     InvalidRequest,
@@ -81,7 +70,6 @@ pub enum CredentialReferenceErrorKind {
     Storage,
 }
 
-/// A bounded Credential reference error that never copies caller payload text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialReferenceError {
     kind: CredentialReferenceErrorKind,
@@ -193,10 +181,6 @@ impl From<StorageError> for CredentialReferenceError {
     }
 }
 
-/// The exact scope-bound handle supplied to a `SecretStore` adapter.
-///
-/// It contains no vault locator or secret material. A caller must obtain a new
-/// value after every rotation, so a stale version cannot silently resolve.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialReferenceResolution {
@@ -206,23 +190,13 @@ pub struct CredentialReferenceResolution {
     rotation_version: u64,
 }
 
-/// Port implemented by local and remote secret stores.
-///
-/// The versioned, scope-bound resolution is the only accepted lookup key;
-/// adapters never receive an unscoped Credential reference ID.
 pub trait SecretStorePort: Send + Sync {
-    /// Resolves one exact current reference to owned secret bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable secret-safe categories.
     fn resolve(
         &self,
         reference: &CredentialReferenceResolution,
     ) -> Result<ResolvedSecret, SecretStoreError>;
 }
 
-/// Failure from the ordered metadata-check then `SecretStore`-resolution path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CredentialSecretResolutionError {
     Reference(CredentialReferenceError),
@@ -407,11 +381,6 @@ struct PreparedCredentialReferenceMutation {
     scope_key: winwincode_storage::ReceiptScopeKey,
 }
 
-/// Application service for the generated Credential reference HTTP types.
-///
-/// The service reuses the Control Plane's durable state/receipt transaction,
-/// so exact request retries return the original result without rerunning the
-/// lifecycle transition.
 pub struct CredentialReferenceService<'a> {
     storage: &'a mut dyn ProductStateStorage,
 }
@@ -422,13 +391,6 @@ impl<'a> CredentialReferenceService<'a> {
         Self { storage }
     }
 
-    /// Creates secret-free reference metadata after the `SecretStore` adapter
-    /// has accepted the write-only locator.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid fields, a reused identity, a foreign scope, a stale
-    /// revision, or a conflicting request replay.
     pub fn create(
         &mut self,
         command: &CredentialReferenceCreateCommand,
@@ -451,10 +413,6 @@ impl<'a> CredentialReferenceService<'a> {
 
         let stream_id = stream_id(&command.payload.credential_reference_id);
         if let Some(stored) = self.storage.load_state(&stream_id)? {
-            // Another connection may have committed this exact request after
-            // the first receipt read but before this state read. The state and
-            // receipt are atomic, so a second receipt read now distinguishes
-            // an exact replay from a genuinely different create.
             if let Some(replay) = self.replay(
                 &envelope,
                 LifecycleOperation::Created,
@@ -493,14 +451,6 @@ impl<'a> CredentialReferenceService<'a> {
         create_response(command, result)
     }
 
-    /// Commits the metadata version of an already successful atomic secret
-    /// rotation. The write-only locator participates in request replay identity
-    /// but is discarded before state, event, audit, or response construction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, foreign, revoked, deleted, stale, or conflicting
-    /// reference.
     pub fn rotate(
         &mut self,
         command: &CredentialReferenceRotateCommand,
@@ -545,13 +495,6 @@ impl<'a> CredentialReferenceService<'a> {
         rotate_response(command, result)
     }
 
-    /// Revokes a reference. Every later resolution checks this durable state
-    /// before a `SecretStore` adapter can be called.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, foreign, already revoked, deleted, stale, or
-    /// conflicting reference.
     pub fn revoke(
         &mut self,
         command: &CredentialReferenceRevokeCommand,
@@ -591,12 +534,6 @@ impl<'a> CredentialReferenceService<'a> {
         revoke_response(command, result)
     }
 
-    /// Replaces the metadata with a scope-bound tombstone. A deleted identity
-    /// cannot be recreated under another scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, foreign, deleted, stale, or conflicting reference.
     pub fn delete(
         &mut self,
         command: &CredentialReferenceDeleteCommand,
@@ -633,12 +570,6 @@ impl<'a> CredentialReferenceService<'a> {
         delete_response(command, result)
     }
 
-    /// Loads the generated, secret-free projection for one exact scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid request identity, a foreign scope, or a missing or
-    /// deleted reference.
     pub fn get(
         &self,
         query: &CredentialReferenceGetQuery,
@@ -666,18 +597,6 @@ impl<'a> CredentialReferenceService<'a> {
         })
     }
 
-    /// Lists the secret-free references in one exact scope using a
-    /// revision-bound stable cursor.
-    ///
-    /// Both available and revoked references are returned. Deleted references
-    /// are absent from the scope catalog. A cursor expires explicitly when any
-    /// reference in the scope is created, rotated, revoked, or deleted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid scope, provider filter, page limit, stale/foreign
-    /// cursor, or a catalog that no longer agrees with canonical reference
-    /// state.
     pub fn list(
         &self,
         query: &CredentialReferenceListQuery,
@@ -779,12 +698,6 @@ impl<'a> CredentialReferenceService<'a> {
         })
     }
 
-    /// Returns a versioned, scope-bound reference for `SecretStore` resolution.
-    /// Revocation is checked before this value can reach a `SecretStore` adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign, missing, deleted, or revoked reference.
     pub fn resolve(
         &self,
         scope: &Scope,
@@ -812,13 +725,6 @@ impl<'a> CredentialReferenceService<'a> {
         })
     }
 
-    /// Checks current scope and revocation state, then calls the `SecretStore`
-    /// exactly once with the current rotation version.
-    ///
-    /// # Errors
-    ///
-    /// A reference failure is returned before the `SecretStore` is accessed;
-    /// otherwise the adapter's stable secret-safe error is preserved.
     pub fn resolve_secret(
         &self,
         secret_store: &dyn SecretStorePort,

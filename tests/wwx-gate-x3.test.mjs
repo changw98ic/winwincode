@@ -53,7 +53,6 @@ test('ADR-0034 success: only confirmed knowledge enters context', () => {
     sourceVersion: 'v1',
     expiresAt: null,
   })
-  // Create always lands in suggested first.
   assert.equal(catalog.entries.get('src_1').status, 'suggested')
   catalog = confirmKnowledge(catalog, 'src_1')
   const caller = { userId: 'u1', repositoryIds: new Set() }

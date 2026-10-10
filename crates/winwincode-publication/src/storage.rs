@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Publication-owned persistence contract.
-
 use std::{error::Error, fmt};
 
 use winwincode_domain::{PublicationId, RequestId, Sha256Digest};
@@ -56,10 +52,6 @@ pub struct PublicationReceiptIdentity {
 }
 
 impl PublicationReceiptIdentity {
-    /// Builds one opaque request identity from canonical adapter-owned encodings.
-    ///
-    /// # Errors
-    /// Rejects empty actor, scope, or request identities.
     pub fn try_new(
         actor_key: impl Into<Vec<u8>>,
         scope_key: impl Into<Vec<u8>>,
@@ -158,10 +150,6 @@ pub struct PublicationStorageCommit {
 }
 
 impl PublicationStorageCommit {
-    /// Builds the one atomic state, receipt, outbox, and journal mutation.
-    ///
-    /// # Errors
-    /// Rejects incomplete bytes or a journal sequence inconsistent with the state revision.
     pub fn try_new(
         receipt_identity: PublicationReceiptIdentity,
         command_digest: Sha256Digest,
@@ -260,40 +248,23 @@ pub struct PublicationStorageReceipt {
     pub events: Vec<PublicationStorageEvent>,
 }
 
-/// Atomic durable operations required by the Publication coordinator.
 pub trait PublicationStorage {
-    /// Returns the exact result retained for one request identity and digest.
-    ///
-    /// # Errors
-    /// Returns a typed adapter, validation, or receipt conflict failure.
     fn load_receipt(
         &self,
         identity: &PublicationReceiptIdentity,
         digest: &Sha256Digest,
     ) -> Result<Option<PublicationStorageReceipt>, PublicationStorageError>;
 
-    /// Returns the current encoded Publication state.
-    ///
-    /// # Errors
-    /// Returns a typed adapter or validation failure.
     fn load_state(
         &self,
         publication_id: &PublicationId,
     ) -> Result<Option<PublicationStoredState>, PublicationStorageError>;
 
-    /// Returns the complete append-only Publication journal.
-    ///
-    /// # Errors
-    /// Returns a typed adapter or validation failure.
     fn load_journal(
         &self,
         publication_id: &PublicationId,
     ) -> Result<Option<PublicationStoredJournal>, PublicationStorageError>;
 
-    /// Atomically persists one Publication state, receipt, event, and journal record.
-    ///
-    /// # Errors
-    /// Returns a typed adapter, validation, idempotency, or revision failure.
     fn commit(
         &mut self,
         commit: &PublicationStorageCommit,

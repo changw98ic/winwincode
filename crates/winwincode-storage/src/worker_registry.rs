@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Worker registration profile, health, and capacity snapshot contracts.
-//!
-//! Durable identity, heartbeat ordering, and lease/fence authority remain in
-//! [`crate::ExecutionRegistry`]. This module defines the additional Worker
-//! facts and deterministic decisions consumed by that single registry.
-
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{
     Instant, OrganizationId, ProjectId, RepositoryId, Sha256Digest, WorkerId, WorkerInstanceId,
@@ -14,11 +6,6 @@ use winwincode_domain::{
 
 pub const EXECUTION_PROTOCOL_VERSION: &str = "winwincode/v1;usage=2";
 
-/// Exact tenant scope that owns one registered Worker.
-///
-/// Local Workers use the canonical local repository scope. Remote Fleet
-/// adapters may register against a broader scope without creating another
-/// Worker Registry authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRegistryScope {
@@ -43,7 +30,6 @@ pub enum WorkerRegistryScope {
 }
 
 impl WorkerRegistryScope {
-    /// Canonical scope of the embedded Community Worker.
     #[must_use]
     pub fn local_default() -> Self {
         Self::Repository {
@@ -55,7 +41,6 @@ impl WorkerRegistryScope {
     }
 }
 
-/// Durable operator-controlled placement state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerManagementState {
@@ -63,7 +48,6 @@ pub enum WorkerManagementState {
     Draining,
 }
 
-/// Public operational state derived from management and health authority.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerOperationalState {
@@ -72,7 +56,6 @@ pub enum WorkerOperationalState {
     Offline,
 }
 
-/// Secret-free snapshot used by the Control Plane projection adapter.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerManagementSnapshot {
@@ -90,21 +73,18 @@ pub struct WorkerManagementSnapshot {
 }
 
 impl WorkerManagementSnapshot {
-    /// Closed public state for generated `WorkerProjection` mapping.
     #[must_use]
     pub const fn operational_state(&self) -> WorkerOperationalState {
         self.operational_state
     }
 }
 
-/// Stable cursor over one scope-local Worker page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerManagementPageCursor {
     pub worker_id: WorkerId,
     pub upper_bound_worker_id: WorkerId,
 }
 
-/// Stable scope-local Worker page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerManagementPage {
     pub workers: Vec<WorkerManagementSnapshot>,
@@ -185,7 +165,6 @@ impl WorkerHealth {
     }
 }
 
-/// Stable reason attached to a rejected registration.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerRegistrationErrorCode {
@@ -197,7 +176,6 @@ pub enum WorkerRegistrationErrorCode {
     MessageConflict,
 }
 
-/// Current capacity for one canonical Worker process instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerCapacityEntry {
     pub worker_id: WorkerId,
@@ -212,7 +190,6 @@ pub struct WorkerCapacityEntry {
     pub available_slots: u64,
 }
 
-/// One transactionally consistent view across all current Worker instances.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerCapacitySnapshot {
     pub observed_at: Instant,

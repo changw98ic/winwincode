@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::{

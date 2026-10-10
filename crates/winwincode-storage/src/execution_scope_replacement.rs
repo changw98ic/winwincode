@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Sealed old-to-new authority for one scheduler-owned execution replacement.
-
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -68,11 +64,6 @@ fn ensure_execution_scope_replacement_schema(connection: &Connection) -> Result<
     Ok(())
 }
 
-/// Durable scheduler seal proving one exact logical Job moved to a fresh lease.
-///
-/// Fields are private: only the repository scheduler transaction can create the
-/// predecessor/successor lineage consumed by Delivery, `ProductSession`, and
-/// Worker workspace recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionScopeReplacementAuthority {
     receipt_id: RequestId,
@@ -175,7 +166,6 @@ impl ExecutionScopeReplacementAuthority {
         self.applied_at.is_some()
     }
 
-    /// Verifies that a newly accepted dispatch is the sealed successor.
     #[must_use]
     pub fn authorizes_successor(&self, dispatch: &ExecutionDispatchAuthority) -> bool {
         dispatch.lease() == &self.successor_lease
@@ -403,11 +393,6 @@ fn decode<'de, T: Deserialize<'de>>(value: &'de str) -> Result<T, StorageError> 
 }
 
 impl SqliteStorage {
-    /// Loads the one scheduler-sealed old-to-new authority for a logical Job.
-    ///
-    /// # Errors
-    ///
-    /// Returns corruption or storage failures; a missing record returns `None`.
     pub fn load_execution_scope_replacement(
         &self,
         job_id: &ExecutionJobId,
@@ -415,12 +400,6 @@ impl SqliteStorage {
         load_execution_scope_replacement(self.connection()?, job_id)
     }
 
-    /// Marks an owner phase applied only under the exact accepted successor.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign successor dispatch, changed completion time, or
-    /// missing scheduler replacement authority.
     pub fn mark_execution_scope_replacement_applied(
         &mut self,
         dispatch: &ExecutionDispatchAuthority,

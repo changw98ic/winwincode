@@ -1,18 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use sha2::{Digest, Sha256};
 
 use crate::Sha256Digest;
 
 const DIGEST_DOMAIN: &[u8] = b"winwincode-verification-command-v1\0";
 
-/// Returns the sealed identity of one approved verification command.
 #[must_use]
 pub fn verification_method_digest(method: &str) -> Option<Sha256Digest> {
     Some(command_digest(canonical_command(method)?.as_bytes()))
 }
 
-/// Returns the same sealed identity for an observed process invocation.
 #[must_use]
 pub fn observed_verification_command_digest(command: &[String]) -> Option<Sha256Digest> {
     Some(command_digest(
@@ -20,7 +16,6 @@ pub fn observed_verification_command_digest(command: &[String]) -> Option<Sha256
     ))
 }
 
-/// Classifies an observed command from its executable and leading arguments.
 #[must_use]
 pub fn observed_verification_command_is_test(command: &[String]) -> bool {
     let Some(tokens) = observed_command_tokens(command) else {
@@ -76,8 +71,6 @@ fn canonical_command(command: &str) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
-    // Only literal, standalone invocations share argv identity. Expansions,
-    // redirection and shell control flow retain their exact script identity.
     Some(literal_shell_argv(normalized).map_or_else(
         || format!("shell:{normalized}"),
         |arguments| canonical_argv(&arguments),

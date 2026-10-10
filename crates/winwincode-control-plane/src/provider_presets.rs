@@ -1,39 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Discoverable Provider presets and the model catalog service surface.
-//!
-//! A preset is a configuration template only: a stable Provider identifier, a
-//! display name, a documented `OpenAI`-compatible base URL, and the Provider's
-//! documented model identifiers. Presets never carry or fabricate model
-//! capabilities (context window, tool support, billing). Real capabilities
-//! come exclusively from an authoritative [`ModelCapabilitySource`] — the
-//! durable [`crate::provider_catalog`] today, or a live connection probe in
-//! later integration — and [`ModelCatalogService`] reports unknown
-//! capabilities rather than inventing defaults.
-//!
-//! Custom endpoints are accepted only after canonical endpoint validation:
-//! public/private hosts require HTTPS, while plaintext HTTP is limited to the
-//! exact loopback hosts used by local model servers. Embedded userinfo, query,
-//! and fragment data are rejected, so a credential can never hide inside the URL. This module never accepts,
-//! stores, or emits credential material, and every serializable output passes
-//! the [`crate::credential_leak_gate`].
-//!
-//! # MODEL-100.3 integration boundary
-//!
-//! Credential write/test/rotate APIs should (1) implement
-//! [`ModelCapabilitySource`] over the durable
-//! [`crate::provider_catalog::ProviderCatalogService`] projection or a live
-//! connection probe, and (2) pair a preset with a
-//! [`winwincode_domain::CredentialReferenceId`] to build the
-//! [`crate::provider_catalog::ProviderDescriptor`] accepted by
-//! [`crate::provider_catalog::ProviderCatalogService::upsert`]. A descriptor
-//! requires positive capability values, so a preset alone can never satisfy
-//! it: Provider registration stays gated behind verified capability data by
-//! design. The client settings surface can consume [`list_provider_presets`],
-//! [`find_provider_preset`], and [`resolve_provider_endpoint`] to replace
-//! hand-typed Provider/model input; UI wiring is intentionally out of scope
-//! for this module.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -44,15 +8,10 @@ use winwincode_provider::credential_leak_gate::{
 };
 use winwincode_provider::provider_https_sse::{MAX_ENDPOINT_BYTES, canonical_https_endpoint};
 
-/// Adapter implementation every preset routes through: the embedded Kernel
-/// `OpenAI`-compatible execution adapter.
 const PRESET_ADAPTER_KIND: &str = "openai-responses";
-/// Same Provider identifier bound as the durable Provider catalog.
 const MAX_PROVIDER_ID_CHARS: usize = 128;
-/// Same model identifier bound as the durable Provider catalog.
 const MAX_MODEL_ID_CHARS: usize = 200;
 
-/// Bounded Provider preset and model catalog failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderPresetsErrorKind {
     InvalidRequest,
@@ -60,7 +19,6 @@ pub enum ProviderPresetsErrorKind {
     CredentialLeak,
 }
 
-/// Bounded error that never copies preset endpoint or model input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderPresetsError {
     kind: ProviderPresetsErrorKind,
@@ -93,7 +51,6 @@ impl ProviderPresetsError {
         )
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> ProviderPresetsErrorKind {
         self.kind
@@ -114,7 +71,6 @@ impl From<CredentialLeakError> for ProviderPresetsError {
     }
 }
 
-/// One documented model identifier inside a preset.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PresetModel {
@@ -122,25 +78,17 @@ pub struct PresetModel {
     pub display_name: String,
 }
 
-/// A discoverable Provider configuration template.
-///
-/// Identity and documented defaults only: `models` lists identifiers to
-/// pre-fill the model picker and carries no capability values.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderPreset {
     pub provider_id: String,
     pub display_name: String,
-    /// Documented default `OpenAI`-compatible base URL.
     pub base_url: String,
-    /// Stable adapter implementation identifier, never adapter configuration.
     pub adapter_kind: String,
-    /// Provider documentation that publishes the base URL and model catalog.
     pub docs_url: String,
     pub models: Vec<PresetModel>,
 }
 
-/// Where a resolved endpoint came from.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndpointSource {
@@ -148,7 +96,6 @@ pub enum EndpointSource {
     Custom,
 }
 
-/// The endpoint a settings flow should use after safe validation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolvedEndpoint {
@@ -157,7 +104,6 @@ pub enum ResolvedEndpoint {
 }
 
 impl ResolvedEndpoint {
-    /// Returns the endpoint URL regardless of its source.
     #[must_use]
     pub fn endpoint(&self) -> &str {
         match self {
@@ -165,27 +111,19 @@ impl ResolvedEndpoint {
         }
     }
 
-    /// Returns whether the endpoint came from a user-supplied custom entry.
     #[must_use]
     pub const fn is_custom(&self) -> bool {
         matches!(self, Self::Custom { .. })
     }
 }
 
-/// Which authoritative source confirmed one capability snapshot.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapabilityOrigin {
-    /// Confirmed against the durable Provider catalog projection.
     ProviderCatalog,
-    /// Confirmed through a live connection probe of the endpoint.
     ConnectionProbe,
 }
 
-/// Real capability values confirmed by an authoritative source.
-///
-/// The snapshot intentionally carries no billing fields: billing facts stay
-/// with the Provider catalog and gateway settlement, never with presets.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCapabilitySnapshot {
@@ -195,50 +133,34 @@ pub struct ModelCapabilitySnapshot {
     pub origin: ModelCapabilityOrigin,
 }
 
-/// Port implemented by authoritative capability sources.
-///
-/// Implementations return `Some` only for values verified against the durable
-/// Provider catalog or a live connection probe. Verified values are positive,
-/// `max_output_tokens` never exceeds `context_window_tokens`, and no value is
-/// ever defaulted from a preset: the presets module holds identity data only.
 pub trait ModelCapabilitySource {
     fn capability(&self, provider_id: &str, model_id: &str) -> Option<ModelCapabilitySnapshot>;
 }
 
-/// One documented preset model joined to its authoritative capability.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCatalogModelEntry {
     pub model_id: String,
     pub display_name: String,
-    /// `None` means unknown: no catalog or probe data confirmed a value.
     pub capability: Option<ModelCapabilitySnapshot>,
 }
 
-/// One model resolution with preset identity and authoritative capability.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCatalogResolution {
     pub provider_id: String,
     pub model_id: String,
     pub display_name: String,
-    /// `None` means unknown: no catalog or probe data confirmed a value.
     pub capability: Option<ModelCapabilitySnapshot>,
 }
 
 impl ModelCatalogResolution {
-    /// Returns whether an authoritative source confirmed the capabilities.
     #[must_use]
     pub const fn capability_is_known(&self) -> bool {
         self.capability.is_some()
     }
 }
 
-/// Joins preset identity with authoritative model capabilities.
-///
-/// The service owns no capability data: it forwards every capability lookup
-/// to the configured [`ModelCapabilitySource`] list in order and reports the
-/// first confirmed value, or unknown.
 #[derive(Clone, Copy)]
 pub struct ModelCatalogService<'a> {
     sources: &'a [&'a dyn ModelCapabilitySource],
@@ -259,11 +181,6 @@ impl<'a> ModelCatalogService<'a> {
         Self { sources }
     }
 
-    /// Lists every documented model of one preset with its capability status.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed Provider identifier or an unknown preset.
     pub fn list_preset_models(
         &self,
         provider_id: &str,
@@ -284,15 +201,6 @@ impl<'a> ModelCatalogService<'a> {
         Ok(entries)
     }
 
-    /// Resolves one model identity with its authoritative capability.
-    ///
-    /// Works for preset Providers and custom endpoint Providers alike; a
-    /// Provider outside the presets keeps its caller-supplied identity and
-    /// still reports unknown capabilities until a source confirms values.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed Provider or model identifiers.
     pub fn resolve_model(
         &self,
         provider_id: &str,
@@ -332,11 +240,6 @@ impl<'a> ModelCatalogService<'a> {
     }
 }
 
-/// Lists every built-in Provider preset, sorted by Provider identifier.
-///
-/// # Errors
-///
-/// Fails closed when the leak gate rejects preset serialization.
 pub fn list_provider_presets() -> Result<Vec<ProviderPreset>, ProviderPresetsError> {
     let presets = BUILTIN_PROVIDER_PRESETS
         .iter()
@@ -346,11 +249,6 @@ pub fn list_provider_presets() -> Result<Vec<ProviderPreset>, ProviderPresetsErr
     Ok(presets)
 }
 
-/// Returns one built-in Provider preset by its exact identifier.
-///
-/// # Errors
-///
-/// Rejects a malformed identifier or an unknown preset.
 pub fn find_provider_preset(provider_id: &str) -> Result<ProviderPreset, ProviderPresetsError> {
     validate_provider_id(provider_id)?;
     let template =
@@ -360,18 +258,6 @@ pub fn find_provider_preset(provider_id: &str) -> Result<ProviderPreset, Provide
     Ok(preset)
 }
 
-/// Resolves the endpoint for one Provider, preferring a validated custom
-/// entry over the preset default.
-///
-/// A custom entry is returned only after [`validate_custom_endpoint`]
-/// accepts it; an invalid custom entry fails closed instead of falling back
-/// to the preset default. A custom entry never requires a preset Provider,
-/// because custom endpoints exist precisely for unlisted Providers.
-///
-/// # Errors
-///
-/// Rejects an invalid custom endpoint, a malformed Provider identifier, or a
-/// Provider without a preset when no custom entry was supplied.
 pub fn resolve_provider_endpoint(
     provider_id: &str,
     custom_endpoint: Option<&str>,
@@ -394,16 +280,6 @@ pub fn resolve_provider_endpoint(
     Ok(resolved)
 }
 
-/// Accepts a custom `OpenAI`-compatible endpoint after canonical HTTPS
-/// validation, or canonical HTTP only for `localhost`, `127.0.0.1`, and `::1`.
-///
-/// Embedded userinfo is rejected outright, so a credential can never be
-/// smuggled through the endpoint string.
-///
-/// # Errors
-///
-/// Returns [`ProviderPresetsErrorKind::InvalidRequest`] for every rejected
-/// shape without echoing the input.
 pub fn validate_custom_endpoint(endpoint: &str) -> Result<(), ProviderPresetsError> {
     if valid_preset_endpoint(endpoint) {
         Ok(())
@@ -425,11 +301,6 @@ struct ProviderPresetTemplate {
     models: &'static [PresetModelTemplate],
 }
 
-/// Built-in presets, kept sorted by Provider identifier.
-///
-/// Base URLs and model identifiers mirror each Provider's published
-/// `OpenAI`-compatible documentation (see `docs_url`); they are configuration
-/// templates and deliberately exclude capability and billing values.
 const BUILTIN_PROVIDER_PRESETS: &[ProviderPresetTemplate] = &[
     ProviderPresetTemplate {
         provider_id: "alibaba-qwen",
@@ -653,7 +524,6 @@ fn validate_model_id(value: &str) -> Result<(), ProviderPresetsError> {
     validate_token(value, MAX_MODEL_ID_CHARS)
 }
 
-/// Same identifier charset as the durable Provider catalog validators.
 fn validate_token(value: &str, max_chars: usize) -> Result<(), ProviderPresetsError> {
     if value.is_empty()
         || value.len() > max_chars
@@ -667,8 +537,6 @@ fn validate_token(value: &str, max_chars: usize) -> Result<(), ProviderPresetsEr
     }
 }
 
-/// Preset gate over the authority-owned canonical HTTPS endpoint check, with
-/// the shared 2,048-byte bound and a fragment/query pre-filter.
 fn valid_preset_endpoint(value: &str) -> bool {
     value.len() <= MAX_ENDPOINT_BYTES
         && value.trim() == value

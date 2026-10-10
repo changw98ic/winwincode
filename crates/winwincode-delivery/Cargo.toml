@@ -9,8 +9,6 @@ repository.workspace = true
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [features]
-# Exposes raw Scheduler/Worker fixture builders only to Rust integration tests.
-# Production Control Plane dependencies do not enable this feature.
 test-support = []
 
 [dependencies]

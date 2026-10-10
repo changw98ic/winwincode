@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Bounded HTTPS client for the canonical remote Execution Port exchange.
-
 use sha2::Digest;
 use std::collections::VecDeque;
 use std::fmt;
@@ -24,22 +20,15 @@ use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
 const MAX_HTTP_RESPONSE_BYTES: usize =
     winwincode_execution_port::transport::MAX_REMOTE_RESPONSE_BYTES;
 
-/// Secret-free separated Worker transport failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerPortError {
-    /// Connection, timeout, or temporary Server authority failure.
     Transport,
     Network(NetworkFailure),
     NetworkExhausted(NetworkFailure),
-    /// ACKs and controls were exchanged; the upstream frame must be retried.
     Backpressure,
-    /// The Server permanently rejected authentication or protocol authority.
     Rejected,
-    /// A permanent protocol failure; execution authority remains distinct.
     Protocol,
-    /// One message or response exceeds its deterministic wire budget.
     TooLarge,
-    /// The received response cannot be bounded/decoded safely.
     ResponseTooLarge,
 }
 
@@ -102,8 +91,6 @@ impl SharedRemoteState {
             let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
                 .map_err(|_| RemoteWorkerPortError::Protocol)?;
             if let ExecutionPortMessage::LeaseRenewMessage(renewal) = frame.message() {
-                // Record local receipt after authenticated response validation.
-                // It is distinct from the Server's sentAt and later consumption.
                 eprintln!(
                     "component=worker stage=lease_renewal_received message_sha256={:x} received_at_unix_ms={} prior_expires_at={} new_expires_at={} sent_at={}",
                     sha2::Sha256::digest(renewal.message_id.0.as_bytes()),
@@ -133,20 +120,16 @@ impl SharedRemoteState {
     }
 }
 
-/// Cloneable Worker-side delivery handle. A delivery is confirmed only after
-/// [`WorkerMain`](crate::WorkerMain) accepts the exact generated message.
 #[derive(Clone)]
 pub struct RemoteWorkerTransportHandle {
     state: Arc<Mutex<SharedRemoteState>>,
 }
 
 impl RemoteWorkerTransportHandle {
-    /// Whether validated controls are waiting for lifecycle consumption.
     #[must_use]
     pub fn has_pending_controls(&self) -> bool {
         self.state.lock().is_ok_and(|state| !state.inbox.is_empty())
     }
-    /// Creates an empty local control inbox for native lifecycle fault injection.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn empty_for_test() -> Self {
@@ -160,7 +143,6 @@ impl RemoteWorkerTransportHandle {
         }
     }
 
-    /// A permanent Server rejection ends this process instead of replaying dead authority.
     #[must_use]
     pub fn authority_rejected(&self) -> bool {
         matches!(self.terminal_error(), Some(RemoteWorkerPortError::Rejected))
@@ -168,7 +150,6 @@ impl RemoteWorkerTransportHandle {
                 if matches!(failure.kind, ErrorKind::Authentication | ErrorKind::Authorization))
     }
 
-    /// Permanent encoding/protocol faults stop replay without revoking authority.
     #[must_use]
     pub fn terminal_error(&self) -> Option<RemoteWorkerPortError> {
         self.state
@@ -178,11 +159,6 @@ impl RemoteWorkerTransportHandle {
             })
     }
 
-    /// Takes the next validated Control Plane delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
     pub fn next_control(
         &self,
     ) -> Result<Option<(ExecutionMessageId, ExecutionPortMessage)>, RemoteWorkerPortError> {
@@ -199,12 +175,6 @@ impl RemoteWorkerTransportHandle {
         Ok(delivery)
     }
 
-    /// Marks one delivery ready for confirmation on the next authenticated
-    /// exchange. Lost HTTP responses therefore replay the same delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
     pub fn confirm(&self, id: ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
         let mut state = self
             .state
@@ -217,12 +187,6 @@ impl RemoteWorkerTransportHandle {
         Ok(())
     }
 
-    /// Releases an unaccepted delivery so the Server's next replay can put it
-    /// back in the process inbox.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
     pub fn retry(&self, id: &ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
         let mut state = self
             .state
@@ -233,8 +197,6 @@ impl RemoteWorkerTransportHandle {
     }
 }
 
-/// Worker outbound port using a fresh authenticated TLS connection for each
-/// exchange so ordinary disconnects and Server restarts reconnect naturally.
 pub struct RemoteWorkerPort {
     accounting_enabled: std::sync::atomic::AtomicBool,
     accounting_wake: Arc<tokio::sync::Notify>,
@@ -251,8 +213,6 @@ pub struct RemoteWorkerPort {
 }
 
 impl RemoteWorkerPort {
-    /// Starts the financial reconciler independently of heartbeat and control
-    /// delivery. It reads only local receipt sources and never invokes a Provider.
     #[must_use]
     pub fn spawn_accounting_reconciler(
         &self,
@@ -307,7 +267,6 @@ impl RemoteWorkerPort {
                     for lease in page.leases {
                         let directory = provider_directory.clone();
                         let source_key = key.clone();
-                        // SQLite scans run off the async runtime's control threads.
                         let statement = tokio::task::spawn_blocking(move || {
                             winwincode_provider::DeviceProviderStore::open(&directory)
                                 .and_then(|store| store.accounting_statement(&lease, &source_key))
@@ -320,8 +279,6 @@ impl RemoteWorkerPort {
                             continue;
                         };
                         let send = async {
-                            // Signed accounting statements are exact idempotent receipts.
-                            // Their bytes form the durable identity on every reschedule.
                             queued_http_attempt(
                                 &journal,
                                 &bytes,
@@ -350,13 +307,6 @@ impl RemoteWorkerPort {
             }
         })
     }
-    /// Opens a TLS client from one DER trust root and a private credential
-    /// file. The only accepted origin form is `https://HOST:PORT`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed origins, trust roots, timeouts, and non-private
-    /// credential files before the Worker registers.
     pub fn open(
         origin: &str,
         tls_root_der: &[u8],
@@ -440,8 +390,6 @@ impl RemoteWorkerPort {
                 + 1;
             let mut progress = self.accounting_progress.subscribe();
             self.accounting_wake.notify_one();
-            // Give the final financial handoff a bounded drain before a short-lived
-            // Worker exits. Missing bills remain durable and are retried on restart.
             let _ = tokio::time::timeout(Duration::from_secs(2), async {
                 while *progress.borrow_and_update() < requested {
                     if progress.changed().await.is_err() {
@@ -576,8 +524,6 @@ fn decode_exchange_response(bytes: &[u8]) -> Result<RemoteExchangeResponse, Remo
 
 fn exchange_failure(result: &Result<(), RemoteWorkerPortError>) -> Option<NetworkFailure> {
     match result {
-        // A valid queue backpressure receipt is a protocol decision, not
-        // a failed network attempt. The Worker queue owns its reschedule.
         Ok(()) | Err(RemoteWorkerPortError::Backpressure) => None,
         Err(
             RemoteWorkerPortError::Network(failure)
@@ -820,8 +766,6 @@ fn remote_transport_debug(message: &str) {
     }
 }
 
-/// The only accepted Worker origin form, `https://HOST:PORT`; shared by the
-/// `--remote` entry and the managed session config validator.
 pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortError> {
     let authority = origin
         .strip_prefix("https://")

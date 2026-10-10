@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Append-only Provider receipts and attempt manifests. Execution outcomes and
-//! the original unknown-accounting markers are never rewritten or deleted.
-
 use crate::{ExecutionLeaseRecord, SqliteStorage, StorageError};
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -56,9 +51,6 @@ pub(crate) fn same_lease(stamp: &ExecutionLeaseStamp, lease: &ExecutionLeaseReco
 }
 
 impl SqliteStorage {
-    /// Lists bounded financially unresolved attempts for the trusted Device reconciler.
-    /// # Errors
-    /// Rejects corrupt leases or unavailable storage.
     pub fn pending_accounting_leases(
         &mut self,
         offset: u64,
@@ -98,9 +90,6 @@ impl SqliteStorage {
         Ok(leases)
     }
 
-    /// Retains authenticated current-attempt usage before combining predecessors.
-    /// # Errors
-    /// Rejects conflicting replays or unavailable storage.
     pub fn combine_execution_attempt_usage(
         &mut self,
         lease: &ExecutionLeaseStamp,
@@ -149,10 +138,6 @@ impl SqliteStorage {
         Ok(combined)
     }
 
-    /// Imports a signature-verified statement from the trusted Provider adapter.
-    /// Signature checking belongs to the production boundary, never to a Worker outcome.
-    /// # Errors
-    /// Rejects foreign leases, changed manifests, reused Provider receipts, or changed known usage.
     #[allow(clippy::too_many_lines)]
     pub fn reconcile_provider_attempt(
         &mut self,
@@ -284,8 +269,6 @@ impl SqliteStorage {
             .map_err(adapter)?;
         }
         tx.commit().map_err(adapter)?;
-        // Import and projection are independently replayable. A crash between them
-        // leaves source facts intact; retrying the same receipt repairs the projection.
         self.reconcile_attempt_totals(&lease.job_id, now)
     }
 
@@ -420,8 +403,6 @@ fn merge_terminal_metrics(
     totals: &mut ExecutionOutcomeUsage,
 ) -> Result<(), StorageError> {
     let terminal: Option<String> = connection.query_row("SELECT usage_json FROM execution_attempt_terminal_usage WHERE job_id=?1 AND attempt=?2",params![statement.lease.job_id.0,statement.lease.attempt],|row|row.get(0)).optional().map_err(adapter)?;
-    // Upgrade compatibility: older terminals did not retain an attempt row.
-    // Their job usage can identify the current attempt only without predecessors.
     let terminal = if terminal.is_some() {
         terminal
     } else {

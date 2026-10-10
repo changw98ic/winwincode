@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Blind Fusion requests through the same durable `ModelPort` as embedded Core.
-
 use crate::{
     ParallelModelAttempt, ParallelModelBudget, ParallelModelRunner, ParallelModelStatus,
     ParallelModelTarget, parallel_model_cancellation,
@@ -15,9 +11,6 @@ use winwincode_fusion::{
 };
 use winwincode_kernel::{ModelPort, ModelPortRequest};
 
-/// Binds independent panel requests to an existing execution context.
-/// The injected production `ModelPort` retains request, response and usage receipts.
-/// This adapter owns no credentials, tools, workspace or product state.
 pub struct FusionModelPortProvider {
     port: Arc<dyn ModelPort>,
     session_id: String,
@@ -33,7 +26,6 @@ impl fmt::Debug for FusionModelPortProvider {
 }
 
 impl FusionModelPortProvider {
-    /// Uses identities issued by the enclosing execution; never creates a second agent loop.
     #[must_use]
     pub fn new(
         port: Arc<dyn ModelPort>,

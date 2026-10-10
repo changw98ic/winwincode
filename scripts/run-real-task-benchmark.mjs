@@ -60,8 +60,6 @@ function runnerFailureCode(error) {
 
 const retainedRunnerFailures = new WeakMap()
 
-// Retain source locations and controlled phase names, never arbitrary error
-// text, request headers, assertion values, or Provider response bodies.
 function runnerFailure(error, phase = 'cell') {
   const cacheable = error !== null && typeof error === 'object'
   if (cacheable && retainedRunnerFailures.has(error)) return structuredClone(retainedRunnerFailures.get(error))
@@ -257,15 +255,10 @@ export async function executeBenchmarkCell(cell, adapter, {
           : member
       } catch (error) {
         if (runnerTermination(error) || requiresBenchmarkRecovery(error)) throw error
-        // A failed model is one retained member outcome, not permission to
-        // omit the remaining independent members or reuse another cell.
         return { status: 'failed', provider, callId: request.callId,
           failure: runnerFailure(error, 'member') }
       }
     }))
-    // Keep the ledger open until every launched member has retained its result,
-    // including when a sibling stops the task. Aggregation preserves provider
-    // order independently of completion order and starts only after this join.
     const failure = outcomes.find(outcome => outcome.status === 'rejected' && requiresBenchmarkRecovery(outcome.reason))
       ?? outcomes.find(outcome => outcome.status === 'rejected')
     if (failure) throw failure.reason
@@ -316,12 +309,7 @@ function runnerTermination(value) {
   return null
 }
 
-// Reconstruct the same cell from durable calls. Missing model results may only
-// come from the registered product; aggregation is never dispatched again.
 export async function recoverBenchmarkCell(cell, observed, resolveModel) {
-  // registerLaunch is committed before the first product command. A claimed
-  // cell with no launch or call therefore never entered the product loop.
-  // Preserve it as an explicit failed denominator row instead of retrying it.
   if (observed.launches.length === 0 && observed.calls.length === 0) {
     return { status: 'failed', failure: { code: 'BENCHMARK_UNLAUNCHED_CLAIM' }, calls: [],
       recovery: { kind: 'unlaunched-claim', originalCalls: [] } }
@@ -355,8 +343,6 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
     if (!error.retainedFailure && !runnerTermination(error)) throw error
     result = { status: 'failed', termination: runnerTermination(error), failure: runnerFailure(error, 'recovery') }
   }
-  // Existing receipts retain their durable order for the recovery transaction;
-  // parallel member replay may finish in a different order from the first run.
   const retainedCallIds = new Set(observed.calls.map(call => call.callId))
   const recoveredByCallId = new Map(recoveredCalls.map(call => [call.callId, call]))
   const calls = [
@@ -367,9 +353,6 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
     originalCalls: observed.calls } }
 }
 
-// Coordinate independent durable task runners. Their returned task outcomes
-// never stop admission; a thrown ledger/evidence error stops new admission and
-// waits for already running tasks to retain their results before propagating.
 export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell }) {
   validateBenchmarkConcurrency(concurrency)
   const results = Array(cells.length)
@@ -393,8 +376,6 @@ function validateBenchmarkConcurrency(concurrency) {
   }
 }
 
-// Admission policy can expand between runs without changing the frozen plan.
-// Selecting profiles never creates a smaller experiment or claims another profile.
 export function validateBenchmarkDispatchPolicy(plan, { concurrency = 1, selectedConfigurationIds } = {}) {
   validateBenchmarkConcurrency(concurrency)
   if (selectedConfigurationIds === undefined) return
@@ -406,8 +387,6 @@ export function validateBenchmarkDispatchPolicy(plan, { concurrency = 1, selecte
   }
 }
 
-// Validate formal configuration before initializing or checking the immutable
-// identity. This may create an unclaimed ledger, but never starts product work.
 export function verifyBenchmarkLedgerIdentity(plan, options) {
   validateFormalBenchmarkOptions(options)
   validateBenchmarkDispatchPolicy(plan, options)
@@ -484,7 +463,6 @@ export async function runBenchmarkPlan(plan, {
             ...result,
             runId: cell.runId,
             status: termination ? 'failed' : result.status ?? 'completed',
-            // Benchmark grades belong to the user's independent grading machine.
             verdict: null,
             score: null,
             termination,
@@ -503,14 +481,10 @@ export async function runBenchmarkPlan(plan, {
             termination,
             failure: { ...runnerFailure(error),
               code: termination?.reason ?? runnerFailureCode(error),
-              // Raw adapter errors can contain request headers or credentials.
-              // Detailed diagnostics remain in the sanitized product evidence.
               message: termination?.reason ?? runnerFailureCode(error),
             },
           }
         }
-        // Storage/export failures must escape. They are not model failures and
-        // must never overwrite a completed task or allow the next task to start.
         if (store) {
           record.launches = store.launches(index)
           record.calls = store.calls(index)
@@ -519,8 +493,6 @@ export async function runBenchmarkPlan(plan, {
         store?.finish(index, claim.token, record)
       }
       records[index] = record
-      // A retained termination belongs to this task. Only hard persistence or
-      // evidence errors escape the loop and prevent admission of another task.
       await onRecord(record, index)
       return record
     }

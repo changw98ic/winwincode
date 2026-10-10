@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{
     collections::BTreeMap,
     fs,
@@ -974,7 +972,6 @@ impl RuntimeFixture {
         authority.close().expect("close pause authority");
     }
 
-    // Keep upgrade, rejection, restart and single-side-effect assertions in one lifecycle.
     #[allow(clippy::too_many_lines)]
     fn assert_terminal_final_ack_recovery(mut self) {
         let authority = DurableModelExchangeAuthority::open(&self.root)
@@ -1032,7 +1029,6 @@ impl RuntimeFixture {
             .restarted_ack(&acknowledgement)
             .expect("replay lost final-ack response");
         assert_terminal_ack_replay(first, replay);
-        // Emulate a pre-upgrade database with only the original raw ACK tombstone.
         let authority = DurableModelExchangeAuthority::open(&self.root).unwrap();
         let raw_digest: String = {
             let connection = Connection::open(authority.database_path()).unwrap();
@@ -2434,7 +2430,6 @@ fn strict_json_schema_is_rejected_before_anthropic_credentials_admission_or_prov
         81,
         StructuredOutputSupport::Unsupported,
     );
-    // Deliberately omit CredentialReference state: capability routing must reject first.
     configure_session(&mut storage, 83, 81, "anthropic", "claude-fixture", 81);
 
     let identity = FakeIdentity {

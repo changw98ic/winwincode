@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Authenticated remote Worker connections over the canonical registry.
-//!
-//! Community product boundary: Worker connections serve the single local
-//! Owner. Organization-shaped scope keys in this module are protocol encodings
-//! for registry locality, not multi-tenant product administration.
-
 use std::fmt;
 
 use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
@@ -26,20 +18,11 @@ use crate::{
 
 const MAX_REMOTE_CREDENTIAL_BYTES: usize = 16 * 1024;
 
-/// Opaque connection credential that is zeroed when released.
-///
-/// Debug and serialization are intentionally omitted so an authentication
-/// proof cannot enter diagnostics or durable state by accident.
 pub struct RemoteWorkerCredential {
     bytes: Vec<u8>,
 }
 
 impl RemoteWorkerCredential {
-    /// Wraps one bounded non-empty transport authentication proof.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized proofs before an authenticator is called.
     pub fn new(bytes: Vec<u8>) -> Result<Self, RemoteWorkerAuthenticationError> {
         if bytes.is_empty() || bytes.len() > MAX_REMOTE_CREDENTIAL_BYTES {
             return Err(RemoteWorkerAuthenticationError::rejected());
@@ -47,7 +30,6 @@ impl RemoteWorkerCredential {
         Ok(Self { bytes })
     }
 
-    /// Exposes proof bytes only to the injected authentication implementation.
     #[must_use]
     pub fn expose_for_verification(&self) -> &[u8] {
         &self.bytes
@@ -60,7 +42,6 @@ impl Drop for RemoteWorkerCredential {
     }
 }
 
-/// Stable authentication rejection category without provider diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerAuthenticationErrorKind {
     Rejected,
@@ -68,7 +49,6 @@ pub enum RemoteWorkerAuthenticationErrorKind {
     Unavailable,
 }
 
-/// Secret-free error returned by an injected connection authenticator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerAuthenticationError {
     kind: RemoteWorkerAuthenticationErrorKind,
@@ -110,7 +90,6 @@ impl fmt::Display for RemoteWorkerAuthenticationError {
 
 impl std::error::Error for RemoteWorkerAuthenticationError {}
 
-/// Secret-free identity and pool authority returned after credential checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerPrincipal {
     worker_id: WorkerId,
@@ -124,11 +103,6 @@ pub struct RemoteWorkerPrincipal {
 }
 
 impl RemoteWorkerPrincipal {
-    /// Constructs the only identity accepted by a remote pool connection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed IDs, scope, fingerprint, or bounded transport text.
     pub fn new(
         worker_id: WorkerId,
         worker_pool_id: WorkerPoolId,
@@ -150,11 +124,6 @@ impl RemoteWorkerPrincipal {
         )
     }
 
-    /// Constructs a principal bound to one exact Worker process boot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed IDs, scope, fingerprint, or bounded transport text.
     #[allow(clippy::too_many_arguments)]
     pub fn new_bound(
         worker_id: WorkerId,
@@ -237,28 +206,13 @@ impl RemoteWorkerPrincipal {
     }
 }
 
-/// Injected remote Worker identity authority.
-///
-/// `authenticate` validates the connection proof once. `ensure_active` is
-/// called before every Worker message so revocation closes an existing
-/// connection instead of waiting for a reconnect.
 pub trait RemoteWorkerAuthenticator: Send + Sync {
-    /// Resolves one proof to a secret-free exact Worker principal.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded rejected, revoked, or unavailable result.
     fn authenticate(
         &self,
         credential: &RemoteWorkerCredential,
         now: &Instant,
     ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError>;
 
-    /// Revalidates an established principal against current revocation state.
-    ///
-    /// # Errors
-    ///
-    /// Returns revoked when the connection must be closed immediately.
     fn ensure_active(
         &self,
         principal: &RemoteWorkerPrincipal,
@@ -266,7 +220,6 @@ pub trait RemoteWorkerAuthenticator: Send + Sync {
     ) -> Result<(), RemoteWorkerAuthenticationError>;
 }
 
-/// In-memory lifecycle of one authenticated transport connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerConnectionState {
     Authenticated,
@@ -280,7 +233,6 @@ struct RegisteredWorkerBinding {
     worker_instance_id: WorkerInstanceId,
 }
 
-/// One short-lived connection handle; durable identity remains in the Worker Registry.
 pub struct RemoteWorkerConnection {
     principal: RemoteWorkerPrincipal,
     state: RemoteWorkerConnectionState,
@@ -306,7 +258,6 @@ impl RemoteWorkerConnection {
     }
 }
 
-/// Stable remote pool adapter error categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerPoolErrorKind {
     AuthenticationRejected,
@@ -317,7 +268,6 @@ pub enum RemoteWorkerPoolErrorKind {
     Registry,
 }
 
-/// Bounded adapter failure that never contains credential or provider text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerPoolError {
     kind: RemoteWorkerPoolErrorKind,
@@ -342,7 +292,6 @@ impl fmt::Display for RemoteWorkerPoolError {
 
 impl std::error::Error for RemoteWorkerPoolError {}
 
-/// Transport-neutral remote pool adapter over the canonical Execution Port.
 pub struct RemoteWorkerPoolAdapter<'storage, 'authenticator> {
     storage: &'storage mut SqliteStorage,
     authenticator: &'authenticator dyn RemoteWorkerAuthenticator,
@@ -350,7 +299,6 @@ pub struct RemoteWorkerPoolAdapter<'storage, 'authenticator> {
 }
 
 impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator> {
-    /// Uses the canonical heartbeat interval.
     #[must_use]
     pub const fn new(
         storage: &'storage mut SqliteStorage,
@@ -363,11 +311,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         }
     }
 
-    /// Uses an explicit one-second to five-minute heartbeat interval.
-    ///
-    /// # Errors
-    ///
-    /// Rejects values outside the canonical Execution Port range.
     pub fn with_heartbeat_interval(
         storage: &'storage mut SqliteStorage,
         authenticator: &'authenticator dyn RemoteWorkerAuthenticator,
@@ -385,11 +328,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         })
     }
 
-    /// Authenticates a new connection without persisting its proof.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable authentication result from the injected authority.
     pub fn connect(
         &self,
         credential: &RemoteWorkerCredential,
@@ -406,17 +344,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         })
     }
 
-    /// Re-authenticates a transport request and restores its exact durable
-    /// Worker process binding after the previous network connection ended.
-    ///
-    /// This does not register a new process and does not change Registry
-    /// health.  The credential principal, Worker record, and authenticated
-    /// pool placement must all describe the same process.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked credentials and any principal, instance, pool, scope,
-    /// or authentication identity mismatch.
     pub fn resume(
         &mut self,
         credential: &RemoteWorkerCredential,
@@ -472,13 +399,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         })
     }
 
-    /// Revalidates one registered request before its canonical frame is
-    /// forwarded to the shared Execution Port ingress.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a revoked identity, disconnected connection, or foreign Worker
-    /// process binding.
     pub fn authorize_registered_message(
         &mut self,
         connection: &mut RemoteWorkerConnection,
@@ -490,12 +410,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         require_binding(connection, worker_id, worker_instance_id)
     }
 
-    /// Applies one generated Worker message through the canonical Execution Port.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked identities, foreign process identities, unsupported
-    /// messages, protocol failures, and unavailable durable registry state.
     pub fn accept(
         &mut self,
         connection: &mut RemoteWorkerConnection,
@@ -519,11 +433,6 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         }
     }
 
-    /// Explicitly closes a connection and marks its exact registered process offline.
-    ///
-    /// # Errors
-    ///
-    /// Returns a registry error when durable health cannot be updated.
     pub fn disconnect(
         &mut self,
         connection: &mut RemoteWorkerConnection,

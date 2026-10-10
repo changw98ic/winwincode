@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Chat output reads are authorized by the retained turn, never by an Artifact id alone.
-
 use crate::{
     ControlPlane, ProductSessionPersistence, ProductSessionService, ProductSessionServiceError,
     ProductSessionServiceErrorCode, repository_scope_key,
@@ -81,10 +77,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Reads a bounded portion of an acknowledged project from its owning Chat turn.
-    ///
-    /// # Errors
-    /// Rejects an invalid range, foreign session, missing terminal link, or changed bytes.
     pub fn session_artifact_get(
         &self,
         storage: &mut dyn ProductSessionPersistence,

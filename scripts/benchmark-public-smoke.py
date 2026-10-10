@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
 """Device MCP tool for the frozen benchmark's public examples, never hidden grading."""
 import argparse
 from contextlib import contextmanager
@@ -208,7 +207,6 @@ class PublicSmoke:
             write_record(attempt / 'result.json', report)
             return report
         except Exception as error:
-            # Host errors must not disclose credentials or arbitrary host diagnostics.
             report = dict(identity, status='failed', errorType=type(error).__name__)
             write_record(attempt / 'result.json', report)
             return report

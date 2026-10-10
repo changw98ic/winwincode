@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import type { ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import {
   DEFAULT_HOME_VISIT_LIMIT,
@@ -39,29 +37,17 @@ import type {
 } from './generated/contracts.js'
 import { QueryName, WorkItemState as WorkItemStateVocabulary } from './generated/contracts.js'
 
-/**
- * UI-504 composes the projections that already exist - pending decisions,
- * the Delivery list, and the Usage/Worker health summary - into one bounded
- * first screen.  It adds no second business queue, no Portfolio and no new
- * background aggregate: every card is a projection of a server fact.
- */
 export type HomeDashboardStatus = 'loading' | 'ready' | 'partial' | 'error' | 'closed'
 
 export type HomeDashboardSource = 'delivery' | 'attention' | 'usage'
 
 export type HomeDashboardSourceState = 'loading' | 'ok' | 'unavailable'
 
-/** One bounded server page of the board's Delivery list projection. */
 const DELIVERY_LIST_PAGE_LIMIT = 50
 const DELIVERY_LIST_MAX_PAGES = 10
 
 export type HomeDeliveryListStatus = 'loading' | 'ready' | 'refreshing' | 'error'
 
-/**
- * The one Delivery read model the board mounts: a bounded, recent-first window
- * of the Scope's Deliveries.  A first load that fails has nothing to show
- * (`error`); a failed refresh keeps the loaded window.
- */
 export interface HomeDeliveryListState {
   readonly status: HomeDeliveryListStatus
   readonly visible: readonly DeliveryProjection[]
@@ -83,11 +69,6 @@ interface HomeDeliveryListOptions {
   readonly nextRequestId: () => RequestId
 }
 
-/**
- * Load one consistent recent-first snapshot through bounded server pages.
- * Refresh swaps the whole loaded window only after the rebuild completes; a
- * first load publishes growing prefixes of the same page chain.
- */
 export function createHomeDeliveryListViewModel(
   options: HomeDeliveryListOptions,
 ): HomeDeliveryListViewModel {
@@ -228,7 +209,6 @@ function deliveryListSourceState(status: string): HomeDashboardSourceState {
 }
 
 
-/** One Delivery card: the exact identity the StrongFlow deep link opens. */
 export interface HomeDeliveryCard {
   readonly deliveryId: DeliveryId
   readonly title: string
@@ -245,7 +225,6 @@ export interface HomeDeliveryCard {
   readonly totalTasks: number
 }
 
-/** One pending decision: an input, a tool approval, or a business Attention. */
 export interface HomeDecisionCard {
   readonly kind: AttentionCenterItem['kind']
   readonly id: string
@@ -253,18 +232,15 @@ export interface HomeDecisionCard {
   readonly urgency: AttentionCenterItem['urgency']
   readonly createdAt: Instant | null
   readonly expiresAt: Instant | null
-  /** Expired and binding-invalid decisions can no longer be acted on. */
   readonly actionDisabled: boolean
   readonly productSessionId: AttentionCenterItem['productSessionId']
   readonly sessionTitle: string | null
   readonly deliveryId: AttentionCenterItem['deliveryId']
   readonly deliveryTitle: string | null
   readonly workRunId: AttentionCenterItem['workRunId']
-  /** Number of open Attention items represented by one Delivery card. */
   readonly attentionCount?: number
 }
 
-/** 设计稿 04 折叠行之外的浏览器本地区块:最近打开过的交付。 */
 export interface HomeVisitedCard extends HomeDeliveryCard {
   readonly visitedAt: Instant
 }
@@ -294,7 +270,6 @@ export interface HomeDashboardState {
   readonly visited: readonly HomeVisitedCard[]
   readonly counts: HomeDashboardCounts
   readonly sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>>
-  /** True only when every projection proves the Scope was never used. */
   readonly firstUse: boolean
 }
 
@@ -314,7 +289,6 @@ export interface HomeDashboardViewModelOptions {
   readonly client: ControlPlaneClient
   readonly actor: Actor
   readonly scope: RepositoryScope
-  /** One scope event subscription, opened by the Attention projection. */
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
   readonly visits?: HomeRecentVisitStore
@@ -323,7 +297,6 @@ export interface HomeDashboardViewModelOptions {
 }
 
 export interface HomeDashboardViewModel {
-  /** The Usage, Provider and Worker health projection the summary panel mounts. */
   readonly usage: UsageHealthViewModel
   readonly state: HomeDashboardState
   subscribe(listener: (state: HomeDashboardState) => void): () => void
@@ -332,12 +305,6 @@ export interface HomeDashboardViewModel {
   close(): void
 }
 
-/**
- * The one canonical Delivery partition the board renders (WWC-ER-1001).  Every
- * Controller-derived `WorkItemState` lands in exactly one section, so the board can
- * never park a served Delivery in no section and never needs a second state
- * model: the section is a pure function of the served projection.
- */
 export type HomeDeliverySection =
   | 'backlog'
   | 'ready'
@@ -347,21 +314,15 @@ export type HomeDeliverySection =
   | 'failed'
   | 'completed'
 
-/**
- * Deliveries whose work is in motion, including the rework cycle the Worker
- * runs by itself (design page 04 keeps 验证未通过，正在修复 in 正在运行).
- */
 const RUNNING_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
   WorkItemStateVocabulary.InProgress,
   WorkItemStateVocabulary.Rework,
 ])
 
-/** Idle Deliveries whose next move is the user's: start them or accept them. */
 const READY_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
   WorkItemStateVocabulary.Ready,
 ])
 
-/** Deliveries waiting on the conversation: input, clarification, plan review. */
 const WAITING_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
   WorkItemStateVocabulary.WaitingDependency,
   WorkItemStateVocabulary.WaitingHuman,
@@ -394,7 +355,6 @@ function isWaiting(delivery: HomeDeliveryCard): boolean {
   return WAITING_DELIVERY_STATUSES.includes(delivery.status)
 }
 
-/** The one section a served Delivery belongs to; total over every status. */
 export function homeDeliverySection(delivery: HomeDeliveryCard): HomeDeliverySection {
   if (isFailed(delivery)) return 'failed'
   if (delivery.status === WorkItemStateVocabulary.Backlog) return 'backlog'
@@ -410,11 +370,6 @@ function recency(left: HomeDeliveryCard, right: HomeDeliveryCard): number {
     || right.deliveryId.localeCompare(left.deliveryId)
 }
 
-/**
- * The one bounded order of one canonical section.  The filter reads the same
- * `homeDeliverySection` the board buckets with, so a test helper and the
- * mounted dashboard can never disagree about where a Delivery belongs.
- */
 function orderedSection(
   section: HomeDeliverySection,
   cards: readonly HomeDeliveryCard[],
@@ -423,21 +378,18 @@ function orderedSection(
   return Object.freeze(cards.filter(card => homeDeliverySection(card) === section).sort(compare))
 }
 
-/** In-progress Deliveries, most recently updated first. */
 export function orderedHomeRunningCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('running', cards, recency)
 }
 
-/** Backlog Deliveries, most recently updated first. */
 export function orderedHomeBacklogCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('backlog', cards, recency)
 }
 
-/** Failed or blocked Deliveries: hardest failure first, then recency. */
 export function orderedHomeFailedCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
@@ -447,35 +399,30 @@ export function orderedHomeFailedCards(
     || recency(left, right))
 }
 
-/** Idle, user-advancable Deliveries, most recently updated first. */
 export function orderedHomeReadyCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('ready', cards, recency)
 }
 
-/** Deliveries waiting on the conversation, most recently updated first. */
 export function orderedHomeWaitingCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('waiting', cards, recency)
 }
 
-/** Candidate-ready and actively validating Deliveries, most recent first. */
 export function orderedHomeValidatingCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('validating', cards, recency)
 }
 
-/** Recently completed Deliveries, most recent first. */
 export function orderedHomeCompletedCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
   return orderedSection('completed', cards, recency)
 }
 
-/** Project every loaded Delivery summary into the card shape the dashboard renders. */
 export function homeDeliveryCards(
   deliveries: readonly DeliveryProjection[],
 ): readonly HomeDeliveryCard[] {
@@ -496,7 +443,6 @@ export function homeDeliveryCards(
   })))
 }
 
-/** Keep one actionable card per Delivery while retaining every Attention item in its count. */
 export function homeDecisionCards(
   items: readonly AttentionCenterItem[],
 ): readonly HomeDecisionCard[] {
@@ -580,10 +526,6 @@ function dashboardStatus(
   return values.includes('unavailable') ? 'partial' : 'ready'
 }
 
-/**
- * Project the three read models into one dashboard snapshot.  Pure, so the
- * section order, bounds and the first-use claim stay testable without a browser.
- */
 function visitedCards(
   cards: ReadonlyMap<DeliveryId, HomeDeliveryCard>,
   visits: readonly HomeVisit[],
@@ -607,8 +549,6 @@ export function homeDashboardState(input: {
   const limits = input.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
   const cards = homeDeliveryCards(input.deliveries.visible)
   const byId = new Map(cards.map(card => [card.deliveryId, card] as const))
-  // One canonical pass: every card lands in exactly the section its served
-  // status proves, then each section keeps its own bounded order.
   const sections: Record<HomeDeliverySection, HomeDeliveryCard[]> = {
     backlog: [],
     running: [],
@@ -664,8 +604,6 @@ export function homeDashboardState(input: {
       visited: visited.length,
     }),
     sources,
-    // First use is a claim about this Scope, so every projection that could
-    // contradict it has to be readable before the entry point is offered.
     firstUse: sources.delivery === 'ok'
       && sources.attention === 'ok'
       && input.deliveries.loadedCount === 0
@@ -717,7 +655,6 @@ function closedState(): HomeDashboardState {
   })
 }
 
-/** Compose the existing Attention, Delivery and Usage projections into one dashboard. */
 function scopeSelection(scope: RepositoryScope): ScopeRouteSelection {
   return Object.freeze({
     organizationId: scope.organizationId,

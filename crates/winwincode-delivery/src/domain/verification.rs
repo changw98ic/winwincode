@@ -1,31 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Independent candidate verification facts.
-//!
-//! Runtime observations enter through explicit fact types. The validated
-//! values returned by [`validate_independent_verification`] keep their fields
-//! private, so a verdict can consume only assignments, outcomes, and findings
-//! that were reconciled with the current Delivery and frozen candidate.
-//!
-//! A serialized projection cannot be promoted back into a sealed terminal fact.
-//!
-//! ```compile_fail
-//! use serde::de::DeserializeOwned;
-//! use winwincode_delivery::domain::verification::AcceptedVerificationJobOutcomeFact;
-//!
-//! fn require_deserialize<T: DeserializeOwned>() {}
-//! require_deserialize::<AcceptedVerificationJobOutcomeFact>();
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::verification::VerificationFacts;
-//!
-//! let _caller_built_facts = VerificationFacts {
-//!     required_roles: vec![],
-//!     sessions: vec![],
-//! };
-//! ```
-
 use std::collections::HashSet;
 
 use serde::Serialize;
@@ -86,7 +58,6 @@ impl<'fact> FencedExecutionIdentity<'fact> {
     }
 }
 
-/// One canonical independent verification role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationRole {
@@ -105,7 +76,6 @@ impl VerificationRole {
     }
 }
 
-/// Workspace policy observed for one verification Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[cfg_attr(
@@ -121,7 +91,6 @@ pub(crate) enum VerificationWorkspaceMode {
     SourceReadOnly,
 }
 
-/// Restricted permission profile accepted for an independent verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[cfg_attr(
@@ -136,7 +105,6 @@ pub(crate) enum VerificationPermissionProfile {
     Unrestricted,
 }
 
-/// Candidate mutation category emitted by the Worker runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
@@ -151,7 +119,6 @@ pub(crate) enum VerificationMutationKind {
     PatchApply,
 }
 
-/// Worker-authoritative mutation record under an exact fenced attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationWorkerMutationRecord {
     pub(crate) execution_job_id: ExecutionJobId,
@@ -198,7 +165,6 @@ impl VerificationWorkerMutationRecord {
     }
 }
 
-/// Terminal status from one Control-Plane-accepted Worker `JobOutcome`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationJobOutcomeStatus {
@@ -208,7 +174,6 @@ pub enum VerificationJobOutcomeStatus {
     Cancelled,
 }
 
-/// One role-reported criterion conclusion, before evidence sealing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationFindingConclusion {
@@ -216,7 +181,6 @@ pub enum VerificationFindingConclusion {
     Fail,
 }
 
-/// Observed finding payload tied to one verification Session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationFindingFact {
     pub(crate) finding_ref: String,
@@ -228,7 +192,6 @@ pub(crate) struct VerificationFindingFact {
     pub(crate) explanation: String,
 }
 
-/// Runtime facts for one role-scoped verification Session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationSessionFacts {
     pub(crate) role: VerificationRole,
@@ -239,16 +202,11 @@ pub(crate) struct VerificationSessionFacts {
     pub(crate) pre_candidate_snapshot: Option<CanonicalSnapshot>,
     pub(crate) post_candidate_snapshot: Option<CanonicalSnapshot>,
     pub(crate) accepted_job_outcome: Option<AcceptedVerificationJobOutcomeFact>,
-    /// A Codex runtime event, intentionally insufficient for settlement.
     pub(crate) codex_turn_completed: bool,
     pub(crate) mutation_records: Vec<VerificationWorkerMutationRecord>,
     pub(crate) findings: Vec<VerificationFindingFact>,
 }
 
-/// Opaque, crate-assembled facts accepted by the verification seam.
-///
-/// The fields have crate visibility so Delivery adapters can assemble facts;
-/// transport callers cannot construct this value or any sealed attestation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationFacts {
     pub(crate) snapshot: CanonicalSnapshot,
@@ -256,7 +214,6 @@ pub struct VerificationFacts {
     pub(crate) sessions: Vec<VerificationSessionFacts>,
 }
 
-/// One verified current role assignment derived from canonical Delivery facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationAssignment {
@@ -319,7 +276,6 @@ impl VerificationAssignment {
     }
 }
 
-/// Fail-closed state derived from canonical and accepted runtime facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationSessionState {
@@ -331,7 +287,6 @@ pub enum VerificationSessionState {
     Settled,
 }
 
-/// Constructor-derived terminal settlement for one verification role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationTerminalSettlement {
@@ -341,7 +296,6 @@ pub enum VerificationTerminalSettlement {
     Cancelled,
 }
 
-/// Validated terminal Worker outcome bound to one current assignment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptedVerificationJobOutcomeFact {
@@ -365,7 +319,6 @@ pub struct AcceptedVerificationJobOutcomeFact {
 }
 
 impl AcceptedVerificationJobOutcomeFact {
-    /// Joins a current fenced terminal to its durably assigned canonical Snapshot.
     pub(crate) fn from_verified_outcome(
         outcome: &VerifiedTerminalOutcome,
         binding: &SessionBinding,
@@ -491,7 +444,6 @@ impl AcceptedVerificationJobOutcomeFact {
     }
 }
 
-/// Validated role finding bound to the current candidate and criterion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationFinding {
@@ -558,7 +510,6 @@ impl VerificationFinding {
     }
 }
 
-/// One required role and its constructor-derived state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationRoleSettlement {
@@ -602,7 +553,6 @@ impl VerificationRoleSettlement {
     }
 }
 
-/// Derived independent-verification facts for one current candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndependentVerification {
@@ -644,13 +594,6 @@ impl IndependentVerification {
     }
 }
 
-/// Validates role-scoped independent verification against one frozen candidate.
-///
-/// # Errors
-///
-/// Rejects stale candidates, assignment drift, mutable workspaces, unaccepted
-/// terminal outcomes, stale lease identities, changed terminal trees, and any
-/// successful file or patch mutation.
 #[allow(clippy::too_many_lines)]
 pub fn validate_independent_verification(
     delivery: &Delivery,
@@ -1478,10 +1421,6 @@ fn relationship_mismatch(path: &str, message: &str) -> DeliveryValidationError {
     )
 }
 
-/// Narrow sealed fixtures shared by sibling domain-module tests.
-///
-/// These helpers deliberately construct only the validated projection. They
-/// are unavailable to production code and keep every production field private.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     #![allow(dead_code, clippy::wildcard_imports)]
@@ -1552,7 +1491,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Resolves fixture observations through the production verification seam.
     pub(crate) fn resolved_independent_verification(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1579,8 +1517,6 @@ pub(crate) mod test_support {
         .expect("verification fixture observations must pass the production resolver")
     }
 
-    /// Resolves infrastructure-error fixture observations from each role's
-    /// current terminal `WorkRun`.
     pub(crate) fn resolved_infrastructure_verification(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,

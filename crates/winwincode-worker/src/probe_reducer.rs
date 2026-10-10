@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! The bounded, one-shot reducer at the `DebugProbe` round boundary.
-//!
-//! This is intentionally a small seam around the existing D3 evidence store:
-//! raw streams never enter the request, and the reducer can only add a typed
-//! supplement to an already durable round receipt.  The journal is written
-//! before the Provider call so a retry cannot create a second call or charge.
-
 use std::{
     fmt, fs,
     path::Path,
@@ -39,15 +30,12 @@ CREATE TABLE IF NOT EXISTS reducer_intent (
 );
 ";
 
-/// Provider result used by the reducer seam. The Provider owns transport and
-/// charging; this Worker owns strict parsing and exact-once persistence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbeReducerProviderResponse {
     pub output_json: Vec<u8>,
     pub usage: Option<ExecutionOutcomeUsage>,
 }
 
-/// Bounded Provider failure. No Provider error text crosses the receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeReducerProviderError {
     RateLimited,
@@ -55,13 +43,7 @@ pub enum ProbeReducerProviderError {
     Infrastructure,
 }
 
-/// Independent, no-tool Provider route for one reducer operation.
 pub trait ProbeReducerProvider: Send + Sync + 'static {
-    /// Executes exactly one already-journaled operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded Provider failure category.
     fn reduce(
         &self,
         operation_id: &str,
@@ -69,8 +51,6 @@ pub trait ProbeReducerProvider: Send + Sync + 'static {
     ) -> Result<ProbeReducerProviderResponse, ProbeReducerProviderError>;
 }
 
-/// Durable reducer facade. A single instance serializes its own journal and
-/// may safely be reconstructed after process restart.
 pub struct ProbeReducer<Provider> {
     connection: Mutex<Connection>,
     provider: Arc<Provider>,
@@ -85,7 +65,6 @@ impl<Provider> fmt::Debug for ProbeReducer<Provider> {
     }
 }
 
-/// Secret-safe reducer failure. Model output and evidence are never included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeReducerError {
     Storage,
@@ -109,11 +88,6 @@ impl<Provider> ProbeReducer<Provider>
 where
     Provider: ProbeReducerProvider,
 {
-    /// Opens the private reducer journal below the supplied round root.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the private journal cannot be opened.
     pub fn open(root: impl AsRef<Path>, provider: Provider) -> Result<Self, ProbeReducerError> {
         let directory = root.as_ref().join(DATABASE_DIRECTORY);
         fs::create_dir_all(&directory).map_err(|_| ProbeReducerError::Storage)?;
@@ -131,15 +105,6 @@ where
         })
     }
 
-    /// Reduces one terminal round and returns the receipt with its supplement.
-    ///
-    /// Complete small L0/L1 evidence never calls the Provider. Otherwise the
-    /// exact operation intent is retained before the one Provider invocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when evidence is invalid or durable intent state
-    /// conflicts with the requested round.
     pub fn reduce_round(
         &self,
         request: &ProbeRoundRequest,

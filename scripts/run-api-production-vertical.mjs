@@ -1,14 +1,5 @@
 #!/usr/bin/env node
 
-/**
- * API-only production vertical for the standalone Server.
- *
- * This runner deliberately talks to the generated HTTP command/query
- * endpoints. It does not import a UI, start an interactive page, or manufacture
- * runtime/Delivery projections in JavaScript. The only values asserted here
- * are values returned by the public API.
- */
-
 import assert from 'node:assert/strict'
 import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter, withResponseFailure } from '../packages/network-request/src/index.mjs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -173,14 +164,6 @@ const SCOPE = Object.freeze({
   repositoryId: IDS.repository,
 })
 
-/**
- * Device-local model route for production acceptance.
- *
- * Production Server execution is Device-only. The route is bound to the
- * Device Provider credential reference, not Server model environment
- * variables. Callers must pass the enrolled Device client node id (or the
- * public client id used by the Device Provider projection) after pairing.
- */
 function configuredModelRoute(deviceRoute = {}) {
   if (
     typeof deviceRoute.clientNodeId === 'string'
@@ -196,8 +179,6 @@ function configuredModelRoute(deviceRoute = {}) {
         ?? 'device-deterministic-model',
     })
   }
-  // Pre-pairing placeholder. chat.submit is rejected with the public
-  // DEVICE_SESSION_REQUIRED code until Device prerequisites exist.
   return configuredDeviceModelRoute({
     clientNodeId: 'cix_device_session_required_placeholder',
     providerId: 'winwincode-device-deterministic',
@@ -349,11 +330,6 @@ function sourceTreeIdentity(root) {
   }
 }
 
-/**
- * Digest the Rust build inputs and this runner itself.  The helper source is
- * included by projectSourceDigest, while the runner and its build contract are
- * included explicitly so an old target cannot be used with a changed API gate.
- */
 export function apiProductionSourceDigest(root = ROOT) {
   const runnerPath = join(root, API_RUNNER_SOURCE_PATH)
   return createHash('sha256')
@@ -574,10 +550,6 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
   }
 }
 
-/**
- * Emit a source seal after a fresh Server, CLI, Worker and helper build. The seal is kept
- * beside the binaries and is never rewritten by a skip-build invocation.
- */
 export function writeApiProductionSourceSeal({
   root = ROOT,
   serverBinary,
@@ -659,11 +631,6 @@ export function writeApiProductionSourceSeal({
   })
 }
 
-/**
- * Validate a prebuilt target against the current source tree before starting
- * the API.  Missing or stale seals fail closed, so an old target cannot report
- * a contradictory Delivered/released result.
- */
 export function verifyApiProductionSourceSeal({
   root = ROOT,
   serverBinary,
@@ -752,10 +719,6 @@ function responseSetCookie(headers) {
   return cookie?.length > 0 ? cookie : null
 }
 
-/**
- * Request JSON without a UI process or global TLS switches. The fixture uses a
- * self-signed certificate, so only this local request opts out of trust.
- */
 function requestJsonOnce(url, {
   method = 'GET',
   origin,
@@ -838,13 +801,8 @@ function requestJsonOnce(url, {
 export async function requestJson(url, options = {}) {
   const target = new URL(url)
   const method = options.method ?? 'GET'
-  // Occupancy replays for the same signed-in holder and client return the
-  // existing lease or wait for its original offer acknowledgement.
   const occupancyClaim = method === 'POST' && target.pathname === '/api/v1/clients/occupancy'
   const prepared = { ...options, serializedBody: options.body === undefined ? null : JSON.stringify(options.body) }
-  // These three relays persist the request identity with the entire encrypted
-  // envelope and reject identity reuse with different bytes. Freeze the body
-  // first, then admit only a complete envelope to the shared exact-replay path.
   const configurationApply = method === 'POST'
     && /^\/api\/v1\/clients\/[^/]+\/(?:providers|extensions|repositories)$/u.test(target.pathname)
     && retainedDeviceConfigurationEnvelope(prepared.serializedBody)
@@ -876,7 +834,6 @@ function retainedDeviceConfigurationEnvelope(serialized) {
       .every(key => typeof body[key] === 'string' && body[key].length > 0)
 }
 
-// Queries and commands use the same executor and their retained request identity.
 async function requestReadOnlyJson(url, options) {
   return requestJson(url, options)
 }
@@ -905,8 +862,6 @@ export class ApiClient {
 
   requestId() {
     this.nextRequest += 1
-    // Reopening a retained Server must not reuse a prior command receipt's
-    // counter with a different payload. Explicit retry IDs still pass through.
     return `req_${randomBytes(13).toString('hex').toUpperCase()}`
   }
 
@@ -914,8 +869,6 @@ export class ApiClient {
     const mode = process.env.WWC_SERVER_AUTH_MODE ?? 'local-open'
     const useLocalOpen = localOpen || mode === 'local-open'
     if (useLocalOpen) {
-      // Community local-open: the Server caches a loopback Owner principal and
-      // session GET returns it without password or bootstrap proof.
       const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
         origin: this.origin,
         ca: this.ca,
@@ -1057,13 +1010,6 @@ async function waitForRemoteWorker(
   }, `remote Worker ${IDS.remoteWorker} ready heartbeat`, timeoutMillis)
 }
 
-/**
- * Device StrongFlow WorkerSessions are launched by the Client after
- * Controller dispatch. Registration is not instant (Codex/helper boot), and
- * `workRunAggregate.runs` stays empty until the job is Leased/Running — so
- * the vertical must wait for the launched Device Worker identity to appear
- * with a heartbeat instead of treating a queued WorkRun as a stall.
- */
 export async function waitForDeviceWorkerRegistered(
   client,
   launched,
@@ -1176,8 +1122,6 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
       assert.equal(result.status, 0)
       assert.equal(result.stdout, content, 'retained repository baseline content changed')
     }
-    // A pre-checkpoint runtime is adopted only after validating its original
-    // committed tree. No reset, commit, worktree replacement or model restart.
     if (!existsSync(checkpoint)) writeJsonAtomically(checkpoint, { inputDigest, revision })
     return { sourceRoot, repository, revision }
   }
@@ -1274,9 +1218,6 @@ function spawnStandaloneServer({
     detached: process.platform !== 'win32',
     env: {
       ...runtimeChildEnvironment(),
-      // Community loopback production Server: local-open initializes the Owner
-      // at process start. Password mode requires a pre-seeded Owner and is not
-      // the isolated vertical path.
       WWC_SERVER_AUTH_MODE: serverEnvironment.WWC_SERVER_AUTH_MODE ?? 'local-open',
       ...serverEnvironment,
       WWC_SERVER_BIND: `127.0.0.1:${String(port)}`,
@@ -1310,9 +1251,6 @@ function spawnStandaloneServer({
   })
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
-  // Allow the CLI runner to capture the same runtime diagnostics as callers
-  // using runApiProductionVertical({ serverEnvironment }). The explicit
-  // option still wins when a test needs a per-run log path.
   const debugLog = serverEnvironment.WWC_DEBUG_RUNTIME_LOG
     ?? process.env.WWC_DEBUG_RUNTIME_LOG
   child.stdout.on('data', chunk => {
@@ -1433,10 +1371,6 @@ async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMilli
 async function stopServer(child) {
   if (child.exitCode !== null || child.signalCode !== null) return
   const exited = new Promise(resolvePromise => child.once('exit', resolvePromise))
-  // Let the Server own shutdown of its supervised Worker. Sending SIGINT to
-  // the whole detached process group also interrupts the helper before the
-  // Server can release its durable lease, making an immediate restart look
-  // like a stale-instance failure.
   child.kill('SIGINT')
   const graceful = await Promise.race([
     exited.then(() => true),
@@ -1653,8 +1587,6 @@ function deliverySpec(baseRevision, options = {}) {
     repositoryId: IDS.repository,
     scope: ['canonical local API chat and StrongFlow workflow'],
     sourceProductSessionId,
-    // Device-bound Delivery requires a confirmed verification command on the
-    // sealed Device repository. Keep it repository-truthful (no fake verdict).
     verificationCommand: options.verificationCommand
       ?? (sourceProductSessionId === null ? undefined : 'git rev-parse --verify HEAD'),
     title: 'API production StrongFlow',
@@ -1808,9 +1740,6 @@ export async function driveDelivery(
   const stuckPollLimit = 80
   for (;;) {
     await hooks.assertRunning?.()
-    // A failed cursor-bound query invalidates the entire observation. Re-read
-    // this Delivery before querying its WorkRuns rather than acting on stale
-    // attention, status or revision facts.
     detail = null
     workRunAggregate = null
     let query = 'delivery.get'
@@ -1848,10 +1777,6 @@ export async function driveDelivery(
     if (terminalFailure) {
       throw Object.assign(new Error(`Product execution ended in ${terminalFailure.status}`), terminalFailure)
     }
-    // Queued Device WorkRuns are not projected into workRunAggregate.runs
-    // (append_run accepts only Leased/Running). The Client launch anchor is
-    // still product authority until that run appears in the aggregate.
-    // Already projected terminal runs cannot keep this launch wait alive.
     const pendingDeviceWorkRunIds = typeof hooks.pendingDeviceWorkRunIds === 'function'
       ? hooks.pendingDeviceWorkRunIds().filter(id => !workRuns.some(run => run.id === id))
       : []
@@ -1874,16 +1799,11 @@ export async function driveDelivery(
     let command = null
     let payload = null
     if (activeWorkRuns.length > 0) {
-      // The Controller owns active WorkRuns (executor → reviewer → verifier →
-      // submit_verdict, and retry verification after a resolved Attention).
-      // Device execution still requires one Client launch anchor per WorkRun;
-      // the caller supplies that product-authority step via hooks.
       if (typeof hooks.onActiveWorkRuns === 'function') {
         try {
           await hooks.onActiveWorkRuns(activeWorkRuns)
         } catch (error) {
           if (hooks.strictLaunchAnchor === true) throw error
-          // Launch anchors can lag WorkRun creation; keep polling.
         }
       }
       idlePolls = 0
@@ -1932,17 +1852,10 @@ export async function driveDelivery(
         remediation: null,
       }
     } else if (expectDeviceWorkRun) {
-      // Device StrongFlow: Controller dispatched a queued executor job and the
-      // Client consumed a launch grant. The WorkerSession still has to
-      // register and lease before the aggregate can append the run. Wait out
-      // the caller timeout instead of the short local-stall budget.
       idlePolls = 0
       await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
       continue
     } else {
-      // No active WorkRun and no open Attention while the Delivery is not
-      // done: the Controller should already have dispatched the next step.
-      // A stuck projection is a product bug, not a slow poll.
       idlePolls += 1
       if (idlePolls >= stuckPollLimit) {
         fail(`StrongFlow stalled without a dispatchable next action: ${JSON.stringify({
@@ -1988,7 +1901,6 @@ export async function driveDelivery(
           deliveryId,
         })).result ?? detail
       } catch {
-        // Preserve the command error when the diagnostic query is unavailable.
       }
       const summary = JSON.stringify(deliveryFailureSummary(failureDetail, modelRoute))
       if (error instanceof Error) error.message = `${error.message}; delivery=${summary}`
@@ -2005,8 +1917,6 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  // The successful pair already contains the authoritative terminal aggregate.
-  // Do not introduce another unpaired query after accepting completion.
   const terminalWorkRunAggregate = workRunAggregate
   assertCompletedDelivery(terminal, terminalWorkRunAggregate)
   return {
@@ -2090,7 +2000,6 @@ async function runtimeWorkRunEvidence(client, detail) {
   return snapshots
 }
 
-/** Verify the public Device prerequisite errors before launching a Device. */
 export async function probeDeviceErrorTruthfulness(api) {
   const probeSessionId = 'psn_01J00000000000000000000099'
   const probe = {
@@ -2148,7 +2057,6 @@ export async function probeDeviceErrorTruthfulness(api) {
   return probe
 }
 
-/** Stop Device resources before finalizing their observed Provider request count. */
 export async function stopDevicePath(report, devicePath) {
   try {
     await devicePath.stop?.()
@@ -2159,10 +2067,6 @@ export async function stopDevicePath(report, devicePath) {
   }
 }
 
-/**
- * Start one standalone Server and prove the API-only Chat + StrongFlow path.
- * The returned report contains only canonical, secret-free observations.
- */
 export async function runApiProductionVertical({
   build = process.env.WWC_API_SKIP_BUILD !== '1',
   directory = null,
@@ -2229,10 +2133,6 @@ export async function runApiProductionVertical({
     workerIdentity = fileIdentity(remoteWorkerBinary, 'Worker binary')
     assert.notEqual(workerIdentity.mode & 0o111, 0, 'Worker binary must be executable')
   }
-  // Keep the helper and Server in one executable directory.  The production
-  // adapter authenticates that both paths share the running executable's
-  // directory; deriving the helper from CARGO_TARGET_DIR would silently pick
-  // another target when callers provide --server-binary.
   const helperExecutable = resolve(dirname(binary), 'winwincode-kernel-helper')
   assert.equal(existsSync(helperExecutable), true, `kernel helper binary is missing: ${helperExecutable}`)
   if (build) {
@@ -2280,7 +2180,6 @@ export async function runApiProductionVertical({
         WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
       }
   const proof = randomBytes(32).toString('base64url')
-  // Bootstrap proof only. Device Provider secrets are never Server proofs.
   const proofs = [proof].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
@@ -2362,8 +2261,6 @@ export async function runApiProductionVertical({
     api = new ApiClient(started.controlUrl, started.origin)
     await api.bootstrap(proof, { login: retainedEndpoint !== null })
 
-    // Live public-error truthfulness: without Device prerequisites the Server
-    // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
     if (devicePrerequisites && retainedEndpoint === null) {
       report.errorCodeTruthfulness = await probeDeviceErrorTruthfulness(api)
     }
@@ -2438,7 +2335,6 @@ export async function runApiProductionVertical({
           credentialReferenceId: devicePath.modelRoute.credentialReferenceId,
         },
       }
-      // Prefer the Device-bound model route after pairing.
       Object.assign(modelRoute, devicePath.modelRoute)
     }
 
@@ -2531,14 +2427,9 @@ export async function runApiProductionVertical({
       }
     }
 
-    // StrongFlow runs before cancel so Device WorkerSession capacity stays
-    // available for Controller-dispatched role WorkRuns.
     let delivery = null
     if (includeStrongFlow) {
       try {
-        // Device StrongFlow is sealed to an already-launched Device
-        // ProductSession so Controller-dispatched role jobs carry the Device
-        // target and model route. Chat already launched IDS.session.
         const strongFlowSourceSessionId = devicePath === null ? null : IDS.session
         const deliveryCreated = await commandEventually(api, 'delivery.create', 0, {
           deliveryId: IDS.delivery,
@@ -2595,9 +2486,6 @@ export async function runApiProductionVertical({
           deliveryBeforeDispatch.result.deliveryRevision,
         )
         assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
-        // Device product authority: each StrongFlow WorkRun needs its own
-        // WorkerLaunchGrant before Device execution can dispatch. Controller
-        // owns role sequencing; the Client owns launch anchors.
         const anchoredWorkRunIds = new Set()
         const deviceWorkersByWorkRun = new Map()
         const anchorWorkRun = async workRunId => {
@@ -2611,8 +2499,6 @@ export async function runApiProductionVertical({
             deviceWorkersByWorkRun.set(workRunId, launched)
           }
           report.devicePath.steps = [...devicePath.steps]
-          // Wait for the Device WorkerSession process to register/heartbeat
-          // so the Server can lease the queued StrongFlow executor job.
           if (launched?.workerId !== undefined) {
             try {
               await waitForDeviceWorkerRegistered(
@@ -2621,8 +2507,6 @@ export async function runApiProductionVertical({
                 Math.min(timeoutMillis, 90_000),
               )
             } catch {
-              // worker.list may omit Device sessions; driveDelivery still waits
-              // for the WorkRun lease/aggregate projection.
             }
           }
           return true
@@ -2631,9 +2515,6 @@ export async function runApiProductionVertical({
           ?? deliveryAdvanced.result?.workRunId
           ?? null
         await anchorWorkRun(executorWorkRunId)
-        // Device StrongFlow needs Worker boot + registration + lease. Cap the
-        // wait well above chat register time but below the full vertical budget
-        // so a residual is reported instead of hanging the acceptance script.
         delivery = await driveDelivery(
           api,
           Math.min(timeoutMillis, 180_000),
@@ -2680,10 +2561,6 @@ export async function runApiProductionVertical({
           coupledTo72t361: false,
         }
       } catch (error) {
-        // StrongFlow can stall after Controller dispatch: Device reviewer/
-        // verifier execution may still fail (72t.36.1 residual) even when
-        // role WorkRuns were created. Record the exact subset and continue
-        // when the caller asked for Device-path chat/cancel/restart evidence.
         let detail = null
         let failedWorkRunStates = []
         try {
@@ -2759,9 +2636,6 @@ export async function runApiProductionVertical({
         port: stableServerPort,
       })
       report.health.afterRestart = started.health.status
-      // Request receipts survive the Server process. Use a disjoint request
-      // namespace for new work after restart while retaining the original ids
-      // only for the explicit terminal replay assertion below.
       const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
       await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
       if (workerStarted !== null) {
@@ -2871,7 +2745,6 @@ export async function runApiProductionVertical({
     }
     if (!retainRepository) removeControlledRepository({ repository: controlledRepository.repository })
     if (ownedDirectory) rmSync(fixtureDirectory, { recursive: true, force: true })
-    // Cleanup failures also reject a scenario's early return.
     if (failure !== null) throw failure
   }
   return report

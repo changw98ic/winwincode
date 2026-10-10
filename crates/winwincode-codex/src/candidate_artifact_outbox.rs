@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable candidate Artifact upload ledger.
-//!
-//! The exact candidate bytes, descriptor, `artifact.open`, every
-//! `artifact.chunk`, and their stable identities are committed before the first
-//! transport attempt. A final matching `artifact.ack` is the only transition
-//! that exposes the candidate reference to a terminal Job outcome.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -28,12 +19,9 @@ use crate::{
     store::{AdapterStore, AdapterStoreError},
 };
 
-/// Canonical candidate product media type.
 pub const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+json";
-/// Canonical candidate product file name.
 pub const CANDIDATE_FILE_NAME: &str = "candidate.json";
 
-/// Chat exports the frozen project; Delivery retains its canonical manifest.
 #[must_use]
 pub fn candidate_artifact_format(profile: &str) -> (&'static str, &'static str) {
     if profile == "codex-chat" {
@@ -43,15 +31,12 @@ pub fn candidate_artifact_format(profile: &str) -> (&'static str, &'static str) 
     }
 }
 
-// A conservative raw ceiling; the actual plan also accounts for canonical
-// frame metadata and validates the final remote encoding before retention.
 const RAW_CHUNK_BYTES: usize = 64 * 1024;
 fn legacy_chunk_bytes() -> usize {
     3 * 1024 * 1024
 }
 const PENDING: &str = "pending";
 
-/// Exact verified bytes and execution authority entering the durable ledger.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CandidateArtifactUpload {
     pub snapshot_id: Option<winwincode_domain::SnapshotId>,
@@ -69,7 +54,6 @@ pub struct CandidateArtifactUpload {
 }
 
 impl CandidateArtifactUpload {
-    /// Returns the immutable Job/lease/session identity without copying bytes.
     #[must_use]
     pub fn authority(&self) -> CandidateArtifactAuthority {
         CandidateArtifactAuthority {
@@ -86,7 +70,6 @@ impl CandidateArtifactUpload {
     }
 }
 
-/// Exact candidate upload authority used to recover a final accepted reference.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CandidateArtifactAuthority {
     pub snapshot_id: Option<winwincode_domain::SnapshotId>,
@@ -100,7 +83,6 @@ pub struct CandidateArtifactAuthority {
     pub session_identity: winwincode_domain::SessionIdentity,
 }
 
-/// First durable retention result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetainedCandidateArtifact {
     pub artifact: ArtifactReference,
@@ -109,18 +91,13 @@ pub struct RetainedCandidateArtifact {
     pub already_accepted: bool,
 }
 
-/// Result of applying one exact candidate Artifact acknowledgement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CandidateArtifactAckOutcome {
-    /// A non-final contiguous prefix was accepted.
     Pending,
-    /// The Control Plane requested the original suffix again.
     Replay(Vec<DurableExecutionDelivery>),
-    /// The exact final chunk is durable and may enter one Job outcome.
     Accepted(ArtifactReference),
 }
 
-/// Candidate Artifact operations over the adapter's one private `SQLite` store.
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateArtifactOutbox {
     store: AdapterStore,
@@ -352,11 +329,6 @@ impl CandidateArtifactOutbox {
         Ok(record.final_ack.as_ref().map(|_| record.reference()))
     }
 
-    /// Durably records that no further candidate upload frame may be sent.
-    ///
-    /// The marker is committed before the caller attempts to remove the
-    /// retained frames. This makes a cancellation retryable across a process
-    /// stop between the intent and the cleanup transaction.
     pub(crate) fn request_cancel(
         &self,
         authority: &CandidateArtifactAuthority,
@@ -386,11 +358,6 @@ impl CandidateArtifactOutbox {
         })
     }
 
-    /// Returns whether a retained candidate frame is still eligible for send.
-    ///
-    /// Missing candidate records are treated as ineligible as well: a frame
-    /// without its durable artifact record cannot be tied to an active
-    /// cancellation/authority decision.
     pub(crate) fn delivery_allowed(
         &self,
         message: &ExecutionPortMessage,
@@ -707,8 +674,6 @@ impl StoredCandidateArtifact {
         {
             return Err(AdapterStoreError::Corrupt);
         }
-        // Immutable material is checked once at retention/recovery, never on
-        // each ACK or eligibility lookup. Those paths load metadata only.
         if !self.bytes.is_empty()
             && (i64::try_from(self.bytes.len()).map_err(|_| AdapterStoreError::Corrupt)?
                 != self.descriptor.size_bytes
@@ -1115,11 +1080,6 @@ fn load_by_authority_connection(
     decode_record(bytes)
 }
 
-/// Finds the upload owned by one active authority, including a predecessor
-/// stream sealed for a one-attempt replacement. The latter is needed when a
-/// Worker restarts after committing cancellation intent: its in-memory
-/// predecessor completion is gone, but the successor lease still identifies
-/// the exact predecessor attempt that must be cleaned up.
 fn load_cancel_record(
     transaction: &Transaction<'_>,
     authority: &CandidateArtifactAuthority,
@@ -1167,7 +1127,6 @@ fn load_cancel_record(
     Ok(Some((record, false)))
 }
 
-// Late acknowledgements of a retired transport plan never advance its successor.
 fn load_ack_record(
     transaction: &Transaction<'_>,
     acknowledgement: &ArtifactAckMessage,
@@ -1191,8 +1150,6 @@ fn load_ack_record(
     Ok(None)
 }
 
-// Retired/cancelled uploads consume exact, well-formed late receipts without
-// applying progress or replaying chunks. Malformed/foreign receipts still fail.
 fn validate_retired_ack_shape(
     record: &StoredCandidateArtifact,
     ack: &ArtifactAckMessage,

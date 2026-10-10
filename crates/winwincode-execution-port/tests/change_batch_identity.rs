@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use winwincode_domain::WorkspaceRevision;
 
 use winwincode_domain::{

@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-
-/* WWX-ART-03: StrongFlow review panel. Real Control Plane projections with safe
-   degradation: only text previews render inline, every colour stays on tokens. */
-
 .wwc-review {
   display: grid;
   gap: var(--wwc-space-3);

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #[test]
 #[ignore = "mechanism audit: retained diagnostic artifact validation cost baseline"]
 fn m08_real_diagnostic_queries_validate_acked_artifacts_of_other_jobs() {
@@ -70,7 +68,6 @@ fn m08_real_diagnostic_queries_validate_acked_artifacts_of_other_jobs() {
             })
             .unwrap();
         assert_eq!(transport_rows, 0);
-        // This fault is confined to an unrelated record in this temporary fixture.
         store.lock().unwrap().execute("UPDATE diagnostic_artifact_upload SET record_json = ?1 WHERE artifact_id = (SELECT MIN(artifact_id) FROM diagnostic_artifact_upload)", [b"{}".as_slice()]).unwrap();
         assert!(outbox.has_pending(&current).is_err());
         println!(

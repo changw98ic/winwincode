@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   ControlPlaneClientError,
   type ControlPlaneClientDirectory,
@@ -188,18 +186,11 @@ function mountManagedAppSettings(
   return details
 }
 
-/**
- * Design page 07: 项目与仓库. One row per repository bound to the connected
- * execution device. Registration checks the selected device's local path
- * before exposing a project-specific Chat entry.
- */
 export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'section', 'wwc-projects')
   layout.dataset.wwcPage = 'management'
 
-  // Design page 07: the display title stands alone, the accent 添加仓库 entry
-  // on the same row's right end.
   const pageHeader = mountPageHeader({
     document,
     props: {

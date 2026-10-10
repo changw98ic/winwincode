@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   controlPlaneTaskModelRouteOptions,
   type ControlPlaneDeviceSummary,
@@ -15,10 +13,6 @@ import type {
   RepositoriesViewModel,
 } from './repositories-view-model.js'
 
-/**
- * Why a submission cannot even start; every reason is a pre-request fact the
- * form already knows, plus the honest catch-all for a rejected creation.
- */
 export type TaskEntryFailure =
   | 'no-occupied-client'
   | 'no-repository'
@@ -27,7 +21,6 @@ export type TaskEntryFailure =
   | 'missing-model-route'
   | 'unavailable'
 
-/** The form drafts the browser owns while the page is mounted (ADR-0029). */
 export interface TaskEntrySelection {
   readonly clientId: string | null
   readonly repositoryBindingId: string | null
@@ -36,12 +29,6 @@ export interface TaskEntrySelection {
   readonly modelRouteId: string | null
 }
 
-/**
- * One §16.6 form snapshot.  The Client and Repository options are the
- * shell-owned device and repository lists re-used verbatim — the Client list
- * is narrowed to the devices this user occupies (only an occupied Client can
- * start a task), so the form never grows a second directory.
- */
 export interface TaskEntryState {
   readonly status: 'editing' | 'submitting' | 'started'
   readonly occupiedDevices: readonly ControlPlaneDeviceSummary[]
@@ -56,32 +43,20 @@ export interface TaskEntryState {
 
 export type TaskEntryListener = (state: TaskEntryState) => void
 
-/**
- * Whether a device may start tasks right now: the user holds its occupancy
- * lease and the device can reach its Control Plane connection.
- */
 export function deviceSupportsTaskStart(device: ControlPlaneDeviceSummary): boolean {
   return device.presence === 'online' && device.occupancy === 'occupied-by-me'
 }
 
-/** Whether one repository may take a new task: only an available binding. */
 export function repositorySupportsTaskStart(
   repository: ControlPlaneRepositorySummary,
 ): boolean {
   return repository.availability === 'available'
 }
 
-/**
- * Own the §16.6 new-task form state machine.  The device and repository
- * snapshots stay in the shell-owned models; this model only keeps the form
- * drafts, derives the occupied-device and repository options, validates the
- * submission, and hands the started anchor to the page.
- */
 export function createTaskEntryViewModel(options: {
   readonly clients: ClientsViewModel
   readonly repositories: RepositoriesViewModel
   readonly port: ControlPlaneTaskPort
-  /** Fake §16.6 route catalog by default; MODEL routing replaces the list. */
   readonly modelRouteOptions?: readonly ControlPlaneTaskModelRouteOption[]
 }): TaskEntryViewModel {
   const clients = options.clients
@@ -130,12 +105,6 @@ export function createTaskEntryViewModel(options: {
     selection = Object.freeze(next)
   }
 
-  /**
-   * Keep the form honest when the world moves: a selected Client that left
-   * the occupied set, or a selected repository that left the list, drops back
-   * to an empty choice instead of naming a task target that no longer exists.
-   * Returns the Client id whose repositories the form no longer shows.
-   */
   function reconcileWithSnapshots(): string | null {
     let droppedClient: string | null = null
     if (
@@ -169,16 +138,12 @@ export function createTaskEntryViewModel(options: {
     if (closed) return
     const droppedClient = reconcileWithSnapshots()
     publish()
-    // The dropped device keeps no repository selection anywhere: the one
-    // shared repository area clears with the form.
     if (droppedClient !== null) void repositories.showDevice(null)
   })
 
   const unsubscribeRepositories = repositories.subscribe(() => {
     if (closed) return
     reconcileWithSnapshots()
-    // A fresh repository list with no choice yet selects its first usable
-    // binding and defaults the base branch to that repository's default.
     if (
       selection.clientId !== null
       && repositories.state.clientId === selection.clientId
@@ -230,8 +195,6 @@ export function createTaskEntryViewModel(options: {
       })
       failure = null
       publish()
-      // The repository select is driven by the one shell-owned repository
-      // list, so the device switch reads that device's bindings through it.
       void repositories.showDevice(nextClientId)
     },
     selectRepository(repositoryBindingId) {
@@ -240,8 +203,6 @@ export function createTaskEntryViewModel(options: {
       setSelection({
         ...selection,
         repositoryBindingId,
-        // A different target repository restarts the base-branch draft on its
-        // own default; re-selecting the same choice keeps the user's draft.
         baseBranch: defaultBranchOf(repositoryBindingId),
       })
       failure = null
@@ -325,8 +286,6 @@ export function createTaskEntryViewModel(options: {
         publish()
       }, () => {
         if (closed) return
-        // A rejected creation keeps every draft so the same explicit submit
-        // can retry once the connection recovers.
         status = 'editing'
         failure = 'unavailable'
         publish()
@@ -357,25 +316,16 @@ export function createTaskEntryViewModel(options: {
 }
 
 export interface TaskEntryViewModel {
-  /** The current form snapshot; every listener receives it on subscribe. */
   readonly state: TaskEntryState
   subscribe(listener: TaskEntryListener): () => void
-  /** Choose the occupied Client the task runs on; null clears the form. */
   selectClient(clientId: string | null): void
-  /** Choose one of the selected Client's repositories. */
   selectRepository(repositoryBindingId: string | null): void
-  /** Edit the base-branch draft; the default is the repository default. */
   setBaseBranch(value: string): void
-  /** Edit the task description draft. */
   setDescription(value: string): void
-  /** Choose one model route option, or clear the choice. */
   selectModelRoute(routeId: string | null): void
-  /** Validate and create the task; the anchor arrives through `state.anchor`. */
   submit(): void
   dismissFailure(): void
-  /** Re-read the shell-owned device and repository snapshots. */
   refresh(): Promise<void>
-  /** First read for a freshly mounted form. */
   start(): Promise<void>
   close(): void
 }

@@ -1,16 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
-// UI-608 unit lane for the deterministic visual-regression fingerprints.
-//
-// The capture itself needs real layout, so the browser lanes in
-// tests/ui608-component-state-visual-browser.test.mjs and
-// tests/ui608-page-visual-browser.test.mjs own the rendered fingerprints.
-// This lane owns everything that must hold without a browser: the traversal
-// contract, the token resolution, the difference reasons a reviewer reads, and
-// the registration of the whole visual lane.  Keeping the difference vocabulary
-// here is what lets a visual failure be told apart from a functional E2E
-// failure instead of failing as a vague assertion deep inside a scenario.
-
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -45,12 +32,6 @@ const {
   renderVisualRegressionReport,
   visualRegressionReport,
 } = visual
-
-// ---------------------------------------------------------------------------
-// A tiny deterministic DOM double.  Real layout is the browser lanes' job;
-// this double only has to answer "what is the tree, what does it compute, and
-// where does it sit" so the traversal contract is pinned without Chrome.
-// ---------------------------------------------------------------------------
 
 const TOKENS = Object.freeze({
   '--wwc-color-danger-border': 'rgb(220, 38, 38)',
@@ -139,8 +120,6 @@ function capture(rootNode, overrides = {}) {
 function flatten(fingerprint) {
   return Object.fromEntries(fingerprint.nodes.map(node => [node.path, node]))
 }
-
-// ---------------------------------------------------------------------------
 
 test('visual fingerprints carry the schema version, capture identity, and the fixed font contract', () => {
   const button = createNode('button', {
@@ -288,22 +267,17 @@ test('visibility:hidden nodes stay in the fingerprint because they still hold la
 
 test('native options stay in the fingerprint with their viewport-origin geometry', () => {
   const root_ = createNode('div')
-  // A closed native <select>: Chrome answers every option's
-  // getBoundingClientRect with a zero-size box pinned to the viewport origin.
   const closed = root_.append(createNode('select'))
   const phantom = closed.append(createNode('option'))
   phantom.appendText('Closed list choice')
   const grouping = closed.append(createNode('optgroup'))
   grouping.setAttribute('label', 'Closed group')
-  // A rendered option list (`multiple` or `size`): real line height, real box.
   const listed = root_.append(createNode('select'))
   const rendered = listed.append(createNode('option'))
   rendered.appendText('Listed choice')
   rendered.rect = { x: 0, y: 24, width: 80, height: 20 }
 
   const nodes = flatten(capture(root_))
-  // Native list membership is part of the baseline, including phantom boxes;
-  // ignoring these nodes would hide shell-level geometry changes.
   assert.deepEqual(Object.keys(nodes), [
     '.',
     './select[1]',

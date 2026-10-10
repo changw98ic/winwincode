@@ -11,11 +11,6 @@ import {
   scanText,
 } from '../scripts/check-no-absolute-paths.mjs'
 
-// Phase 0 path-ban lint lane: absolute local paths must never enter the
-// Client public surface (original plan §8.1, §13, §17.3, §20.7, gate
-// "no absolute path in public projections"). These tests exercise the gate
-// against fabricated temporary trees plus the current repository tree.
-
 const root = resolve(import.meta.dirname, '..')
 const scriptPath = join(root, 'scripts', 'check-no-absolute-paths.mjs')
 
@@ -81,7 +76,6 @@ function writeTree(target) {
     join(target, 'tests/fixtures/client-control/sample.json'),
     '{\n  "root": "/Users/alice/work/repo"\n}\n',
   )
-  // Untouched target kinds must be skipped without failing the scan.
 }
 
 test('scanPublicSurface scans every target kind and skips missing ones', (t) => {

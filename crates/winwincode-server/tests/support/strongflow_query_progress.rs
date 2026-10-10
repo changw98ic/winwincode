@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable source fixture, using the same journal/artifact seed pattern as
-//! `winwincode-control-plane/tests/delivery_verdict_authority.rs`.
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -484,9 +479,6 @@ fn fixture_delivery(repository: &Path, base_commit: String) -> Delivery {
         VerdictFixtureOutcome::Pass,
     );
     let mut snapshot = fixture.delivery.into_snapshot();
-    // The candidate is ready for review. No reviewer/verifier has run yet.
-    // The verdict fixture's completed verification roles require runtime
-    // ledgers and are outside this query/ingress regression.
     snapshot
         .session_bindings
         .retain(|binding| binding.execution_profile.as_deref() == Some("executor"));

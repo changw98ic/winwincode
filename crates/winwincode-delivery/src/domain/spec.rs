@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -212,11 +210,6 @@ fn validate_product_session_id(
     }
 }
 
-/// Maps one valid GitHub issue source to its single stable canonical Delivery identity.
-///
-/// # Errors
-///
-/// Returns [`DeliveryValidationError`] when the source is not a canonical GitHub issue reference.
 pub fn delivery_id_for_github_issue_source(
     source: &GitHubIssueSourceRef,
 ) -> Result<DeliveryId, DeliveryValidationError> {

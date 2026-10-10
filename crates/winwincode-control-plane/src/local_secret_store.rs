@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Permission-protected local implementation of the canonical secret-store port.
-//!
-//! Each scope-bound Credential reference owns immutable version files. Rotation
-//! publishes the next complete file before metadata advances, so either the old
-//! or the new metadata version remains resolvable across a crash. Cleanup only
-//! removes versions after the caller supplies the newly committed resolution.
-
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -30,7 +21,6 @@ const TEMPORARY_SUFFIX: &str = ".tmp";
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
-/// Result of one immutable local secret-version publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalSecretWriteReceipt {
     credential_reference_id: CredentialReferenceId,
@@ -49,14 +39,12 @@ impl LocalSecretWriteReceipt {
         self.rotation_version
     }
 
-    /// Whether the exact bytes were already durably published.
     #[must_use]
     pub const fn replayed(&self) -> bool {
         self.replayed
     }
 }
 
-/// Result of removing obsolete or deleted local secret versions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalSecretCleanupReceipt {
     removed_versions: u64,
@@ -69,25 +57,12 @@ impl LocalSecretCleanupReceipt {
     }
 }
 
-/// Filesystem-backed Community/local adapter for [`SecretStorePort`].
-///
-/// The supplied root is dedicated to secret storage. It and every reference
-/// directory are forced to owner-only access; secret and lock files are
-/// owner-read/write only. No ID, provider name, scope, or secret appears in a
-/// filesystem name.
 pub struct LocalSecretStoreAdapter {
     root: PathBuf,
     lock_path: PathBuf,
 }
 
 impl LocalSecretStoreAdapter {
-    /// Opens or creates a dedicated local secret-store root and removes any
-    /// incomplete temporary files left by a stopped process.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable secret-free failure if the root cannot be protected,
-    /// locked, or recovered.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, SecretStoreError> {
         create_secure_directory(root.as_ref())?;
         let root = fs::canonicalize(root.as_ref()).map_err(|_| SecretStoreError::unavailable())?;
@@ -102,15 +77,6 @@ impl LocalSecretStoreAdapter {
         Ok(store)
     }
 
-    /// Atomically publishes the exact version represented by `reference`.
-    /// Exact retries are idempotent; different bytes for an existing version
-    /// are rejected without replacing the durable value.
-    ///
-    /// The secret is consumed so its owned input buffer is cleared on return.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable secret-safe categories.
     pub fn store(
         &self,
         reference: &CredentialReferenceResolution,
@@ -121,15 +87,6 @@ impl LocalSecretStoreAdapter {
         result
     }
 
-    /// Atomically stages the next immutable version while retaining the current
-    /// one. The caller may then commit Credential-reference metadata and call
-    /// [`Self::cleanup`] with the new resolution. A crash at either boundary
-    /// therefore leaves the metadata-selected version readable.
-    ///
-    /// # Errors
-    ///
-    /// Returns a version conflict at the supported version boundary or when a
-    /// different value already occupies the next version.
     pub fn rotate(
         &self,
         current: &CredentialReferenceResolution,
@@ -145,12 +102,6 @@ impl LocalSecretStoreAdapter {
         result
     }
 
-    /// Removes every obsolete version after `current` has become the committed
-    /// metadata resolution. The operation is idempotent and crash-recoverable.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable secret-free store failure.
     pub fn cleanup(
         &self,
         current: &CredentialReferenceResolution,
@@ -185,13 +136,6 @@ impl LocalSecretStoreAdapter {
         Ok(LocalSecretCleanupReceipt { removed_versions })
     }
 
-    /// Clears and removes all local versions for a captured scope-bound
-    /// resolution. Callers can capture the resolution immediately before a
-    /// metadata revoke or delete, then invoke this idempotent cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable secret-free store failure.
     pub fn delete(
         &self,
         reference: &CredentialReferenceResolution,

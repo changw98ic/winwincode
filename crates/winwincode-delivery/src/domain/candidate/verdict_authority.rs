@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Production reconstruction of a Delivery verdict from sealed durable facts.
-
 use std::collections::{BTreeMap, HashSet};
 use std::{error::Error, fmt};
 
@@ -31,10 +27,6 @@ const SESSION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1
 const JSON_CONTENT_TYPE: &str = "application/json";
 const MAX_RUNTIME_EVENTS: usize = 100_000;
 
-/// One event read from the canonical accepted runtime ledger.
-///
-/// The Control Plane derives `occurred_at_millis` from the event's canonical
-/// `Instant`; the verdict resolver never accepts an outcome or identity here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionRuntimeEvent {
     category: ProductionRuntimeEventCategory,
@@ -45,7 +37,6 @@ pub struct ProductionRuntimeEvent {
 }
 
 impl ProductionRuntimeEvent {
-    /// Seals one event already read from the canonical runtime ledger.
     #[must_use]
     pub const fn from_durable_ledger(
         category: ProductionRuntimeEventCategory,
@@ -64,7 +55,6 @@ impl ProductionRuntimeEvent {
     }
 }
 
-/// Delivery-owned classification of one accepted runtime event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionRuntimeEventCategory {
     Lifecycle,
@@ -77,8 +67,6 @@ pub enum ProductionRuntimeEventCategory {
     Diagnostic,
 }
 
-/// Payload bytes whose base64 form and digest were already checked by the
-/// Control Plane's canonical runtime-ledger adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionRuntimePayload {
     content_type: String,
@@ -86,8 +74,6 @@ pub struct ProductionRuntimePayload {
 }
 
 impl ProductionRuntimePayload {
-    /// Seals payload bytes after the Control Plane has checked the durable
-    /// transport encoding and digest.
     #[must_use]
     pub fn from_validated_bytes(content_type: impl Into<String>, bytes: Vec<u8>) -> Self {
         Self {
@@ -97,7 +83,6 @@ impl ProductionRuntimePayload {
     }
 }
 
-/// Durable runtime facts for one independent verification role.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionVerificationRuntime {
     role: VerificationRole,
@@ -107,8 +92,6 @@ pub struct ProductionVerificationRuntime {
 }
 
 impl ProductionVerificationRuntime {
-    /// The Control Plane supplies the Snapshot loaded through the exact durable
-    /// job/attempt binding, never reconstructed from terminal output.
     #[must_use]
     pub fn from_durable(
         role: VerificationRole,
@@ -125,7 +108,6 @@ impl ProductionVerificationRuntime {
     }
 }
 
-/// Sealed candidate, verification, and Evidence facts for verdict computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionVerdictFacts {
     candidate: FrozenDeliveryCandidate,
@@ -135,7 +117,6 @@ pub struct ProductionVerdictFacts {
 }
 
 impl ProductionVerdictFacts {
-    /// Consumes the sealed result for the Control Plane verdict boundary.
     #[must_use]
     pub fn into_parts(
         self,
@@ -154,7 +135,6 @@ impl ProductionVerdictFacts {
     }
 }
 
-/// Failure while reconciling durable production verdict facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionVerdictResolutionError {
     message: String,
@@ -168,15 +148,6 @@ impl fmt::Display for ProductionVerdictResolutionError {
 
 impl Error for ProductionVerdictResolutionError {}
 
-/// Resolves exact candidate, verification, and Evidence facts from production
-/// durable records.
-///
-/// # Errors
-///
-/// Rejects missing roles, non-contiguous or changed runtime events, an invalid
-/// policy attestation, stale candidate/spec/runtime positions, malformed
-/// structured findings, and any terminal, Artifact, lease, fence, session, or
-/// Git identity drift.
 pub fn resolve_production_verdict(
     delivery: &Delivery,
     candidate: FrozenDeliveryCandidate,
@@ -227,10 +198,6 @@ pub fn resolve_production_verdict(
         .checked_add(2)
         .ok_or_else(|| error("verdict production time exceeds the durable range"))?;
 
-    // Frozen preview source authority requires one executor/remediator Commit
-    // Evidence sealed from the real frozen candidate already produced by the
-    // writer Worker. Never invent a commit id: rebuild it from the frozen
-    // candidateRef/commit that freeze_source just validated.
     let producer_commit = resolve_delivery_evidence(
         delivery,
         &candidate,

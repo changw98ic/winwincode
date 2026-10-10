@@ -1,67 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Local branch creation engine for frozen Worker candidates (GIT-100.3).
-//!
-//! One vertical that turns a retained candidate into a durable local branch:
-//! given a repository binding, a stable candidate reference
-//! (`refs/winwincode/candidates/<candidate-commit>`), and a task slug (or an
-//! explicit `winwincode/` branch name), the engine creates
-//! `winwincode/<task-slug>-<short-id>` pointing exactly at the frozen
-//! candidate commit with `git branch` — the user's current checkout, HEAD,
-//! and working tree are never touched and no commit is created, so the
-//! candidate commit's authorship is preserved verbatim.
-//!
-//! The full sequence, every step fail-closed before the next one mutates:
-//!
-//! 1. Validate the request shapes (binding id, canonical candidate ref,
-//!    branch-name vocabulary) — nothing is read or written on refusal.
-//! 2. Load the registry row: an unretained candidate is
-//!    [`CandidateBranchErrorKind::CandidateMissing`], a foreign binding or a
-//!    terminal row (`applied`/`discarded`) is
-//!    [`CandidateBranchErrorKind::Conflict`].
-//! 3. Require the durable occupancy mirror — the uplink must stamp a valid
-//!    lease plus fencing token (contract 6), so without a mirror the engine
-//!    refuses *before* touching the repository. Unlike the retention vertical
-//!    (which records durably and then fails the report), a branch is a change
-//!    to the user's repository: it is not created when it cannot be reported.
-//! 4. Resolve the bound checkout and read the candidate ref through Git: a
-//!    missing ref is [`CandidateBranchErrorKind::CandidateMissing`], a ref
-//!    resolving elsewhere is [`CandidateBranchErrorKind::Conflict`].
-//! 5. Determine the branch name. An explicit request must be a canonical
-//!    `winwincode/` name that is either free or already resolves to the
-//!    candidate commit — a name occupied by another commit fails closed with
-//!    [`CandidateBranchErrorKind::Conflict`]. A derived name walks the stable
-//!    ladder `winwincode/<slug>-<7|12|20|full commit id>` and takes the first
-//!    rung that is free or already resolves to the candidate commit; the
-//!    derivation is a pure function of (slug, commit, existing refs), so the
-//!    same inputs always resolve to the same branch.
-//! 6. Create the branch when it does not already resolve to the candidate,
-//!    then confirm it by an exact re-read (the freeze-path discipline).
-//! 7. Persist the durable created-branch record (the device-local equivalent
-//!    of the `LocalApplyReceipt` facts) and progress the registry row to
-//!    `branch_created` along the contract 6 transition table.
-//! 8. Enqueue the durable `client.candidate.apply_result` frame stamped
-//!    `C + L` from the occupancy mirror: strategy `create_branch`, result
-//!    `branch_created`, deterministic receipt id and idempotency key per
-//!    candidate, so a repeated request re-reports the identical receipt the
-//!    Control Plane settles as the same creation.
-//!
-//! A repeated request returns the original branch: the durable record names
-//! it, and any follow-up request verifies it still resolves to the candidate
-//! and reports it again instead of creating a second branch. The engine
-//! never silently re-creates a recorded branch that vanished and never
-//! rewrites a diverged candidate ref.
-//!
-//! Failure reporting boundary: the engine reports the *success* apply result
-//! (with its idempotent replay) and fails closed locally with the mapped
-//! error kinds otherwise — the registry row stays retryable (`retained` /
-//! `branch_created`) and unreported local `failed` progressions are left to
-//! the apply-result settlement lane, which owns per-attempt receipt
-//! identity. Callers surface [`CandidateBranchErrorKind`] to the user.
-//!
-//! Local-data boundary: the engine reads the binding's canonical local path
-//! to run Git, but no path enters the durable rows, the frame, or any error.
-
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -82,84 +18,42 @@ use crate::candidate_registry::{
 use crate::daemon::DeviceDaemon;
 use crate::store::{DeviceStore, DeviceStoreError};
 
-/// Branch namespace of every branch this engine creates; an explicit branch
-/// name must stay inside it so the engine can never touch a user branch such
-/// as `main`.
 pub const WINWINCODE_BRANCH_PREFIX: &str = "winwincode/";
 
-/// Longest derived slug segment (before the `-<commit id>` suffix).
 const MAX_SLUG_BYTES: usize = 48;
 
-/// Longest explicit `winwincode/` branch name suffix.
 const MAX_BRANCH_SUFFIX_BYTES: usize = 160;
 
 const MAX_ID_BYTES: usize = 200;
 
-/// Short-id ladder of the deterministic branch-name derivation, in rung
-/// order. The final rung is the full commit id, so the ladder always
-/// terminates with a name unique to the candidate.
 const SHORT_ID_RUNGS: [usize; 4] = [7, 12, 20, usize::MAX];
 
-/// The durable device-local record of one created branch — the facts the
-/// `client.candidate.apply_result` receipt is derived from, so every report
-/// of the same creation encodes identical receipt fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedBranchRecord {
-    /// Candidate identity the branch was created from (the frozen commit).
     pub candidate_id: String,
-    /// Repository binding the branch lives in.
     pub repository_binding_id: String,
-    /// Branch name inside the `winwincode/` namespace (no `refs/heads/`).
     pub branch_name: String,
-    /// RFC 3339 stamp of the first creation; never rewritten.
     pub created_at: String,
 }
 
-/// One validated branch-creation request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchCreationRequest {
-    /// Repository binding whose local checkout holds the candidate ref.
     pub repository_binding_id: String,
-    /// Stable candidate reference
-    /// (`refs/winwincode/candidates/<candidate-commit>`).
     pub candidate_ref: String,
-    /// Task slug for the derived `winwincode/<slug>-<short-id>` name. Only
-    /// used (and only validated) when [`BranchCreationRequest::
-    /// requested_branch_name`] is `None`.
     pub task_slug: String,
-    /// Explicit `winwincode/` branch name; the derivation is skipped when
-    /// present.
     pub requested_branch_name: Option<String>,
-    /// RFC 3339 stamp of the request; the durable record keeps the first
-    /// one it ever saw.
     pub requested_at: String,
 }
 
-/// Bounded branch-creation failure categories, mapped onto the contract 8
-/// result-code vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateBranchErrorKind {
-    /// A request input violated the frozen shapes; nothing was read or
-    /// written.
     InvalidInput,
-    /// Fail closed: the candidate lifecycle ended, a diverging fact was met
-    /// (foreign binding, drifted candidate ref), the requested or derived
-    /// branch name is occupied by another commit, or a recorded branch no
-    /// longer resolves. Every conflict is stable: the same request retries
-    /// to the same verdict.
     Conflict,
-    /// The device holds no occupancy mirror, so the apply-result uplink
-    /// cannot stamp its lease (fail closed; the repository was not touched).
     NoOccupancyMirror,
-    /// Fail closed: the candidate ref does not resolve locally (the
-    /// candidate was never retained, the binding maps no checkout, or the
-    /// ref is gone) — contract 8 `candidate_missing`.
     CandidateMissing,
-    /// The durable store or the Git execution failed.
     Store,
 }
 
-/// Branch-creation failure with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateBranchError {
     kind: CandidateBranchErrorKind,
@@ -195,7 +89,6 @@ impl CandidateBranchError {
         }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> CandidateBranchErrorKind {
         self.kind
@@ -243,58 +136,28 @@ impl From<crate::candidate_registry::CandidateRegistryError> for CandidateBranch
     }
 }
 
-/// The stable facts of one branch-creation vertical.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchCreationFacts {
-    /// Candidate identity the branch was created from (the frozen commit).
     pub candidate_id: String,
-    /// Frozen candidate commit the branch points at.
     pub candidate_commit: String,
-    /// Stable candidate reference the branch was created from.
     pub candidate_ref: String,
-    /// Repository binding the branch lives in.
     pub repository_binding_id: String,
-    /// Branch name inside the `winwincode/` namespace (no `refs/heads/`).
     pub branch_name: String,
-    /// Full ref name of the created branch
-    /// (`refs/heads/<branch name>`).
     pub branch_ref: String,
 }
 
-/// Whether this call created the branch or met it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchCreationOutcome {
-    /// This call ran `git branch` and created the branch.
     Created(BranchCreationFacts),
-    /// The branch already resolved to the candidate commit — either a
-    /// earlier run of this engine (the durable record names it) or a
-    /// pre-existing branch at the candidate — and nothing was created. The
-    /// facts name the original branch a repeated request returns.
     Duplicate(BranchCreationFacts),
 }
 
-/// The result of one full branch-creation vertical.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchCreationReport {
-    /// Whether this call created the branch or met the original one.
     pub outcome: BranchCreationOutcome,
-    /// Outbox sequence of the `client.candidate.apply_result` frame.
     pub frame_sequence: u64,
 }
 
-/// Creates the local branch for one retained candidate and reports it
-/// upstream as one vertical.
-///
-/// See the module documentation for the full sequence and the failure
-/// mapping. Idempotent: a repeated request — identical or with a different
-/// slug — returns the original recorded branch and re-reports the identical
-/// receipt under the identical idempotency key.
-///
-/// # Errors
-///
-/// Returns the failure categories of [`CandidateBranchErrorKind`]; every
-/// error leaves the repository, the registry row, and the durable record in
-/// their prior state.
 pub fn create_candidate_branch(
     daemon: &mut DeviceDaemon,
     request: &BranchCreationRequest,
@@ -306,9 +169,6 @@ pub fn create_candidate_branch(
         bound_repository_path(daemon.store_mut(), &request.repository_binding_id)?;
 
     if let Some(durable) = created_branch_record(daemon.store_mut(), &candidate_id)? {
-        // The repeated-request path: the recorded branch is the original
-        // branch. Verify it still resolves to the candidate and re-report
-        // it; never create a second branch beside it.
         let head = read_git_identity(&repository_path, &branch_ref_name(&durable.branch_name))?
             .ok_or_else(|| {
                 CandidateBranchError::conflict(format!(
@@ -331,8 +191,6 @@ pub fn create_candidate_branch(
         return finish_creation(daemon, &record, &durable, outcome);
     }
 
-    // Fresh creation: the candidate ref must resolve to exactly the frozen
-    // commit the registry retained.
     let observed =
         read_git_identity(&repository_path, &request.candidate_ref)?.ok_or_else(|| {
             CandidateBranchError::candidate_missing(format!(
@@ -366,9 +224,6 @@ pub fn create_candidate_branch(
     finish_creation(daemon, &record, &durable, outcome)
 }
 
-/// The fail-closed guards that run before anything is read from Git: the
-/// candidate must be retained on this binding and non-terminal, and the
-/// occupancy mirror must exist so the vertical can be reported.
 fn creation_guards(
     daemon: &mut DeviceDaemon,
     request: &BranchCreationRequest,
@@ -394,8 +249,6 @@ fn creation_guards(
             record.local_state
         )));
     }
-    // The uplink stamp exists before the repository is touched: a branch
-    // that could not be reported is not created.
     if daemon.occupancy_mirror().is_none() {
         return Err(CandidateBranchError {
             kind: CandidateBranchErrorKind::NoOccupancyMirror,
@@ -407,10 +260,6 @@ fn creation_guards(
     Ok(record)
 }
 
-/// Resolves the target branch name: an explicit name must be free or already
-/// resolve to the candidate commit, and a derived name walks the stable
-/// short-id ladder. Returns the name plus whether it already resolves to the
-/// candidate commit.
 fn determine_branch_name(
     repository_path: &str,
     request: &BranchCreationRequest,
@@ -435,7 +284,6 @@ fn determine_branch_name(
     }
 }
 
-/// Assembles the stable facts of one creation from the registry row.
 fn facts_of(
     record: &CandidateLocalRefRecord,
     candidate_id: &str,
@@ -451,8 +299,6 @@ fn facts_of(
     }
 }
 
-/// Shared tail of the vertical: progress the registry row to
-/// `branch_created` and enqueue the lease-stamped apply-result frame.
 fn finish_creation(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -471,7 +317,6 @@ fn finish_creation(
     })
 }
 
-/// Builds the deterministic canonical `lar_` receipt id for a branch event.
 fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     let hex: String = candidate_id
         .chars()
@@ -482,13 +327,6 @@ fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     format!("lar_{hex}{tag}")
 }
 
-/// Enqueues the durable `client.candidate.apply_result` frame for one created
-/// branch. The receipt is derived deterministically from the durable facts.
-///
-/// # Errors
-///
-/// Returns [`CandidateBranchErrorKind::NoOccupancyMirror`] when no occupancy
-/// mirror is held, or a store error when appending the outbox frame fails.
 pub fn enqueue_branch_created(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -539,12 +377,6 @@ pub fn enqueue_branch_created(
         })
 }
 
-/// Loads the durable created-branch record of one candidate, if any.
-///
-/// # Errors
-///
-/// Returns a store failure when the read fails, the store is closed, or the
-/// stored row disagrees with its shape.
 pub fn created_branch_record(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -570,8 +402,6 @@ pub fn created_branch_record(
         .map_err(CandidateBranchError::from)
 }
 
-/// Persists the created-branch record; the first creation's stamp wins, and
-/// a stored record for another binding or branch fails closed.
 fn write_branch_record(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -606,8 +436,6 @@ fn write_branch_record(
     Ok(stored)
 }
 
-/// Creates the `candidate_created_branches` table on first use; the table is
-/// additive and idempotent, so no store schema migration is involved.
 fn ensure_branch_schema(store: &mut DeviceStore) -> Result<(), CandidateBranchError> {
     store
         .connection_mut()?
@@ -623,9 +451,6 @@ fn ensure_branch_schema(store: &mut DeviceStore) -> Result<(), CandidateBranchEr
     Ok(())
 }
 
-/// Resolves one binding's canonical local checkout; a binding that maps no
-/// existing checkout is the candidate-missing verdict, exactly as the
-/// registry's reconciliation treats it.
 fn bound_repository_path(
     store: &mut DeviceStore,
     repository_binding_id: &str,
@@ -643,9 +468,6 @@ fn bound_repository_path(
     Ok(mapping.canonical_path)
 }
 
-/// Walks the stable short-id ladder and returns the first branch name that
-/// is free or already resolves to the candidate commit, plus whether the
-/// name already resolves to the candidate.
 fn derive_branch_name(
     repository_path: &str,
     task_slug: &str,
@@ -672,7 +494,6 @@ fn derive_branch_name(
     )))
 }
 
-/// Validates one request before anything is read or written.
 fn validate_request(request: &BranchCreationRequest) -> Result<(), CandidateBranchError> {
     require_non_empty(&request.repository_binding_id, "repository binding id")?;
     validate_candidate_ref(&request.candidate_ref)?;
@@ -683,8 +504,6 @@ fn validate_request(request: &BranchCreationRequest) -> Result<(), CandidateBran
     Ok(())
 }
 
-/// Extracts the candidate id (the frozen commit) from a validated candidate
-/// reference.
 fn candidate_id_of(candidate_ref: &str) -> String {
     candidate_ref
         .strip_prefix(CANDIDATE_REF_PREFIX)
@@ -692,8 +511,6 @@ fn candidate_id_of(candidate_ref: &str) -> String {
         .to_owned()
 }
 
-/// Validates the canonical stable candidate reference:
-/// `refs/winwincode/candidates/<full lowercase git commit id>`.
 fn validate_candidate_ref(candidate_ref: &str) -> Result<(), CandidateBranchError> {
     let Some(suffix) = candidate_ref.strip_prefix(CANDIDATE_REF_PREFIX) else {
         return Err(CandidateBranchError::invalid(format!(
@@ -713,12 +530,6 @@ fn validate_candidate_ref(candidate_ref: &str) -> Result<(), CandidateBranchErro
     }
 }
 
-/// Validates one `winwincode/` branch name against a conservative
-/// `git check-ref-format` subset: every `/`-segment is non-empty, starts
-/// with an alphanumeric or `_` (never `.` or `-`), never ends in `.lock`,
-/// the charset is alphanumeric plus `. _ - /`, and the whole suffix carries
-/// no `..`, no `@{`, and no trailing `.` or `/`. The engine can therefore
-/// never name a branch outside the namespace or inject an option.
 fn validate_branch_name(name: &str) -> Result<(), CandidateBranchError> {
     let Some(suffix) = name.strip_prefix(WINWINCODE_BRANCH_PREFIX) else {
         return Err(CandidateBranchError::invalid(format!(
@@ -749,10 +560,6 @@ fn validate_branch_name(name: &str) -> Result<(), CandidateBranchError> {
     }
 }
 
-/// Validates one task slug for the derived
-/// `winwincode/<slug>-<short-id>` name: a single ASCII segment of
-/// alphanumerics, `_`, and `-`, starting and ending alphanumeric, so the
-/// derived name always passes [`validate_branch_name`].
 fn validate_task_slug(task_slug: &str) -> Result<(), CandidateBranchError> {
     let valid = !task_slug.is_empty()
         && task_slug.len() <= MAX_SLUG_BYTES
@@ -784,14 +591,10 @@ fn require_non_empty(value: &str, label: &str) -> Result<(), CandidateBranchErro
     Ok(())
 }
 
-/// The full ref name of one branch name in the `winwincode/` namespace.
 fn branch_ref_name(branch_name: &str) -> String {
     format!("refs/heads/{branch_name}")
 }
 
-/// Runs `git rev-parse --verify --quiet` for one ref: a status of 1 is the
-/// missing-ref answer, success must yield exactly one identity, anything
-/// else is an error.
 fn read_git_identity(
     repository_path: &str,
     ref_name: &str,
@@ -828,10 +631,6 @@ fn read_git_identity(
     )))
 }
 
-/// Runs `git branch <name> <commit>` — a ref write only: the current
-/// checkout, HEAD, and working tree are untouched and no commit is created,
-/// so the candidate commit's authorship is preserved verbatim. The result is
-/// confirmed by an exact re-read before the caller may proceed.
 fn create_git_branch(
     repository_path: &str,
     branch_name: &str,

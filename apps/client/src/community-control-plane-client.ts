@@ -1,5 +1,4 @@
 import { requestFetch as sendHttp, withResponseFailure } from '@winwincode/network-request'
-// SPDX-License-Identifier: Apache-2.0
 
 import {
   ControlPlaneClientError,
@@ -388,7 +387,6 @@ export interface WorkItemsCreateInput {
   readonly items: readonly WorkItemsCreateItem[]
 }
 
-/** Exact public input for cancelling one active WorkRun. */
 export interface DeliveryCancelRequest {
   readonly deliveryId: DeliveryId
   readonly workRunId: WorkRunId
@@ -396,7 +394,6 @@ export interface DeliveryCancelRequest {
   readonly requestId: RequestId
 }
 
-/** Builds the canonical WorkRun cancellation command. */
 export function workRunCancelCommand(
   input: DeliveryCancelRequest,
   context: { readonly actor: Actor; readonly scope: RepositoryScope },
@@ -416,7 +413,6 @@ export function workRunCancelCommand(
 }
 
 
-/** Builds the canonical WorkItem command; the server owns graph checks. */
 export function workItemsCreateCommand(
   input: WorkItemsCreateInput,
 ): WorkItemsCreateCommand {
@@ -436,7 +432,6 @@ export function workItemsCreateCommand(
   }
 }
 
-/** Reads the canonical WorkRun aggregate used by StrongFlow active views. */
 export async function queryWorkRunAggregate(
   client: ControlPlaneClient,
   input: WorkRunAggregateQueryInput,
@@ -563,7 +558,6 @@ const REPOSITORY_DIRECTORY_LIST_PATH = '/api/v1/repositories'
 
 export type ControlPlaneRepositoryDirtyState = 'clean' | 'dirty'
 
-/** The seven canonical repository availability projections. */
 export type ControlPlaneRepositoryAvailability =
   | 'available'
   | 'dirty'
@@ -573,12 +567,10 @@ export type ControlPlaneRepositoryAvailability =
   | 'permission_denied'
   | 'scan_failed'
 
-/** One repository list read: the Client device whose bindings are listed. */
 export interface ControlPlaneRepositoryListInput {
   readonly clientId: string
 }
 
-/** One repository card. The Server owns every field; the browser only displays. */
 export interface ControlPlaneRepositorySummary {
   readonly repositoryBindingId: string
   readonly displayName: string
@@ -609,11 +601,6 @@ function invalidRepositoryListError(): ControlPlaneClientError {
   })
 }
 
-/**
- * Validate the list input before a request exists: the query names one Client
- * device, so the identity must be a non-empty digit string with no grouping
- * separators or path-shaped text.
- */
 function assertRepositoryListInput(clientId: string): void {
   if (!/^\d+$/u.test(clientId)) {
     throw new ControlPlaneClientError({
@@ -728,23 +715,11 @@ async function repositoriesListRequest(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Client directory: add-Client connect and the device card list (CLIENT-200.4).
-//
-// FAKE-DRIVEN SHAPES: the routes and payload shapes in this block are the
-// presentation-side contract for the add-Client form and the device list.
-// The server-connect-flow lane owns the real wire routes and payload names;
-// when those land, only the path constants and parsers in this block change.
-// Pages and view-models only ever see the typed unions and summaries below.
-// ---------------------------------------------------------------------------
-
 const CLIENT_DIRECTORY_LIST_PATH = '/api/v1/clients'
 const CLIENT_DIRECTORY_CONNECT_PATH = '/api/v1/clients/connections'
 
-/** §12.1: presence is displayed separately from occupancy, never merged. */
 export type ControlPlaneDevicePresence = 'online' | 'offline' | 'locked'
 
-/** §12.1 occupancy states projected for device cards. */
 export type ControlPlaneDeviceOccupancy =
   | 'available'
   | 'occupied-by-me'
@@ -752,7 +727,6 @@ export type ControlPlaneDeviceOccupancy =
   | 'draining'
   | 'recovery-pending'
 
-/** One device card. The Server owns every field; the browser only displays. */
 export interface ControlPlaneDeviceSummary {
   readonly clientId: string
   readonly displayName: string
@@ -765,20 +739,11 @@ export interface ControlPlaneDeviceSummary {
   readonly recoveryDeadlineAt?: string | null
 }
 
-/** One add-Client attempt: the device identity plus its dynamic code. */
 export interface ControlPlaneClientConnectInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
   readonly clientId: string
-  /** Exactly 8 digits. */
   readonly connectionCode: string
 }
 
-/**
- * The one presentation-facing add-Client failure taxonomy. Wire codes are
- * translated by `controlPlaneClientAddFailure` and never read anywhere else.
- * `unavailable` is the catch-all for outages, protocol drift, and expired
- * browser sessions, mirroring the sign-in taxonomy above.
- */
 export type ControlPlaneClientAddFailure =
   | 'id-not-found'
   | 'client-offline'
@@ -813,11 +778,6 @@ const DEVICE_OCCUPANCY_VALUES: readonly string[] = Object.freeze([
   'recovery-pending',
 ])
 
-/**
- * Translate one add-Client failure into the presentation taxonomy. Every wire
- * code stays inside this function; view-models and pages branch only on the
- * returned union.
- */
 export function controlPlaneClientAddFailure(error: unknown): ControlPlaneClientAddFailure {
   if (error instanceof ControlPlaneClientError) {
     const failure = CLIENT_ADD_FAILURE_CODES[error.code]
@@ -826,11 +786,6 @@ export function controlPlaneClientAddFailure(error: unknown): ControlPlaneClient
   return 'unavailable'
 }
 
-/**
- * Validate connect input before a request exists, mirroring the sign-in input
- * bound. Grouping separators are stripped here, so the facade is the one place
- * that owns the digit shape; the failure code says which field is wrong.
- */
 function assertClientConnectInput(input: ControlPlaneClientConnectInput): void {
   const clientId = typeof input?.clientId === 'string' ? input.clientId : ''
   const connectionCode = typeof input?.connectionCode === 'string' ? input.connectionCode : ''
@@ -976,38 +931,22 @@ function deviceListResponse(source: string): readonly ControlPlaneDeviceSummary[
   return Object.freeze(value.clients.map(deviceSummaryValue))
 }
 
-/**
- * The base facade extended with the two Client directory reads/writes. The
- * decorator delegates every base method, so hosts can pass it anywhere a
- * `ControlPlaneClient` is accepted and keep one session and one error identity.
- */
 export interface ControlPlaneClientDirectory extends ControlPlaneClient {
-  /** Submit one dynamic-code connect; resolves to the fresh device list. */
   addClient(
     input: ControlPlaneClientConnectInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneDeviceSummary[]>
-  /** Read the device card list for the signed-in identity. */
   listClients(
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneDeviceSummary[]>
-  /** Read the repository list bound to one Client device. */
   listRepositories(
     input: ControlPlaneRepositoryListInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneRepositorySummary[]>
 }
 
-/**
- * Extend the one Control Plane facade with the Client directory. Expected
- * add-Client failures stay in the add form (the base client keeps reporting
- * connection health), and an injected facade that already implements the
- * directory methods is reused verbatim so deterministic fixtures and host
- * composition keep their single seam.
- */
 export function createControlPlaneClientDirectory(options: {
   readonly client: ControlPlaneClient
-  /** Same deterministic transport seam the base facade was created with. */
   readonly transport?: ControlPlaneClientTransport
 }): ControlPlaneClientDirectory {
   const location = parseControlPlaneServerUrl(options.client.serverUrl)
@@ -1137,9 +1076,6 @@ export function createControlPlaneClientDirectory(options: {
       return options.client.subscribe(subscriptionOptions)
     },
     addClient(rawInput, requestOptions) {
-      // The facade is the one place that owns the digit shape, so an injected
-      // directory implementation receives the same normalized input the wire
-      // path would send.
       const input: ControlPlaneClientConnectInput = {
         clientId: rawInput.clientId.replace(/\D+/gu, ''),
         connectionCode: rawInput.connectionCode.replace(/\D+/gu, ''),
@@ -1156,10 +1092,6 @@ export function createControlPlaneClientDirectory(options: {
       return listRequest(requestOptions)
     },
     async listRepositories(rawInput, requestOptions) {
-      // The facade is the one place that owns the query identity, so an
-      // injected directory implementation receives the same normalized input
-      // the wire path would send. Every rejection surfaces as a promise
-      // rejection, mirroring the connect path above.
       const input: ControlPlaneRepositoryListInput = {
         clientId: (typeof rawInput?.clientId === 'string' ? rawInput.clientId : '').trim(),
       }
@@ -1176,69 +1108,40 @@ export function createControlPlaneClientDirectory(options: {
   return Object.freeze(directory)
 }
 
-// ---------------------------------------------------------------------------
-// Client occupancy: claim, status, release, and Owner force-release
-// (CLIENT-300.4, plan §12).
-//
-// REAL SERVER SHAPES: the routes, payload names, state strings, and wire error
-// codes in this block mirror the landed Server occupancy flow (the occupancy
-// routes and the central occupancy error-code table of
-// crates/winwincode-server). Pages and view-models only ever see the typed
-// unions below. The occupied-by-other projection is rebuilt here field by
-// field, so a non-holder read can never carry the holder identity even when
-// the wire payload drifted.
-// ---------------------------------------------------------------------------
-
 const CLIENT_OCCUPANCY_CLAIM_PATH = '/api/v1/clients/occupancy'
 const CLIENT_OCCUPANCY_FORCE_RELEASE_PATH = '/api/v1/clients/occupancy/force-release'
 
-/** One occupancy claim: the Client device to occupy. */
 export interface ControlPlaneOccupancyClaimInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
   readonly clientId: string
 }
 
-/** The three Server release modes of plan §12.4. */
 export type ControlPlaneOccupancyReleaseMode = 'release' | 'drain' | 'cancel_and_release'
 
-/** One holder release request: finish, cancel, or withdraw the occupancy. */
 export interface ControlPlaneOccupancyReleaseInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
   readonly clientId: string
   readonly mode: ControlPlaneOccupancyReleaseMode
-  /** The Server demands this flag for `cancel_and_release`. */
   readonly confirm?: boolean
 }
 
-/** One occupancy status read. */
 export interface ControlPlaneOccupancyStatusInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
   readonly clientId: string
 }
 
-/** The lease states the holder-side projection returns. */
 export type ControlPlaneOccupancyHolderState =
   | 'reserving'
   | 'occupied'
   | 'draining'
   | 'recovery_pending'
 
-/** No active lease: the Client is free for the signed-in user. */
 export interface ControlPlaneOccupancyAvailable {
   readonly occupancy: 'available'
   readonly presence: ControlPlaneDevicePresence
 }
 
-/**
- * Privacy projection for a signed-in non-holder (plan §16.4): it names the
- * occupancy and nothing else — never the holder identity, never lease or
- * capacity details.
- */
 export interface ControlPlaneOccupiedByOther {
   readonly occupancy: 'occupied-by-other'
 }
 
-/** The full view only the occupancy holder receives. */
 export interface ControlPlaneOccupancyHolderView {
   readonly occupancy: ControlPlaneOccupancyHolderState
   readonly presence: ControlPlaneDevicePresence
@@ -1252,32 +1155,23 @@ export interface ControlPlaneOccupancyHolderView {
   readonly capacityTotal: number
 }
 
-/** The one occupancy projection the signed-in user can read. */
 export type ControlPlaneOccupancyStatus =
   | ControlPlaneOccupancyAvailable
   | ControlPlaneOccupiedByOther
   | ControlPlaneOccupancyHolderView
 
-/** One holder release outcome: released at once, or draining first. */
 export interface ControlPlaneOccupancyReleaseOutcome {
   readonly occupancy: 'released' | 'draining'
   readonly occupancyLeaseId: string
   readonly mode: ControlPlaneOccupancyReleaseMode
 }
 
-/** One Owner force-release outcome with the strictly higher fence token. */
 export interface ControlPlaneOccupancyForceReleaseOutcome {
   readonly released: true
   readonly occupancyLeaseId: string
   readonly forceFenceToken: number
 }
 
-/**
- * The one presentation-facing occupancy failure taxonomy. Wire codes are
- * translated by `controlPlaneOccupancyFailure` and never read anywhere else.
- * `unavailable` is the catch-all for outages, expired browser sessions,
- * protocol drift, and unknown codes, mirroring the sign-in taxonomy above.
- */
 export type ControlPlaneOccupancyFailure =
   | 'invalid-request'
   | 'confirmation-required'
@@ -1317,11 +1211,6 @@ const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ControlPlaneOccupancyFail
     RATE_LIMITED: 'rate-limited',
   })
 
-/**
- * Translate one occupancy failure into the presentation taxonomy. Every wire
- * code stays inside this function; view-models and pages branch only on the
- * returned union.
- */
 export function controlPlaneOccupancyFailure(error: unknown): ControlPlaneOccupancyFailure {
   if (error instanceof ControlPlaneClientError) {
     const failure = OCCUPANCY_FAILURE_CODES[error.code]
@@ -1367,11 +1256,6 @@ function occupancyNetworkError(cause: unknown): ControlPlaneClientError {
   })
 }
 
-/**
- * Validate occupancy input before a request exists, mirroring the connect
- * input bound: the facade owns the digit shape, so grouping separators are
- * stripped here and never reach the wire.
- */
 function assertOccupancyClientId(clientId: string): void {
   if (!/^\d{9,12}$/u.test(clientId)) {
     throw new ControlPlaneClientError({
@@ -1529,8 +1413,6 @@ function occupancyStatusResponse(source: string): ControlPlaneOccupancyStatus {
     })
   }
   if (value.occupancy === 'occupied-by-other') {
-    // Rebuilt field by field: the parsed projection carries the occupancy
-    // name and nothing else, whatever the wire payload said (plan §16.4).
     return Object.freeze({ occupancy: 'occupied-by-other' })
   }
   return occupancyHolderViewValue(value)
@@ -1579,47 +1461,27 @@ function occupancyForceReleaseResponse(
   })
 }
 
-/**
- * The base facade extended with the signed-in user's occupancy surface. The
- * decorator delegates every base method, so hosts can pass it anywhere a
- * `ControlPlaneClient` is accepted and keep one session and one error identity.
- */
 export interface ControlPlaneClientOccupancy extends ControlPlaneClient {
-  /**
-   * Submit one occupancy claim. Repeated claims for the same Client are
-   * idempotent: an in-flight claim is never repeated, and a settled claim
-   * replays to the same holder view without a second lease.
-   */
   claimOccupancy(
     input: ControlPlaneOccupancyClaimInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneOccupancyHolderView>
-  /** Read the signed-in user's occupancy projection for one Client. */
   occupancyStatus(
     input: ControlPlaneOccupancyStatusInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneOccupancyStatus>
-  /** Release, drain, or cancel-and-release the caller's own occupancy. */
   releaseOccupancy(
     input: ControlPlaneOccupancyReleaseInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneOccupancyReleaseOutcome>
-  /** Owner-only safe cleanup of a recovery-pending lease past its deadline. */
   forceReleaseOccupancy(
     input: ControlPlaneOccupancyStatusInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneOccupancyForceReleaseOutcome>
 }
 
-/**
- * Extend the one Control Plane facade with the Client occupancy flow over the
- * real Server occupancy routes. An injected facade that already implements
- * the occupancy methods is reused verbatim so deterministic fixtures and host
- * composition keep their single seam.
- */
 export function createControlPlaneClientOccupancy(options: {
   readonly client: ControlPlaneClient
-  /** Same deterministic transport seam the base facade was created with. */
   readonly transport?: ControlPlaneClientTransport
 }): ControlPlaneClientOccupancy {
   const location = parseControlPlaneServerUrl(options.client.serverUrl)
@@ -1629,8 +1491,6 @@ export function createControlPlaneClientOccupancy(options: {
   const injectedOccupancyStatus = injected.occupancyStatus
   const injectedReleaseOccupancy = injected.releaseOccupancy
   const injectedForceReleaseOccupancy = injected.forceReleaseOccupancy
-  // One claim per Client at a time: a second claim for the same Client while
-  // one is in flight joins the first instead of racing the lease gate.
   const claimsInFlight = new Map<string, Promise<ControlPlaneOccupancyHolderView>>()
 
   function claimOnce(
@@ -1803,13 +1663,7 @@ export function createControlPlaneClientOccupancy(options: {
       return options.client.subscribe(subscriptionOptions)
     },
     claimOccupancy(rawInput, requestOptions) {
-      // Non-async on purpose: callers that join an in-flight claim receive the
-      // one shared promise. Validation failures surface through the explicit
-      // rejection below, so every failure still rejects instead of throwing.
       try {
-        // The facade is the one place that owns the digit shape, so an
-        // injected occupancy implementation receives the same normalized
-        // input the wire path would send.
         const clientId = occupancyInputClientId(rawInput)
         assertOccupancyClientId(clientId)
         const input: ControlPlaneOccupancyClaimInput = { clientId }
@@ -1860,24 +1714,6 @@ export function createControlPlaneClientOccupancy(options: {
   return Object.freeze(occupancy)
 }
 
-// ---------------------------------------------------------------------------
-// Device candidate local operations: the retained list, local branch
-// creation, target-branch apply, and discard (GIT-100.8, plan §15).
-//
-// FAKE-FIRST SHAPES: the field names, state strings, and the ten result codes
-// below mirror the landed device receipt domain — `LocalCandidateReceipt`,
-// `LocalApplyReceipt`, and the ten `ApplyResult` codes of
-// crates/winwincode-client-port/src/domain.rs as they are projected through
-// the generated client-control contracts. The HTTP routes and status codes in
-// this block are provisional until the GIT-100.3 branch engine and the
-// GIT-100.4 apply engine land; the engine route table is authoritative at
-// that point, and only the path constants and expected status codes below
-// should need to move. The receipt ledger projection of the Server decides
-// the `history` and `branchName` fields of a summary; pages and view-models
-// only ever see the typed unions below.
-// ---------------------------------------------------------------------------
-
-/** The retention lifecycle states a candidate projection can carry. */
 export type ControlPlaneCandidateState =
   | 'retained'
   | 'branch_created'
@@ -1885,18 +1721,12 @@ export type ControlPlaneCandidateState =
   | 'discarded'
   | 'failed'
 
-/** The strategy the apply engine chose for one attempt. */
 export type ControlPlaneCandidateApplyStrategy =
   | 'create_branch'
   | 'fast_forward'
   | 'cherry_pick'
   | 'merge'
 
-/**
- * The ten terminal apply results of the Server receipt ledger. `retained`,
- * `branch_created`, and `discarded` close a lifecycle step; every other code
- * is presented as a failed or retryable attempt.
- */
 export type ControlPlaneCandidateApplyResult =
   | 'retained'
   | 'branch_created'
@@ -1909,7 +1739,6 @@ export type ControlPlaneCandidateApplyResult =
   | 'discarded'
   | 'failed'
 
-/** One audited apply attempt, mirroring `LocalApplyReceipt` field for field. */
 export interface ControlPlaneCandidateApplyReceipt {
   readonly localApplyReceiptId: string
   readonly candidateRef: string
@@ -1924,11 +1753,6 @@ export interface ControlPlaneCandidateApplyReceipt {
   readonly revision: number
 }
 
-/**
- * One candidate card projection: the device receipt plus the two ledger facts
- * the card renders — the working branch name once one exists, and the apply
- * receipt history in ledger order.
- */
 export interface ControlPlaneCandidateSummary {
   readonly localCandidateReceiptId: string
   readonly candidateRef: string
@@ -1942,23 +1766,16 @@ export interface ControlPlaneCandidateSummary {
   readonly history: readonly ControlPlaneCandidateApplyReceipt[]
 }
 
-/** One candidate list read. */
 export interface ControlPlaneCandidateReadInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
   readonly clientId: string
 }
 
-/** One local branch creation from a stable candidate ref. */
 export interface ControlPlaneCandidateBranchInput {
   readonly clientId: string
   readonly candidateRef: string
   readonly repositoryBindingId: string
 }
 
-/**
- * One dangerous apply onto a target branch. The Server re-checks the branch
- * HEAD against `expectedHead` even though the browser already showed it.
- */
 export interface ControlPlaneCandidateApplyInput {
   readonly clientId: string
   readonly candidateRef: string
@@ -1967,26 +1784,17 @@ export interface ControlPlaneCandidateApplyInput {
   readonly expectedHead: string
 }
 
-/** One discard of a retained candidate. */
 export interface ControlPlaneCandidateDiscardInput {
   readonly clientId: string
   readonly candidateRef: string
   readonly repositoryBindingId: string
 }
 
-/** One branch creation outcome: the created branch and the refreshed card. */
 export interface ControlPlaneCandidateBranchOutcome {
   readonly candidate: ControlPlaneCandidateSummary
   readonly branchName: string
 }
 
-/**
- * The one presentation-facing candidate action failure taxonomy. Wire codes
- * are translated by `controlPlaneCandidateActionFailure` and never read
- * anywhere else. `unavailable` is the catch-all for outages, expired browser
- * sessions, protocol drift, and unknown codes, mirroring the occupancy
- * taxonomy above.
- */
 export type ControlPlaneCandidateActionFailure =
   | 'invalid-request'
   | 'candidate-not-found'
@@ -2009,11 +1817,6 @@ const CANDIDATE_ACTION_FAILURE_CODES: Readonly<Record<string, ControlPlaneCandid
     RATE_LIMITED: 'rate-limited',
   })
 
-/**
- * Translate one candidate action rejection into the presentation taxonomy.
- * Every wire code stays inside this function; view-models and pages branch
- * only on the returned union.
- */
 export function controlPlaneCandidateActionFailure(
   error: unknown,
 ): ControlPlaneCandidateActionFailure {
@@ -2138,7 +1941,6 @@ function parsedCandidatePayload(source: string): Readonly<Record<string, unknown
   return value
 }
 
-/** The identity text fields of the candidate payloads share one bound. */
 function candidateIdentityText(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
     throw invalidCandidateResponseError()
@@ -2146,7 +1948,6 @@ function candidateIdentityText(value: unknown): string {
   return value
 }
 
-/** A commit SHA is hex; the exact width stays the engine's decision. */
 function candidateShaValue(value: unknown): string {
   if (typeof value !== 'string' || !/^[0-9a-f]{4,64}$/iu.test(value)) {
     throw invalidCandidateResponseError()
@@ -2154,7 +1955,6 @@ function candidateShaValue(value: unknown): string {
   return value
 }
 
-/** One receipt instant; the canonical RFC 3339 Z form is the only shape. */
 function candidateInstantValue(value: unknown): string {
   if (
     typeof value !== 'string'
@@ -2271,12 +2071,6 @@ function candidateSummaryResponse(source: string): ControlPlaneCandidateSummary 
   return candidateSummaryValue(parsedCandidatePayload(source).candidate)
 }
 
-/**
- * The shared input bound of every candidate action. The facade owns the
- * identity shapes, so grouping separators never reach the wire and an
- * injected implementation receives the same normalized input the wire path
- * would send.
- */
 function candidateInputFields(input: {
   readonly clientId: string
   readonly candidateRef?: string
@@ -2348,47 +2142,27 @@ function candidateApplyFields(input: ControlPlaneCandidateApplyInput): {
   return Object.freeze({ ...identity, targetBranch, expectedHead })
 }
 
-/**
- * The base facade extended with the candidate local operations of one Client
- * device. The decorator delegates every base method, so hosts can pass it
- * anywhere a `ControlPlaneClient` is accepted and keep one session and one
- * error identity.
- */
 export interface ControlPlaneClientCandidates extends ControlPlaneClient {
-  /** Read the candidate cards projected for one Client device. */
   listDeviceCandidates(
     input: ControlPlaneCandidateReadInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneCandidateSummary[]>
-  /**
-   * Create the local branch of one candidate ref without touching the user's
-   * worktree. Repeated requests return the original branch.
-   */
   createCandidateBranch(
     input: ControlPlaneCandidateBranchInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneCandidateBranchOutcome>
-  /** Apply one candidate onto a target branch under an expected HEAD. */
   applyCandidate(
     input: ControlPlaneCandidateApplyInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneCandidateApplyReceipt>
-  /** Discard one retained candidate; the fact lands in the next list read. */
   discardCandidate(
     input: ControlPlaneCandidateDiscardInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneCandidateSummary>
 }
 
-/**
- * Extend the one Control Plane facade with the device candidate local
- * operations. An injected facade that already implements the candidate
- * methods is reused verbatim so deterministic fixtures and host composition
- * keep their single seam.
- */
 export function createControlPlaneClientCandidates(options: {
   readonly client: ControlPlaneClient
-  /** Same deterministic transport seam the base facade was created with. */
   readonly transport?: ControlPlaneClientTransport
 }): ControlPlaneClientCandidates {
   const location = parseControlPlaneServerUrl(options.client.serverUrl)
@@ -2600,30 +2374,12 @@ export function createControlPlaneClientCandidates(options: {
   return Object.freeze(candidates)
 }
 
-// ---------------------------------------------------------------------------
-// UI-100.2 (fake-first): new-task entry and run-page local identity.
-//
-// Plan §16.6/§16.7.  Everything below is the ONE concentrated seam for the
-// new-task form backend and the run-page local identity zone.  The shapes are
-// the presentation contract; the factories are deterministic local fakes that
-// keep the browser honest until the FLOW scheduler and launch routing land
-// (FLOW-100).  When those routes arrive they replace the fake factories with
-// real Server queries/commands while these shapes stay authoritative — every
-// further addition to this seam belongs inside this block.
-// ---------------------------------------------------------------------------
-
-/** One model route choice the new-task form offers (plan §16.6). */
 export interface ControlPlaneTaskModelRouteOption {
   readonly routeId: string
   readonly label: string
   readonly detail: string
 }
 
-/**
- * Fake route catalog.  MODEL routing replaces this list with the Server-joined
- * availability projection when that seam reaches the task entry; the ids stay
- * stable so saved tasks keep naming their route.
- */
 const TASK_MODEL_ROUTE_FAKE_OPTIONS: readonly ControlPlaneTaskModelRouteOption[] =
   Object.freeze([
     Object.freeze({
@@ -2643,12 +2399,10 @@ const TASK_MODEL_ROUTE_FAKE_OPTIONS: readonly ControlPlaneTaskModelRouteOption[]
     }),
   ])
 
-/** The fake §16.6 route catalog; one frozen list shared by form and tests. */
 export function controlPlaneTaskModelRouteOptions(): readonly ControlPlaneTaskModelRouteOption[] {
   return TASK_MODEL_ROUTE_FAKE_OPTIONS
 }
 
-/** One new-task submission before a task identity exists. */
 export interface ControlPlaneTaskCreateInput {
   readonly clientId: string
   readonly repositoryBindingId: string
@@ -2657,10 +2411,6 @@ export interface ControlPlaneTaskCreateInput {
   readonly modelRouteId: string
 }
 
-/**
- * The started WorkItem anchor. `taskId` is retained as the route field name
- * at the browser boundary, but its value is the canonical WorkItemId.
- */
 export interface ControlPlaneTaskAnchor {
   readonly taskId: import('./generated/contracts.js').WorkItemId
   readonly clientId: string
@@ -2668,19 +2418,12 @@ export interface ControlPlaneTaskAnchor {
   readonly baseBranch: string
   readonly description: string
   readonly modelRouteId: string
-  /** 设计稿 05:任务名/改动/验收为演示锚点的可选展示字段。 */
   readonly title?: string
   readonly changes?: string
   readonly acceptance?: string
-  /** Server sealed managed-app run configuration, when this task has one. */
   readonly managedAppRunConfig?: import('./generated/contracts.js').ManagedAppRunControlProjection
 }
 
-/**
- * The task-creation seam of the new-task form.  `create` resolves with the
- * anchor once the Server (today: the fake) accepted the task; `describe`
- * re-reads a previously created anchor for a deep-linked run page.
- */
 export interface ControlPlaneTaskPort {
   create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor>
   describe(taskId: string): ControlPlaneTaskAnchor | null
@@ -2695,7 +2438,6 @@ export interface ControlPlaneWorkerSessionPort {
   launch(input: ControlPlaneWorkerSessionLaunchInput): Promise<void>
 }
 
-/** Browser boundary for the signed-in Device Worker launch route. */
 export function createControlPlaneWorkerSessionPort(options: {
   readonly client: ControlPlaneClient
   readonly transport?: ControlPlaneClientTransport
@@ -2777,8 +2519,6 @@ export function createControlPlaneWorkerSessionPort(options: {
   })
 }
 
-/** Production task port: submits the canonical breakdown command and retains
- * only the returned WorkItem anchor for the current browser session. */
 export function createControlPlaneTaskPort(options: {
   readonly client: ControlPlaneClient
   readonly actor: () => Actor | null
@@ -2872,14 +2612,8 @@ export function createControlPlaneTaskPort(options: {
   })
 }
 
-/**
- * Fake task store: creates monotonic task ids and remembers every anchor it
- * issued, so a reloaded run page still names its task.  FLOW task creation
- * replaces this port without changing the interface.
- */
 export function createControlPlaneTaskFake(options?: {
   readonly nextTaskId?: () => import('./generated/contracts.js').WorkItemId
-  /** 演示/假优先种子:预置的锚点可直接被运行页 describe 命中。 */
   readonly seed?: readonly ControlPlaneTaskAnchor[]
 }): ControlPlaneTaskPort {
   const nextTaskId = options?.nextTaskId
@@ -2912,7 +2646,6 @@ export function createControlPlaneTaskFake(options?: {
   })
 }
 
-/** The WorkerSession states the run-page zone projects (plan §16.7). */
 export type ControlPlaneRunWorkerSessionState =
   | 'reserving'
   | 'launching'
@@ -2921,58 +2654,36 @@ export type ControlPlaneRunWorkerSessionState =
   | 'stopped'
   | 'failed'
 
-/** One WorkerSession row of the run-page identity zone. */
-/**
- * The run-page identity projection beyond live Client, Repository, and
- * Occupancy facts. WorkRun is the sole executable runtime record; historical
- * WorkRun is the only writable and executable run view.
- */
 export interface ControlPlaneRunIdentityProjection {
   readonly taskId: import('./generated/contracts.js').WorkItemId
-  /** The Delivery read cut that selected every other identity fact. */
   readonly deliveryId: DeliveryId | null
   readonly readCursor: StrongFlowReadCursor | null
   readonly clientId: string
   readonly repositoryBindingId: string
-  /** Versioned runtime fact; null means this WorkRun has no managed-app config. */
   readonly managedAppRunConfig: import('./generated/contracts.js').ManagedAppRunControlProjection | null
-  /** WorkRun that owns the managed-app source; candidate facts remain bound to `workRun`. */
   readonly managedAppSourceRun: import('./generated/contracts.js').WorkRun | null
-  /** Evidence for the managed-app source WorkRun, kept separate from candidate producer evidence. */
   readonly managedAppSourceEvidence?: readonly import('./generated/contracts.js').DeliveryEvidenceProjection[]
-  /** The canonical WorkContract and WorkItem cut returned by `workrun.get`. */
   readonly contract: import('./generated/contracts.js').WorkContract | null
   readonly item: import('./generated/contracts.js').WorkItem | null
-  /** Derived dependency/blocker state; this does not create another state source. */
   readonly graphItem: import('./generated/contracts.js').WorkGraphItemProjection | null
-  /** The only executable run projection. */
   readonly workRun: import('./generated/contracts.js').WorkRun
   readonly candidate: ControlPlaneRunCandidateProjection | null
-  /** Delivery owner and Evidence filtered to this exact WorkRun. */
   readonly owner: string | null
   readonly evidence: readonly import('./generated/contracts.js').DeliveryEvidenceProjection[]
 }
 
-/** Current Candidate identity plus its optional device-local lifecycle facts. */
 export interface ControlPlaneRunCandidateProjection {
   readonly candidateId: import('./generated/contracts.js').CandidateId
   readonly candidateDigest: Sha256Digest
   readonly candidateRef: string
-  /** Exact commit sealed by the canonical FrozenCandidateSummaryProjection. */
   readonly candidateCommitId: string
-  /** Exact tree sealed by the canonical FrozenCandidateSummaryProjection. */
   readonly candidateTreeId: string
-  /** Exact diff digest sealed by the canonical FrozenCandidateSummaryProjection. */
   readonly diffSha256: Sha256Digest
   readonly state: ControlPlaneCandidateState | 'produced'
   readonly branchName: string | null
   readonly history: readonly ControlPlaneCandidateApplyReceipt[]
 }
 
-/**
- * Accepts only a server sealed run config whose identities match the exact
- * WorkRun read cut. The browser never fills in executable fields.
- */
 function projectManagedAppRunConfig(
   config: import('./generated/contracts.js').ManagedAppRunControlProjection | undefined,
   sourceRun: import('./generated/contracts.js').WorkRun | undefined,
@@ -3003,12 +2714,10 @@ function canonicalCandidateObjectId(value: unknown, label: 'commit' | 'tree'): s
   return value
 }
 
-/** The run-page identity seam; it reads the canonical WorkRun projection. */
 export interface ControlPlaneRunIdentityPort {
   read(anchor: ControlPlaneTaskAnchor): Promise<ControlPlaneRunIdentityProjection>
 }
 
-/** Production run identity reader backed by the canonical WorkRun aggregate. */
 export function createControlPlaneRunIdentityPort(options: {
   readonly client: ControlPlaneClient
   readonly candidates: ControlPlaneClientCandidates
@@ -3111,8 +2820,6 @@ export function createControlPlaneRunIdentityPort(options: {
             readonly config: import('./generated/contracts.js').ManagedAppRunControlProjection
             readonly sourceRun: import('./generated/contracts.js').WorkRun
           } => entry !== null)
-        // A candidate must never select an arbitrary verifier when more than
-        // one source run claims the same frozen commit.
         return candidates.length === 1 ? (candidates[0] ?? null) : null
       })()
       return Object.freeze({
@@ -3138,7 +2845,6 @@ export function createControlPlaneRunIdentityPort(options: {
   })
 }
 
-/** Deterministic local fixture for the canonical WorkRun read seam. */
 export function createControlPlaneRunIdentityFake(options?: {
   readonly managedAppRunConfig?: import('./generated/contracts.js').ManagedAppRunControlProjection
 }): ControlPlaneRunIdentityPort {

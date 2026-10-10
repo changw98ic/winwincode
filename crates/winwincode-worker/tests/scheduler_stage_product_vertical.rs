@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(
     clippy::doc_markdown,
     clippy::large_futures,
@@ -9,15 +7,6 @@
     clippy::too_many_lines,
     clippy::uninlined_format_args
 )]
-
-//! Scheduler-to-Worker-to-StrongFlow stage-product composition fixtures.
-//!
-//! These tests deliberately use the real repository scheduler, SQLite
-//! registry/queue/slot stores, Worker lifecycle, detached Git workspaces, and
-//! canonical stage-product validators.  The in-test adapter is only the
-//! narrow Codex boundary needed to make the longitudinal assertions
-//! deterministic; it emits the same semantic products as the production
-//! adapter and retains the same Worker-facing outbox records.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1279,7 +1268,6 @@ fn register_result(
     }
 }
 
-// A transport turn consumes the control, then drives its retained output.
 trait WorkerTransportTurn {
     async fn accept_control_and_drive(
         &mut self,

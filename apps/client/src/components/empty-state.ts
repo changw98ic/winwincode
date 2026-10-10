@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { assertMounted, removeNode, type MountedView } from '@winwincode/browser-ui'
 
 export type EmptyStateHeadingLevel = 2 | 3 | 4
@@ -9,7 +7,6 @@ export interface EmptyStateProps {
   readonly detail: string
   readonly action?: HTMLElement
   readonly className?: string
-  /** UI-604: follow the level of the panel the state nests inside. */
   readonly headingLevel?: EmptyStateHeadingLevel
 }
 

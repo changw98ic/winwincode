@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use futures::future::BoxFuture;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -106,7 +104,6 @@ impl FusionInvestigationPort for Investigation {
                 ordinal < 2,
                 "receipt-backed evidence did not reach verification"
             );
-            // First action has only prose. It must not end the run or call JEV.
             if ordinal == 0 {
                 return Ok(vec![]);
             }

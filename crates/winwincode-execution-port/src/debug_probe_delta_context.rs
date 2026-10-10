@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Deterministic, bounded context deltas for one strong-model debug round.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -32,29 +28,15 @@ const MAX_SNIPPETS: usize = 8;
 const MAX_SNIPPET_BYTES: usize = 2_000;
 const MAX_TOTAL_SNIPPET_BYTES: usize = 16_000;
 
-/// Host-owned scanner used by the production context assembly boundary.
-///
-/// This is an authority port, not a caller-selected policy. Production code
-/// must wire its single registered scanner implementation and persist the
-/// returned profile with the prepared context.
 pub trait DebugContextSafetyScanner {
-    /// Returns the immutable scanner policy bound into the context.
     fn profile(&self) -> &DebugContextSafetyProfile;
 
-    /// Checks one bounded value without retaining it in an error.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed, content-free reason when the value is unsafe.
     fn validate(&self, text: &str) -> Result<(), ContextSafetyScanError>;
 }
 
-/// Content-free scanner failures safe to retain in host logs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextSafetyScanError {
-    /// The value contains credential-shaped or otherwise sensitive material.
     SensitiveMaterial,
-    /// The value identifies unbounded raw output or conversation history.
     RawContextMaterial,
 }
 
@@ -69,44 +51,29 @@ impl fmt::Display for ContextSafetyScanError {
 
 impl std::error::Error for ContextSafetyScanError {}
 
-/// Untrusted snippet fields accepted only by [`seal_debug_context_snippet`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct DebugContextSnippetInput {
-    /// Exact bounded snippet content; it is never truncated by the sealer.
     pub content: String,
-    /// Inclusive ending source line when a line range is known.
     pub end_line: Option<i64>,
-    /// Repository-relative source path when known.
     pub path: Option<String>,
-    /// Artifact containing the source bytes.
     pub source_artifact_ref: ArtifactReference,
-    /// Semantic digest of the D3 evidence that selected this snippet.
     pub source_evidence_digest: Sha256Digest,
-    /// Inclusive starting source line when a line range is known.
     pub start_line: Option<i64>,
 }
 
-/// Opaque proof that one complete snippet passed bounds, binding and scanning.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedDebugContextSnippet {
     snippet: DebugContextSnippet,
 }
 
-/// Exact trusted inputs used to prepare one strong-model Delta Context.
 pub struct DebugProbeDeltaContextInput<'a> {
-    /// Latest committed Ledger projection before the model call.
     pub current_ledger: &'a ValidatedDebugHypothesisLedger,
-    /// Previously prepared context cursor, absent only on the first round.
     pub previous_context: Option<&'a ValidatedDebugProbeDeltaContext>,
-    /// Ledger snapshot named by `previous_context`, absent only on first round.
     pub previous_ledger: Option<&'a ValidatedDebugHypothesisLedger>,
-    /// Current terminal probe receipt plus its exact D3 projections.
     pub round_evidence: &'a ValidatedDebugHypothesisRoundEvidence,
-    /// Host exact-read snippets; the builder performs final source rebinding.
     pub snippets: &'a [ValidatedDebugContextSnippet],
 }
 
-/// Opaque exact context and the canonical bytes persisted by the Control Plane.
 #[derive(Clone, Debug)]
 pub struct ValidatedDebugProbeDeltaContext {
     context: DebugProbeDeltaContext,
@@ -114,19 +81,16 @@ pub struct ValidatedDebugProbeDeltaContext {
 }
 
 impl ValidatedDebugProbeDeltaContext {
-    /// Borrows the typed context.
     #[must_use]
     pub const fn context(&self) -> &DebugProbeDeltaContext {
         &self.context
     }
 
-    /// Borrows the exact canonical bytes sent to the model and retained in Prepared.
     #[must_use]
     pub fn canonical_bytes(&self) -> &[u8] {
         &self.canonical_bytes
     }
 
-    /// Returns the typed context and exact canonical bytes.
     #[must_use]
     pub fn into_parts(self) -> (DebugProbeDeltaContext, Vec<u8>) {
         (self.context, self.canonical_bytes)
@@ -134,19 +98,12 @@ impl ValidatedDebugProbeDeltaContext {
 }
 
 impl ValidatedDebugContextSnippet {
-    /// Borrows the exact generated value safe to place in a Delta Context.
     #[must_use]
     pub const fn snippet(&self) -> &DebugContextSnippet {
         &self.snippet
     }
 }
 
-/// Validates and seals one whole snippet without truncating its UTF-8 bytes.
-///
-/// # Errors
-///
-/// Returns a bounded error for malformed source binding, unsafe text, an
-/// invalid scanner profile, or content above the fixed per-item limit.
 pub fn seal_debug_context_snippet(
     input: DebugContextSnippetInput,
     scanner: &impl DebugContextSafetyScanner,
@@ -179,14 +136,6 @@ pub fn seal_debug_context_snippet(
     })
 }
 
-/// Builds the deterministic delta between the acknowledged Ledger cursor and
-/// the latest committed Ledger, then adds only current sealed D3 evidence and
-/// whole host-selected snippets that fit the fixed budget.
-///
-/// # Errors
-///
-/// Fails closed on cursor or authority drift, unsafe text, inexact evidence,
-/// non-canonical collections, or required context above the hard token bound.
 pub fn prepare_debug_probe_delta_context(
     input: &DebugProbeDeltaContextInput<'_>,
     scanner: &impl DebugContextSafetyScanner,
@@ -273,14 +222,6 @@ pub fn prepare_debug_probe_delta_context(
     seal_with_selected_snippets(&mut context, &snippets)
 }
 
-/// Reopens exact Prepared bytes without rerunning selection, truncation, or
-/// the current scanner policy. The stored safety profile remains digest-bound;
-/// fresh scanning happened before these exact bytes entered Prepared.
-///
-/// # Errors
-///
-/// Rejects non-canonical JSON, a journal digest mismatch, an invalid stored
-/// profile, malformed text, collection-order drift, or inconsistent counts.
 pub fn reopen_debug_probe_delta_context(
     bytes: &[u8],
     expected_context_digest: &Sha256Digest,
@@ -304,13 +245,6 @@ pub fn reopen_debug_probe_delta_context(
     })
 }
 
-/// Verifies that an exact Prepared context names the same durable D3 evidence
-/// cut that the Ledger reducer will consume at commit.
-///
-/// # Errors
-///
-/// Returns `InvalidInput` when the receipt reference, bounded summaries, or
-/// target-bound candidates differ from the sealed durable evidence cut.
 pub fn validate_debug_probe_delta_context_evidence(
     prepared: &ValidatedDebugProbeDeltaContext,
     evidence: &ValidatedDebugHypothesisRoundEvidence,
@@ -326,11 +260,6 @@ pub fn validate_debug_probe_delta_context_evidence(
     Ok(())
 }
 
-/// Derives the semantic context digest without trusting its digest or counts.
-///
-/// # Errors
-///
-/// Returns `Serialization` if a generated field cannot be encoded as JSON.
 pub fn derive_debug_probe_delta_context_digest(
     context: &DebugProbeDeltaContext,
 ) -> Result<Sha256Digest, DebugDeltaContextError> {
@@ -356,11 +285,6 @@ pub fn derive_debug_probe_delta_context_digest(
     Ok(digest.finish())
 }
 
-/// Derives the request idempotency digest before the context digest exists.
-///
-/// # Errors
-///
-/// Returns `Serialization` if one generated source field cannot be encoded.
 pub fn derive_debug_probe_delta_source_request_digest(
     source_round_receipt: &crate::generated::ProbeRoundReceiptReference,
     current_ledger_digest: &Sha256Digest,
@@ -1062,7 +986,6 @@ fn zero_digest() -> Sha256Digest {
     Sha256Digest(format!("sha256:{}", "0".repeat(64)))
 }
 
-/// Returns the single host-owned Delta Context budget.
 #[must_use]
 pub fn canonical_debug_delta_context_budget() -> DebugDeltaContextBudget {
     let mut budget = DebugDeltaContextBudget {
@@ -1078,7 +1001,6 @@ pub fn canonical_debug_delta_context_budget() -> DebugDeltaContextBudget {
     budget
 }
 
-/// Derives the immutable budget-policy digest without trusting its digest field.
 #[must_use]
 pub fn derive_debug_delta_context_budget_digest(budget: &DebugDeltaContextBudget) -> Sha256Digest {
     let mut digest = Sha256::new();
@@ -1104,40 +1026,23 @@ pub fn derive_debug_delta_context_budget_digest(budget: &DebugDeltaContextBudget
     Sha256Digest(format!("sha256:{:x}", digest.finalize()))
 }
 
-/// Stable failures returned by Delta Context sealing and exact reopen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DebugDeltaContextError {
-    /// A trusted input does not form one valid canonical context.
     InvalidInput,
-    /// A required digest is not canonical lowercase SHA-256.
     InvalidDigest,
-    /// The selected scanner profile is not a canonical host profile.
     InvalidSafetyProfile,
-    /// A context string is empty or is not one bounded canonical line.
     InvalidText,
-    /// A complete item exceeds its fixed UTF-8 byte bound.
     TextTooLarge,
-    /// The host scanner rejected content without retaining it.
     UnsafeText(ContextSafetyScanError),
-    /// Snippet path and line fields do not form one coherent source location.
     InvalidSnippetLocation,
-    /// A snippet is not bound to an exact current D3 evidence candidate.
     SnippetSourceMismatch,
-    /// The acknowledged context and Ledger cursor are absent or paired incorrectly.
     CursorMismatch,
-    /// Current evidence or a cursor belongs to another debug session snapshot.
     AuthorityMismatch,
-    /// Required structured context exceeds the conservative token upper bound.
     ContextTooLarge,
-    /// JSON encoding or a derived size cannot be represented.
     Serialization,
-    /// Exact Prepared bytes could not be decoded as the generated contract.
     InvalidPayload,
-    /// Exact Prepared bytes are not the canonical generated encoding.
     NonCanonicalPayload,
-    /// A persisted or recomputed semantic digest differs.
     DigestMismatch,
-    /// Persisted byte and conservative token counts differ from exact bytes.
     CountMismatch,
 }
 

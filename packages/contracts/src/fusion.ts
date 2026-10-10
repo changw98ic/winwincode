@@ -1,19 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-/**
- * Fusion blind-panel wire contract (community.5.1 / FUSION-01).
- *
- * Authoritative Rust types: `crates/winwincode-fusion`. This module is the
- * TypeScript projection for host surfaces. Field names are camelCase and must
- * stay aligned with the Rust serde contract.
- *
- * Track boundary: Fusion is Blind Independent Reasoning over the same
- * canonical question and context. It is not a multi-agent role split, does
- * not block Community P0 work, and is not part of the E13 execution epic.
- * This contract intentionally does not import Kernel, Jev, or StrongFlow role
- * types so the Fusion epic can version independently.
- */
-
 export const MIN_FUSION_PROVIDER_COUNT = 3
 export const MAX_FUSION_PROVIDER_COUNT = 16
 
@@ -115,7 +99,6 @@ export type FusionPanelErrorCode =
   | 'Fusion text is empty or exceeds the bound'
   | 'Fusion constraints exceed the bound'
 
-/** Canonical validation mirroring the Rust panel gate. */
 export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | null {
   if (!input.question.trim()) {
     return 'Fusion text is empty or exceeds the bound'
@@ -161,10 +144,6 @@ function validOptionalLimit(value: number | null): boolean {
   return value === null || (Number.isSafeInteger(value) && (value as number) > 0)
 }
 
-/**
- * Builds the isolated prompt each Provider receives. Sibling candidates are
- * never included.
- */
 export function fusionBlindPrompt(input: FusionInput): FusionBlindPrompt {
   return {
     question: input.question,

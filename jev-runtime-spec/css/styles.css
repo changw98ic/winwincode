@@ -79,7 +79,6 @@ button:focus-visible,
   left: 0;
 }
 
-/* Instrument header */
 .top {
   border-bottom: 1px solid var(--line);
   background: var(--ink);
@@ -242,7 +241,6 @@ h1 {
   margin-bottom: 0.25rem;
 }
 
-/* Pipeline signature */
 .pipeline {
   background: var(--panel);
   border: 1px solid var(--line);

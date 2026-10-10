@@ -1,5 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-
 [data-wwc-component='page-header'] {
   display: grid;
   gap: var(--wwc-space-1);
@@ -78,7 +76,6 @@
   background: var(--wwc-color-surface-subtle);
 }
 
-/* DSH primary capsule: contrasting ink, with a quiet hover fill. */
 [data-wwc-component='button'][data-variant='primary'] {
   border-color: transparent;
   color: var(--wwc-color-on-accent);
@@ -322,8 +319,6 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* The connection bar is the sidebar footer: stacked, quiet, borderless edges
-   beyond the separators. Narrow screens restore a full-width status strip. */
 [data-wwc-component='connection-bar'] {
   display: flex;
   flex-direction: column;
@@ -373,8 +368,6 @@
   gap: var(--wwc-space-2);
 }
 
-/* Design 04 sidebar footer: the connected state reads as one quiet line —
-   no badge box and no action buttons. */
 .wwc-connection-bar[data-connection-status='connected'] .wwc-connection-actions {
   display: none;
 }
@@ -642,9 +635,6 @@
   }
 }
 
-/* Design page 01: signed-out sign-in renders on the bare canvas — no sidebar,
-   no surface heading, no connection strip. Lives in the components layer so
-   these overrides win against the connection-bar and main rules above. */
 .wwc-shell:has(.wwc-login:not([hidden])) {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -670,8 +660,6 @@
   align-content: center;
 }
 
-/* Design page 02: the first-run onboarding renders on the bare canvas —
-   no sidebar, no connection strip. Same layer rationale as the login block. */
 .wwc-shell:has([data-winwincode-surface='onboarding']) {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -689,7 +677,6 @@
   display: block;
 }
 
-/* The signed-out shell keeps only the brand in the header, as page 01 does. */
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-header {
   border-right: none;
   border-bottom: none;

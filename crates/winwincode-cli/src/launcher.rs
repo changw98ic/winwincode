@@ -15,28 +15,10 @@ use crate::{
 };
 
 pub trait LocalLauncherPort: Send + Sync {
-    /// Initializes Git when explicitly confirmed and binds one exact baseline.
-    ///
-    /// # Errors
-    ///
-    /// Returns a categorized error when repository inspection, Git, context
-    /// detection, or local state persistence fails.
     fn initialize_repository(&self, request: &InitRequest) -> Result<SetupOutcome, LauncherError>;
 
-    /// Binds an existing Git repository to one exact baseline.
-    ///
-    /// # Errors
-    ///
-    /// Returns a categorized error when the path is not a Git repository or
-    /// when the selected baseline cannot be created, inspected, or persisted.
     fn attach_repository(&self, request: &AttachRequest) -> Result<SetupOutcome, LauncherError>;
 
-    /// Runs product, repository, and environment diagnostics.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only when the diagnostic operation itself cannot
-    /// produce a report. Individual failed checks are returned in the report.
     fn doctor(&self, request: &DoctorRequest) -> Result<DiagnosticReport, LauncherError>;
 }
 
@@ -265,12 +247,6 @@ impl LocalLauncherPort for SystemLocalLauncher {
     }
 }
 
-/// Resolves the local state root without reading any credential values.
-///
-/// # Errors
-///
-/// Returns an environment error when neither `WINWINCODE_HOME` nor `HOME` is
-/// available.
 pub fn default_state_root() -> Result<PathBuf, LauncherError> {
     if let Some(path) = std::env::var_os("WINWINCODE_HOME") {
         return Ok(PathBuf::from(path));

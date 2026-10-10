@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Shared SSE representation parser. Metadata never grants model authority;
-//! each codec validates the unmodified data and its own terminal ordering.
-
 #[derive(Debug)]
 pub(crate) struct SseFrame {
     pub(crate) event: Option<String>,
@@ -32,8 +27,6 @@ pub(crate) fn parse(
     }
 }
 
-/// Retains completed bounded frames for private accounting after a later size failure.
-/// UTF-8 validity remains required; a valid prefix never establishes stream success.
 pub(crate) fn parse_prefix(
     bytes: &[u8],
     max_event_bytes: usize,
@@ -98,12 +91,9 @@ fn parse_frames(bytes: &[u8], max_event_bytes: usize, max_events: usize) -> Pars
                     return outcome;
                 }
             }
-            // No transport reconnect is performed from model-supplied fields.
-            // id/retry/extension fields do not change JSON data or authority.
             _ => {}
         }
     }
-    // Preserve existing codec EOF handling; terminal semantics remain strict.
     outcome.error = flush(
         &mut outcome.frames,
         &mut event,

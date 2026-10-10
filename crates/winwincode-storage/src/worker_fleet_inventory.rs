@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Stable Fleet projections over the canonical Worker Registry.
-//!
-//! This module owns only immutable read snapshots and their derived labels.
-//! Worker identity, heartbeat, capacity, leases, and pool attribution remain
-//! in [`crate::ExecutionRegistry`].
-
 use std::collections::HashSet;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -52,7 +44,6 @@ CREATE INDEX IF NOT EXISTS worker_fleet_inventory_snapshot_state
     ON worker_fleet_inventory_snapshot_items (snapshot_id, state, ordinal);
 ";
 
-/// Public health state derived from current Registry and heartbeat facts.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerFleetInventoryState {
@@ -73,7 +64,6 @@ impl WorkerFleetInventoryState {
     }
 }
 
-/// One immutable pool aggregate from the single Worker Registry authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetPoolInventory {
@@ -93,7 +83,6 @@ pub struct WorkerFleetPoolInventory {
     pub updated_at: Instant,
 }
 
-/// Durable continuation inside one materialized Fleet snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetSnapshotCursor {
@@ -101,7 +90,6 @@ pub struct WorkerFleetSnapshotCursor {
     pub after_ordinal: u64,
 }
 
-/// Exact request used to create or continue one stable Fleet snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerFleetSnapshotRequest {
     pub scope: WorkerRegistryScope,
@@ -112,7 +100,6 @@ pub struct WorkerFleetSnapshotRequest {
     pub cursor: Option<WorkerFleetSnapshotCursor>,
 }
 
-/// One bounded page whose items never change while its cursor is retained.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerFleetInventoryPage {
     pub snapshot_revision: u64,
@@ -120,18 +107,11 @@ pub struct WorkerFleetInventoryPage {
     pub next_cursor: Option<WorkerFleetSnapshotCursor>,
 }
 
-/// Read-only Fleet projection adapter over the canonical Registry tables.
 pub struct WorkerFleetInventoryStore<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the stable Fleet inventory projection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the canonical Registry or projection
-    /// snapshot schema cannot be prepared.
     pub fn worker_fleet_inventory(
         &mut self,
     ) -> Result<WorkerFleetInventoryStore<'_>, StorageError> {
@@ -151,13 +131,6 @@ impl<'storage> WorkerFleetInventoryStore<'storage> {
         Ok(Self { storage })
     }
 
-    /// Creates or continues one immutable, exact-scope inventory snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scopes, filters, times, limits, and cursors. Returns
-    /// cursor-expired only after the bounded retention window has removed a
-    /// previously valid snapshot.
     pub fn page(
         &mut self,
         request: &WorkerFleetSnapshotRequest,

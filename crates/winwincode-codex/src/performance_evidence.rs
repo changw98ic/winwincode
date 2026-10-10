@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Read-only export of durable React-versus-DelegatedBatch performance facts.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -21,11 +17,6 @@ use crate::store::DATABASE_FILE;
 
 const MAX_SAFE_METRIC: i64 = 9_007_199_254_740_991;
 
-/// Secret-safe evidence exported from one Worker Codex store.
-///
-/// The run projection contains only metrics backed by both React and
-/// delegated durable facts. Delegated workspace Patch and Validation counters
-/// are omitted until that execution boundary has an authoritative settlement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProductionPerformanceV0Evidence {
@@ -34,17 +25,11 @@ pub struct ProductionPerformanceV0Evidence {
 }
 
 impl ProductionPerformanceV0Evidence {
-    /// Reduces this exact export into the two V0 comparison arms.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when durable run and model-call facts do not reconcile.
     pub fn summarize(&self) -> Result<PerformanceV0Comparison, PerformanceV0ComparisonError> {
         summarize_performance_v0(&self.runs, &self.model_calls)
     }
 }
 
-/// Read-only export failure with no database path or private identity content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionPerformanceEvidenceError {
     Unavailable,
@@ -97,18 +82,6 @@ struct ExportedRun {
     evidence: PerformanceV0RunEvidence,
 }
 
-/// Opens an existing `AdapterStore` database in `SQLite` read-only mode and
-/// exports retained terminal performance facts.
-///
-/// Raw run and model-call identities are converted to domain-separated
-/// SHA-256 digests. Reserved but not retained terminal projections are omitted.
-/// The exported runtime spans the first durable operation through the final
-/// durable activity, rather than copying the last turn's duration.
-///
-/// # Errors
-///
-/// Returns an error if the store is unavailable, malformed, or its retained
-/// terminal report disagrees with the model-call ledger.
 pub fn export_performance_v0_evidence(
     data_directory: &Path,
 ) -> Result<ProductionPerformanceV0Evidence, ProductionPerformanceEvidenceError> {

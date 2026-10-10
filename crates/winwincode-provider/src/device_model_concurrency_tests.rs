@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
@@ -141,7 +139,6 @@ fn shared_provider_slots_release_on_drop_without_a_device_or_model_global_limit(
         .collect::<Vec<_>>();
     let waiting = model_open("provider-a", 4);
     assert_full(&reopened, &waiting);
-    // Different Providers remain independent, even beyond the former per-Worker total of 16.
     let others = (0..20)
         .map(|index| {
             permit(
@@ -376,8 +373,6 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
         .try_clone()
         .unwrap();
     let release = directory.0.join("release-child");
-    // Explicit stdin inheritance pins the same open file description after exec.
-    // This deterministically models the transient inherited descriptor before exec.
     let mut child = SlotAliasChild {
         child: Command::new(std::env::current_exe().unwrap())
             .args([
@@ -412,7 +407,6 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
             }
         })();
         let _ = ready.send(result);
-        // libtest still writes its result after the helper's release.
         let _ = std::io::copy(&mut output, &mut std::io::sink());
     }));
     receiver
@@ -432,7 +426,6 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
         child.child.try_wait().unwrap().is_none(),
         "the child must still retain stdin at the release boundary"
     );
-    // Always release and reap naturally before asserting the red-capable verdict.
     fs::write(&child.release, b"release").unwrap();
     assert!(child.child.wait().unwrap().success());
     child.reader.take().unwrap().join().unwrap();

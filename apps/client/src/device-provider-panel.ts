@@ -1,5 +1,4 @@
 import { requestFetch as sendHttp } from '@winwincode/network-request'
-// SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientTransport } from './community-control-plane-client.js'
 

@@ -1,17 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Control-plane host wiring between the FUSION-03 analyzer and the FUSION-04
-//! `CanonicalDecision` adjudicator.
-//!
-//! Delivery must not import control-plane `fusion_analysis` (dependency
-//! cycle). This host owns the one-way mapping:
-//! `analyze_fusion` → [`FusionAnalysis`] → [`FusionAnalysisFixture`] →
-//! [`adjudicate_canonical_decision_from_analysis`].
-//!
-//! Mapped analyzer findings stay in the model-claim tier. They never become
-//! Delivery [`DecisionAuthority::VerifiedFact`] and never override verifier
-//! real test results. The host adds no Canonical State write power.
-
 use winwincode_delivery::domain::{
     CanonicalDecision, ComputedDeliveryVerdict, CriterionVerdict, Delivery,
     DeliveryValidationError, FrozenDeliveryCandidate, FusionAnalysisFixture,
@@ -22,10 +8,6 @@ use crate::fusion_analysis::{
     ConflictLeadingSource, FusionAnalysis, FusionClaimPosition, FusionConflict,
 };
 
-/// Maps one analyzer claim position onto a Delivery criterion outcome.
-///
-/// Supports → Pass, Opposes → Fail. The mapping is claim-shaped only; it
-/// never raises authority above the model-claim tier.
 #[must_use]
 pub const fn fusion_position_outcome(position: FusionClaimPosition) -> CriterionVerdict {
     match position {
@@ -34,20 +16,6 @@ pub const fn fusion_position_outcome(position: FusionClaimPosition) -> Criterion
     }
 }
 
-/// Host-maps FUSION-03 [`FusionAnalysis`] into FUSION-04 [`FusionAnalysisFixture`].
-///
-/// - Consensus findings become `consensus_outcomes`, one model claim per
-///   supporting candidate.
-/// - Each conflict contributes `conflict_outcomes`: the evidence-ranked
-///   leading side when present, otherwise every position so unresolved
-///   evidence rank stays non-unanimous. Each side emits one claim per
-///   candidate.
-/// - Unique insights and unsupported claims stay single-model claims under
-///   `unsupported_model_claims`.
-/// - Missing-evidence notes have no delivery outcome and are not mapped.
-///
-/// Candidate counts never raise authority above tool observation or verified
-/// facts. Analyzer evidence quality is recorded as model claims only.
 #[must_use]
 pub fn map_fusion_analysis_to_fixture(analysis: &FusionAnalysis) -> FusionAnalysisFixture {
     let mut fixture = FusionAnalysisFixture::default();
@@ -76,17 +44,6 @@ pub fn map_fusion_analysis_to_fixture(analysis: &FusionAnalysis) -> FusionAnalys
     fixture
 }
 
-/// Control-plane host adjudication path for analyzer findings.
-///
-/// Maps [`FusionAnalysis`] into [`FusionAnalysisFixture`] and delegates to
-/// [`adjudicate_canonical_decision_from_analysis`]. Verifier facts and sealed
-/// test Evidence still outrank every mapped model claim. This host never
-/// invents a verifier pass and never writes Canonical State.
-///
-/// # Errors
-///
-/// Returns the same stale repository, canonical, verifier, or Evidence
-/// rejection as the delivery adjudicator.
 pub fn adjudicate_canonical_decision_from_fusion_analysis(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -131,7 +88,6 @@ fn push_conflict_outcomes(fixture: &mut FusionAnalysisFixture, conflict: &Fusion
     }
 }
 
-/// Emits one model-claim outcome per supporting candidate (at least one).
 fn push_repeated_outcome(
     outcomes: &mut Vec<CriterionVerdict>,
     outcome: CriterionVerdict,
@@ -257,7 +213,6 @@ mod tests {
             fixture.consensus_outcomes,
             vec![CriterionVerdict::Pass, CriterionVerdict::Pass]
         );
-        // Leading evidence-ranked side wins; unsupported majority does not.
         assert_eq!(fixture.conflict_outcomes, vec![CriterionVerdict::Fail]);
         assert_eq!(
             fixture.unsupported_model_claims,
@@ -418,8 +373,6 @@ mod tests {
         let analysis = analyze_fusion(&candidates).expect("fixture candidates analyze");
         let fixture = map_fusion_analysis_to_fixture(&analysis);
 
-        // Analyzer ranks the verified Opposes side as leading on the conflict.
-        // The unique Supports insight stays a single-model claim.
         assert!(analysis.consensus.is_empty());
         assert_eq!(analysis.conflicts.len(), 1);
         assert_eq!(
@@ -478,7 +431,6 @@ mod tests {
         .expect("failed verifier fixture computes a canonical verdict");
         assert_eq!(computed.verdict().status, CriterionVerdict::Fail);
 
-        // Analyzer-unanimous Pass claims must not overwrite verifier facts.
         let analysis = consensus_support_analysis();
         let decision = adjudicate_canonical_decision_from_fusion_analysis(
             &fixture.delivery,

@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Durable Approval and Delivery Attention Inbox source adapter.
-
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -23,16 +19,10 @@ use crate::{
     session_binding_transaction::instant_millis,
 };
 
-/// Durable scope-wide Approval and Attention source backed by canonical state.
 pub struct DurableCollaborationInboxSource {
     storage: Box<dyn ProductSessionPersistence>,
 }
 
-/// Local production authority for the single Owner account.
-///
-/// The local Server has one repository and one durable Owner. Its Inbox
-/// authority is derived from the same canonical Approval/Delivery source cut,
-/// so page annotations cannot outlive the Delivery state they reference.
 pub struct LocalOwnerCollaborationInboxAuthority {
     source: DurableCollaborationInboxSource,
     owner: UserId,

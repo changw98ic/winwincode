@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import { boundApprovalText } from './components/bounded-text.js'
 import { mountPanel } from '@winwincode/browser-ui'
 import { mountKeyedCollection } from './components/keyed-collection.js'
@@ -12,11 +10,6 @@ import {
   type ContextualDecisionView,
 } from './contextual-decision-view-model.js'
 
-/**
- * UI-502 one decision a mounted page can submit.  Every action goes through the
- * page's own view-model command, so the card adds no second mutation authority
- * and no second copy of the server state behind the decision.
- */
 export interface ContextualDecisionActions {
   readonly provideInput?: (item: ContextualDecisionItem, value: InteractiveInputValue) => void
   readonly cancelInput?: (item: ContextualDecisionItem) => void
@@ -34,25 +27,18 @@ export interface ContextualDecisionActions {
 
 export interface ContextualDecisionCardOptions {
   readonly root: HTMLElement
-  /** Stable panel id; it also namespaces the per-row control ids. */
   readonly id: string
   readonly title?: string
   readonly description?: string
   readonly className?: string
   readonly actions?: ContextualDecisionActions
-  /**
-   * Canonical link to the surface that owns this decision when the mounted page
-   * does not decide it itself.  `null` renders no link for that row.
-   */
   readonly detailHref?: (item: ContextualDecisionItem) => string | null
-  /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
 
 export interface ContextualDecisionCardUpdate {
   readonly view: ContextualDecisionView
   readonly presentation: ContextualDecisionPresentation
-  /** Static host context, such as where the same Delivery review is decided. */
   readonly note?: string | null
 }
 
@@ -69,7 +55,6 @@ const LOCKED_TEXT = '当前页面状态下无法处理决策。'
 const NOTE_REQUIRED_TEXT = '提交前请说明决策原因。'
 const RESPONSE_REQUIRED_TEXT = '请输入此请求需要的回复。'
 
-/** Why one row cannot be decided right now: the row itself, or the page state. */
 function rejectionText(item: ContextualDecisionItem): string {
   return item.urgency === 'expired' || item.urgency === 'binding-invalid'
     ? STALE_TEXT
@@ -109,10 +94,6 @@ function noteLabel(kind: ContextualDecisionItem['kind']): string {
   return '回复'
 }
 
-/**
- * A row is decided inline only when the mounted page actually owns that
- * command; otherwise the row is a summary that opens the owning surface.
- */
 function decidesInline(
   item: ContextualDecisionItem,
   actions: ContextualDecisionActions | undefined,
@@ -141,12 +122,6 @@ interface DecisionRow {
   readonly onSecondary: () => void
 }
 
-/**
- * Mount the bounded decision card of one Session/WorkRun context.  The card is
- * a projection with the page's own commands behind it: it is hidden when the
- * context has no decision, and it is never a live region, so the page keeps its
- * single polite announcement channel.
- */
 export function mountContextualDecisionCard(
   options: ContextualDecisionCardOptions,
 ): ContextualDecisionCard {
@@ -173,8 +148,6 @@ export function mountContextualDecisionCard(
   panel.content.append(note, list, omitted)
   options.root.replaceChildren(panel.root)
 
-  // The capability of the latest card update; row handlers read it at the
-  // moment of activation so a stale row can never submit behind the page.
   let presentation: ContextualDecisionPresentation = Object.freeze({
     statusText: '',
     decisionsDisabled: false,
@@ -256,7 +229,6 @@ export function mountContextualDecisionCard(
 
   const collection = mountKeyedCollection<ContextualDecisionItem, string, HTMLLIElement>({
     parent: list,
-    // Kind and identity are one stable decision; a row never changes kind.
     key: item => `${item.kind}:${item.id}`,
     create(item: ContextualDecisionItem) {
       const row = element(document, 'li', 'wwc-contextual-decision-item')
@@ -328,7 +300,6 @@ export function mountContextualDecisionCard(
       parts.current = item
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
-      // Producer summaries are free-form, so a card never renders one raw.
       parts.title.textContent = boundApprovalText(item.title).text
       updateDecisionContext(parts.context, [
         contextualDecisionKindLabel(item.kind),
@@ -366,13 +337,8 @@ export function mountContextualDecisionCard(
           ? '忽略'
           : '取消输入'
       parts.secondary.disabled = capability.disabled
-      // A stale row keeps whatever the user already typed: a rejected decision
-      // never costs the user their input, and the text clears only when the
-      // server stops listing this decision and the row is removed.
       parts.rejected.hidden = !inline || !capability.disabled
       if (inline && capability.disabled) parts.rejected.textContent = rejectionText(item)
-      // Navigation stays available while the page refreshes; only a decision
-      // that can no longer be made loses its link.
       const href = item.urgency === 'expired' || item.urgency === 'binding-invalid'
         ? null
         : options.detailHref?.(item) ?? null
@@ -411,8 +377,6 @@ export function mountContextualDecisionCard(
         className,
         busy: input.presentation.decisionsDisabled,
       })
-      // The host note takes precedence; without one the card shows its own
-      // count so the cost of the context stays readable at a glance.
       const noteText = input.note ?? (
         input.presentation.statusText.length === 0 ? null : input.presentation.statusText
       )

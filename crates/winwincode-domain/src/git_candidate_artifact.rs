@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{error::Error, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -11,8 +9,6 @@ use crate::Sha256Digest;
 const SCHEMA_VERSION: u8 = 2;
 const MAX_BUNDLE_BYTES: usize = 512 * 1024 * 1024;
 
-/// Canonical candidate Artifact carrying the Git objects missing from an
-/// independently deployed Control Plane repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitCandidateArtifactManifest {
     candidate_commit_id: String,
@@ -40,11 +36,6 @@ impl fmt::Display for GitCandidateArtifactManifestError {
 impl Error for GitCandidateArtifactManifestError {}
 
 impl GitCandidateArtifactManifest {
-    /// Creates the one current canonical manifest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed commit id or an empty/oversized Git bundle.
     pub fn new(
         candidate_commit_id: impl Into<String>,
         bundle: Vec<u8>,
@@ -62,12 +53,6 @@ impl GitCandidateArtifactManifest {
         })
     }
 
-    /// Decodes and verifies exact canonical JSON, bundle encoding, and digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects old versions, unknown/reordered fields, invalid base64, or a
-    /// bundle whose bytes do not match the sealed digest.
     pub fn decode(bytes: &[u8]) -> Result<Self, GitCandidateArtifactManifestError> {
         let wire: ManifestWire =
             serde_json::from_slice(bytes).map_err(|_| GitCandidateArtifactManifestError)?;
@@ -84,11 +69,6 @@ impl GitCandidateArtifactManifest {
         Ok(manifest)
     }
 
-    /// Encodes the strict canonical JSON retained as Artifact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if serialization of the closed wire shape fails.
     pub fn encode(&self) -> Result<Vec<u8>, GitCandidateArtifactManifestError> {
         serde_json::to_vec(&ManifestWire {
             schema_version: SCHEMA_VERSION,

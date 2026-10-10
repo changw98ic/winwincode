@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 source /etc/os-release
@@ -26,8 +25,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   binutils bubblewrap pkg-config libcap-dev libglib2.0-dev \
   clang-23 libclang-23-dev libclang-rt-23-dev lld-23 llvm-23
 
-# Chromium GN uses the target-triple resource layout; Debian packages use
-# lib/linux and an architecture suffix. Bind GN to the installed native bytes.
 resource_dir=$(/usr/lib/llvm-23/bin/clang -print-resource-dir)
 native_builtins="${resource_dir}/lib/linux/libclang_rt.builtins-${runtime_arch}.a"
 gn_builtins="${resource_dir}/lib/${compiler_target}/libclang_rt.builtins.a"

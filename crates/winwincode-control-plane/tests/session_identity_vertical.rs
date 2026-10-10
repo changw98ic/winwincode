@@ -1659,8 +1659,6 @@ mod session_binding_fixture {
         ));
         drop(captured);
 
-        // A later task in the same conversation starts its own ACK sequence,
-        // while the public resource revision continues monotonically.
         let mut next_job = job.clone();
         next_job.job_id = ExecutionJobId(canonical_id("job", seed + 1));
         let mut next_command = command.clone();

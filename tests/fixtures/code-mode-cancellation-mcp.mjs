@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 import { appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'

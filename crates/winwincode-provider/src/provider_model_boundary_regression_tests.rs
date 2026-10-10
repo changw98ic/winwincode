@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 thread_local! {
     static AUDIT_READER_READS: std::cell::RefCell<Vec<(usize,usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -333,8 +332,6 @@ fn mechanism_actual_tls_size_limit_device_accounting_omits_known_usage() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-// The listener and socket waits are bounded even when the second attempt never
-// arrives. This helper is test-only; the actual Provider reader is unchanged.
 fn audit_bounded_tls_responses(responses: Vec<TestResponse<'_>>) -> TlsFixture {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let CertifiedKey { cert, signing_key } =

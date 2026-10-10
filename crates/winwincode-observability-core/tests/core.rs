@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 use sha2::{Digest, Sha256};
 use winwincode_observability_core::{
     AlertCondition, AlertRule, AlertRuleId, AlertSeverity, AlertState, AlertStatus,

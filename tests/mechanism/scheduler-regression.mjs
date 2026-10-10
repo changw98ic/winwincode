@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Offline fixture. The regression_runner owns execution.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -28,7 +26,6 @@ const red = (id, title, observed, predicate) => {
   receipt.cases.push({ id, title, observed, desiredBehaviorPassed: error === null, regression: error ? 'red' : 'green', assertion: error })
 }
 try {
-  // M18: real schedule and durable local ledger. No task 3 admission is permitted.
   let release
   let settled = false
   let admitted = 0
@@ -68,10 +65,6 @@ try {
       'runBenchmarkSchedule emitted no immediate stopped-admission state before the blocked sibling finished')
   })
 
-  // M19: old report is active; the original launch has since become terminal.
-  // Exercise the actual adapter classifier and the actual read-only recovery API.
-  // The production catch calls these in this order. The first call throws,
-  // preventing the second. No product invocation or second launch exists here.
   const directory = resolve(root, 'm19')
   await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
   await mkdir(resolve(directory, 'device-data/worker-sessions'), { recursive: true })
@@ -146,8 +139,6 @@ try {
     await new Promise(resolvePromise => server.close(resolvePromise))
   }
 
-  // M21: actual active driveDelivery loop + actual no-approval registry reads.
-  // Ten terminal Core databases are historical. No model data is required.
   const pollDir = resolve(root, 'm21')
   const history = 10
   for (let index = 0; index < history; index += 1) {

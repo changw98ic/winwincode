@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 use super::tests::{event_with_fact, fixture};
 use super::*;
 #[test]

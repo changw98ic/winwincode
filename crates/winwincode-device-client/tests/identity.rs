@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device identity persistence: first-boot generation, the canonical
-//! fresh-per-launch `clientInstanceId`, and the server-issued enrollment
-//! identity adopted after the exchange, across restarts.
-//! Temporary-directory infrastructure mirrors
-//! `crates/winwincode-storage/tests/sqlite.rs`.
-
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,8 +83,6 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
     assert_eq!(first.credential().expose_secret().len(), 32);
     assert_eq!(first.credential().generation(), 1);
 
-    // The enrollment adoption backfills the server-issued identity and
-    // replaces the local credential with the issued Device Credential.
     let issued = issued_enrollment(0xab);
     adopt_enrollment(
         &mut store,
@@ -165,7 +155,6 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
         "clientInstanceId must be a fresh value on every launch"
     );
 
-    // A replayed adoption can never rotate the adopted identity.
     let error = adopt_enrollment(
         &mut store,
         second.identity().device_id(),
@@ -206,7 +195,6 @@ fn separate_devices_receive_distinct_stable_identities() {
         "both stay unenrolled until their own server issues identities"
     );
 
-    // Two devices adopt distinct issued identities independently.
     let first_issued = IssuedEnrollment {
         client_node_id: "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1".to_owned(),
         ..issued_enrollment(0x01)
@@ -262,7 +250,6 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
         .expect("a valid call must still create the identity after rejected calls");
     assert_eq!(record.revision(), 1);
 
-    // The issued identity is validated before anything persists.
     let cases = vec![
         IssuedEnrollment {
             client_node_id: "cnd_NOTCANONICAL".to_owned(),
@@ -295,8 +282,6 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
             "{issued:?}"
         );
     }
-    // Every rejection changed nothing: the identity is still unenrolled and
-    // the local credential untouched.
     let unchanged = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:01:00.000Z")
         .expect("identity reload");
     assert_eq!(unchanged.identity().client_node_id(), "");

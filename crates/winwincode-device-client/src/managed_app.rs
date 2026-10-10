@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Device-owned lifecycle for one managed candidate/live application.
-//!
-//! This module intentionally does not use [`crate::supervisor::SessionSupervisor`].
-//! Worker sessions and candidate HTTP processes have different identities,
-//! leases and preview sources.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -33,7 +25,6 @@ const STARTUP_READY_TIMEOUT: Duration = Duration::from_secs(1);
 #[derive(Clone, Debug)]
 pub struct ManagedAppSupervisorConfig {
     pub data_directory: PathBuf,
-    /// Executables are matched by the exact argv[0] string.
     pub executable_allowlist: BTreeSet<String>,
     pub preview_sources: AuthorizedPreviewSourceRegistry,
 }
@@ -87,16 +78,10 @@ struct PersistedRun {
     pid: Option<u32>,
     process_start_identity: Option<String>,
     exit_code: Option<i32>,
-    /// Canonical repository binding used for this run. This prevents a
-    /// replayed run id from being attached to another local checkout.
     #[serde(default)]
     repository_root: Option<PathBuf>,
-    /// Detached checkout used by a frozen candidate, if any.
     #[serde(default)]
     execution_root: Option<PathBuf>,
-    /// The configured loopback port was free immediately before this process
-    /// was spawned. This is the durable evidence used during recovery before
-    /// a healthy endpoint is exposed as a preview source.
     #[serde(default)]
     port_preflight_passed: bool,
 }
@@ -121,10 +106,6 @@ impl std::fmt::Debug for ManagedAppSupervisor {
 }
 
 impl ManagedAppSupervisor {
-    /// # Errors
-    ///
-    /// Returns an error when the state directory cannot be created or the
-    /// persisted state cannot be read or decoded.
     pub fn open(config: ManagedAppSupervisorConfig) -> Result<Self, ManagedAppError> {
         fs::create_dir_all(&config.data_directory)?;
         let mut config = config;
@@ -143,12 +124,6 @@ impl ManagedAppSupervisor {
         })
     }
 
-    /// Reconciles persisted process identities after a Device restart. A
-    /// mismatched PID is marked missing and is never signalled.
-    /// # Errors
-    ///
-    /// Returns an error when the persisted state cannot be written or the
-    /// supervisor state lock is poisoned.
     pub fn reconcile(&self) -> Result<Vec<ManagedAppStatus>, ManagedAppError> {
         let mut state = self
             .state
@@ -197,10 +172,6 @@ impl ManagedAppSupervisor {
         Ok(statuses)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error when the command is invalid, its lease is stale, the
-    /// run cannot be started or stopped, or supervisor state is unavailable.
     pub fn apply(
         &self,
         command: &ManagedAppCommand,
@@ -227,10 +198,6 @@ impl ManagedAppSupervisor {
         }
     }
 
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor state lock is poisoned or the run
-    /// does not exist.
     pub fn query(&self, run_id: &str) -> Result<ManagedAppStatus, ManagedAppError> {
         let mut state = self
             .state
@@ -580,7 +547,6 @@ impl ManagedAppSupervisor {
             run.process_start_identity.as_deref(),
             live.get_mut(&run.config.run_id),
         );
-        // A timeout (or failed reap poll) must retain the Child for Stop/Query retry.
         if release != ProcessRelease::Alive {
             live.remove(&run.config.run_id);
         }
@@ -744,8 +710,6 @@ impl OwnedProcessGroup {
     }
 
     fn signal(&self, signal: &str) {
-        // A surviving original member proves continuity after the leader is reaped.
-        // If that proof is gone, do not signal a possibly reused group number.
         if self.original_members.iter().any(|(pid, identity)| {
             process_matches(*pid, Some(identity)) && process_group_id(*pid) == Some(self.group)
         }) {
@@ -762,8 +726,6 @@ fn stop_owned_process(
     let Some(pid) = pid.or_else(|| live.as_ref().map(|run| run.child.id())) else {
         return ProcessRelease::Gone;
     };
-    // A previously collected child cannot authorize a new process/group that
-    // happens to reuse its PID. Preserve the existing pre-Stop exit behavior.
     if let Some(run) = live.as_mut()
         && run.child.try_wait().ok().flatten().is_some()
     {
@@ -812,8 +774,6 @@ fn wait_for_process_release(
         });
         let release = observe_process_release(pid, identity, group);
         if release != ProcessRelease::Alive {
-            // ps excludes zombies. The child may exit after the poll above, so
-            // collect it once more before reporting success or dropping ownership.
             if reaped
                 || live
                     .as_mut()
@@ -831,7 +791,6 @@ fn wait_for_process_release(
 
 #[cfg(test)]
 thread_local! {
-    // Deterministically exit a real child between the reap poll and ps observation.
     static PROCESS_RELEASE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -964,7 +923,6 @@ fn listening_socket_owner_pids(port: u16) -> Option<BTreeSet<u32>> {
 
 #[cfg(any(target_os = "linux", test))]
 fn parse_listening_socket_inodes(contents: &str, port: u16) -> BTreeSet<u64> {
-    // /proc combines queue and timer pairs with colons; inode is token 9.
     let wanted_port = format!("{port:04X}");
     contents
         .lines()
@@ -1223,8 +1181,6 @@ mod tests {
         supervisor: &ManagedAppSupervisor,
         mut status: ManagedAppStatus,
     ) -> ManagedAppStatus {
-        // Start may legitimately return Starting while the listener is coming up.
-        // Query must still prove health and socket ownership before the assertion.
         let deadline = Instant::now() + Duration::from_secs(2);
         while matches!(
             status.state,
@@ -1634,7 +1590,6 @@ mod tests {
         drop(supervisor);
         let reopened = ManagedAppSupervisor::open(supervisor_config()).expect("reopen");
         let reconciled = reopened.reconcile().expect("reconcile");
-        // The old implementation leaves this orphan alive; clean up before asserting.
         if process_group_id(child_pid) == Some(pid) {
             let _ = Command::new("/bin/kill")
                 .args(["-KILL", &child_pid.to_string()])
@@ -1703,7 +1658,6 @@ mod tests {
             finish.config = None;
         }
         let finished = supervisor.apply(&finish, &root).expect("stop or restart");
-        // Unlike process_exists(), lstart includes zombies: a missing entry proves reaping.
         let root_reaped = process_start_identity(pid).is_none();
         let repeated = supervisor
             .apply(&command(run_id, ManagedAppOperation::Stop), &root)
@@ -1736,8 +1690,6 @@ mod tests {
 
     #[test]
     fn stop_timeout_retains_child_for_a_later_reap() {
-        // A non-group child cannot be signalled by Stop; it exercises the bounded
-        // failure path without replacing the real Child or process observations.
         let root = test_directory("reap-timeout-root");
         let state = test_directory("reap-timeout-state");
         fs::create_dir_all(&root).expect("root");
@@ -1777,7 +1729,6 @@ mod tests {
         let failed_stop = supervisor.apply(&stop, &root).expect("bounded stop");
         assert_eq!(failed_stop.state, ManagedAppState::Missing);
         assert_eq!(failed_stop.pid, Some(pid));
-        // Restart must not overwrite ownership while the earlier process lives.
         let restart = command(&run.config.run_id, ManagedAppOperation::Restart);
         assert!(matches!(
             supervisor.apply(&restart, &root),

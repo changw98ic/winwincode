@@ -1,15 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import {
   controlPlaneLoginFailure,
   type ControlPlaneClient,
   type ControlPlaneLoginFailure,
 } from './community-control-plane-client.js'
 
-/** Which mounted form produced the current submission or failure. */
 export type LoginSubmissionSource = 'sign-in' | 'initialization'
 
-/** Server initialization visibility for the first-time entry. */
 export type LoginInitialization = 'unknown' | 'uninitialized' | 'initialized'
 
 export interface LoginCredentials {
@@ -36,7 +32,6 @@ export interface LoginViewModel {
   login(credentials: LoginCredentials): Promise<void>
   initialize(credentials: OwnerInitializationCredentials): Promise<void>
   refreshInitialization(): Promise<void>
-  /** Clear one submission outcome so the page is armed for the next session. */
   reset(): void
   dismissFailure(): void
   close(): void
@@ -51,11 +46,6 @@ function state(
   return Object.freeze({ status, source, failure, initialization })
 }
 
-/**
- * Own the username + password sign-in lifecycle for the login page. Failure
- * reasons stay in the facade-owned presentation taxonomy, and credential
- * material is only held on the call stack of one request.
- */
 export function createLoginViewModel(options: {
   readonly client: ControlPlaneClient
 }): LoginViewModel {
@@ -90,8 +80,6 @@ export function createLoginViewModel(options: {
         publish(state('idle', null, null, current.initialization))
         return
       }
-      // Keep the submission source so the page can render the failure on the
-      // form that produced it.
       publish(state(
         'idle',
         source,
@@ -120,8 +108,6 @@ export function createLoginViewModel(options: {
       }
       return submit('sign-in', signal => {
         const operation = client.login(attempt, { signal })
-        // The facade consumed the material synchronously, so the retained
-        // reference keeps only the username.
         attempt.password = ''
         return operation
       })
@@ -153,8 +139,6 @@ export function createLoginViewModel(options: {
           status.initialized ? 'initialized' : 'uninitialized',
         ))
       } catch {
-        // An unavailable probe only hides the first-time entry; it never
-        // blocks the username + password form.
         if (closed || initializationProbe !== controller) return
         publish(state(
           current.status,

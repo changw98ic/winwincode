@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 
 use std::cell::{Cell, RefCell};
@@ -417,8 +415,6 @@ impl FakeCodex {
             .clone()
     }
 
-    /// Injects one durable pending delivery (used to model frames retained
-    /// while the Server exchange was down / restarting).
     fn inject_pending_delivery(&self, message: &ExecutionPortMessage) {
         let delivery = fixture_delivery(message);
         let mut state = self.state.lock().expect("FakeCodex state");
@@ -428,8 +424,6 @@ impl FakeCodex {
         state.durable_deliveries.push(delivery);
     }
 
-    /// Queues a Core execution message for `take_execution_messages`
-    /// (the production path that can emit runtime.event after Job teardown).
     fn queue_execution_message(&self, message: ExecutionPortMessage) {
         self.state
             .lock()
@@ -770,8 +764,6 @@ impl CodexCoreAdapter for FakeCodex {
         limit: usize,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
         let state = self.state.lock().expect("FakeCodex state");
-        // Production locates the cursor in the durable ledger, including sent
-        // rows, before selecting the next pending deliveries.
         let start = after_delivery
             .and_then(|id| {
                 state
@@ -810,11 +802,6 @@ impl CodexCoreAdapter for FakeCodex {
         if !state.candidate_delivery_ids.contains(delivery_id) {
             state.pending_delivery_ids.remove(delivery_id);
         }
-        // Transport-only frames have no later response and are compacted after
-        // a successful send.  Keeping them would make a successor process
-        // collide with a fresh local message sequence while retaining the
-        // response-bearing Job/Candidate frames needed for replay.  Registration
-        // remains here until its matching result is accepted below.
         if transport_only {
             state
                 .durable_deliveries
@@ -1636,8 +1623,6 @@ impl WorkerTestAccess for WorkerMain<RecordingPort, FakeCodex> {
     fn registration_for_test(&self) -> (RequestId, WorkerId, WorkerInstanceId) {
         let active = self.lifecycle();
         assert_eq!(active, WorkerLifecycleState::Registering);
-        // Registration values are deterministic and are asserted again against
-        // the emitted message in every parity script.
         (
             RequestId("req_00000000000000000000000001".to_owned()),
             WorkerId(id("wrk", 'A')),
@@ -3737,8 +3722,6 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
         );
     }
 
-    // No Provider is configured: the exact started exchange ends with a durable
-    // configuration error, exercising result restoration without any API charge.
     for _ in 0..100 {
         if !store
             .replay_model(&original.model_exchange_id.0, 1)
@@ -4964,7 +4947,6 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
                     prior_expires_at: active.lease.expires_at.clone(),
                 }), now()).await.unwrap();
         }
-        // The driver sampled its wall clock before a control/network await.
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         let result = worker.flush_durable_outbox_at(now()).await;
         if renewed {
@@ -4987,7 +4969,6 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
             store.list_stored_model_exchanges().unwrap().len(),
             usize::from(renewed)
         );
-        // A later poll with the same stale timestamp must not reset the origin either.
         Box::pin(worker.poll_codex(now())).await.unwrap();
         assert_eq!(
             store.list_stored_model_exchanges().unwrap().len(),
@@ -5989,8 +5970,6 @@ async fn accepted_candidate_survives_outcome_retention_restart_before_workspace_
         .await
         .expect("ack candidate open");
 
-    // Stop after the candidate ledger commits but before the terminal outcome
-    // is retained.  The workspace must stay durable for the replacement.
     pump.state
         .lock()
         .expect("FakeCodex state")
@@ -6704,11 +6683,6 @@ async fn a_lost_binding_response_resumes_the_prepared_turn_once() {
 
 #[tokio::test]
 async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_window() {
-    // Models the RUN-03 residual: Core produces verification evidence while
-    // the Worker→Server exchange is down (Server restart / Connection
-    // refused). After the in-memory Job is gone, the durable outbox must
-    // still flush runtime.event + diagnostic artifact.chunk + JobOutcome on
-    // the same exchange protocol when the Server returns.
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
     let failures = port.failures_handle();
@@ -6743,8 +6717,6 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
         session_identity: active.session_identity.clone(),
         worker_session_id: active.worker_session_id.clone(),
     };
-    // Diagnostic (non-candidate) artifact chunk — the exact class that used to
-    // be skipped by `_ => continue` once the in-memory Job was gone.
     let diagnostic_chunk = ExecutionPortMessage::ArtifactChunkMessage(ArtifactChunkMessage {
         artifact_id: ArtifactId(id("art", 'D')),
         is_final: true,
@@ -6764,7 +6736,6 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
         worker_session_id: active.worker_session_id.clone(),
     });
 
-    // Simulate Server restart: every outbound send fails while Core finishes.
     failures.set(usize::MAX);
     pump.queue_poll(
         &active.codex_thread_id,
@@ -6816,8 +6787,6 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
         "JobOutcome must stay pending, got {pending_before:?}"
     );
 
-    // Server returns: heartbeat/poll flush must send every pending evidence
-    // frame even though the in-memory Job is already gone.
     failures.set(0);
     worker
         .flush_durable_outbox()
@@ -6887,7 +6856,6 @@ async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
     let worker_session_id = active.worker_session_id.clone();
     let codex_thread_id = active.codex_thread_id.clone();
 
-    // Drop the Job while transport is down (finish without a live Job).
     failures.set(usize::MAX);
     pump.queue_poll(
         &codex_thread_id,
@@ -6898,9 +6866,6 @@ async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
     let _ = worker.poll_codex_boxed().await;
     assert!(worker.active_jobs().is_empty());
 
-    // A late Core runtime frame for the already-closed Job must still retain
-    // and send once the Server is reachable — not hard-fail with
-    // RuntimeTraceMismatch and never leave the process.
     let late = RuntimeEventMessage {
         codex_thread_id: codex_thread_id.clone(),
         event: ExecutionEventRecord {
@@ -6920,8 +6885,6 @@ async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
         worker_session_id,
     };
     pump.queue_execution_message(ExecutionPortMessage::RuntimeEventMessage(late));
-    // poll_codex requires Active lifecycle; the Worker is still Active after
-    // finish_job. Transport is still down, so the late frame stays pending.
     let _ = worker.poll_codex_boxed().await;
     assert!(
         worker.has_pending_durable_evidence(),
@@ -7027,8 +6990,6 @@ async fn assert_invalid_renewals(
         );
         assert_eq!(worker.active_jobs()[0], before);
     }
-    // A valid renewal consumed after expiry now settles only that exact Job.
-    // The production driver regression covers this separately from forgery.
 }
 
 #[tokio::test]
