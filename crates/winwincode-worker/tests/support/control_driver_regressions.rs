@@ -353,3 +353,28 @@ async fn candidate_git_failure_retains_stage_and_cause_without_private_path() {
     assert!(!safe.contains("SYNTHETIC_PRIVATE_LOCK_CONTENT"));
     assert!(!safe.contains(path.to_str().unwrap()));
 }
+
+#[tokio::test]
+async fn queued_control_cannot_starve_the_durable_outbox() {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    queue_evidence(&codex, &active);
+    // A control is already pending before the flush starts.
+    let control = renewal(&active);
+    port.controls
+        .queued
+        .borrow_mut()
+        .push_back((ExecutionMessageId(id("xmsg", 'N')), control));
+    worker.flush_durable_outbox().await.unwrap();
+    let sent = port
+        .controls
+        .trace
+        .borrow()
+        .iter()
+        .filter(|event| event.starts_with("sent:"))
+        .count();
+    assert_eq!(
+        sent, 1,
+        "the flush must make progress by one frame, then yield to the control"
+    );
+}

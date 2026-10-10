@@ -383,9 +383,10 @@ where
         let mut sent_bytes = 0;
         let mut deferred = None;
         for delivery in deliveries {
-            // Yield to pending controls only after this batch made progress;
-            // checking before the first frame starves the durable outbox
-            // whenever any control is still queued.
+            // Yield to pending controls only after this batch has attempted at
+            // least one frame (`sent_bytes` counts every dispatched frame,
+            // including deferred model starts); checking before the first
+            // frame starves the durable outbox whenever a control is queued.
             if (sent_bytes > 0 && self.port.has_pending_controls())
                 || tokio::time::Instant::now() >= deadline
             {
