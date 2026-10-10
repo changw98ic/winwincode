@@ -14,6 +14,10 @@ use std::sync::Mutex;
 pub(crate) const MAX_LOGIN_FAILURES: u32 = 5;
 /// Fixed failure-counting window.
 pub(crate) const LOGIN_FAILURE_WINDOW_MILLIS: i64 = 15 * 60 * 1000;
+/// Upper bound on tracked pairs so spraying many usernames/IPs cannot grow
+/// memory without limit. Expired windows are pruned first; if every tracked
+/// pair is still live, the oldest window is evicted.
+pub(crate) const MAX_TRACKED_PAIRS: usize = 65_536;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct AttemptKey {
@@ -59,6 +63,19 @@ impl LoginRateLimiter {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
+        if !entries.contains_key(&key) && entries.len() >= MAX_TRACKED_PAIRS {
+            entries.retain(|_, entry| {
+                now.saturating_sub(entry.window_started_millis) < LOGIN_FAILURE_WINDOW_MILLIS
+            });
+            if entries.len() >= MAX_TRACKED_PAIRS
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.window_started_millis)
+                    .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
         let entry = entries.entry(key).or_insert(AttemptEntry {
             failures: 0,
             window_started_millis: now,
@@ -104,6 +121,25 @@ mod tests {
 
         // A passed window resets the counter.
         assert!(!limiter.rejected("203.0.113.9", "wen", LOGIN_FAILURE_WINDOW_MILLIS + 6_000));
+    }
+
+    #[test]
+    fn tracked_pairs_stay_bounded_and_expired_windows_are_pruned() {
+        let limiter = LoginRateLimiter::default();
+        for index in 0..MAX_TRACKED_PAIRS {
+            limiter.record_failure(&format!("client-{index}"), "wen", 0);
+        }
+        // A new pair at capacity evicts one live entry, never grows past the cap.
+        limiter.record_failure("fresh", "wen", 1);
+        assert_eq!(limiter.entries.lock().unwrap().len(), MAX_TRACKED_PAIRS);
+        // Once the old windows expire, the next insert prunes them all.
+        limiter.record_failure("later", "wen", LOGIN_FAILURE_WINDOW_MILLIS + 2);
+        assert_eq!(limiter.entries.lock().unwrap().len(), 1);
+        // Lockout behavior for live pairs is unchanged.
+        for attempt in 0..i64::from(MAX_LOGIN_FAILURES) {
+            limiter.record_failure("203.0.113.9", "wen", LOGIN_FAILURE_WINDOW_MILLIS + attempt);
+        }
+        assert!(limiter.rejected("203.0.113.9", "wen", LOGIN_FAILURE_WINDOW_MILLIS + 10));
     }
 
     #[test]
