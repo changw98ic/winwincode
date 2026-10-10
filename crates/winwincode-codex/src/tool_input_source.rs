@@ -5,9 +5,10 @@
 //! read and never contribute to the returned identity.
 
 use std::fs::{self, Metadata, OpenOptions};
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
@@ -182,7 +183,33 @@ pub(crate) fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, A
     {
         return Err(AdapterStoreError::Conflict);
     }
+    // Metadata cannot see a same-length rewrite inside one timestamp tick.
+    // For recently modified ("racy") files, confirm the bytes are stable.
+    if recently_modified(&after) {
+        let mut reread = Vec::new();
+        (&file)
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        (&file)
+            .take(remaining + 1)
+            .read_to_end(&mut reread)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if reread != content || !same_metadata(&after, &checked_metadata(path)?) {
+            return Err(AdapterStoreError::Conflict);
+        }
+    }
     Ok(content)
+}
+
+/// Window covering coarse filesystem timestamp granularity (e.g. 1-2s).
+const RACY_MTIME_WINDOW: Duration = Duration::from_secs(2);
+
+fn recently_modified(metadata: &Metadata) -> bool {
+    metadata.modified().map_or(true, |modified| {
+        SystemTime::now()
+            .duration_since(modified)
+            .map_or(true, |age| age <= RACY_MTIME_WINDOW)
+    })
 }
 
 fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
@@ -367,6 +394,17 @@ mod tests {
         fs::write(&source, "original").unwrap();
         let before = checked_metadata(&source).unwrap();
         fs::write(&source, "modified").unwrap();
+        // A same-length rewrite inside one timestamp tick is indistinguishable
+        // by metadata alone (read_source_file re-reads racy files instead), so
+        // advance mtime explicitly to make this assertion deterministic.
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_times(
+                FileTimes::new().set_modified(before.modified().unwrap() + Duration::from_secs(5)),
+            )
+            .unwrap();
         assert!(!same_metadata(&before, &checked_metadata(&source).unwrap()));
         let opened = File::open(&source).unwrap();
         fs::rename(&source, checkout.0.join("previous.py")).unwrap();
