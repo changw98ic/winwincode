@@ -122,7 +122,21 @@ impl Fixture {
     ) -> ProductionCodexAdapter {
         let helper = std::env::var_os("WWC_TEST_HELPER").map_or_else(
             || {
-                PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+                // Same resolution as production_vertical: default to
+                // <workspace>/target when CARGO_TARGET_DIR is unset.
+                let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map_or_else(
+                        || workspace.join("target"),
+                        |value| {
+                            let value = PathBuf::from(value);
+                            if value.is_absolute() {
+                                value
+                            } else {
+                                workspace.join(value)
+                            }
+                        },
+                    )
                     .join("debug/winwincode-kernel-helper")
             },
             PathBuf::from,
