@@ -104,6 +104,7 @@
     "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
     "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
     "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
-    "upstream/patches/codex/0098-mechanism-behavior-audit.patch"
+    "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
+    "upstream/patches/codex/0099-task-state-compaction-budget.patch"
   ]
 }

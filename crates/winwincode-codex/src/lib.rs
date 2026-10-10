@@ -36,6 +36,7 @@ mod public_smoke_adapter;
 pub mod stage_product;
 mod store;
 mod structured_result;
+mod task_handoff;
 mod tool_dependencies;
 mod tool_input_source;
 pub mod workrun_runtime_projection;

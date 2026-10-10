@@ -773,6 +773,20 @@ impl ExecutionPortModelBridge {
         })
     }
 
+    pub(crate) fn task_context_overhead_bytes(
+        &self,
+        run_key: &str,
+    ) -> Result<usize, ModelPortFailure> {
+        let run = self
+            .ordinal_store
+            .load_run::<serde_json::Value>(run_key)
+            .map_err(model_store_failure)?
+            .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+        crate::task_handoff::context_snapshot(&run)
+            .map(|context| context.map_or(0, |text| text.len()))
+            .map_err(|_| model_failure(BridgeError::InvalidPayload))
+    }
+
     pub(crate) fn install_binding(&self, binding: ModelRunBinding) -> Result<(), BridgeError> {
         self.authority
             .install(&binding.run_key, binding.authority.clone())?;
@@ -1614,7 +1628,7 @@ impl ExecutionPortModelBridge {
         self.prepare_member_stream(request, None)
     }
 
-    fn prepare_host_payload(
+    pub(crate) fn prepare_host_payload(
         &self,
         request: &ModelPortRequest,
         stored: Option<&serde_json::Value>,
@@ -1641,6 +1655,27 @@ impl ExecutionPortModelBridge {
                     .map_err(model_store_failure)?,
             )
             .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+            payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        }
+        if !is_fusion_member
+            && let Some(run) = stored
+            && let Some(context) = crate::task_handoff::context_snapshot(run)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?
+        {
+            let context = self
+                .ordinal_store
+                .retain_model_task_context(
+                    run_key,
+                    &request.request_id,
+                    &model_call_digest(&payload["request"]).map_err(model_failure)?,
+                    context.as_bytes(),
+                )
+                .map_err(model_store_failure)?;
+            let context = std::str::from_utf8(&context)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+            crate::task_handoff::attach_context(&mut payload, context)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
             payload_bytes = serde_json::to_vec(&payload)
                 .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
         }
@@ -1825,6 +1860,29 @@ struct KernelModelPort {
 }
 
 impl ModelPort for KernelModelPort {
+    fn compaction_context_overhead_bytes(
+        &self,
+        thread_id: &str,
+    ) -> Result<usize, ModelPortFailure> {
+        if self.fusion_member.is_some() {
+            return Ok(0);
+        }
+        let thread = CodexThreadId(thread_id.to_owned());
+        let binding = match self
+            .bridge
+            .binding_for_thread(&thread)
+            .map_err(model_failure)?
+        {
+            Some(binding) => binding,
+            None => self
+                .bridge
+                .durable_binding_for_thread(&thread)
+                .map_err(model_failure)?
+                .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
+        };
+        self.bridge.task_context_overhead_bytes(&binding.run_key)
+    }
+
     fn stream(
         &self,
         request: ModelPortRequest,

@@ -1,6 +1,8 @@
 //! Embedded Codex Core ownership boundary.
 
 mod model_port;
+#[cfg(test)]
+mod task_handoff_tests;
 
 pub use model_port::ModelPort;
 pub use model_port::ModelPortFailure;
@@ -648,6 +650,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
     "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
     "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+    "upstream/patches/codex/0099-task-state-compaction-budget.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -1356,6 +1359,7 @@ impl Kernel {
             ));
         }
         let mut config = runtime.base_config.clone();
+        Self::apply_task_state_compaction_policy(&mut config)?;
         // A Worker outlives a chat task. Read the newly installed user layer for
         // each session while retaining host-owned model and permission settings.
         // Resolve from the private home, as at startup: candidate repository
@@ -1444,6 +1448,26 @@ impl Kernel {
             Self::apply_host_action_approvals(&mut config)?;
         }
         Ok(config)
+    }
+
+    fn apply_task_state_compaction_policy(config: &mut Config) -> KernelResult<()> {
+        // The upstream token-budget experiment bypasses compact_prompt.
+        // Product sessions use the same task-state compaction policy.
+        config.features.disable(Feature::TokenBudget).map_err(|_| {
+            KernelFailure::new(
+                "SESSION_POLICY_UNAVAILABLE",
+                "Task-state compaction policy could not be applied",
+            )
+        })?;
+        // Manual and automatic local compaction use this field. Create/resume
+        // apply the template; fork inherits the source configuration.
+        config.compact_prompt =
+            Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_COMPACT_PROMPT.to_owned());
+        // The total is checked inside Core after generation. It is not a model
+        // instruction or a fixed limit on the summary or original user tail.
+        config.compact_context_max_tokens =
+            Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_CONTEXT_MAX_TOKENS);
+        Ok(())
     }
 
     fn apply_host_action_approvals(config: &mut Config) -> KernelResult<()> {
@@ -2866,6 +2890,7 @@ mod tests {
         "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
         "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
         "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+        "upstream/patches/codex/0099-task-state-compaction-budget.patch",
     ];
 
     #[test]
@@ -3018,6 +3043,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Kernel instance covers workspace policy, compaction policy and live extension refresh"
+    )]
     async fn chat_session_applies_its_declared_workspace_permissions() {
         use winwincode_execution_port::agent_config::{
             AgentProfileSettings, resolve_agent_session_config,
@@ -3095,6 +3124,12 @@ mod tests {
                 continue;
             }
             let config = result.expect("session config");
+            assert!(!config.features.enabled(super::Feature::TokenBudget));
+            assert_eq!(config.compact_context_max_tokens, Some(30_000));
+            assert_eq!(
+                config.compact_prompt.as_deref(),
+                Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_COMPACT_PROMPT)
+            );
             assert_eq!(
                 config
                     .model_reasoning_effort

@@ -34,6 +34,7 @@ pub mod repository_rule_pack;
 pub mod runtime_replay;
 pub mod runtime_trace_outbox;
 pub mod snapshot_freeze;
+pub mod task_handoff;
 pub mod transport;
 pub mod typed_replay;
 pub mod usage;

@@ -204,6 +204,15 @@ impl std::fmt::Debug for ModelStreamRequest {
 /// Optional host-owned transport for streaming model inference without an HTTP compatibility
 /// gateway. The default Codex construction leaves this unset and retains the upstream transport.
 pub trait ModelStreamTransport: std::fmt::Debug + Send + Sync {
+    /// Current host-added context, measured without starting model inference.
+    /// The count remains inside the host/Core boundary.
+    fn compaction_context_overhead_bytes(
+        &self,
+        _thread_id: &str,
+    ) -> std::result::Result<usize, ApiError> {
+        Ok(0)
+    }
+
     fn stream(
         &self,
         request: ModelStreamRequest,
@@ -536,6 +545,15 @@ impl ModelClient {
 
     pub(crate) fn model_stream_transport(&self) -> Option<Arc<dyn ModelStreamTransport>> {
         self.state.model_stream_transport.clone()
+    }
+
+    pub(crate) fn compaction_context_overhead_bytes(&self) -> std::result::Result<usize, ApiError> {
+        self.state
+            .model_stream_transport
+            .as_ref()
+            .map_or(Ok(0), |transport| {
+                transport.compaction_context_overhead_bytes(&self.state.thread_id.to_string())
+            })
     }
 
     pub(crate) fn with_prompt_cache_key_override(

@@ -1393,6 +1393,18 @@
         "codex-rs/core/src/session/handlers.rs",
         "codex-rs/core/src/session/mod.rs"
       ]
+    },
+    {
+      "id": "codex-task-state-compaction-budget",
+      "file": "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+      "planned": false,
+      "patchSha256": "4e290218c2bb03d8701647610943034fbce82ae44303d3f393e84a64c1007745",
+      "targets": [
+        "codex-rs/core/src/client.rs",
+        "codex-rs/core/src/compact.rs",
+        "codex-rs/core/src/compact_tests.rs",
+        "codex-rs/core/src/config/mod.rs"
+      ]
     }
   ],
   "licenseObligations": {

@@ -188,6 +188,16 @@ notes do not grant authority. By default, report changes and checks without
 committing, pushing, or syncing the remote. Close completed issues only after
 their acceptance criteria pass; record remaining work before handoff.
 
+Write the latest task progress note as a concise state snapshot using `Task`,
+`Status`, `Workspace`, `Validation`, `Changes`, `Dependencies`, and `Unverified`.
+Changes describe observed modifications with paths and result references;
+Validation distinguishes implementation, command results, and independent
+acceptance. Unverified records missing results rather than root-cause guesses
+or next-step instructions. Keep durable decisions in bd memory. Preserve live
+scope, authorization, assignments, and version bindings in their authoritative
+task/runtime records so recovery can reload them separately. A snapshot does
+not replace those records or grant authority.
+
 Issues live in `.beads/dolt/`; remote sync uses `bd dolt push/pull` and
 `refs/dolt/data`. `.beads/issues.jsonl` is a passive export, not the source of
 truth or the normal synchronization input.

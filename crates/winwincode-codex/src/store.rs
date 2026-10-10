@@ -147,6 +147,14 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    PRIMARY KEY (run_key, model_call_id, sequence)
                  );
+                 CREATE TABLE IF NOT EXISTS model_call_task_context (
+                   run_key TEXT NOT NULL,
+                   model_call_id TEXT NOT NULL,
+                   request_digest TEXT NOT NULL,
+                   context_digest TEXT NOT NULL,
+                   context_text BLOB NOT NULL,
+                   PRIMARY KEY (run_key, model_call_id)
+                 );
                  CREATE TABLE IF NOT EXISTS model_thread_lineage (
                    thread_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
@@ -1506,6 +1514,44 @@ execution_mode,
             .commit()
             .map_err(|_| AdapterStoreError::Unavailable)?;
         u64::try_from(next).map_err(|_| AdapterStoreError::Conflict)
+    }
+
+    /// Freezes host task context once per semantic Core request. A later task
+    /// observation must not alter replayed task text. The caller supplies the
+    /// existing model-call identity, which excludes transport metadata.
+    pub(crate) fn retain_model_task_context(
+        &self,
+        run_key: &str,
+        call_id: &str,
+        request_digest: &Sha256Digest,
+        context: &[u8],
+    ) -> Result<Vec<u8>, AdapterStoreError> {
+        if run_key.trim().is_empty()
+            || call_id.trim().is_empty()
+            || context.len() > MAX_MODEL_CALL_FRAME_BYTES
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let context_digest = format!("sha256:{:x}", Sha256::digest(context));
+        self.transaction(|transaction| {
+            transaction.execute(
+                "INSERT OR IGNORE INTO model_call_task_context VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![run_key, call_id, request_digest.0, context_digest, context],
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            let (saved_request, saved_digest, saved): (String, String, Vec<u8>) = transaction.query_row(
+                "SELECT request_digest, context_digest, context_text FROM model_call_task_context
+                 WHERE run_key=?1 AND model_call_id=?2",
+                params![run_key, call_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            if saved_request != request_digest.0 {
+                return Err(AdapterStoreError::Conflict);
+            }
+            if saved_digest != format!("sha256:{:x}", Sha256::digest(&saved)) {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            Ok(saved)
+        })
     }
 
     /// Returns the durable phase of one stable Core model call.
@@ -3462,6 +3508,48 @@ mod tests {
             "winwincode-codex-store-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn task_handoff_context_upgrade_preserves_runs_and_detects_corrupt_text() {
+        let root = test_root("task-handoff-context-upgrade");
+        let request_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let store = AdapterStore::open(&root).unwrap();
+        store
+            .save_run("existing-run", &serde_json::json!({"existing":"state"}))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE model_call_task_context")
+            .unwrap();
+        drop(store);
+        let upgraded = AdapterStore::open(&root).unwrap();
+        let run: serde_json::Value = upgraded.load_run("existing-run").unwrap().unwrap();
+        assert_eq!(run["existing"], "state");
+        upgraded
+            .retain_model_task_context(
+                "existing-run",
+                "request-1",
+                &request_digest,
+                b"Task: fixture",
+            )
+            .unwrap();
+        upgraded.lock().unwrap().execute(
+            "UPDATE model_call_task_context SET context_text=?1 WHERE run_key=?2 AND model_call_id=?3",
+            rusqlite::params![b"changed text".as_slice(), "existing-run", "request-1"],
+        ).unwrap();
+        assert_eq!(
+            upgraded.retain_model_task_context(
+                "existing-run",
+                "request-1",
+                &request_digest,
+                b"Task: fixture"
+            ),
+            Err(AdapterStoreError::Corrupt)
+        );
+        drop(upgraded);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

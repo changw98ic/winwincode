@@ -89,6 +89,17 @@ pub type ModelPortStream =
 
 /// The kernel's only model-execution dependency.
 pub trait ModelPort: fmt::Debug + Send + Sync {
+    /// Measures host-added task context without calling a model provider.
+    ///
+    /// # Errors
+    /// Returns a failure when the current task binding cannot be recovered.
+    fn compaction_context_overhead_bytes(
+        &self,
+        _thread_id: &str,
+    ) -> Result<usize, ModelPortFailure> {
+        Ok(0)
+    }
+
     /// Start one model request. Dropping the returned stream cancels host work.
     fn stream(
         &self,
@@ -108,6 +119,12 @@ impl KernelModelStreamTransport {
 }
 
 impl ModelStreamTransport for KernelModelStreamTransport {
+    fn compaction_context_overhead_bytes(&self, thread_id: &str) -> Result<usize, ApiError> {
+        self.port
+            .compaction_context_overhead_bytes(thread_id)
+            .map_err(|error| model_port_api_error(&error))
+    }
+
     fn stream(
         &self,
         request: ModelStreamRequest,

@@ -1656,8 +1656,16 @@ impl ProductionCodexAdapter {
 
     fn persist_run(&self, run_key: &str) -> Result<(), ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        let mut record = run.record.clone();
+        if let Some(state) = record.task_handoff.as_mut() {
+            record
+                .terminal
+                .as_ref()
+                .map_or("in_progress", StoredTerminal::handoff_status)
+                .clone_into(&mut state.status);
+        }
         self.store
-            .save_run(run_key, &run.record)
+            .save_run(run_key, &record)
             .map_err(map_store_error)
     }
 
@@ -2189,6 +2197,18 @@ impl ProductionCodexAdapter {
         event: CodexEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            let state = run.record.task_handoff.get_or_insert_with(|| {
+                winwincode_execution_port::task_handoff::TaskHandoffRecord::from_job(
+                    &run.record.job,
+                    &run.record.workspace.to_string_lossy(),
+                )
+            });
+            if crate::task_handoff::observe(state, &event.msg) {
+                self.persist_run(run_key)?;
+            }
+        }
         if let CodexEventMsg::PatchApplyEnd(patch) = &event.msg {
             let _ = self.record_patch_completion(run_key, patch, now);
             return self
@@ -4659,6 +4679,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, &error))?;
         let record = StoredRun {
             host_action_approvals: self.config.host_action_approvals,
+            task_handoff: Some(
+                winwincode_execution_port::task_handoff::TaskHandoffRecord::from_job(
+                    start.job,
+                    &workspace.to_string_lossy(),
+                ),
+            ),
             snapshot_id: start.snapshot_id.cloned(),
             job: start.job.clone(),
             workspace_revision: start.workspace_revision.clone(),
@@ -6480,6 +6506,10 @@ fn migrate_stored_run_role_policies_v1_to_v2(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
+    /// Bounded advisory state derived from actual Core events. This is stored
+    /// beside the execution record, never used to authorize product writes.
+    #[serde(default)]
+    task_handoff: Option<winwincode_execution_port::task_handoff::TaskHandoffRecord>,
     #[serde(default)]
     host_action_approvals: bool,
     snapshot_id: Option<winwincode_domain::SnapshotId>,
@@ -6755,6 +6785,17 @@ enum StoredTerminal {
 }
 
 impl StoredTerminal {
+    const fn handoff_status(&self) -> &'static str {
+        match self {
+            Self::Completed { .. } => "execution_stopped",
+            Self::Cancelled { .. } => "execution_cancelled",
+            Self::DelegatedInconclusive => "execution_inconclusive",
+            Self::Failed { .. }
+            | Self::DelegatedRepairInfrastructureFailed
+            | Self::InfrastructureFailed { .. } => "execution_failed",
+        }
+    }
+
     fn trace_summary(&self) -> &'static str {
         match self {
             Self::Completed { .. } => "embedded Codex turn stopped",
@@ -8584,6 +8625,361 @@ mod tests {
         assert_eq!(reason, RepairLoopStopReason::PrimaryModelCallLimitReached);
         assert_eq!(stopped.primary_model_calls, 8);
         assert_eq!(stopped, actual);
+    }
+
+    #[test]
+    fn task_handoff_restore_preserves_boundaries_and_freezes_each_request() {
+        use winwincode_execution_port::task_handoff::TaskHandoffRecord;
+        let root = test_root("task-handoff-restore");
+        let request_a = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let request_b = Sha256Digest(format!("sha256:{}", "b".repeat(64)));
+        let store = AdapterStore::open(&root).unwrap();
+        let mut job = executor_job();
+        job.work_input.as_mut().unwrap().work_contract.constraints =
+            vec!["temporary assigned-runner boundary".to_owned()];
+        let state = TaskHandoffRecord::from_job(&job, "/workspace/candidate");
+        let mut saved =
+            serde_json::json!({"job":job,"workspace":"/workspace/candidate","taskHandoff":state});
+        store.save_run("run-handoff", &saved).unwrap();
+        drop(store);
+        let reopened = AdapterStore::open(&root).unwrap();
+        let restored: serde_json::Value = reopened.load_run("run-handoff").unwrap().unwrap();
+        let suffix = crate::task_handoff::context_snapshot(&restored)
+            .unwrap()
+            .unwrap();
+        assert!(suffix.contains("temporary assigned-runner boundary"));
+        assert!(suffix.contains(&job.workspace.checkout_revision));
+        assert!(suffix.contains("unverified_by_controller"));
+        let mut payload = serde_json::json!({"request":{"instructions":"Existing role and repository instructions.","input":[]}});
+        crate::task_handoff::attach_context(&mut payload, &suffix).unwrap();
+        assert!(
+            payload["request"]["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with("Existing role and repository instructions.")
+        );
+        let original = reopened
+            .retain_model_task_context("run-handoff", "request-A", &request_a, suffix.as_bytes())
+            .unwrap();
+        drop(reopened);
+        let reopened = AdapterStore::open(&root).unwrap();
+        saved["taskHandoff"]["Unverified"]["late-result"] =
+            serde_json::json!("result still missing");
+        let updated = crate::task_handoff::context_snapshot(&saved)
+            .unwrap()
+            .unwrap();
+        assert_ne!(updated.as_bytes(), original);
+        assert_eq!(
+            reopened
+                .retain_model_task_context(
+                    "run-handoff",
+                    "request-A",
+                    &request_a,
+                    updated.as_bytes()
+                )
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            reopened
+                .retain_model_task_context(
+                    "run-handoff",
+                    "request-B",
+                    &request_b,
+                    updated.as_bytes()
+                )
+                .unwrap(),
+            updated.as_bytes()
+        );
+        assert!(
+            reopened
+                .retain_model_task_context(
+                    "run-handoff",
+                    "request-A",
+                    &request_b,
+                    updated.as_bytes()
+                )
+                .is_err()
+        );
+        saved["taskHandoff"]["Workspace"] = serde_json::json!("/workspace/foreign");
+        assert!(crate::task_handoff::context_snapshot(&saved).is_err());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_handoff_records_applied_changes_and_missing_results_separately() {
+        use codex_protocol::protocol::{
+            FileChange, PatchApplyBeginEvent, PatchApplyEndEvent, PatchApplyStatus,
+        };
+        use std::collections::HashMap;
+        use winwincode_execution_port::task_handoff::TaskHandoffRecord;
+        let job = executor_job();
+        let mut state = TaskHandoffRecord::from_job(&job, "/workspace/candidate");
+        let changes = HashMap::from([(
+            PathBuf::from("/workspace/candidate/src/file.rs"),
+            FileChange::Add {
+                content: "original text".to_owned(),
+            },
+        )]);
+        crate::task_handoff::observe(
+            &mut state,
+            &CodexEventMsg::PatchApplyBegin(PatchApplyBeginEvent {
+                call_id: "patch-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                auto_approved: true,
+                changes: changes.clone(),
+            }),
+        );
+        assert!(state.changes.is_empty());
+        assert!(state.unverified.contains_key("turn:turn-1/call:patch-1"));
+        let encoded = serde_json::to_vec(&state).unwrap();
+        state = serde_json::from_slice(&encoded).unwrap();
+        assert!(
+            state.unverified.contains_key("turn:turn-1/call:patch-1"),
+            "interruption keeps the missing result"
+        );
+        crate::task_handoff::observe(
+            &mut state,
+            &CodexEventMsg::PatchApplyEnd(PatchApplyEndEvent {
+                call_id: "patch-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+                changes,
+                status: PatchApplyStatus::Completed,
+            }),
+        );
+        assert_eq!(state.changes["src/file.rs"].operation, "create");
+        assert_eq!(
+            state.changes["src/file.rs"].source_id,
+            "turn:turn-1/call:patch-1"
+        );
+        assert!(state.unverified.is_empty());
+        let plan = serde_json::from_value(serde_json::json!({"explanation":"a root-cause guess to omit","plan":[{"step":"edit code","status":"completed"}]})).unwrap();
+        crate::task_handoff::observe(&mut state, &CodexEventMsg::PlanUpdate(plan));
+        assert_eq!(state.status, "in_progress");
+        assert_eq!(state.validation.acceptance, "unverified_by_controller");
+        let yaml = state.to_yaml().unwrap();
+        assert!(!yaml.contains("a root-cause guess to omit"));
+        assert_eq!(
+            yaml.lines()
+                .map(|line| line.split(':').next().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "Task",
+                "Status",
+                "Workspace",
+                "Validation",
+                "Changes",
+                "Dependencies",
+                "Unverified"
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one request lifecycle covers state updates, metadata recovery, replay identity and independent member isolation"
+    )]
+    fn task_handoff_bridge_restores_state_and_preserves_request_replay() {
+        use crate::model_bridge::{ExecutionPortModelBridge, SharedAuthoritySource};
+        use crate::outbox::ExecutionOutbox;
+        use winwincode_execution_port::task_handoff::TaskHandoffRecord;
+        let root = test_root("task-handoff-bridge");
+        let store = AdapterStore::open(&root).unwrap();
+        let job = executor_job();
+        let policy = role_session_policy(&job, RoleExecutionMode::React)
+            .unwrap()
+            .unwrap();
+        let mut run = serde_json::json!({
+            "job": job, "workspace": "/workspace/candidate",
+            "agentConfig": fixture_agent_config(&job, &policy),
+            "taskHandoff": TaskHandoffRecord::from_job(&job, "/workspace/candidate")
+        });
+        store.save_run("run", &run).unwrap();
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store).unwrap(),
+            ModelGatewayRoute {
+                capability: "model".into(),
+                route: "loopback".into(),
+            },
+            "fixture-provider".into(),
+            SharedAuthoritySource::default(),
+        );
+        assert_eq!(
+            bridge.task_context_overhead_bytes("run").unwrap(),
+            crate::task_handoff::context_snapshot(&run)
+                .unwrap()
+                .unwrap()
+                .len(),
+        );
+        let mut request = winwincode_kernel::ModelPortRequest {
+            request_id: "request-1".into(),
+            payload_json: serde_json::json!({"requestId":"request-1","request":{
+                "instructions":"original role instructions", "input":[]
+            }})
+            .to_string(),
+        };
+        let original = bridge
+            .prepare_host_payload(&request, Some(&run), "run", false)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        assert!(
+            payload["request"]["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with("original role instructions")
+        );
+        assert!(
+            payload["request"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("unverified_by_controller")
+        );
+        run["taskHandoff"]["Unverified"]["late-result"] = serde_json::json!("result still missing");
+        assert_eq!(
+            bridge
+                .prepare_host_payload(&request, Some(&run), "run", false)
+                .unwrap(),
+            original
+        );
+        let mut recovered = request.clone();
+        let mut recovered_payload: serde_json::Value =
+            serde_json::from_str(&recovered.payload_json).unwrap();
+        recovered_payload["request"]["client_metadata"] =
+            serde_json::json!({"session_id":"recovered","turn_attempt":2});
+        recovered.payload_json = recovered_payload.to_string();
+        let recovered_bytes = bridge
+            .prepare_host_payload(&recovered, Some(&run), "run", false)
+            .unwrap();
+        let recovered_body: serde_json::Value = serde_json::from_slice(&recovered_bytes).unwrap();
+        assert_eq!(
+            recovered_body["request"]["instructions"],
+            payload["request"]["instructions"]
+        );
+        assert_eq!(
+            recovered_body["request"]["client_metadata"]["turn_attempt"],
+            2
+        );
+        assert_eq!(
+            bridge
+                .prepare_host_payload(&request, Some(&run), "run", true)
+                .unwrap(),
+            request.payload_json.as_bytes()
+        );
+        request.request_id = "request-2".into();
+        let mut request_payload: serde_json::Value =
+            serde_json::from_str(&request.payload_json).unwrap();
+        request_payload["requestId"] = serde_json::json!("request-2");
+        request.payload_json = request_payload.to_string();
+        let updated = bridge
+            .prepare_host_payload(&request, Some(&run), "run", false)
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&updated)
+                .unwrap()
+                .contains("late-result")
+        );
+        request_payload["request"]["input"] =
+            serde_json::json!([{"role":"user","content":"changed model input"}]);
+        request.payload_json = request_payload.to_string();
+        assert!(
+            bridge
+                .prepare_host_payload(&request, Some(&run), "run", false)
+                .is_err()
+        );
+        let old_run = run.as_object_mut().unwrap();
+        old_run.remove("taskHandoff");
+        assert!(
+            crate::task_handoff::context_snapshot(&run)
+                .unwrap()
+                .unwrap()
+                .contains("unverified_by_controller")
+        );
+        drop(bridge);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_handoff_failed_patch_is_a_known_result() {
+        use winwincode_execution_port::task_handoff::TaskHandoffRecord;
+        let mut state = TaskHandoffRecord::from_job(&executor_job(), "/workspace/candidate");
+        let begin = serde_json::from_value(serde_json::json!({
+            "call_id": "patch-failed", "turn_id": "turn-1",
+            "auto_approved": true, "changes": {}
+        }))
+        .unwrap();
+        crate::task_handoff::observe(&mut state, &CodexEventMsg::PatchApplyBegin(begin));
+        assert_eq!(state.unverified.len(), 1);
+        let end = serde_json::from_value(serde_json::json!({
+            "call_id": "patch-failed", "turn_id": "turn-1",
+            "success": false, "status": "failed", "changes": {}, "stdout": "", "stderr": "rejected"
+        }))
+        .unwrap();
+        crate::task_handoff::observe(&mut state, &CodexEventMsg::PatchApplyEnd(end));
+        assert!(state.unverified.is_empty());
+        assert!(state.changes.is_empty());
+        assert_eq!(state.validation.acceptance, "unverified_by_controller");
+    }
+
+    #[test]
+    fn task_handoff_keeps_recent_check_receipts_and_move_destinations() {
+        use winwincode_execution_port::task_handoff::TaskHandoffRecord;
+        let mut state = TaskHandoffRecord::from_job(&executor_job(), "/workspace/candidate");
+        for index in 0..20 {
+            let call = serde_json::from_value(serde_json::json!({
+                "call_id": format!("check-{index}"), "turn_id": "turn-1",
+                "command": ["/bin/zsh", "-lc", "cargo check --locked"],
+                "cwd": "file:///workspace/candidate", "parsed_cmd": [],
+                "stdout": "full output stays in receipts", "stderr": "",
+                "exit_code": 0, "duration": {"secs": 1, "nanos": 0},
+                "formatted_output": "full output stays in receipts", "status": "completed"
+            }))
+            .unwrap();
+            let event = CodexEventMsg::ExecCommandEnd(call);
+            crate::task_handoff::observe(&mut state, &event);
+            crate::task_handoff::observe(&mut state, &event);
+        }
+        assert_eq!(state.validation.checks.len(), 16);
+        assert_eq!(
+            state.validation.checks[0].cwd,
+            "file:///workspace/candidate"
+        );
+        assert_eq!(
+            state.validation.checks[0].source_id,
+            "turn:turn-1/call:check-4"
+        );
+        assert_eq!(
+            state.validation.checks[15].source_id,
+            "turn:turn-1/call:check-19"
+        );
+        assert_eq!(state.validation.acceptance, "unverified_by_controller");
+        assert!(state.unverified.contains_key("earlier_checks"));
+        assert!(
+            !state
+                .to_yaml()
+                .unwrap()
+                .contains("full output stays in receipts")
+        );
+        let moved = serde_json::from_value(serde_json::json!({
+            "call_id": "move-1", "turn_id": "turn-1", "stdout": "", "stderr": "",
+            "success": true, "status": "completed", "changes": {
+                "/workspace/candidate/old.rs": {
+                    "type": "update", "unified_diff": "", "move_path": "/workspace/candidate/new.rs"
+                }
+            }
+        }))
+        .unwrap();
+        crate::task_handoff::observe(&mut state, &CodexEventMsg::PatchApplyEnd(moved));
+        assert_eq!(state.changes["old.rs"].operation, "move");
+        assert_eq!(
+            state.changes["old.rs"].destination.as_deref(),
+            Some("new.rs")
+        );
     }
 
     fn executor_job() -> ExecutionJob {
@@ -12437,6 +12833,7 @@ mod tests {
         let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
             host_action_approvals: false,
+            task_handoff: None,
             snapshot_id: None,
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
@@ -12604,6 +13001,7 @@ mod tests {
         let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
             host_action_approvals: false,
+            task_handoff: None,
             snapshot_id: None,
             role_policy: Some(role_policy),
             agent_config,

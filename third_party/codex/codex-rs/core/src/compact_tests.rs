@@ -265,6 +265,81 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
 }
 
 #[test]
+fn task_state_budget_preserves_latest_user_scope_and_summary() {
+    let original = "old transcript material ".repeat(20_000);
+    let latest = "Current user scope: only update the assigned input path.";
+    let summary = format!(
+        "Task: input lane\nChanges: {}\nValidation: unverified",
+        "observed file state ".repeat(2_000)
+    );
+    let history = super::build_total_budget_compacted_history(
+        &[
+            compacted_user_message(&original),
+            compacted_user_message(latest),
+        ],
+        &summary,
+        5_000,
+        30_000,
+    )
+    .unwrap();
+    let texts = history
+        .iter()
+        .map(|item| match &item.item {
+            ResponseItem::Message { content, .. } => {
+                content_items_to_text(content).unwrap_or_default()
+            }
+            other => panic!("unexpected compacted item: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(texts.iter().any(|text| text == latest));
+    assert_eq!(texts.last().unwrap(), &summary);
+    assert!(texts.iter().all(|text| !text.contains(&original)));
+    assert!(texts[0].len() > 2_048 * 4);
+    assert!(super::compacted_history_tokens(&history) + 5_000 <= 30_000);
+}
+
+#[test]
+fn total_compaction_budget_rejects_required_state_instead_of_truncating_it() {
+    let summary = "necessary task state ".repeat(8_000);
+    assert!(super::build_total_budget_compacted_history(&[], &summary, 0, 30_000).is_err());
+    let required = super::compacted_history_tokens(&super::build_compacted_history_with_limit(
+        Vec::new(),
+        &[],
+        "necessary state",
+        0,
+    ));
+    assert!(
+        super::build_total_budget_compacted_history(
+            &[],
+            "necessary state",
+            5_000,
+            required + 5_000
+        )
+        .is_ok()
+    );
+    assert!(
+        super::build_total_budget_compacted_history(
+            &[],
+            "necessary state",
+            5_000,
+            required + 4_999
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn total_compaction_budget_counts_message_wrappers_and_truncation_markers() {
+    let users = (0..1_000)
+        .map(|_| compacted_user_message("short user message"))
+        .collect::<Vec<_>>();
+    let history =
+        super::build_total_budget_compacted_history(&users, "task state", 300, 500).unwrap();
+    assert!(super::compacted_history_tokens(&history) + 300 <= 500);
+    assert!(history.len() < users.len());
+}
+
+#[test]
 fn build_token_limited_compacted_history_appends_summary_message() {
     let initial_context: Vec<ResponseItemEnvelope> = Vec::new();
     let user_messages = vec![compacted_user_message("first user message")];

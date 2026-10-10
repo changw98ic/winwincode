@@ -22,8 +22,8 @@ pub use snapshot::{
 };
 pub use user_account::{UserAccount, UserAccountError, UserAccountErrorKind};
 pub use verification_command::{
-    observed_verification_command_digest, observed_verification_command_is_test,
-    verification_method_digest,
+    observed_verification_command_digest, observed_verification_command_is_check,
+    observed_verification_command_is_test, verification_method_digest,
 };
 
 /// Returns whether `value` is the canonical Delivery identifier defined by the
