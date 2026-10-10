@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
@@ -121,6 +123,8 @@ impl BoundaryError {
 struct ServerState {
     config: Arc<ServerConfig>,
     auth_sessions: Arc<SqliteAuthSessionManager>,
+    /// Bounds concurrent Argon2 work on the blocking pool.
+    credential_hash_permits: Arc<Semaphore>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
@@ -338,6 +342,7 @@ pub async fn start_server_with_remote_worker(
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
+        credential_hash_permits: Arc::new(Semaphore::new(credential_hash_concurrency())),
         authenticator,
         api: Arc::clone(&api),
         remote_worker,
@@ -1992,6 +1997,30 @@ async fn server_initialization(
     response
 }
 
+/// Longest a login waits for an Argon2 permit before it is rejected as busy.
+const CREDENTIAL_HASH_PERMIT_WAIT: Duration = Duration::from_millis(500);
+
+/// Concurrent Argon2 hashes: `WWC_SERVER_CREDENTIAL_HASH_CONCURRENCY` when set
+/// to a positive integer, otherwise the available CPU parallelism.
+fn credential_hash_concurrency() -> usize {
+    std::env::var("WWC_SERVER_CREDENTIAL_HASH_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
+
+/// Takes one hashing permit, waiting at most `wait`.
+async fn acquire_credential_hash_permit(
+    permits: &Arc<Semaphore>,
+    wait: Duration,
+) -> Option<OwnedSemaphorePermit> {
+    match tokio::time::timeout(wait, Arc::clone(permits).acquire_owned()).await {
+        Ok(Ok(permit)) => Some(permit),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 async fn create_auth_session(
     State(state): State<ServerState>,
     ConnectInfo(client): ConnectInfo<SocketAddr>,
@@ -2030,7 +2059,26 @@ async fn create_auth_session(
     // CPU-expensive; keep it off the async worker threads.
     let auth_sessions = Arc::clone(&state.auth_sessions);
     let client = client.ip().to_string();
+    // Reject rate-limited logins before taking a hashing permit, so locked
+    // out callers cannot occupy the bounded Argon2 capacity.
+    if credentials.bearer().is_none() && auth_sessions.login_rate_limited(&client, &login.username)
+    {
+        return auth_session_error(AuthSessionError::rate_limited(), Some(origin)).into_response();
+    }
+    let Some(permit) =
+        acquire_credential_hash_permit(&state.credential_hash_permits, CREDENTIAL_HASH_PERMIT_WAIT)
+            .await
+    else {
+        return BoundaryError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "browser session service is busy",
+            Some(origin),
+        )
+        .into_response();
+    };
     let issued = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         if credentials.bearer().is_some() {
             auth_sessions.initialize(&credentials, &login.username, &login.password)
         } else {
@@ -2038,7 +2086,10 @@ async fn create_auth_session(
         }
     })
     .await
-    .unwrap_or_else(|_| Err(AuthSessionError::storage()));
+    .unwrap_or_else(|error| {
+        eprintln!("error: browser session credential task failed: {error}");
+        Err(AuthSessionError::storage())
+    });
     let issued = match issued {
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
@@ -3352,5 +3403,34 @@ mod public_error_mapping_tests {
             TerminalErrorCode::WrongState
         );
         assert_eq!(public_reason("WRONG_STATE"), "WRONG_STATE");
+    }
+}
+
+#[cfg(test)]
+mod credential_hash_permit_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Semaphore;
+
+    use super::acquire_credential_hash_permit;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_permits_reject_after_a_bounded_wait() {
+        let permits = Arc::new(Semaphore::new(1));
+        let held = acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+            .await
+            .expect("first permit is available");
+        assert!(
+            acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+                .await
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+                .await
+                .is_some()
+        );
     }
 }

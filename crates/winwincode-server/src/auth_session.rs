@@ -485,6 +485,21 @@ impl SqliteAuthSessionManager {
         self.issue_for_user(&account.user_id)
     }
 
+    /// Cheap pre-check, run before any Argon2 work is scheduled: reports
+    /// whether a username + password login from `client` is currently rate
+    /// limited. Invalid usernames and clock failures report `false` so the
+    /// full login path produces its regular error.
+    #[must_use]
+    pub(crate) fn login_rate_limited(&self, client: &str, username: &str) -> bool {
+        let Ok(normalized) = UserAccountService::normalize_username(username) else {
+            return false;
+        };
+        let Ok(now) = self.clock.unix_millis() else {
+            return false;
+        };
+        self.login_limiter.rejected(client, &normalized, now)
+    }
+
     /// Daily username + Argon2id password login for one active account.
     ///
     /// Failures are rate limited per (normalized username, client) pair; once
@@ -925,7 +940,7 @@ impl AuthSessionError {
         }
     }
 
-    const fn rate_limited() -> Self {
+    pub(crate) const fn rate_limited() -> Self {
         Self {
             kind: AuthSessionErrorKind::RateLimited,
         }
