@@ -10,10 +10,18 @@ import test from 'node:test'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.json'), 'utf8'))
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
-const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context')
+const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context' || id === 'codex-mechanism-behavior-audit')
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
 // The retrospective 0094 export was already present in P1; the clean archive replay covers it.
 const originalHashes = {
+  "codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs": null,
+  "codex-rs/code-mode-runtime/src/runtime/mod.rs": "0c2cbbdf2dd94ad3bda1508dca676e385de578b32259c4b2d68c0799e6d77fef",
+  "codex-rs/code-mode-runtime/src/runtime/module_loader.rs": "6e58d68d43d8aefca0daf5ebbd3876cc9f3837f02a50a676089366fcbff62528",
+  "codex-rs/code-mode/src/remote_session/connection.rs": "7f34290f560da11be5c8647c86e011cfc9b02128e0837d1586b0e533a2aa58e3",
+  "codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs": null,
+  "codex-rs/core-api/Cargo.toml": "64d89566ae6c63d3dbd6c655fe9f5277dd93765330611be3f05ebf09e15dd015",
+  "codex-rs/core/src/mechanism_interaction_test_barrier.rs": null,
+  "codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs": null,
   "codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs": "0579ad2a03c3c4bb50c141725cd46b50982a60654d3cfc6dcb41be2a185c828c",
   "codex-rs/core/tests/suite/skill_approval.rs": "1e15ef12fe4881ddfd47ffe6390911c2f91760538563ea1681c3b82ab663182d",
   "codex-rs/exec-server/tests/exec_process.rs": "fc308c108474662ddc95f3ec9d8fa47b1ca0148b0b87e1319ab4ba921a1dfda4",
@@ -260,7 +268,8 @@ test('the tool runtime manifest and ordered patch digests describe the dispatch 
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-export-mcp-server-transport-config')?.file, 'upstream/patches/codex/0094-export-mcp-server-transport-config.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-seatbelt-explicit-literal-deny')?.file, 'upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-zsh-parent-approval-context')?.file, 'upstream/patches/codex/0097-zsh-parent-approval-context.patch')
-  assert.equal(patches.length, 83)
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-mechanism-behavior-audit')?.file, 'upstream/patches/codex/0098-mechanism-behavior-audit.patch')
+  assert.equal(patches.length, 84)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
