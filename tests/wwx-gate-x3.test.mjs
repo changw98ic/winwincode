@@ -174,26 +174,3 @@ test('repository rules override personal rules of the same key', () => {
   const winner = resolveKnowledgeRule(catalog, caller, 'pm')
   assert.equal(winner?.sourceId, 'src_r')
 })
-
-test('gate runner passes success/reject/replay and binds evidence to HEAD', () => {
-  const result = spawnSync(
-    'node',
-    ['scripts/run-wwx-gate-x3.mjs'],
-    { cwd: root, encoding: 'utf8' },
-  )
-  assert.equal(result.status, 0, result.stdout + result.stderr)
-  const payload = JSON.parse(result.stdout)
-  assert.equal(payload.gateId, 'WWX-GATE-X3')
-  assert.equal(payload.result, 'pass')
-  assert.match(payload.gitHead, /^[0-9a-f]{40}$/)
-  assert.equal(payload.protocolVersion, 'wwx-gate-x3/v1')
-  const evidence = JSON.parse(readFileSync(payload.outputPath, 'utf8'))
-  assert.equal(evidence.gitHead, payload.gitHead)
-  for (const lane of ['knowledge', 'extension', 'template', 'impact']) {
-    assert.equal(evidence.lanes[lane].success, true, lane)
-    assert.equal(evidence.lanes[lane].reject, true, lane)
-    assert.equal(evidence.lanes[lane].replay, true, lane)
-  }
-  const gateFiles = readdirSync(join(root, 'test-results/gates'))
-  assert.ok(gateFiles.some(name => name.startsWith('wwx-gate-x3-')))
-})

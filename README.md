@@ -129,7 +129,6 @@ crates/helper/                    本机权限与系统操作
 packages/      跨端共享包:contracts、strongflow
 schema/        canonical schema 与生成产物,是所有合同类型的唯一来源
 tests/         Client、Server、Worker 与合同检查
-docs/          发布与仓库边界脚本读取的机器可读合同(JSON)
 upstream/      固定上游身份、补丁和通知记录
 ```
 

@@ -62,7 +62,7 @@ const expectedArtifacts = [
   'test-results/browser-chat-production/chat-terminal.png',
   'test-results/browser-chat-production/trace.json',
 ]
-// The gate rules formerly lived in docs/contracts/browser-chat-production.rules.json;
+// The gate rules formerly lived in a separate rules file;
 // they are inlined here so the browser gate keeps the same frozen values.
 const rules = Object.freeze({
   schemaVersion: 'winwincode.browser-chat-production.v1',
