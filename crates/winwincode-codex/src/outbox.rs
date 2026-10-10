@@ -320,11 +320,17 @@ impl ExecutionOutbox {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        rows.map(|row| {
-            let (id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
-            decode_delivery(id, &frame)
-        })
-        .collect()
+        let result = rows
+            .map(|row| {
+                let (id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+                decode_delivery(id, &frame)
+            })
+            .collect();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::pending_query(
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        result
     }
 
     /// Returns the highest numeric Worker message id retained in the outbox.
@@ -1303,6 +1309,8 @@ fn runtime_rows(transaction: &Transaction<'_>) -> Result<Vec<RuntimeRow>, Adapte
         .map_err(|_| AdapterStoreError::Unavailable)?;
     rows.map(|row| {
         let (delivery_id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::runtime_row(frame.len());
         let message: ExecutionPortMessage =
             serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
         let ExecutionPortMessage::RuntimeEventMessage(event) = message else {

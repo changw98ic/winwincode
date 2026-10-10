@@ -1355,6 +1355,8 @@ impl HttpsSseProviderAdapter {
             if read == 0 {
                 return Ok(bytes);
             }
+            #[cfg(test)]
+            tests::audit_record_reader_read(bytes.len(), read);
             if bytes.len().saturating_add(read) > self.shared.config.max_response_bytes {
                 return Err(HttpsSseProviderError::new(
                     HttpsSseProviderErrorKind::SizeLimit,
@@ -2720,6 +2722,7 @@ fn valid_token(value: &str, max_len: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("provider_model_boundary_regression_tests.rs");
     use std::{
         io::{Read, Write},
         net::{Shutdown, TcpListener, TcpStream},

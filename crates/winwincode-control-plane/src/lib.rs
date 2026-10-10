@@ -2920,3 +2920,8 @@ fn cleanup_suffix(failures: &[String]) -> String {
 
 mod private_launch_material;
 pub use private_launch_material::PrivateLaunchMaterialStore;
+
+#[cfg(test)]
+extern crate self as winwincode_control_plane;
+#[cfg(test)]
+mod storage_mechanism_regression;

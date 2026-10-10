@@ -187,6 +187,8 @@ impl ModelCursorSnapshot {
             return Err(ModelCursorStateError::CursorMismatch);
         }
         for (index, frame) in self.frames.iter().enumerate() {
+            #[cfg(test)]
+            crate::audit_model_metrics::record_fingerprint_visit();
             let expected = u64::try_from(index)
                 .ok()
                 .and_then(|value| value.checked_add(1))

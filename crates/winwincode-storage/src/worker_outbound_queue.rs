@@ -1447,16 +1447,23 @@ fn enqueue_in_transaction(
     }
     require_retained_slot_authority(connection, &current_authority.slot)?;
     let digests = history_digests(&history)?;
-    let (authority_pending, retained_bytes) = connection
-        .query_row(
+    let mut capacity_statement = connection
+        .prepare(
             "SELECT
-                COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
-                COALESCE(SUM(length(payload)), 0)
-             FROM internal_worker_outbound_messages",
-            [&digests],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
+            COALESCE(SUM(length(payload)), 0)
+         FROM internal_worker_outbound_messages",
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let (authority_pending, retained_bytes) = capacity_statement
+        .query_row([&digests], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_query(
+        capacity_statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
     let authority_pending =
         usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?;
     let retained_bytes =

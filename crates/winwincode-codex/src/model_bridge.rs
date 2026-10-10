@@ -2513,6 +2513,7 @@ impl std::error::Error for BridgeError {}
 
 #[cfg(test)]
 mod tests {
+    include!("model_mechanism_regression_tests.rs");
     use serde_json::json;
     use std::sync::Arc;
     use winwincode_domain::{

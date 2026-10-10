@@ -68,6 +68,9 @@ use codex_protocol::protocol::EventMsg as CodexEventMsg;
 use codex_protocol::protocol::ReviewDecision as CodexReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+
+#[cfg(feature = "test-support")]
+mod mechanism_interaction_test_options;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -2223,7 +2226,10 @@ fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInput
         image_url: url.clone(),
         detail: None,
     }));
-    TurnInputRequest::user_input(input).on_start(turn_start_options(options))
+    let request = TurnInputRequest::user_input(input).on_start(turn_start_options(options));
+    #[cfg(feature = "test-support")]
+    let request = mechanism_interaction_test_options::apply(request);
+    request
 }
 
 fn turn_start_options(options: &TurnSubmissionOptions) -> TurnStartOptions {

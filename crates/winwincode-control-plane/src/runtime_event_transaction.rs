@@ -326,6 +326,8 @@ pub(crate) fn execute_at(
             "failed to encode runtime ledger state: {error}"
         )))
     })?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_state(state.len());
     let events = vec![
         NewOutboxEvent::internal(
             runtime_outbox_event_id(&stream_id, &message.event),
@@ -1159,6 +1161,8 @@ fn load_ledger(
     let Some(state) = storage.load_state(stream_id)? else {
         return Ok(None);
     };
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_read(state.payload.len());
     decode_runtime_ledger_state(&state, stream_id).map(Some)
 }
 
@@ -1184,6 +1188,8 @@ pub(crate) fn decode_runtime_ledger_state(
         ));
     }
     for (index, entry) in ledger.events.iter().enumerate() {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::event_validation();
         let expected_sequence = u64::try_from(index + 1)
             .map_err(|_| StorageError::adapter("runtime ledger sequence is out of range"))?;
         let sequence = u64::try_from(entry.event.sequence.0)
@@ -1219,6 +1225,8 @@ fn runtime_ledger_digest(ledger: &RuntimeLedgerState) -> Result<Sha256Digest, Ru
             "failed to encode runtime ledger digest: {error}"
         )))
     })?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_digest(encoded.len());
     Ok(Sha256Digest(format!(
         "sha256:{:x}",
         Sha256::digest(encoded)

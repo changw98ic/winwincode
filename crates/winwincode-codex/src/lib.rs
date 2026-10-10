@@ -65,3 +65,9 @@ pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
 pub use model_bridge::set_model_intake_log_path;
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
 pub use winwincode_kernel::RoleExecutionMode;
+
+#[cfg(test)]
+mod audit_model_metrics;
+
+#[cfg(test)]
+mod storage_mechanism_regression;

@@ -165,6 +165,8 @@ pub(crate) fn candidate_context(
         if !output.status.success() {
             return Err(error("FUSION_CANDIDATE_UNAVAILABLE"));
         }
+        #[cfg(test)]
+        mechanism_regression_tests::record_git_output(args[0]);
         Ok(output.stdout)
     };
     let tree_bytes = git(&["rev-parse", "--verify", &format!("{commit}^{{tree}}")])?;
@@ -471,3 +473,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "durable_fusion_mechanism_regression_tests.rs"]
+mod mechanism_regression_tests;

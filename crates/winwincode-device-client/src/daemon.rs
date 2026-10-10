@@ -3567,6 +3567,10 @@ pub(crate) fn worker_process_closure(
 }
 
 #[cfg(test)]
+#[path = "mechanism_scheduler_regression_tests.rs"]
+mod mechanism_scheduler_regression_tests;
+
+#[cfg(test)]
 mod receipt_compatibility_tests {
     use super::*;
 

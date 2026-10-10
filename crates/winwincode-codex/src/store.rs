@@ -463,6 +463,8 @@ impl AdapterStore {
         record: &T,
     ) -> Result<(), AdapterStoreError> {
         let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::run_write(bytes.len());
         self.lock()?
             .execute(
                 "INSERT INTO codex_run(run_key, record_json) VALUES (?1, ?2)
@@ -1645,6 +1647,8 @@ execution_mode,
         for row in rows {
             let (sequence, expected_digest, frame) =
                 row.map_err(|_| AdapterStoreError::Unavailable)?;
+            #[cfg(test)]
+            crate::audit_model_metrics::record_frame_read(frame.len());
             if sequence <= 0 || frame.len() > MAX_MODEL_CALL_FRAME_BYTES {
                 return Err(AdapterStoreError::Corrupt);
             }
@@ -3395,6 +3399,14 @@ fn load_snapshot<T: DeserializeOwned>(
         .query_row(&query, params![key], |row| row.get::<_, Vec<u8>>(0))
         .optional()
         .map_err(|_| AdapterStoreError::Unavailable)?;
+    #[cfg(test)]
+    if table == "model_cursor"
+        && let Some(bytes) = &bytes
+    {
+        crate::audit_model_metrics::record_cursor_read(bytes.len());
+    }
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_read(table, bytes.as_ref().map_or(0, Vec::len));
     bytes
         .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
         .transpose()
@@ -3411,9 +3423,17 @@ fn write_snapshot<T: Serialize>(
         "INSERT INTO {table}(stream_key, snapshot_json) VALUES (?1, ?2)
          ON CONFLICT(stream_key) DO UPDATE SET snapshot_json = excluded.snapshot_json"
     );
+    #[cfg(test)]
+    let serialized_len = bytes.len();
     transaction
         .execute(&statement, params![key, bytes])
         .map_err(|_| AdapterStoreError::Unavailable)?;
+    #[cfg(test)]
+    if table == "model_cursor" {
+        crate::audit_model_metrics::record_cursor_write(serialized_len);
+    }
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_write(table, serialized_len);
     Ok(())
 }
 

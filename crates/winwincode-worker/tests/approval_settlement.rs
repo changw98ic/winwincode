@@ -5,6 +5,15 @@
 #[path = "support/canonical_code_mode.rs"]
 mod canonical_code_mode;
 
+#[path = "support/mechanism_interactions.rs"]
+mod mechanism_interactions;
+
+#[path = "support/mechanism_multiquestion.rs"]
+mod mechanism_multiquestion;
+
+#[path = "support/mechanism_response_boundary.rs"]
+mod mechanism_response_boundary;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
 use std::{

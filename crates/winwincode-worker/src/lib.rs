@@ -21,6 +21,8 @@ mod driver_clock;
 mod execution_effects;
 pub mod handoff_snapshot;
 pub mod managed_session;
+#[cfg(feature = "test-support")]
+pub mod mechanism_timing;
 mod probe_evidence;
 mod probe_process;
 pub mod probe_reducer;
@@ -915,6 +917,11 @@ where
                 renewal.sent_at.0,
                 renewal_predicate.unwrap_or("valid")
             );
+            #[cfg(feature = "test-support")]
+            mechanism_timing::record(
+                "lease_renewal_consumed",
+                &serde_json::json!({"jobId":renewal.lease.job_id.0,"leaseId":renewal.lease.lease_id.0,"workerId":renewal.lease.worker_id.0,"workerInstanceId":renewal.lease.worker_instance_id.0,"attempt":renewal.lease.attempt,"fencingToken":renewal.lease.fencing_token.0,"priorExpiresAt":renewal.prior_expires_at.0,"renewedExpiresAt":renewal.lease.expires_at.0,"processedAt":now.0,"accepted":applied.is_ok(),"predicate":renewal_predicate.unwrap_or("valid"),"outcome":outcome,"currentWorkerLeaseExpiresAt":self.active.get(&renewal.lease.job_id.0).map(|active|&active.lease.expires_at.0),"currentWorkspaceLeaseExpiresAt":self.workspaces.workspace_authorities().find(|provenance|provenance.execution_job_id==renewal.lease.job_id).map(|provenance|&provenance.lease_expires_at.0)}),
+            );
         }
         applied?;
         // Acknowledgement means applied + durable handoff, never transport success.
@@ -1189,6 +1196,13 @@ where
                 .await
             }
             .await;
+            #[cfg(feature = "test-support")]
+            if chunk.sequence.0 % 250 == 0 || chunk.is_final {
+                mechanism_timing::record(
+                    "frame_intake_checkpoint",
+                    &serde_json::json!({"jobId":chunk.lease.job_id.0,"leaseId":chunk.lease.lease_id.0,"workerSessionId":chunk.worker_session_id.0,"modelExchangeId":chunk.model_exchange_id.0,"workerId":chunk.lease.worker_id.0,"workerInstanceId":chunk.lease.worker_instance_id.0,"attempt":chunk.lease.attempt,"fencingToken":chunk.lease.fencing_token.0,"sequence":chunk.sequence.0,"isFinal":chunk.is_final,"suppliedDriverNow":now.0,"leaseExpiresAt":chunk.lease.expires_at.0,"accepted":result.is_ok()}),
+                );
+            }
             if let Err(error) = result {
                 let exchange = chunk.model_exchange_id.0.clone();
                 let sequence = chunk.sequence.0;

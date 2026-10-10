@@ -1373,6 +1373,26 @@
         "codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs",
         "codex-rs/core/tests/suite/skill_approval.rs"
       ]
+    },
+    {
+      "id": "codex-mechanism-behavior-audit",
+      "file": "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
+      "planned": false,
+      "patchSha256": "19f8bc18c363922111f0b95ec8505bef901ce9fa5bc33a28daa670e93cae9612",
+      "targets": [
+        "codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs",
+        "codex-rs/code-mode-runtime/src/runtime/mod.rs",
+        "codex-rs/code-mode-runtime/src/runtime/module_loader.rs",
+        "codex-rs/code-mode/src/remote_session/connection.rs",
+        "codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs",
+        "codex-rs/core-api/Cargo.toml",
+        "codex-rs/core/Cargo.toml",
+        "codex-rs/core/src/lib.rs",
+        "codex-rs/core/src/mechanism_interaction_test_barrier.rs",
+        "codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/session/mod.rs"
+      ]
     }
   ],
   "licenseObligations": {

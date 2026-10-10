@@ -230,6 +230,8 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         credential_path,
         model_route,
     } = bootstrap;
+    #[cfg(feature = "test-support")]
+    winwincode_worker::mechanism_timing::configure(data_directory.join("mechanism-timing.jsonl"));
     let capabilities = worker_capabilities()?;
     let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
     let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
@@ -312,7 +314,11 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             _ = heartbeat.tick() => {
                 let step = async {
                     Box::pin(drain_controls(&mut worker, &handle)).await?;
+                    #[cfg(feature = "test-support")]
+                    winwincode_worker::mechanism_timing::record("heartbeat_entry", &serde_json::json!({}));
                     let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
+                    #[cfg(feature = "test-support")]
+                    winwincode_worker::mechanism_timing::record("heartbeat_exit", &serde_json::json!({}));
                     // A refused upstream frame still carries valid controls.
                     Box::pin(drain_controls(&mut worker, &handle)).await?;
                     Ok::<_, Box<dyn std::error::Error>>(())
@@ -326,6 +332,8 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 // The shared driver retries one bounded outbox batch and polls
                 // Core even when that batch is backpressured. A separate
                 // pre-flush must not prevent cancellation facts from draining.
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_entry", &serde_json::json!({}));
                 if let Some(error) = Box::pin(worker.drive_with_controls(&handle, now_instant)).await? {
                     // Retain each finite category once. A trace mismatch also
                     // carries only numeric cursors and identity-match booleans;
@@ -343,6 +351,8 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                         eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
                     }
                 }
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_exit", &serde_json::json!({}));
                 Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
                 };
                 let Some(result) = interrupt.until_interrupt(step).await else { break; };

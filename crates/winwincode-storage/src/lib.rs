@@ -3976,11 +3976,17 @@ fn pending_audit_events(connection: &Connection) -> Result<Vec<PendingAuditEvent
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(sql_error)?;
-    rows.map(|row| {
-        let (event_id, payload) = row.map_err(sql_error)?;
-        PendingAuditEvent::new(event_id, payload)
-    })
-    .collect()
+    let result = rows
+        .map(|row| {
+            let (event_id, payload) = row.map_err(sql_error)?;
+            PendingAuditEvent::new(event_id, payload)
+        })
+        .collect();
+    #[cfg(test)]
+    storage_mechanism_regression::audit_query(
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    result
 }
 
 fn replay_receipt(
@@ -5044,48 +5050,54 @@ fn receipt_events(
             },
         )
         .map_err(sql_error)?;
-    rows.map(|row| {
-        let (
-            sequence,
-            event_id,
-            topic,
-            payload,
-            scope_key,
-            stream_kind,
-            resource_id,
-            stream_sequence,
-            public_scope,
-            public_stream,
-            public_occurred_at,
-            public_source,
-        ) = row.map_err(sql_error)?;
-        let projection_cursor = stored_projection_cursor(
-            scope_key,
-            stream_kind,
-            resource_id,
-            stream_sequence,
-            &event_id,
-        )?;
-        let public_context = stored_public_context(
-            projection_cursor.as_ref(),
-            public_scope,
-            public_stream,
-            public_occurred_at,
-            public_source,
-            identity.scope_key(),
-            Some(identity.actor_key()),
-        )?;
-        Ok(OutboxEvent {
-            sequence: u64::try_from(sequence)
-                .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
-            projection_cursor,
-            public_context,
-            event_id,
-            topic,
-            payload,
+    let result = rows
+        .map(|row| {
+            let (
+                sequence,
+                event_id,
+                topic,
+                payload,
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                public_scope,
+                public_stream,
+                public_occurred_at,
+                public_source,
+            ) = row.map_err(sql_error)?;
+            let projection_cursor = stored_projection_cursor(
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                &event_id,
+            )?;
+            let public_context = stored_public_context(
+                projection_cursor.as_ref(),
+                public_scope,
+                public_stream,
+                public_occurred_at,
+                public_source,
+                identity.scope_key(),
+                Some(identity.actor_key()),
+            )?;
+            Ok(OutboxEvent {
+                sequence: u64::try_from(sequence)
+                    .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+                projection_cursor,
+                public_context,
+                event_id,
+                topic,
+                payload,
+            })
         })
-    })
-    .collect()
+        .collect();
+    #[cfg(test)]
+    storage_mechanism_regression::receipt_query(
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    result
 }
 
 fn stored_projection_cursor(
@@ -5401,3 +5413,8 @@ pub fn issue_worker_launch_bundle(
 }
 
 pub use client_launch_grant::DeviceLaunchProcessClosure;
+
+#[cfg(test)]
+extern crate self as winwincode_storage;
+#[cfg(test)]
+mod storage_mechanism_regression;

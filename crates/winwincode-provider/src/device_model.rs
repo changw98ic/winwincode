@@ -6,6 +6,10 @@
 #[path = "device_model_recovery_tests.rs"]
 mod recovery_tests;
 
+#[cfg(test)]
+#[path = "device_model_deferred_regression_tests.rs"]
+mod deferred_regression_tests;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::sync::{Mutex, OnceLock};
 type ActiveDeviceExchange = std::sync::Arc<crate::provider_transport::ExchangeCancellation>;
@@ -993,6 +997,8 @@ impl DeviceProviderStore {
         let Some(Some(chunks)) = chunks else {
             return Ok(Vec::new());
         };
+        #[cfg(any(test, feature = "test-support"))]
+        crate::audit_model_replay_metrics::record(chunks.len());
         let chunks: Vec<ModelChunkMessage> = serde_json::from_str(&chunks)?;
         Ok(chunks
             .into_iter()

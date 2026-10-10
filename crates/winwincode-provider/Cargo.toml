@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 include = ["src/**", "tests/**", "Cargo.toml"]
 
+[features]
+test-support = []
+
 [dependencies]
 codex-config = { path = "../../third_party/codex/codex-rs/config" }
 codex-skills = { path = "../../third_party/codex/codex-rs/skills" }

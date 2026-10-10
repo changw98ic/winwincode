@@ -62,6 +62,8 @@ use winwincode_worker::{
 const NOW: &str = "2027-01-15T08:00:02.000Z";
 #[path = "support/control_driver_regressions.rs"]
 mod control_driver_regressions;
+#[path = "support/mechanism_worker_fairness.rs"]
+mod mechanism_worker_fairness;
 const OBSERVER_VALIDATION_CONFIG: &str = r#"schemaVersion = 1
 
 [[commands]]
@@ -271,6 +273,7 @@ struct CodexState {
     model_start_requests: Vec<winwincode_execution_port::generated::ModelOpenMessage>,
     delegated_stops: HashMap<String, DelegatedLoopStopFact>,
     final_freezes: Vec<FinalCandidateFreezeFact>,
+    mechanism_keep_followup_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -627,6 +630,28 @@ impl CodexCoreAdapter for FakeCodex {
         }
         state.final_freezes.push(fact.clone());
         Ok(fact.clone())
+    }
+
+    fn reconcile_delegated_transition(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        transition: winwincode_codex::DelegatedLoopTransition,
+    ) -> impl Future<Output = Result<winwincode_codex::DelegatedLoopTransitionOutcome, Self::Error>> + Send
+    {
+        let keep = self.state.lock().unwrap().mechanism_keep_followup_pending;
+        async move {
+            Ok(if keep {
+                winwincode_codex::DelegatedLoopTransitionOutcome::Submitted {
+                    turn_id: "isolated-followup-pending".into(),
+                    counters: transition.worker_counters,
+                }
+            } else {
+                winwincode_codex::DelegatedLoopTransitionOutcome::Stopped {
+                    reason: RepairLoopStopReason::InfrastructureError,
+                    counters: transition.worker_counters,
+                }
+            })
+        }
     }
 
     fn poll(

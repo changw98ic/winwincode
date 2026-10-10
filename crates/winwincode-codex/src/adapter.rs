@@ -8338,6 +8338,7 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 
 #[cfg(test)]
 mod tests {
+    include!("storage_post_action_regression.rs");
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,

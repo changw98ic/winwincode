@@ -3771,7 +3771,10 @@ pub(crate) fn accepted_lease_history(
         .map_err(sql_error)?;
     let mut leases = Vec::new();
     for row in rows {
-        let receipt: ExecutionLeaseReceipt = serde_json::from_str(&row.map_err(sql_error)?)
+        let encoded = row.map_err(sql_error)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::lease_receipt(encoded.len());
+        let receipt: ExecutionLeaseReceipt = serde_json::from_str(&encoded)
             .map_err(|_| StorageError::adapter("invalid stored lease receipt"))?;
         if receipt.status == LeaseWriteStatus::Accepted {
             let lease = receipt

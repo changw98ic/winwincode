@@ -6,6 +6,10 @@
 #[path = "device_model_concurrency_tests.rs"]
 mod concurrency_tests;
 
+#[cfg(all(test, feature = "test-support"))]
+#[path = "device_model_history_regression_tests.rs"]
+mod history_regression_tests;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},

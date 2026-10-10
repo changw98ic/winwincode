@@ -10,6 +10,9 @@ name = "codex_core_api"
 path = "src/lib.rs"
 test = false
 
+[features]
+mechanism-test-support = ["codex-core/mechanism-test-support"]
+
 [lints]
 workspace = true
 

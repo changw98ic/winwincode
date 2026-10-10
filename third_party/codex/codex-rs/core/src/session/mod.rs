@@ -2478,8 +2478,18 @@ impl Session {
             available_decisions: Some(available_decisions),
             parsed_cmd,
         });
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::record_request(&event);
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        let decision = rx_approve.await;
+        #[cfg(feature = "mechanism-test-support")]
+        if decision.is_ok() {
+            crate::mechanism_interaction_test_barrier::record_waiter_consumed(
+                "approval",
+                &effective_approval_id,
+            );
+        }
+        decision.unwrap_or(ReviewDecision::Abort)
     }
 
     #[expect(
@@ -2752,11 +2762,18 @@ impl Session {
         turn_context
             .turn_metadata_state
             .mark_user_input_requested_during_turn();
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::record_request(&event);
         self.send_event(turn_context, event).await;
-        match queued_response {
+        let response = match queued_response {
             Some(response) => Some(response),
             None => rx_response.await.ok(),
+        };
+        #[cfg(feature = "mechanism-test-support")]
+        if response.is_some() {
+            crate::mechanism_interaction_test_barrier::record_waiter_consumed("input", &sub_id);
         }
+        response
     }
 
     #[expect(
@@ -2791,11 +2808,19 @@ impl Session {
         };
         match entry {
             Some(tx_response) => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "input", "sent",
+                );
                 if let Some(response) = response_to_send {
                     tx_response.send(response).ok();
                 }
             }
             None => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "input", "buffered",
+                );
                 if replaced_response.is_some() {
                     warn!("Overwriting queued user input response for sub_id: {sub_id}");
                 } else {
@@ -3000,9 +3025,17 @@ impl Session {
         };
         match entry {
             Some(tx_approve) => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "approval", "sent",
+                );
                 tx_approve.send(decision).ok();
             }
             None => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "approval", "dropped",
+                );
                 warn!("No pending approval found for call_id: {approval_id}");
             }
         }

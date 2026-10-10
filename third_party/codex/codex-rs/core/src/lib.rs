@@ -9,6 +9,8 @@ mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+#[cfg(feature = "mechanism-test-support")]
+mod mechanism_interaction_test_barrier;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;

@@ -678,6 +678,8 @@ impl StoredDiagnosticArtifact {
     }
 
     fn validate(&self) -> Result<(), AdapterStoreError> {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_validation(self.bytes.len());
         let exact_authority_key = authority_key(
             &self.open.lease,
             &self.open.worker_session_id,
@@ -979,6 +981,7 @@ fn is_final_ack_status(status: &LeaseWriteStatus) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("storage_diagnostic_regression.rs");
     use std::path::PathBuf;
 
     use winwincode_domain::{ExecutionAckSequence, ExecutionSequence};

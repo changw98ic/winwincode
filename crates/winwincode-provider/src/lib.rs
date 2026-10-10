@@ -81,3 +81,6 @@ pub use device_jev_judge::StoredJevJudge;
 
 #[cfg(test)]
 mod diagnostics_regression_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod audit_model_replay_metrics;

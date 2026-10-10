@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-test-support = ["winwincode-codex/test-support"]
+test-support = ["winwincode-codex/test-support", "winwincode-provider/test-support"]
 
 [lib]
 path = "src/lib.rs"

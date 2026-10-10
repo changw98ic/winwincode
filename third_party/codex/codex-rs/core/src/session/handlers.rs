@@ -520,6 +520,8 @@ pub(super) async fn submission_loop(
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
     while let Ok(sub) = rx_sub.recv().await {
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::before_response_dispatch(&sub.op).await;
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
