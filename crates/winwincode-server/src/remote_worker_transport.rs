@@ -440,6 +440,46 @@ type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
 struct RemoteDeliveryQueue {
     pending: Mutex<Vec<RemoteDelivery>>,
     authorities: Mutex<HashMap<(WorkerId, WorkerInstanceId), RemoteWorkerPrincipal>>,
+    /// Re-sent idempotent controls (currently `job.cancel`) that this exact
+    /// Worker instance has already confirmed. The scheduler replays every
+    /// outstanding cancellation on each drive; re-delivering a confirmed one
+    /// to the same instance only keeps the Worker's control inbox non-empty,
+    /// which starves the poll that produces the Job's terminal outcome.
+    confirmed: Mutex<HashMap<(WorkerId, WorkerInstanceId), ConfirmedControls>>,
+}
+
+/// Bounded FIFO set of confirmed delivery identities for one Worker instance.
+#[derive(Default)]
+struct ConfirmedControls {
+    ids: std::collections::HashSet<ExecutionMessageId>,
+    order: std::collections::VecDeque<ExecutionMessageId>,
+}
+
+/// Confirmed identities remembered per Worker instance.
+const MAX_CONFIRMED_CONTROLS: usize = 4_096;
+
+impl ConfirmedControls {
+    fn insert(&mut self, id: ExecutionMessageId) {
+        if self.ids.insert(id.clone()) {
+            self.order.push_back(id);
+            while self.order.len() > MAX_CONFIRMED_CONTROLS {
+                if let Some(old) = self.order.pop_front() {
+                    self.ids.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+fn confirmed_redelivery_frame(frame: &[u8]) -> bool {
+    RemoteTransportAdapter::<NoopCore>::decode(frame)
+        .is_ok_and(|frame| suppress_confirmed_redelivery(frame.message()))
+}
+
+/// Controls whose exact re-delivery after confirmation carries no new
+/// information for the same Worker instance.
+fn suppress_confirmed_redelivery(message: &ExecutionPortMessage) -> bool {
+    matches!(message, ExecutionPortMessage::JobCancelMessage(_))
 }
 
 impl RemoteDeliveryQueue {
@@ -456,11 +496,24 @@ impl RemoteDeliveryQueue {
         let mut pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
+        let mut retired_instances = Vec::new();
         authorities.retain(|(worker, instance), principal| {
             let retired = authenticator.ensure_active(principal, now).is_err_and(|error| matches!(error.kind(), winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked | winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Rejected));
-            if retired { pending.retain(|(target, boot, _, _)| target != worker || boot != instance); }
+            if retired {
+                pending.retain(|(target, boot, _, _)| target != worker || boot != instance);
+                retired_instances.push((worker.clone(), instance.clone()));
+            }
             !retired && pending.iter().any(|(target, boot, _, _)| target == worker && boot == instance)
         });
+        drop(pending);
+        if !retired_instances.is_empty() {
+            let mut confirmed = self.confirmed.lock().map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+            })?;
+            for key in retired_instances {
+                confirmed.remove(&key);
+            }
+        }
         Ok(())
     }
 
@@ -509,6 +562,13 @@ impl RemoteDeliveryQueue {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
         pending.retain(|(target, boot, _, _)| target != worker || boot == instance);
+        drop(pending);
+        self.confirmed
+            .lock()
+            .map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+            })?
+            .retain(|(target, boot), _| target != worker || boot == instance);
         Ok(())
     }
     fn acknowledge(
@@ -520,9 +580,19 @@ impl RemoteDeliveryQueue {
         let mut pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
+        let mut confirmed = self.confirmed.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+        })?;
         for id in ids {
-            pending.retain(|(target, instance, pending_id, _)| {
-                target != worker_id || instance != instance_id || pending_id != id
+            pending.retain(|(target, instance, pending_id, frame)| {
+                let matched = target == worker_id && instance == instance_id && pending_id == id;
+                if matched && confirmed_redelivery_frame(frame) {
+                    confirmed
+                        .entry((worker_id.clone(), instance_id.clone()))
+                        .or_default()
+                        .insert(id.clone());
+                }
+                !matched
             });
         }
         Ok(())
@@ -572,6 +642,16 @@ impl RemoteDeliveryQueue {
     ) -> Result<(), RuntimeSupervisorError> {
         separate_heartbeat_receipt_identity(&mut message)?;
         let delivery_id = execution_message_id(&message).map_err(|_| remote_queue_failure())?;
+        if suppress_confirmed_redelivery(&message)
+            && self
+                .confirmed
+                .lock()
+                .map_err(|_| remote_queue_failure())?
+                .get(&(worker_id.clone(), instance_id.clone()))
+                .is_some_and(|confirmed| confirmed.ids.contains(&delivery_id))
+        {
+            return Ok(());
+        }
         let frame = TypedFrame::new(FrameDirection::ControlPlaneToWorker, message)
             .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
             .map_err(|_| remote_queue_failure())?;
@@ -1126,6 +1206,73 @@ mod tests {
             value["error"] = serde_json::json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(padding),"retryable":true});
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn cancel_message(seed: usize) -> ExecutionPortMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut value = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["kind"] == "job.cancel")
+            .unwrap()
+            .clone();
+        value["messageId"] = serde_json::json!(format!("xmsg_{seed:026}"));
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn confirmed_cancel_is_not_redelivered_to_the_same_instance() {
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let next = WorkerInstanceId("wki_00000000000000000000000002".into());
+        queue
+            .enqueue_for(&worker, &instance, cancel_message(7))
+            .unwrap();
+        let page = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(page.len(), 1);
+        queue
+            .acknowledge(&worker, &instance, &[page[0].delivery_id.clone()])
+            .unwrap();
+        // The scheduler replays the outstanding cancellation every drive.
+        for _ in 0..3 {
+            queue
+                .enqueue_for(&worker, &instance, cancel_message(7))
+                .unwrap();
+        }
+        assert!(
+            queue.snapshot(&worker, &instance).unwrap().is_empty(),
+            "a confirmed cancel must not keep the Worker inbox busy"
+        );
+        // A different cancellation still flows, and a new instance still
+        // receives the replay.
+        queue
+            .enqueue_for(&worker, &instance, cancel_message(8))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 1);
+        queue
+            .enqueue_for(&worker, &next, cancel_message(7))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &next).unwrap().len(), 1);
+        // Unconfirmed cancels and other controls keep their replay semantics.
+        queue
+            .enqueue_for(&worker, &instance, queue_message(9, &worker, &instance, 0))
+            .unwrap();
+        let ids = queue
+            .snapshot(&worker, &instance)
+            .unwrap()
+            .into_iter()
+            .map(|delivery| delivery.delivery_id)
+            .collect::<Vec<_>>();
+        queue.acknowledge(&worker, &instance, &ids).unwrap();
+        queue
+            .enqueue_for(&worker, &instance, queue_message(9, &worker, &instance, 0))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 1);
     }
 
     #[test]
