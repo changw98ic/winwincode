@@ -383,6 +383,10 @@ where
         let mut sent_bytes = 0;
         let mut deferred = None;
         for delivery in deliveries {
+            // Controls (cancel, renewal, ACK) always take priority, including
+            // before the first frame: shutdown and the driver must never send
+            // new outbound work while a control is queued. Drivers drain the
+            // control inbox before flushing, so this cannot starve the outbox.
             if self.port.has_pending_controls() || tokio::time::Instant::now() >= deadline {
                 break;
             }

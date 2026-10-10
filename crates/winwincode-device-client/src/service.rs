@@ -653,7 +653,10 @@ fn private_options() -> OpenOptions {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    Command::new("kill")
+    // Absolute path: a PATH-resolved `kill` could be shadowed and report a
+    // stale daemon as alive (or a live one as dead). Matches the other
+    // `/bin/kill` call sites; `unsafe_code` is denied, so no libc::kill.
+    Command::new("/bin/kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

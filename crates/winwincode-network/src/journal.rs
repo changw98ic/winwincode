@@ -269,6 +269,24 @@ impl RequestJournal {
         failure: Option<NetworkFailure>,
         now: u64,
     ) -> Result<(), NetworkFailure> {
+        self.finish_with_delay_cap(operation, sequence, failure, now, None)
+    }
+
+    /// Same as [`Self::finish`], but a caller-owned retry policy may cap the
+    /// rescheduled delay (for example a Device daemon's configured
+    /// `max_backoff`). The cap never extends the shared policy delay, never
+    /// turns a stopped (terminal) operation into a retry, and never shortens a
+    /// server-provided Retry-After floor.
+    /// # Errors
+    /// Rejects a foreign attempt and failed persistence.
+    pub fn finish_with_delay_cap(
+        &self,
+        operation: &[u8],
+        sequence: u64,
+        failure: Option<NetworkFailure>,
+        now: u64,
+        max_delay: Option<Duration>,
+    ) -> Result<(), NetworkFailure> {
         let now = self.monotonic_now(now)?;
         let operation = key(operation);
         let mut connection = self.0.lock().map_err(|_| storage())?;
@@ -291,6 +309,15 @@ impl RequestJournal {
             params![operation, sql_int(sequence)?, if failure.is_some() { "failed" } else { "completed" }, failure_json, sql_int(now)?]).map_err(|_| storage())?;
         if let Some(failure) = failure {
             apply_failure(&mut state, failure, now);
+            // Only the normal backoff is capped: a terminal decision stays
+            // stopped, and a server-provided Retry-After floor is honored.
+            if let Some(max_delay) = max_delay
+                && !state.stopped
+            {
+                let floor = failure.retry_after_ms.unwrap_or(0);
+                let cap = now.saturating_add(crate::policy::duration_millis(max_delay).max(floor));
+                state.ready_at = state.ready_at.min(cap);
+            }
             transaction
                 .execute(
                     "UPDATE network_queue_state SET state_json=?2 WHERE operation_hash=?1",
@@ -412,6 +439,123 @@ mod tests {
             .finish(b"same-control-frame", sequence, None, now)
             .unwrap();
         assert_eq!(sequence, 7);
+        drop(journal);
+        let _ = std::fs::remove_file(path);
+    }
+    fn delay_after_one_failure(
+        tag: &str,
+        failure: NetworkFailure,
+        cap: Option<Duration>,
+    ) -> Option<Duration> {
+        let path = std::env::temp_dir().join(format!(
+            "network-delay-cap-{tag}-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        let journal = RequestJournal::open(&path).unwrap();
+        let now = 1_000;
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"capped", Replay::ReplayExact, 4, now)
+            .unwrap()
+        else {
+            panic!("first attempt");
+        };
+        // Two failures so the uncapped policy delay grows past the cap.
+        journal
+            .finish_with_delay_cap(b"capped", sequence, Some(failure), now, cap)
+            .unwrap();
+        let later = now + 600_000;
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"capped", Replay::ReplayExact, 4, later)
+            .unwrap()
+        else {
+            panic!("second attempt");
+        };
+        journal
+            .finish_with_delay_cap(b"capped", sequence, Some(failure), later, cap)
+            .unwrap();
+        let delay = match journal
+            .prepare(b"capped", Replay::ReplayExact, 4, later)
+            .unwrap()
+        {
+            QueuePermit::Waiting(delay, _) => Some(delay),
+            QueuePermit::Stopped(_) => None,
+            QueuePermit::Ready(_) => Some(Duration::ZERO),
+        };
+        drop(journal);
+        let _ = std::fs::remove_file(path);
+        delay
+    }
+
+    #[test]
+    fn caller_delay_cap_bounds_but_never_extends_the_policy_delay() {
+        let failure = NetworkFailure::new(
+            ErrorKind::ConnectionUnavailable,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        let cap = Duration::from_millis(200);
+        let uncapped = delay_after_one_failure("none", failure, None).unwrap();
+        assert!(uncapped > cap, "uncapped {uncapped:?} must exceed the cap");
+        let capped = delay_after_one_failure("small", failure, Some(cap)).unwrap();
+        assert!(capped <= cap, "{capped:?}");
+        assert!(capped > Duration::ZERO);
+        // A large cap leaves the delay unchanged (modulo monotonic-clock drift).
+        let large =
+            delay_after_one_failure("large", failure, Some(Duration::from_hours(1))).unwrap();
+        assert!(
+            large.abs_diff(uncapped) <= Duration::from_millis(50),
+            "large {large:?} vs uncapped {uncapped:?}"
+        );
+        assert!(large > cap);
+    }
+
+    #[test]
+    fn caller_delay_cap_keeps_retry_after_and_terminal_stops() {
+        let mut deferred = NetworkFailure::new(
+            ErrorKind::ConnectionUnavailable,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        deferred.retry_after_ms = Some(120_000);
+        let delay =
+            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)))
+                .unwrap();
+        assert!(delay >= Duration::from_secs(119), "{delay:?}");
+
+        let terminal = NetworkFailure::new(
+            ErrorKind::Authentication,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        assert!(!terminal.retryable());
+        let path = std::env::temp_dir().join(format!(
+            "network-delay-cap-stop-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        let journal = RequestJournal::open(&path).unwrap();
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"stop", Replay::ReplayExact, 4, 1_000)
+            .unwrap()
+        else {
+            panic!("first attempt");
+        };
+        journal
+            .finish_with_delay_cap(
+                b"stop",
+                sequence,
+                Some(terminal),
+                1_000,
+                Some(Duration::from_millis(1)),
+            )
+            .unwrap();
+        assert!(matches!(
+            journal
+                .prepare(b"stop", Replay::ReplayExact, 4, 10_000)
+                .unwrap(),
+            QueuePermit::Stopped(_)
+        ));
         drop(journal);
         let _ = std::fs::remove_file(path);
     }

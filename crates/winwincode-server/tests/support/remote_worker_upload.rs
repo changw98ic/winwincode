@@ -459,7 +459,13 @@ async fn scenario(chunks: usize) {
         .unwrap();
     handle.confirm(id).unwrap();
     // Intentionally delay ACK intake until the actual server admission threshold.
+    // Received ACK controls are parked (taken from the inbox, unconfirmed) so
+    // the control-first flush keeps sending; they are accepted below.
+    let mut parked = std::collections::VecDeque::new();
     for _ in 0..512 {
+        while let Some((id, message)) = handle.next_control().unwrap() {
+            parked.push_back((id, message));
+        }
         let requests_before = metrics.lock().unwrap().backlog.len();
         match Box::pin(worker.flush_durable_outbox()).await {
             Err(error) if error.code == WorkerErrorCode::ExecutionBackpressure => break,
@@ -493,7 +499,10 @@ async fn scenario(chunks: usize) {
     let mut final_confirmed = false;
     let mut artifact_confirmed = 0;
     for _ in 0..1024 {
-        while let Some((id, message)) = handle.next_control().unwrap() {
+        while let Some((id, message)) = parked
+            .pop_front()
+            .map_or_else(|| handle.next_control().unwrap(), Some)
+        {
             let before = metrics.lock().unwrap().backlog.len();
             Box::pin(worker.accept_control(&message, now.clone()))
                 .await

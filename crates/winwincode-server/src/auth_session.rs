@@ -485,6 +485,21 @@ impl SqliteAuthSessionManager {
         self.issue_for_user(&account.user_id)
     }
 
+    /// Cheap pre-check, run before any Argon2 work is scheduled: reports
+    /// whether a username + password login from `client` is currently rate
+    /// limited. Invalid usernames and clock failures report `false` so the
+    /// full login path produces its regular error.
+    #[must_use]
+    pub(crate) fn login_rate_limited(&self, client: &str, username: &str) -> bool {
+        let Ok(normalized) = UserAccountService::normalize_username(username) else {
+            return false;
+        };
+        let Ok(now) = self.clock.unix_millis() else {
+            return false;
+        };
+        self.login_limiter.rejected(client, &normalized, now)
+    }
+
     /// Daily username + Argon2id password login for one active account.
     ///
     /// Failures are rate limited per (normalized username, client) pair; once
@@ -517,13 +532,15 @@ impl SqliteAuthSessionManager {
             return Err(AuthSessionError::invalid_request());
         }
         let now = self.clock.unix_millis()?;
-        if self.login_limiter.rejected(client, &normalized, now) {
+        // Atomic admission: reserves a tracked slot (or rejects) before the
+        // Argon2 work in verify_credentials, so every attempt is accounted.
+        if !self.login_limiter.admit(client, &normalized, now) {
             return Err(AuthSessionError::rate_limited());
         }
-        let verified = self
-            .accounts
-            .verify_credentials(username, password)
-            .map_err(|_| AuthSessionError::storage())?;
+        let Ok(verified) = self.accounts.verify_credentials(username, password) else {
+            self.login_limiter.release(client, &normalized);
+            return Err(AuthSessionError::storage());
+        };
         match verified {
             Ok(account) => {
                 self.login_limiter.clear(client, &normalized);
@@ -925,7 +942,7 @@ impl AuthSessionError {
         }
     }
 
-    const fn rate_limited() -> Self {
+    pub(crate) const fn rate_limited() -> Self {
         Self {
             kind: AuthSessionErrorKind::RateLimited,
         }
@@ -955,7 +972,7 @@ impl AuthSessionError {
         }
     }
 
-    const fn storage() -> Self {
+    pub(crate) const fn storage() -> Self {
         Self {
             kind: AuthSessionErrorKind::Storage,
         }

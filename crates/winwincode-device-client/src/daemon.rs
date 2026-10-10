@@ -1305,12 +1305,15 @@ impl DeviceDaemon {
         network_now: u64,
     ) -> Result<TickOutcome, DaemonError> {
         let reason = format!("exchange transport failed: {}", error.message());
+        // The configured daemon backoff bounds transport retries; the shared
+        // network policy may only shorten, never exceed, `max_backoff`.
         self.network_journal
-            .finish(
+            .finish_with_delay_cap(
                 operation.as_bytes(),
                 sequence,
                 Some(error.network_failure()),
                 network_now,
+                Some(self.config.max_backoff),
             )
             .map_err(DaemonError::Network)?;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
