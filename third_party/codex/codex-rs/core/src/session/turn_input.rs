@@ -160,15 +160,12 @@ pub(super) async fn handle(
 pub(super) async fn handle_recovery(
     session: &Arc<Session>,
     thread_settings: ThreadSettingsOverrides,
-    submit_change_batch: bool,
+    start: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let request = TurnInputRequest::user_input(Vec::new())
         .with_thread_settings(thread_settings)
-        .on_start(TurnStartOptions {
-            submit_change_batch,
-            ..TurnStartOptions::default()
-        });
+        .on_start(start);
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }
 

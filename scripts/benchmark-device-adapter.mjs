@@ -1,21 +1,26 @@
+import { deviceBenchmarkProfileKey } from './device-agent-environment.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, globSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
+import { NetworkError } from '../packages/network-request/src/index.mjs'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
-  recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource } from './run-real-task-benchmark.mjs'
+  recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource,
+  validateBenchmarkDispatchPolicy, validateFormalBenchmarkOptions, verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
-  loadDeviceProviderEnvironment,
-  runDeviceTaskVertical } from './run-device-task-vertical.mjs'
+  loadDeviceProviderEnvironment, deviceTaskProvider,
+  runDeviceTaskVertical, resumeRegisteredDeviceTask } from './run-device-task-vertical.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDeviceTask, terminalDeviceFailure,
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
-import { assertDeviceBenchmarkRunning } from './device-production-fixture.mjs'
+import { removeDevicePublicSmoke } from './device-production-fixture.mjs'
 import { publishBenchmarkLedger } from './publish-benchmark-submission.mjs'
+import { deviceTaskIdentities, withDeviceTaskRuntime } from './device-task-runtime.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const seats = { 'glm-5.3-flash': 'glm', 'mimo-v2.6-pro': 'mimo', 'deepseek-flash': 'deepseek', 'qwen3.8-flash': 'qwen' }
@@ -51,16 +56,50 @@ function benchmarkSourceIdentity(agentSettings) {
     privateSettingsDigest: agentSettings?.jevSettingsFile ? sha256(readFileSync(agentSettings.jevSettingsFile)) : null }
 }
 
+function publicSmokeExecutionLock(value) {
+  if (value === undefined) return null
+  assert.ok(typeof value === 'string' && value.length > 0, 'public smoke execution lock must be a host path')
+  return resolve(value)
+}
+
+export function deviceBenchmarkExperimentBinding(options, source, catalog) {
+  const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
+  assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  const executionLock = publicSmokeExecutionLock(options.publicSmokeExecutionLock)
+  return { experimentId: options.experimentId, source, fusionExecution: { kind: 'native-panel', coordinatorProvider: aggregationProvider, version: 2 },
+    automaticTaskActions,
+    ...(executionLock === null ? {} : { publicSmokeExecutionLock: executionLock }),
+    preparedCatalogSha256: sha256(JSON.stringify(catalog)),
+    agentSettingsSha256: sha256(JSON.stringify(options.agentSettings)),
+    providerEvidenceSha256: sha256(JSON.stringify(options.providerEvidence)),
+    ...options.frozenSourceIdentity, productSourceSealSha256: options.productSourceSealSha256 }
+}
+
+export function benchmarkDeviceProfiles(plan, options = {}) {
+  validateBenchmarkDispatchPolicy(plan, options)
+  const selected = options.selectedConfigurationIds === undefined ? null : new Set(options.selectedConfigurationIds)
+  const profiles = [...new Map(plan.cells.filter(cell => selected === null || selected.has(cell.configurationId))
+    .map(cell => [deviceBenchmarkProfileKey(cell), cell])).values()]
+  // Validate the profiles being admitted before claiming work. The full frozen
+  // plan stays in the ledger, including profiles awaiting real JEV settings.
+  for (const profile of profiles) benchmarkDeviceEnvironment(profile,
+    options.agentSettings, options.providerEnvironment ?? process.env)
+  return profiles
+}
+
 export async function executeDeviceBenchmark(options) {
+  const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
+  assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  publicSmokeExecutionLock(options.publicSmokeExecutionLock)
+  options = { ...options, automaticTaskActions }
   const catalog = JSON.parse(readFileSync(resolve(options.preparedInputsDirectory, 'prepared-inputs.json'), 'utf8'))
   const plan = buildBenchmarkPlan({ taskIds: catalog.tasks.map(task => task.taskId) })
   const providerEnvironment = options.providerEnvironment ?? process.env
-  // Check every arm before claiming even the first task. Unimplemented arms
-  // cannot turn into 700 apparently executed failure rows.
-  for (const configurationId of new Set(plan.cells.map(cell => cell.configurationId))) {
-    benchmarkDeviceEnvironment(plan.cells.find(cell => cell.configurationId === configurationId),
-      options.agentSettings, providerEnvironment)
-  }
+  const profiles = benchmarkDeviceProfiles(plan, { ...options, providerEnvironment })
+  const ledgerPath = resolve(options.evidenceRoot, 'benchmark.sqlite3')
+  // Invalid first-run configuration must not freeze an unused experiment.
+  validateFormalBenchmarkOptions({ providerEvidence: options.providerEvidence, ledgerPath,
+    experimentBinding: { experimentId: options.experimentId } })
   const source = await validateFrozenTaskSource({ repositoryRoot: options.sourceRoot,
     repositoryUrl: catalog.source.repositoryUrl, revision: catalog.source.revision })
   assert.equal(source.sourceDigest, catalog.source.sourceDigest)
@@ -77,38 +116,54 @@ export async function executeDeviceBenchmark(options) {
     helperExecutable: resolve(binaryDirectory, 'winwincode-kernel-helper') })
   options = { ...options, providerEnvironment, frozenSourceIdentity: benchmarkSourceIdentity(options.agentSettings),
     productSourceSealSha256: sha256(`${JSON.stringify(sourceSeal.seal, null, 2)}\n`) }
-  const adapter = {
-    runModel: (request, runner) => runBenchmarkDeviceModel(request, runner, options),
-    aggregate: (request, runner) => runBenchmarkDeviceAggregation(request, runner, options),
-  }
   const evidenceRoot = resolve(options.evidenceRoot)
   mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 })
-  const result = await executeFormalBenchmark(plan, {
-    providerEvidence: options.providerEvidence, ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
-    experimentBinding: { experimentId: options.experimentId, source, aggregationProvider,
-      preparedCatalogSha256: sha256(JSON.stringify(catalog)),
-      agentSettingsSha256: sha256(JSON.stringify(options.agentSettings)),
-      providerEvidenceSha256: sha256(JSON.stringify(options.providerEvidence)),
-      ...options.frozenSourceIdentity, productSourceSealSha256: options.productSourceSealSha256 },
-    executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
-    recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, options),
-    onRecord: record => {
-      const path = resolve(evidenceRoot, `${sha256(record.runId)}.result.json`)
-      const bytes = `${JSON.stringify(record, null, 2)}\n`
-      try { writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 }) } catch (error) {
-        if (error.code !== 'EEXIST') throw error
-        assert.equal(readFileSync(path, 'utf8'), bytes)
-      }
-    },
+  const experimentBinding = deviceBenchmarkExperimentBinding(options, source, catalog)
+  // Reject changed experiment policy before opening Device/Worker services.
+  // The execution driver rechecks the same identity before claiming work.
+  verifyBenchmarkLedgerIdentity(plan, { providerEvidence: options.providerEvidence, ledgerPath, experimentBinding,
+    concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds })
+  const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
+    profiles,
+    providers: Object.keys(seats).map(name => deviceTaskProvider(seats[name], providerEnvironment)),
+    agentSettings: options.agentSettings, providerEnvironment, automaticTaskActions: options.automaticTaskActions ?? false,
+  }, async runtime => {
+    const sharedOptions = { ...options, runtimeResolver: runtime.forTask }
+    const adapter = {
+      runModel: (request, runner) => runBenchmarkDeviceModel(request, runner, sharedOptions),
+      aggregate: (request, runner) => runBenchmarkDeviceAggregation(request, runner, sharedOptions),
+    }
+    return executeFormalBenchmark(plan, {
+      providerEvidence: options.providerEvidence, ledgerPath,
+      experimentBinding,
+      concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds,
+      executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
+      recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, sharedOptions),
+      onRecord: record => {
+        const path = resolve(evidenceRoot, `${sha256(record.runId)}.result.json`)
+        const bytes = `${JSON.stringify(record, null, 2)}\n`
+        try { writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 }) } catch (error) {
+          if (error.code !== 'EEXIST') throw error
+          assert.equal(readFileSync(path, 'utf8'), bytes)
+        }
+      },
+    })
   })
-  publishBenchmarkLedger({ ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
-    preparedInputsDirectory: options.preparedInputsDirectory,
-    repositoryUrl: options.publicationRepositoryUrl,
-    receiptDirectory: resolve(evidenceRoot, 'publication-receipts') })
+  const result = shared.flow.scenario
+  // A selected cohort leaves real unclaimed rows in the full experiment. The
+  // public publisher requires a completely finalized ledger, so defer it while
+  // another profile is still planned instead of fabricating failure records.
+  if (result.records.every(record => ['completed', 'failed'].includes(record.status))) {
+    publishBenchmarkLedger({ ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
+      preparedInputsDirectory: options.preparedInputsDirectory,
+      repositoryUrl: options.publicationRepositoryUrl,
+      receiptDirectory: resolve(evidenceRoot, 'publication-receipts') })
+  }
   return result
 }
 
-export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirectory, sourceRoot, evidenceRoot, aggregation }) {
+export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirectory, sourceRoot, evidenceRoot,
+  aggregation, productSessionId, publicSmokeExecutionLock: executionLockPath }) {
   assert.ok(typeof request.callId === 'string' && request.callId.startsWith(`${request.runId}:`))
   const catalog = JSON.parse(readFileSync(resolve(preparedInputsDirectory, 'prepared-inputs.json'), 'utf8'))
   const taskRecord = catalog.tasks.find(task => task.taskId === request.taskId)
@@ -129,8 +184,10 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
   const args = ['-I', resolve(import.meta.dirname, 'benchmark-public-smoke.py'), '--task-root', resolve(sourceRoot),
     '--task-id', request.taskId, '--image-id', artifact.imageId,
     '--evidence-directory', resolve(directory, 'public-attempts')]
+  const executionLock = publicSmokeExecutionLock(executionLockPath)
+  if (executionLock !== null) args.push('--execution-lock', executionLock)
   const mcpConfiguration = { command: '/usr/bin/python3', args,
-    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin' } }
+    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' } }
   const task = {
     title: `${request.taskId} ${artifact.spec.title}`,
     goal: '完成 TASK.md 与 PROTOCOL.md 的全部业务和输入输出要求。开发任务不设置 token、调用、金额或开发时长上限。'
@@ -140,10 +197,13 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
     constraints: ['遵守任务的全部业务规则和 JSONL 协议', '保持 TASK.md 和 PROTOCOL.md 不变',
       `只提交 ${artifact.spec.allowed_suffixes.join('、')} 源文件，最多 ${artifact.spec.max_submission_files} 个、合计 ${artifact.spec.max_submission_bytes} 字节`],
     outOfScope: ['任务题面、验证工具、环境镜像和凭据'],
-    verificationCommand: ['/usr/bin/python3', ...args, '--run-source', '.'].map(shellWord).join(' '),
+    // Public execution belongs to the configured host MCP tool. Independent
+    // read-only roles verify its source-bound receipt without host writes.
+    verificationCommand: ['/usr/bin/python3', ...args, '--verify-source', '.'].map(shellWord).join(' '),
     acceptanceCriteria: [{ id: 'public-examples', title: '官方公开示例在冻结环境通过', required: true }],
     files: { ...artifact.files },
   }
+  if (productSessionId) task.goal += ` 本任务只能调用 MCP server benchmark_public_smoke_${productSessionId} 的 public_smoke；其他任务的工具没有授权。`
   if (aggregation) {
     assert.equal(request.callId, `${request.runId}:aggregation`)
     assert.equal(request.comparison, 'fusion-4')
@@ -245,14 +305,27 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     }
   }
   benchmarkDeviceEnvironment(request, options.agentSettings, options.providerEnvironment ?? process.env)
+  const identities = options.runtimeResolver
+    ? deviceTaskIdentities(options.experimentId, request.callId) : {}
   let prepared
-  try { prepared = await prepareBenchmarkDeviceTask(request, options) } catch { throw evidenceFailure() }
+  try { prepared = await prepareBenchmarkDeviceTask(request, { ...options, ...identities }) } catch { throw evidenceFailure() }
+  const runtime = options.runtimeResolver ? await options.runtimeResolver(request, prepared) : null
+  const finalizeFailure = async result => {
+    if (runtime && result.status === 'failed') {
+      try {
+        const removal = await removeTerminalBenchmarkPublicSmoke(registeredLaunch, runtime)
+        if (removal) result.publicSmokeRemoval = removal
+      } catch { result.publicSmokeRemoval = { outcome: 'unknown' } }
+    }
+    return result
+  }
   let registeredLaunch = null
   let report
   try {
-    report = await runDeviceTaskVertical({ ...request, ...prepared,
+    report = await runDeviceTaskVertical({ ...request, ...prepared, ...identities, runtime,
       providerName: seats[request.provider], requestedModel: request.provider,
       agentSettings: options.agentSettings,
+      automaticTaskActions: options.automaticTaskActions ?? false,
       registerLaunch: async target => {
         await runner.registerLaunch(target)
         registeredLaunch = target
@@ -260,40 +333,24 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       providerEnvironment: options.providerEnvironment ?? process.env })
   } catch (error) {
     if (!registeredLaunch) throw error
-    if (error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
-      try { return stoppedDeviceResult(request, registeredLaunch, error.report) }
-      catch { throw evidenceFailure() }
-    }
     if (error?.code === 'DEVICE_WORKER_CRASHED') {
-      try { return crashedDeviceResult(request, registeredLaunch, options, error.report) }
+      try { return await finalizeFailure(crashedDeviceResult(request, registeredLaunch, options, error.report)) }
       catch { throw evidenceFailure() }
     }
     if (error?.code === 'DEVICE_DISPATCH_FAILED' || error.report?.dispatchFailure) {
-      try { return failedDispatchDeviceResult(request, registeredLaunch, options, error.report) }
+      try { return await finalizeFailure(failedDispatchDeviceResult(request, registeredLaunch, options, error.report)) }
       catch { throw evidenceFailure() }
     }
     try {
       const reportBytes = readFileSync(resolve(registeredLaunch.directory, 'device-task-result.json'))
       const report = JSON.parse(reportBytes)
-      assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
-      assert.equal(report.productSessionId, registeredLaunch.productSessionId)
-      assert.equal(report.deliveryId, registeredLaunch.deliveryId)
-      if (!report.delivery?.detail || !report.delivery?.workRunAggregate) {
-        throw Object.assign(new Error('Device execution has no authoritative terminal outcome'), {
-          code: /^DEVICE_[A-Z0-9_]{1,100}$/.test(report.errorCode ?? '')
-            ? report.errorCode : 'DEVICE_EXECUTION_UNRESOLVED',
-          unresolvedDeviceExecution: true,
-        })
-      }
-      const observation = persistedDeviceObservation(report, registeredLaunch)
-      assert.ok(terminalBenchmarkDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
-      return await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
+      const observation = persistedBenchmarkDeviceFailure(report, registeredLaunch, error)
+      return await finalizeFailure(await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
         report, reportBytes, observation,
-      })
+      }))
     } catch (unresolved) {
       if (unresolved.unresolvedDeviceExecution === true) throw unresolved
-      // The product call has been launched, so uncertain state must stay
-      // unresolved in the durable ledger rather than be retried as a task.
+      // Report, identity or read-cursor conflicts remain evidence failures.
       throw evidenceFailure()
     }
   }
@@ -303,6 +360,60 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     if (options.productSourceSealSha256) assert.equal(result.productSourceSealSha256, options.productSourceSealSha256)
     return result
   } catch { throw evidenceFailure() }
+}
+
+export function persistedBenchmarkDeviceFailure(report, launch, error) {
+  assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  let observation = null
+  if (report.delivery?.detail && report.delivery?.workRunAggregate) {
+    observation = persistedDeviceObservation(report, launch)
+    if (terminalBenchmarkDeviceFailure(observation)) return observation
+  }
+  // Transport/driver interruption is not a terminal product outcome, including
+  // when the last persisted observation still contains active execution.
+  // Retain the original typed cause so recovery can query the original launch.
+  const code = error.code ?? report.errorCode
+  throw Object.assign(new Error('Device execution has no authoritative terminal outcome', { cause: error }), {
+    code: typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code)
+      ? code : 'DEVICE_EXECUTION_UNRESOLVED',
+    unresolvedDeviceExecution: true,
+    ...(Number.isInteger(error.status) ? { status: error.status } : {}),
+  })
+}
+
+// A failed call can still have a running role or an unresolved projection. Only
+// current, matching terminal product facts allow removing its own MCP server.
+export async function removeTerminalBenchmarkPublicSmoke(launch, runtime) {
+  const report = JSON.parse(readFileSync(resolve(launch.directory, 'device-task-result.json'), 'utf8'))
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  if (!report.publicSmoke || report.publicSmokeRemoval?.outcome === 'deleted') return null
+  const id = `benchmark_public_smoke_${launch.productSessionId}`
+  assert.equal(report.publicSmoke.id, id)
+  assert.equal(report.publicClientId, runtime.devicePath.publicClientId)
+  const delivery = (await runtime.api.query('delivery.get', { deliveryId: launch.deliveryId })).result
+  assert.equal(delivery.deliveryId, launch.deliveryId)
+  assert.equal(delivery.readCursor.deliveryId, launch.deliveryId)
+  const workRunAggregate = (await runtime.api.query('workrun.get', {
+    deliveryId: launch.deliveryId, workItemId: null, atCursor: delivery.readCursor,
+  })).result
+  assert.deepEqual(workRunAggregate.readCursor, delivery.readCursor)
+  if (!terminalBenchmarkDeviceFailure({ delivery, workRunAggregate })) return null
+  const path = resolve(launch.directory, 'public-smoke-removal.json')
+  if (existsSync(path)) {
+    const retained = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(retained.id, id)
+    assert.equal(retained.publicClientId, report.publicClientId)
+    assert.equal(retained.receipt.outcome, 'deleted')
+    return retained.receipt
+  }
+  const receipt = await removeDevicePublicSmoke({ api: runtime.api,
+    publicClientId: report.publicClientId, id })
+  writeFileSync(path, `${JSON.stringify({ id, publicClientId: report.publicClientId,
+    readCursor: delivery.readCursor, receipt }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+  return receipt
 }
 
 function deviceResult(directory, evidenceDirectory, commit) {
@@ -316,46 +427,6 @@ function deviceResult(directory, evidenceDirectory, commit) {
     submissionManifest: { path: manifestPath, sha256: sha256(manifestBytes) },
     executionReceipts,
     taskSourceBindingSha256: sha256(readFileSync(resolve(directory, 'task-source-binding.json'))),
-    externalVerdict: null, externalScore: null }
-}
-
-export function stoppedDeviceResult(request, launch, expectedReport, { recovering = false } = {}) {
-  const reportBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
-  const report = JSON.parse(reportBytes)
-  if (expectedReport !== null) assert.deepEqual(report, expectedReport, 'Core stop must match the persisted product report')
-  assert.ok(recovering ? report.errorCode === undefined || report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT'
-    : report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(report.productSessionId, launch.productSessionId)
-  assert.equal(report.deliveryId, launch.deliveryId)
-  assert.equal(report.complete, false)
-  const runs = report.delivery?.workRunAggregate?.runs ?? []
-  const workerSessionIds = runs.map(run => run.workerSessionId).filter(Boolean)
-  if (recovering && workerSessionIds.length === 0) workerSessionIds.push(...globSync(
-    'device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
-  assert.ok(workerSessionIds.length > 0, 'Core stop has no registered product WorkRun')
-  let stop = null
-  try { assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'), workerSessionIds) }
-  catch (error) { stop = error }
-  assert.equal(stop?.code, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.ok(workerSessionIds.includes(stop.workerSessionId))
-  const evidenceDirectory = recovering
-    ? resolve(launch.directory, 'recovery', `core-stop-${sha256(reportBytes)}`) : launch.directory
-  if (recovering) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 })
-  const executionReceipts = recovering
-    ? exportDeviceExecutionReceipts(launch.directory, evidenceDirectory).evidence
-    : JSON.parse(readFileSync(resolve(launch.directory, 'execution-receipts.json')))
-  assert.ok(Array.isArray(executionReceipts.calls), 'Core stop has no model receipt ledger')
-  const binding = JSON.parse(readFileSync(resolve(launch.directory, 'task-source-binding.json')))
-  assert.equal(binding.runId, request.runId)
-  assert.equal(binding.callId, request.callId)
-  assert.equal(binding.taskId, request.taskId)
-  return { status: 'failed', failure: { code: 'STUCK_TOOL_REPEAT_LIMIT' },
-    termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' }, productComplete: false,
-    provider: request.provider, callId: request.callId, directory: launch.directory,
-    executionReceipts, delivery: report.delivery,
-    stopProof: { workerSessionId: stop.workerSessionId, runKey: stop.runKey,
-      productReportSha256: sha256(reportBytes) },
-    ...(recovering ? { recovery: { kind: 'retained-core-stop' } } : {}),
     externalVerdict: null, externalScore: null }
 }
 
@@ -439,12 +510,15 @@ export function failedDispatchDeviceResult(request, launch, options, expectedRep
 }
 
 function loopbackUnavailable(error) {
+  if (error instanceof NetworkError && ['connection_unavailable', 'transport_interrupted', 'timeout'].includes(error.failure.kind)) return true
   const transientCodes = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH'])
   for (let cause = error; cause; cause = cause.cause) if (transientCodes.has(cause.code)) return true
   return false
 }
 
-async function resolveRegisteredDeviceTask(request, launch, options = {}, persisted = null) {
+// Reconcile a launched product task after its transport/driver has been
+// interrupted. The current terminal product authorities decide the outcome.
+export async function resolveRegisteredDeviceTask(request, launch, options = {}, persisted = null) {
     const originalBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
     const original = JSON.parse(originalBytes)
     const binding = JSON.parse(readFileSync(resolve(launch.directory, 'task-source-binding.json'), 'utf8'))
@@ -463,20 +537,18 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
     if (original.errorCode === 'DEVICE_WORKER_CRASHED') {
       return crashedDeviceResult(request, launch, options)
     }
-    if (original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure) {
+    // Old reports may have classified a cancelled scheduler row as a dispatch
+    // failure. Preserve those bytes, but let current durable dispatch facts
+    // decide whether that failure still applies before using product recovery.
+    if ((original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure)
+      && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
+        .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {
       return failedDispatchDeviceResult(request, launch, options)
     }
     if (!original.complete && (original.errorCode === undefined || original.errorCode === null)
       && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
         .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {
       return failedDispatchDeviceResult(request, launch, options, null, { recovering: true })
-    }
-    try {
-      assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'),
-        globSync('device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
-    } catch (error) {
-      if (error.code !== 'STUCK_TOOL_REPEAT_LIMIT' || original.complete !== false) throw error
-      return stoppedDeviceResult(request, launch, null, { recovering: true })
     }
     if (persisted) {
       assert.deepEqual(originalBytes, persisted.reportBytes)
@@ -492,6 +564,14 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
         assert.ok(terminalBenchmarkDeviceFailure(observation) || observation.delivery.status === 'done',
           'an unavailable product can only recover from a durable terminal projection')
       }
+    }
+    if (observation.workRunAggregate.runs.some(run => ['queued', 'leased', 'running'].includes(run.state))
+      && options.runtimeResolver) {
+      const runtime = await options.runtimeResolver(request, {
+        directory: launch.directory, taskInputPath: resolve(launch.directory, 'task-input.json'),
+      })
+      await resumeRegisteredDeviceTask({ launch, runtime, automaticTaskActions: options.automaticTaskActions ?? false })
+      observation = await inspectRegisteredDeviceTask(launch)
     }
     assert.ok(observation.workRunAggregate.runs.every(run => !['queued', 'leased', 'running'].includes(run.state)),
       'active product execution cannot be finalized by recovery')
@@ -546,6 +626,7 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
     }
     const manifest = exportDeviceCandidate(launch.directory, resolve(launch.directory, 'task-input.json'), evidenceDirectory)
     return { ...deviceResult(launch.directory, evidenceDirectory, manifest.candidate.candidateCommitId),
+      recovery: report.recovery,
       ...(request.engine === 'fusion-engine' ? { aggregationInputDigest: request.inputDigest, aggregationProvider } : {}) }
 }
 

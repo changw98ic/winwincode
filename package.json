@@ -14,9 +14,9 @@
     "preinstall": "node scripts/check-runtime.mjs",
     "clean": "node scripts/clean.mjs",
     "format:check": "node scripts/check-format.mjs && cargo fmt --all -- --check",
-    "contracts:generate": "node scripts/generate-contracts.mjs",
-    "contracts:check": "node scripts/generate-contracts.mjs --check",
-    "lint:source": "node scripts/lint-workspace.mjs",
+    "contracts:generate": "node scripts/generate-network-policy.mjs && node scripts/generate-contracts.mjs",
+    "contracts:check": "node scripts/generate-network-policy.mjs --check && node scripts/generate-contracts.mjs --check",
+    "lint:source": "node scripts/lint-workspace.mjs && node scripts/check-network-entrypoints.mjs",
     "check:no-absolute-paths": "node scripts/check-no-absolute-paths.mjs",
     "lint:rust": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
     "lint": "pnpm lint:source && pnpm typecheck && pnpm lint:rust",
@@ -32,15 +32,16 @@
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
     "verify:release-artifact-security": "node scripts/verify-release-artifact-security.mjs",
     "verify:api-production-vertical": "node scripts/run-api-production-vertical.mjs --device-prerequisites",
+    "verify:api-production-sessions": "WWC_API_SKIP_BUILD=1 node --test --test-concurrency=1 tests/api-production-vertical.test.mjs",
     "verify:core-lock": "node scripts/verify-core-lock.mjs --lock",
     "test:ts": "pnpm build:ts && node scripts/run-ts-tests.mjs",
-    "test:rust": "cargo build -p winwincode-kernel-helper --bin winwincode-kernel-helper --locked && cargo test --workspace --all-features --locked",
+    "test:rust": "cargo build -p winwincode-kernel-helper --bin winwincode-kernel-helper --locked && pnpm test:rust:built",
     "test": "pnpm test:ts && pnpm test:rust",
-    "test:rust:built": "cargo test --workspace --all-features --locked",
+    "test:rust:built": "node scripts/test-rust-workspace.mjs",
     "verify:products": "node scripts/verify-products.mjs",
     "verify:source": "pnpm format:check && pnpm lint:source",
     "verify:typescript": "pnpm test:ts && node scripts/verify-products.mjs --scope typescript",
-    "verify:rust": "pnpm build:rust && pnpm lint:rust && pnpm test:rust:built && node scripts/verify-products.mjs --scope rust && pnpm verify:api-production-vertical",
+    "verify:rust": "pnpm build:rust && pnpm lint:rust && pnpm test:rust:built && node scripts/verify-products.mjs --scope rust && pnpm verify:api-production-vertical && pnpm verify:api-production-sessions",
     "verify": "pnpm verify:source && pnpm verify:typescript && pnpm verify:rust"
   },
   "devDependencies": {
@@ -52,6 +53,7 @@
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
     "jsdom": "29.1.1",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@winwincode/network-request": "0.1.0-alpha.2"
   }
 }

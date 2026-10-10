@@ -1,0 +1,29 @@
+[package]
+name = "winwincode-network"
+description = "Shared network failure classification, replay decisions and cancellable request execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+journal = ["dep:rusqlite"]
+reqwest = ["dep:reqwest"]
+
+[dependencies]
+rusqlite = { workspace = true, optional = true }
+getrandom.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+httpdate.workspace = true
+time = { workspace = true, features = ["parsing"] }
+tokio = { workspace = true, features = ["net"] }
+ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "=0.12.28", default-features = false, optional = true }
+rustls.workspace = true
+
+[lints]
+workspace = true

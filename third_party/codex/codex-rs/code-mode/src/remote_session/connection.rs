@@ -810,3 +810,7 @@ async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
+
+#[cfg(test)]
+#[path = "connection/mechanism_regression_tests.rs"]
+mod mechanism_regression_tests;

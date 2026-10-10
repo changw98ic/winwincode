@@ -862,6 +862,252 @@ fn assert_files_omit(root: &Path, needle: &[u8]) {
     }
 }
 
+fn failed_open_snapshot(application: &StandaloneModelExecutionApplication) -> serde_json::Value {
+    let connection = rusqlite::Connection::open_with_flags(
+        application.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("read-only failed-open facts");
+    let exchange = connection.query_row(
+        "SELECT state,failure_kind,open_receipt_json IS NOT NULL,terminal_receipt_json IS NOT NULL FROM internal_provider_exchanges",
+        [],
+        |row| Ok(serde_json::json!({
+            "state": row.get::<_, String>(0)?,
+            "failureKind": row.get::<_, String>(1)?,
+            "hasOpenReceipt": row.get::<_, bool>(2)?,
+            "hasTerminalReceipt": row.get::<_, bool>(3)?,
+        })),
+    ).expect("failed exchange");
+    let state: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM product_state WHERE stream_id LIKE 'model-admission:%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("admission state");
+    let pool: Vec<u8> = connection
+        .query_row(
+            "SELECT state_json FROM internal_model_request_pool_authority",
+            [],
+            |row| row.get(0),
+        )
+        .expect("request-pool authority");
+    let mut statement = connection
+        .prepare(
+            "SELECT payload FROM outbox WHERE topic='model.admission.changed.v1' ORDER BY sequence",
+        )
+        .expect("admission receipts");
+    let terminals = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .expect("read admission receipts")
+        .map(|row| {
+            serde_json::from_slice::<(String, serde_json::Value)>(&row.expect("receipt row"))
+                .expect("typed admission event")
+                .1
+        })
+        .filter(|event| event["operation"] == "terminal")
+        .collect::<Vec<_>>();
+    let journal = rusqlite::Connection::open_with_flags(
+        application
+            .database_path()
+            .parent()
+            .expect("data directory")
+            .join("provider-network-attempts.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("read-only physical attempts");
+    let mut statement = journal
+        .prepare(
+            "SELECT sequence,outcome,failure_json FROM network_request_attempts ORDER BY sequence",
+        )
+        .expect("physical attempts");
+    let attempts = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("read physical attempts")
+        .map(|row| {
+            let (sequence, outcome, failure) = row.expect("attempt row");
+            serde_json::json!({"sequence": sequence,"outcome": outcome,
+            "failure": serde_json::from_str::<serde_json::Value>(&failure).expect("safe failure")})
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({"exchange":exchange,
+        "admission":serde_json::from_slice::<serde_json::Value>(&state).expect("admission JSON"),
+        "pool":serde_json::from_slice::<serde_json::Value>(&pool).expect("pool JSON"),
+        "terminals":terminals,"attempts":attempts})
+}
+
+fn private_failure_paths(root: &TestDirectory, snapshot: &serde_json::Value) -> Vec<PathBuf> {
+    let directory = root.data().join("logs/sse-failures");
+    let metadata = fs::symlink_metadata(&directory).expect("private failure directory");
+    assert!(metadata.is_dir());
+    assert!(!metadata.file_type().is_symlink());
+    #[cfg(unix)]
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    let canonical_directory = fs::canonicalize(&directory).expect("confined private directory");
+    assert_eq!(
+        canonical_directory,
+        fs::canonicalize(root.data())
+            .expect("canonical fixture data")
+            .join("logs/sse-failures")
+    );
+    let mut allowed = Vec::new();
+    for attempt in snapshot["attempts"].as_array().expect("attempt array") {
+        let diagnostic = &attempt["failure"]["diagnostic"];
+        assert_eq!(diagnostic["responseLogStatus"], "retained");
+        let basename = diagnostic["responseLog"]
+            .as_str()
+            .expect("safe log reference");
+        assert_eq!(basename.len(), 72);
+        assert!(basename.starts_with("sse-"));
+        assert_eq!(
+            Path::new(basename).extension(),
+            Some(std::ffi::OsStr::new("log"))
+        );
+        assert!(
+            basename[4..68]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        let path = directory.join(basename);
+        let metadata = fs::symlink_metadata(&path).expect("referenced private log");
+        assert!(metadata.is_file());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::canonicalize(&path)
+                .expect("canonical private log")
+                .parent(),
+            Some(canonical_directory.as_path())
+        );
+        #[cfg(unix)]
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        allowed.push(path);
+    }
+    allowed
+}
+
+fn assert_public_files_omit(root: &Path, needle: &[u8], private_logs: &[PathBuf]) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(path).expect("read public fixture directory") {
+                pending.push(entry.expect("fixture entry").path());
+            }
+        } else if path.is_file() && !private_logs.contains(&path) {
+            let bytes = fs::read(path).expect("read public fixture file");
+            assert!(
+                !bytes.windows(needle.len()).any(|value| value == needle),
+                "restricted fixture bytes reached public durable data"
+            );
+        }
+    }
+}
+
+fn assert_failed_open_is_settled(
+    root: &TestDirectory,
+    message: &ModelOpenMessage,
+    application: &mut StandaloneModelExecutionApplication,
+    provider: StandaloneProviderConfig,
+    failure_kind: &str,
+) {
+    let before = failed_open_snapshot(application);
+    assert_eq!(before["exchange"]["state"], "failed");
+    assert_eq!(before["exchange"]["failureKind"], failure_kind);
+    assert_eq!(before["exchange"]["hasOpenReceipt"], false);
+    assert_eq!(before["exchange"]["hasTerminalReceipt"], false);
+    assert!(
+        before["admission"]["active"]
+            .as_object()
+            .expect("active reservations")
+            .is_empty()
+    );
+    assert_eq!(
+        before["admission"]["terminal"][&message.model_exchange_id.0]["outcome"],
+        "provider_failed"
+    );
+    for budget in before["admission"]["budgets"]
+        .as_object()
+        .expect("budgets")
+        .values()
+    {
+        assert_eq!(budget["reservedTokens"], 0);
+        assert_eq!(budget["reservedCostMicros"], 0);
+    }
+    let terminals = before["terminals"].as_array().expect("terminal receipts");
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(
+        terminals[0]["receipt"]["modelExchangeId"],
+        message.model_exchange_id.0
+    );
+    assert_eq!(terminals[0]["receipt"]["outcome"], "provider_failed");
+    assert_eq!(terminals[0]["receipt"]["actualTokens"], 0);
+    assert_eq!(terminals[0]["receipt"]["actualCostMicros"], 0);
+    assert!(
+        before["pool"]["routes"]
+            .as_array()
+            .expect("pool routes")
+            .iter()
+            .all(|route| route["exchanges"]
+                .as_array()
+                .expect("pool exchanges")
+                .is_empty())
+    );
+    let attempts = before["attempts"].as_array().expect("physical attempts");
+    assert!(!attempts.is_empty());
+    assert!(
+        u32::try_from(attempts.len()).expect("bounded attempt count")
+            <= winwincode_network::defaults().max_attempts
+    );
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt["outcome"] == "failed")
+    );
+    if failure_kind == "gateway_adapter_identity_conflict" {
+        assert_eq!(attempts[0]["failure"]["kind"], "integrity_invalid");
+        assert_eq!(attempts[0]["failure"]["httpStatus"], 200);
+    } else {
+        assert_eq!(attempts[0]["failure"]["kind"], "transport_interrupted");
+        assert_eq!(attempts[0]["failure"]["phase"], "response_body");
+    }
+    let private_logs = private_failure_paths(root, &before);
+    let error = application
+        .accept_local(&open_frame(message))
+        .expect_err("same-ID failed replay");
+    assert_eq!(
+        error.kind(),
+        winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
+    );
+    let acknowledgement = TypedFrame::new(
+        FrameDirection::ControlPlaneToWorker,
+        ExecutionPortMessage::ModelAckMessage(final_ack(message, &ExecutionSequence(1))),
+    )
+    .expect("typed unissued final acknowledgement");
+    assert!(application.accept_local(&acknowledgement).is_err());
+    assert_eq!(failed_open_snapshot(application), before);
+    let mut restarted = application_with_providers(root, vec![provider]);
+    let error = restarted
+        .accept_local(&open_frame(message))
+        .expect_err("restart cannot repeat failed Provider call");
+    assert_eq!(
+        error.kind(),
+        winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
+    );
+    assert_eq!(failed_open_snapshot(&restarted), before);
+    assert_public_files_omit(&root.data(), SECRET_FIXTURE, &private_logs);
+    assert_public_files_omit(
+        &root.data(),
+        b"provider-production-private-input",
+        &private_logs,
+    );
+    assert_public_files_omit(&root.data(), b"[1m]", &private_logs);
+}
+
 fn external_sse(delta: &str) -> String {
     format!(
         concat!(
@@ -1091,6 +1337,73 @@ fn durable_identity_rejects_stale_fence_and_foreign_session() {
 }
 
 #[test]
+fn durable_identity_uses_renewed_authority_for_original_model_stream_identity() {
+    let root = TestDirectory::new("renewed-identity");
+    let mut message = setup(&root);
+    let mut storage = SqliteStorage::open(root.data()).expect("open storage");
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: at("2030-01-01T00:10:00.000Z"),
+        prior_expires_at: message.lease.expires_at.clone(),
+        fencing_token: message.lease.fencing_token.clone(),
+        job_id: message.lease.job_id.clone(),
+        lease_id: message.lease.lease_id.clone(),
+        message_id: ExecutionMessageId(id("xmsg", 900)),
+        request_id: RequestId(id("req", 900)),
+        sent_at: at("2030-01-01T00:04:00.000Z"),
+        worker_id: message.lease.worker_id.clone(),
+        worker_instance_id: message.lease.worker_instance_id.clone(),
+        attempt: u64::try_from(message.lease.attempt).expect("positive attempt"),
+    };
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&renewal)
+            .expect("renew lease")
+            .status,
+        StorageLeaseWriteStatus::Accepted
+    );
+    drop(storage);
+    message.sent_at = at("2030-01-01T00:06:00.000Z");
+    let identity = DurableProviderGatewayIdentitySource::open(root.data())
+        .expect("reopen durable identity source");
+    identity
+        .authorize(&message)
+        .expect("original model identity authorized beyond its original lease deadline");
+    let mut application = application(&root);
+    let opened = opened(
+        application
+            .accept_local(&open_frame(&message))
+            .expect("renewed model request passes admission and retry planning"),
+    );
+    let batch = application
+        .complete_loopback(&opened, &at("2030-01-01T00:06:01.000Z"))
+        .expect("model stream completes beyond the original deadline");
+    let mut ack = final_ack(
+        &message,
+        &batch.chunks.last().expect("final chunk").sequence,
+    );
+    ack.sent_at = at("2030-01-01T00:11:00.000Z");
+    let frame = TypedFrame::new(
+        FrameDirection::ControlPlaneToWorker,
+        ExecutionPortMessage::ModelAckMessage(ack),
+    )
+    .expect("typed model acknowledgement");
+    application
+        .accept_local(&frame)
+        .expect("original stream receipt remains valid after the current lease expires");
+    let mut invalid = message.clone();
+    invalid.lease.expires_at = at("2030-01-01T00:07:00.000Z");
+    assert!(identity.authorize(&invalid).is_err());
+    invalid = message.clone();
+    invalid.lease.fencing_token = FencingToken("0".to_owned());
+    assert!(identity.authorize(&invalid).is_err());
+    invalid = message;
+    invalid.sent_at = renewal.expires_at;
+    assert!(identity.authorize(&invalid).is_err());
+}
+
+#[test]
 fn external_https_sse_completion_and_credential_leak_share_durable_terminal_path() {
     const EXTERNAL_PROVIDER: &str = "winwincode-https-fixture";
     const EXTERNAL_MODEL: &str = "https-fixture-model";
@@ -1111,12 +1424,26 @@ fn external_https_sse_completion_and_credential_leak_share_durable_terminal_path
         );
         let tls = HttpsFixture::start(external_sse(delta));
         let provider = tls.provider_config(EXTERNAL_PROVIDER);
-        let mut application = application_with_providers(&root, vec![provider]);
-        let open = opened(
-            application
-                .accept_local(&open_frame(&message))
-                .expect("external Provider ModelOpen"),
-        );
+        let mut application = application_with_providers(&root, vec![provider.clone()]);
+        let result = application.accept_local(&open_frame(&message));
+        if expect_failure {
+            assert_eq!(
+                result
+                    .expect_err("credential leak must fail during whole-response ModelOpen")
+                    .kind(),
+                winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
+            );
+            assert_provider_request(&tls.finish());
+            assert_failed_open_is_settled(
+                &root,
+                &message,
+                &mut application,
+                provider,
+                "gateway_adapter_identity_conflict",
+            );
+            continue;
+        }
+        let open = opened(result.expect("external Provider ModelOpen"));
         let batch = application
             .complete_https_sse(&open, &at("2030-01-01T00:00:02.000Z"))
             .unwrap_or_else(|error| panic!("{label}: {error:?}"));
@@ -1131,6 +1458,17 @@ fn external_https_sse_completion_and_credential_leak_share_durable_terminal_path
                 == winwincode_control_plane::ProviderGatewayTerminalOutcome::Failed,
             expect_failure
         );
+        let acknowledgement = TypedFrame::new(
+            FrameDirection::ControlPlaneToWorker,
+            ExecutionPortMessage::ModelAckMessage(final_ack(
+                &message,
+                &batch.chunks.last().expect("terminal chunk").sequence,
+            )),
+        )
+        .expect("typed successful final acknowledgement");
+        application
+            .accept_local(&acknowledgement)
+            .expect("acknowledge successful external stream");
         assert_provider_request(&tls.finish());
         drop(application);
         assert_files_omit(&root.data(), SECRET_FIXTURE);
@@ -1228,28 +1566,22 @@ fn disconnected_anthropic_messages_stream_settles_failure_without_durable_privat
     let tls = HttpsFixture::start_truncated(anthropic_sse("incomplete"));
     let provider =
         tls.anthropic_provider_config(ANTHROPIC_PROVIDER, 64, ProviderTokenPricing::default());
-    let mut application = application_with_providers(&root, vec![provider]);
-    let open = opened(
-        application
-            .accept_local(&open_frame(&message))
-            .expect("Anthropic Messages ModelOpen"),
-    );
-    let batch = application
-        .complete_https_sse(&open, &at("2030-01-01T00:00:02.000Z"))
-        .expect("disconnected Anthropic Messages settlement");
+    let mut application = application_with_providers(&root, vec![provider.clone()]);
+    let error = application
+        .accept_local(&open_frame(&message))
+        .expect_err("whole-response failure must be rejected before an Opened receipt");
     assert_eq!(
-        batch
-            .flow
-            .gateway_terminal
-            .expect("failure terminal")
-            .outcome,
-        winwincode_control_plane::ProviderGatewayTerminalOutcome::Failed
+        error.kind(),
+        winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
     );
     assert_anthropic_provider_request(&tls.finish(), UPSTREAM_MODEL);
-    drop(application);
-    assert_files_omit(&root.data(), SECRET_FIXTURE);
-    assert_files_omit(&root.data(), b"provider-production-private-input");
-    assert_files_omit(&root.data(), b"[1m]");
+    assert_failed_open_is_settled(
+        &root,
+        &message,
+        &mut application,
+        provider,
+        "gateway_adapter_connection_failed",
+    );
 }
 
 #[test]
@@ -1269,41 +1601,22 @@ fn anthropic_credential_echo_is_rejected_before_canonical_or_durable_output() {
     let tls = HttpsFixture::start(anthropic_sse(reflected));
     let provider =
         tls.anthropic_provider_config(ANTHROPIC_PROVIDER, 64, ProviderTokenPricing::default());
-    let mut application = application_with_providers(&root, vec![provider]);
-    let open = opened(
-        application
-            .accept_local(&open_frame(&message))
-            .expect("Anthropic Messages ModelOpen"),
-    );
-    let batch = application
-        .complete_https_sse(&open, &at("2030-01-01T00:00:02.000Z"))
-        .expect("credential echo failure settlement");
+    let mut application = application_with_providers(&root, vec![provider.clone()]);
+    let error = application
+        .accept_local(&open_frame(&message))
+        .expect_err("whole-response failure must be rejected before an Opened receipt");
     assert_eq!(
-        batch
-            .flow
-            .gateway_terminal
-            .expect("failure terminal")
-            .outcome,
-        winwincode_control_plane::ProviderGatewayTerminalOutcome::Failed
+        error.kind(),
+        winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
     );
-    for payload in batch
-        .chunks
-        .iter()
-        .filter_map(|chunk| chunk.payload.as_ref())
-    {
-        let bytes = STANDARD
-            .decode(&payload.data_base64)
-            .expect("decode failure frame");
-        assert!(
-            !bytes
-                .windows(SECRET_FIXTURE.len())
-                .any(|value| value == SECRET_FIXTURE)
-        );
-    }
     assert_anthropic_provider_request(&tls.finish(), UPSTREAM_MODEL);
-    drop(application);
-    assert_files_omit(&root.data(), SECRET_FIXTURE);
-    assert_files_omit(&root.data(), b"provider-production-private-input");
+    assert_failed_open_is_settled(
+        &root,
+        &message,
+        &mut application,
+        provider,
+        "gateway_adapter_identity_conflict",
+    );
 }
 
 #[test]
@@ -1357,27 +1670,22 @@ fn truncated_external_stream_settles_failure_and_cleans_durable_resources() {
     );
     let tls = HttpsFixture::start_truncated(external_sse("truncated response"));
     let provider = tls.provider_config(EXTERNAL_PROVIDER);
-    let mut application = application_with_providers(&root, vec![provider]);
-    let open = opened(
-        application
-            .accept_local(&open_frame(&message))
-            .expect("external Provider ModelOpen"),
-    );
-    let batch = application
-        .complete_https_sse(&open, &at("2030-01-01T00:00:04.000Z"))
-        .expect("settle truncated external stream");
+    let mut application = application_with_providers(&root, vec![provider.clone()]);
+    let error = application
+        .accept_local(&open_frame(&message))
+        .expect_err("whole-response failure must be rejected before an Opened receipt");
     assert_eq!(
-        batch
-            .flow
-            .gateway_terminal
-            .expect("failure terminal")
-            .outcome,
-        winwincode_control_plane::ProviderGatewayTerminalOutcome::Failed
+        error.kind(),
+        winwincode_control_plane::StandaloneModelExecutionErrorKind::Runtime
     );
     assert_provider_request(&tls.finish());
-    drop(application);
-    assert_files_omit(&root.data(), SECRET_FIXTURE);
-    assert_files_omit(&root.data(), INPUT_FIXTURE);
+    assert_failed_open_is_settled(
+        &root,
+        &message,
+        &mut application,
+        provider,
+        "gateway_adapter_connection_failed",
+    );
 }
 
 struct LiveAnthropicGate {

@@ -314,3 +314,30 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
     store.close().expect("store should close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
+
+#[test]
+fn version_eight_upgrade_discards_pending_rotation_and_preserves_device_identity() {
+    let root = temporary_directory("remove-unused-rotation");
+    let mut store = DeviceStore::open(&root).unwrap();
+    let original = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z").unwrap();
+    let database = store.database_path().to_path_buf();
+    store.close().unwrap();
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    legacy.execute_batch("CREATE TABLE device_credential_rotations (command_message_id TEXT, credential_secret BLOB); INSERT INTO device_credential_rotations VALUES ('unused-rotation', zeroblob(32)); PRAGMA user_version = 8;").unwrap();
+    drop(legacy);
+    let store = DeviceStore::open(&root).unwrap();
+    let restored = winwincode_device_client::identity::load_device_identity(&store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored.identity().device_id(),
+        original.identity().device_id()
+    );
+    assert_eq!(restored.credential(), original.credential());
+    store.close().unwrap();
+    let database = rusqlite::Connection::open(database).unwrap();
+    let pending: i64 = database.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'device_credential_rotations'", [], |row| row.get(0)).unwrap();
+    assert_eq!(pending, 0);
+    drop(database);
+    fs::remove_dir_all(root).unwrap();
+}

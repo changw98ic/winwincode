@@ -796,6 +796,7 @@ impl<Credentials, Mapper, Clock> JiraConnector<Credentials, Mapper, Clock> {
         if let Some(description) = &operation.description {
             fields.insert("description".to_owned(), description.clone());
         }
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -849,6 +850,7 @@ impl<Credentials, Mapper, Clock> JiraConnector<Credentials, Mapper, Clock> {
             "rest/api/3/issue/{}/comment",
             encode_path_segment(&operation.issue_key)
         );
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -973,59 +975,66 @@ impl<Credentials, Mapper, Clock> JiraConnector<Credentials, Mapper, Clock> {
             path.trim_start_matches('/')
         );
         let authorization = format!("Bearer {}", token.value());
-        let response = match (method, body) {
-            ("GET", None) => self
-                .agent
-                .get(&url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("User-Agent", USER_AGENT)
-                .call(),
-            ("POST", Some(body)) => self
-                .agent
-                .post(&url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("User-Agent", USER_AGENT)
-                .send_json(body),
-            ("PUT", Some(body)) => self
-                .agent
-                .put(&url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("User-Agent", USER_AGENT)
-                .send_json(body),
-            _ => {
-                return Err(connector_error(
-                    ConnectorCallErrorKind::Permanent,
-                    "JIRA_REQUEST_INVALID",
-                ));
-            }
-        }
-        .map_err(|_| {
-            connector_error(
-                ConnectorCallErrorKind::Retryable,
-                "JIRA_TRANSPORT_UNAVAILABLE",
-            )
+        let replay = if matches!(method, "GET" | "PUT") {
+            winwincode_network::Replay::ReplayExact
+        } else {
+            winwincode_network::Replay::ReconcileFirst
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| match (method, body) {
+                ("GET", None) => agent
+                    .get(&url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("User-Agent", USER_AGENT)
+                    .call(),
+                ("POST", Some(body)) => agent
+                    .post(&url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("User-Agent", USER_AGENT)
+                    .send_json(body),
+                ("PUT", Some(body)) => agent
+                    .put(&url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("User-Agent", USER_AGENT)
+                    .send_json(body),
+                _ => unreachable!("validated connector request"),
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("JIRA_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
         })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "JIRA_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, std::time::SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let retry_after_seconds = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "JIRA_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+            .and_then(winwincode_network::retry_after_seconds);
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             serde_json::from_slice(&bytes).ok()
@@ -1415,7 +1424,14 @@ fn percent_encode(value: &str, query: bool) -> String {
 }
 
 fn response_invalid() -> ConnectorCallError {
-    connector_error(ConnectorCallErrorKind::Retryable, "JIRA_RESPONSE_INVALID")
+    ConnectorCallError::from_network(
+        "JIRA_RESPONSE_INVALID",
+        winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::ProtocolInvalid,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Decode,
+        ),
+    )
 }
 
 fn connector_error(kind: ConnectorCallErrorKind, code: &str) -> ConnectorCallError {

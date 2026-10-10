@@ -1,0 +1,1496 @@
+{
+  "schemaVersion": 1,
+  "kind": "mechanism_behavior_audit",
+  "auditedBaselineCommit": "e994faa55ac2baad964bea5c43a23d919497a9de",
+  "auditIssue": "winwincode-community.7.5.29.17",
+  "submissionIssue": "winwincode-community.7.5.29.18",
+  "scopeCount": 30,
+  "findingCounts": {
+    "cost_confirmed": 13,
+    "conditional": 10,
+    "semantic_defect": 6,
+    "guard_non_defect": 1
+  },
+  "testResultCounts": {
+    "pass": 17,
+    "red": 13
+  },
+  "interpretation": [
+    "pass表示行为或正控已复现，不表示缺陷已修复。",
+    "red包括语义目标断言与选定成本预算，须按findingType分别解释。",
+    "3个范围M18/M19/M21使用仓库实际JS，其余为Rust或原生Rust链。",
+    "当前源码在审计后加入ignore及便携输出包装；原始实测源码摘要和命令退出另存。"
+  ],
+  "artifactCollection": "mechanism-behavior-regression-20261010",
+  "matrixSha256": "5eb559d8e9bfece018097dd7c9d54bb36911538730c9145cfcaa0f7905d0ac0f",
+  "scopes": [
+    {
+      "id": "M01",
+      "title": "空模型队列仍读取设备历史响应",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual DeviceModels.next_chunk and actual DeviceProviderStore.replay_model Rust regression prepared with100empty calls and1/10MiB owned+foreign synthetic history.",
+        "v1 actualexit101 at fixture directory-open precondition, before any next_chunk or cost assert; historical failure retained.",
+        "v2 actualexit101 correctly accepted fixture foreign instance colliding with owned template, exposing a fixture identity alias before the cost batch; failure preserved.",
+        "v3 actualexit0: original desired owned highwater1/foreignlog2/300reads assertions pass; historical setup failures remain in actual receipts.",
+        "Actual100empty next_chunk calls read300rows for both1/10MiB raw synthetic history. Logical chunks JSON handled140108100/1398399300B; storedJSON1401081/13983993B.",
+        "Actual empty loops946.803ms/7246.201ms under current debug profile and concurrent Core compilation; costs are separate from normal bridge intake.",
+        "No foreign chunk was delivered and actual pending Provider set remained empty."
+      ],
+      "notCovered": [
+        "Formal empty-queue scan frequency and isolated contribution were not measured.",
+        "Empty-history cost is separate from the sampled formal bridge intake path.",
+        "JSON-byte counters measure Rust deserialization input, not physical disk IO.",
+        "physical_provider_requests0 is a fixture declaration; pending.is_empty is an actual assertion, not a network request counter.",
+        "Synthetic debug elapsed time with host load/concurrent compilation cannot be mapped to the formal heartbeat gap."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/model-empty-history-v1/result.json",
+          "sha256": "c097f3644f77c9fc2b1f9132ae4e3b35a6fc3ab24943d7cadd9f6291755bef4c",
+          "actualExitCode": 101,
+          "durationSeconds": 3.3477599159814417,
+          "startedAtUtc": "2026-10-10T03:04:08.547291+00:00",
+          "endedAtUtc": "2026-10-10T03:04:11.965754+00:00",
+          "stdoutSha256": "77d7b28e920011c45de44eb9c9ff122debb22f492423f985912649452ab46666",
+          "stderrSha256": "a31f8c18a60670c2c33eab2f0648c063e78dcfd1f4ecbc001efe7f8ab90e5bc7"
+        },
+        {
+          "path": "receipts/model-empty-history-v2/result.json",
+          "sha256": "114e9891cf016875c4715f81a7ded05833f010bfc64ceb04b19d862845e7ee1c",
+          "actualExitCode": 101,
+          "durationSeconds": 2.870264415978454,
+          "startedAtUtc": "2026-10-10T03:11:25.699299+00:00",
+          "endedAtUtc": "2026-10-10T03:11:28.630982+00:00",
+          "stdoutSha256": "ed4e847c63ccbb046cdc0b18474bc96520f4c7af778a55a4b12ace5eee3f8b78",
+          "stderrSha256": "dc7e75ac5af11151cba19e934c9438a366b30adaad7e7b933bccab4c44279925"
+        },
+        {
+          "path": "receipts/model-empty-history-v3/result.json",
+          "sha256": "c9db67cd4e76db38d54c7e1897053346caec483a532b6811abfb478449c6c071",
+          "actualExitCode": 0,
+          "durationSeconds": 19.31013424997218,
+          "startedAtUtc": "2026-10-10T03:44:49.863998+00:00",
+          "endedAtUtc": "2026-10-10T03:45:09.264227+00:00",
+          "stdoutSha256": "c4e300db44e2bdecb1bf476bcd3d49d7a79bc30daae1271cea672ded4ff8e982",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M02",
+      "title": "逐帧投递和已完成游标复读的历史指纹处理",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual500/1000/2527normal intake and same-bridge completed-cursor duplicate-final tests passed with all final frames preserved; completed replay actually asserted0newModelOpen.",
+        "Normal2527cursor reads5053/1140538190JSONB, writes2527/570495449JSONB, fingerprint visits9579857.",
+        "Separate detached2527final accept:2528cursor reads/1144445824JSONB,0cursor writes, fingerprint visits6388256; entire detached accept34.322s.",
+        "Whole live2527loop673.588s includes stream/decode/assert; detached restoration cost is not added as formal causal attribution.",
+        "Attached failed-partial positive control actualexit0: new exchange/seq1 contains no failed first-response fragments.",
+        "Attached actual two-TLS-attempt guard exit0: first declared397B HTTPbody ends at365B retained prefix with retryable unexpected_eof/ResponseReceived/ResponseBody. Fresh second adapter and attempt2 return6complete chunks fromsequence1 without firstpartial content; exact complete local replay opens0additionalHTTP."
+      ],
+      "notCovered": [
+        "Cursor timing is not isolated from full detached accept/body/ACK work.",
+        "Formal normal versus detached restore branch flags were not retained.",
+        "Failed-partial fresh-request isolation is an attached positive control, not an added finding ID.",
+        "JSON/frame/cursor byte counters measure bytes handled in Rust, not physical disk I/O.",
+        "intake_checkpoints.accept_ms includes actual accept await, live.next, Base64 decode and assertion; it is not pure function duration.",
+        "Entire-source manifest changed during execution only at unrelated M11 Worker test fixture; all listed model source/profile SHA remained stable.",
+        "Synthetic debug/APFS TMPDIR/host load and test hooks cannot isolate or reproduce the formal21-minute duration.",
+        "Detached final test uses same bridge with existing completed cursor; no process restart, missing-cursor recovery or crash recovery tested.",
+        "physical_provider_requests=0 is a fixture declaration, not a network counter; completed replay no-new-ModelOpen is an actual asserted behavior.",
+        "Physical decoder guard covers an in-process retry of one original ModelOpen using actual attempt1/2 idempotency keys. Process restart, arbitrary provider/protocol and cancellation matrix remain untested."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/model-intake-v1/result.json",
+          "sha256": "e2e69f3f61881c68d68ed35705dd8d91a82df7b7754ac6182702378065170bba",
+          "actualExitCode": 0,
+          "durationSeconds": 938.479233207996,
+          "startedAtUtc": "2026-10-10T02:48:15.173599+00:00",
+          "endedAtUtc": "2026-10-10T03:03:54.041317+00:00",
+          "stdoutSha256": "2d1d0df32962a6d4f130cc96924714a751a268a631070e62292b627731d73a3f",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/model-failed-partial-v1/result.json",
+          "sha256": "497bd67c9d9620e31b331826f291dd1d45c3c1c0579641efc91ae76aa976921f",
+          "actualExitCode": 0,
+          "durationSeconds": 0.881216041976586,
+          "startedAtUtc": "2026-10-10T03:04:13.274476+00:00",
+          "endedAtUtc": "2026-10-10T03:04:14.554978+00:00",
+          "stdoutSha256": "ea5322465e213669a0caa7485f663649896d5059a3ddfa647d500ab26bb4c33d",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/provider-failed-partial-v1/result.json",
+          "sha256": "ee1e0fba9c75e94cf7d45b9f445af18a60cb987ebc4dc8b7114dd00690d9897a",
+          "actualExitCode": 0,
+          "durationSeconds": 7.79730070795631,
+          "startedAtUtc": "2026-10-10T03:45:09.818372+00:00",
+          "endedAtUtc": "2026-10-10T03:45:17.696934+00:00",
+          "stdoutSha256": "1ddb6a949d1aef6e2a15b60c17bfec25275a9168c8a77b8382104794745e092f",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "FRAME_BODY_N2",
+      "title": "逐帧重读并解析此前全部模型正文",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual normal intake full-frame rows atN500/1000/2527 were124750/499500/3191601; handled JSONbytes128584828/514897058/3287510147.",
+        "Synthetic2527retained frame JSON total2655570B is3222B below formal2658792B; exact actual bytes preserved.",
+        "Separate detached final accept read5054body rows/5311140JSONB, distinct from the3191601normal row visits.",
+        "Normal loop times39.100s/167.688s/673.588s; source/counters establish repeated whole-history scanning, not formal isolated elapsed contribution.",
+        "Formal finite sample was in this body-read function before branch selection; all2527eventually retained."
+      ],
+      "notCovered": [
+        "Old3191601row-visits/3291973334JSONbytes are prior arithmetic, not an independent formal measurement.",
+        "Debug synthetic wall time cannot be assigned as the formal1291.989second interval.",
+        "JSON/frame/cursor byte counters measure bytes handled in Rust, not physical disk I/O.",
+        "intake_checkpoints.accept_ms includes actual accept await, live.next, Base64 decode and assertion; it is not pure function duration.",
+        "Entire-source manifest changed during execution only at unrelated M11 Worker test fixture; all listed model source/profile SHA remained stable.",
+        "Synthetic debug/APFS TMPDIR/host load and test hooks cannot isolate or reproduce the formal21-minute duration.",
+        "Detached final test uses same bridge with existing completed cursor; no process restart, missing-cursor recovery or crash recovery tested.",
+        "physical_provider_requests=0 is a fixture declaration, not a network counter; completed replay no-new-ModelOpen is an actual asserted behavior."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/model-intake-v1/result.json",
+          "sha256": "e2e69f3f61881c68d68ed35705dd8d91a82df7b7754ac6182702378065170bba",
+          "actualExitCode": 0,
+          "durationSeconds": 938.479233207996,
+          "startedAtUtc": "2026-10-10T02:48:15.173599+00:00",
+          "endedAtUtc": "2026-10-10T03:03:54.041317+00:00",
+          "stdoutSha256": "2d1d0df32962a6d4f130cc96924714a751a268a631070e62292b627731d73a3f",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "MP-C01",
+      "title": "SSE终态与未关闭HTTP正文的等待边界",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual local TLS reader remained pending558.402ms after valid complete SSE terminal with5heartbeat comment chunks, while chunked HTTP body remained open.",
+        "Only release sent the terminating HTTP zero chunk; actual reader then obtainedread0 and Completed with final preserved.",
+        "One actual synthetic HTTPrequest; no external Provider."
+      ],
+      "notCovered": [
+        "No Content-Length-complete or already-terminated HTTP-body wait tested.",
+        "SSE terminal early-return authorization requires an independent protocol contract.",
+        "Fixture global total disabled; idle2s was not reached. Actual timeout/cancellation boundaries were not tested here.",
+        "Finite558ms observation does not establish infinite hang or semantic protocol defect.",
+        "This is independent from formal third Provider already accepted/succeeded before sampled Worker intake."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/provider-tls-v2/result.json",
+          "sha256": "529f4e1e8789e3ec1d1d13fc005cb1616c83455bf12fe8f8c15ed52f67a4970d",
+          "actualExitCode": 0,
+          "durationSeconds": 9.824239999987185,
+          "startedAtUtc": "2026-10-10T02:48:16.654071+00:00",
+          "endedAtUtc": "2026-10-10T02:48:26.548382+00:00",
+          "stdoutSha256": "186d80bab1a2bd45d5d0836a164b69d3efb6bf9e038c7247cee9322f0271169e",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "MP-C02",
+      "title": "响应超限时已收字节与用量诊断的保留",
+      "findingType": "semantic_defect",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual reader had272B complete valid usage prefix(input11/output5) in memory before crossing336B response limit.",
+        "SizeLimit error discarded observed_receipt and response prefix, with true firstfailure retryable=true.",
+        "Actual Device model_invocation_attempts first failed row retainedNULL accounting_chunks andNULL response_bytes.",
+        "Bounded2s authority test actually used1HTTP/1attempt and exact retained failure replay opened0requests.",
+        "Old provider-tls-v1 can_start||true harness was terminated(exit-2) after retrying; that historical failure remains preserved."
+      ],
+      "notCovered": [
+        "No production fix implemented.",
+        "Known firstusage is an independently parsed synthetic prefix, not a recovered formal missing usage fact.",
+        "Subsequent not_sent retries happened in the old unbounded harness; corrected actual run usedoneattempt only.",
+        "Formal third attempt was accepted/succeeded, so SizeLimit is not established as its cause."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/provider-tls-v1/result.json",
+          "sha256": "595ab69b8f653683caa1e4514788de1dabac2ce9b4b4989e1bbf8ea4c2927db6",
+          "actualExitCode": -2,
+          "durationSeconds": 263.1350502909627,
+          "startedAtUtc": "2026-10-10T02:35:58.196139+00:00",
+          "endedAtUtc": "2026-10-10T02:40:21.384631+00:00",
+          "stdoutSha256": "7cd15a0dc87c015d2ad5fb71166f535be0b4eb307bc97fefa467e9b32e4a90d7",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/provider-tls-v2/result.json",
+          "sha256": "529f4e1e8789e3ec1d1d13fc005cb1616c83455bf12fe8f8c15ed52f67a4970d",
+          "actualExitCode": 0,
+          "durationSeconds": 9.824239999987185,
+          "startedAtUtc": "2026-10-10T02:48:16.654071+00:00",
+          "endedAtUtc": "2026-10-10T02:48:26.548382+00:00",
+          "stdoutSha256": "186d80bab1a2bd45d5d0836a164b69d3efb6bf9e038c7247cee9322f0271169e",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M03",
+      "title": "逐新增运行事件校验并重写全历史账本",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"accepted_events\": 100, \"changed_body_rejected\": true, \"duplicate\": {\"ledger_digest_bytes\": 0, \"ledger_digest_serializations\": 0, \"ledger_read_bytes\": 0, \"ledger_reads\": 0, \"ledger_state_bytes\": 0, \"ledger_state_serializations\": 0, \"old_event_validations\": 0}, \"metrics\": {\"ledger_digest_bytes\": 2748465, \"ledger_digest_serializations\": 200, \"ledger_read_bytes\": 1360485, \"ledger_reads\": 99, \"ledger_state_bytes\": 1387429, \"ledger_state_serializations\": 100, \"old_event_validations\": 4950}}",
+        "size=200; observed counters/guards={\"accepted_events\": 200, \"changed_body_rejected\": true, \"duplicate\": {\"ledger_digest_bytes\": 0, \"ledger_digest_serializations\": 0, \"ledger_read_bytes\": 0, \"ledger_reads\": 0, \"ledger_state_bytes\": 0, \"ledger_state_serializations\": 0, \"old_event_validations\": 0}, \"metrics\": {\"ledger_digest_bytes\": 10787265, \"ledger_digest_serializations\": 400, \"ledger_read_bytes\": 5366635, \"ledger_reads\": 199, \"ledger_state_bytes\": 5420079, \"ledger_state_serializations\": 200, \"old_event_validations\": 19900}}",
+        "size=400; observed counters/guards={\"accepted_events\": 400, \"changed_body_rejected\": true, \"duplicate\": {\"ledger_digest_bytes\": 0, \"ledger_digest_serializations\": 0, \"ledger_read_bytes\": 0, \"ledger_reads\": 0, \"ledger_state_bytes\": 0, \"ledger_state_serializations\": 0, \"old_event_validations\": 0}, \"metrics\": {\"ledger_digest_bytes\": 42764865, \"ledger_digest_serializations\": 800, \"ledger_read_bytes\": 21328935, \"ledger_reads\": 399, \"ledger_state_bytes\": 21435379, \"ledger_state_serializations\": 400, \"old_event_validations\": 79800}}",
+        "Contiguous events receive Accepted ACKs at their own sequence",
+        "Exact final receipt replay returns Duplicate without ledger load or state serialization",
+        "Changed exact receipt body returns RejectedConflict"
+      ],
+      "notCovered": [
+        "Does not cover cross-Job rollover, stale lease rejection, gap rejection or production ACK latency."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m03-v1/result.json",
+          "sha256": "dca0b6beec23f11b9d70543fe6f7af8bbadf1e398d32af3fca9d01b7db3e880f",
+          "actualExitCode": 0,
+          "durationSeconds": 25.879409959015902,
+          "startedAtUtc": "2026-10-10T03:10:39.696704+00:00",
+          "endedAtUtc": "2026-10-10T03:11:05.643434+00:00",
+          "stdoutSha256": "db0bd65dbd17582bd4c776e9052a57feb19cd0f169e89e98f72eca11033753b6",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M04",
+      "title": "运行事件与ACK更新的全量快照读写",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 324220, \"replay_reads\": 1, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 97593346, \"replay_reads\": 600, \"replay_write_bytes\": 32747262, \"replay_writes\": 200, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_events_after_ack\": 100}",
+        "size=200; observed counters/guards={\"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 648820, \"replay_reads\": 1, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 389829946, \"replay_reads\": 1200, \"replay_write_bytes\": 130375862, \"replay_writes\": 400, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_events_after_ack\": 200}",
+        "size=400; observed counters/guards={\"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 1298020, \"replay_reads\": 1, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 1558583146, \"replay_reads\": 2400, \"replay_write_bytes\": 520393062, \"replay_writes\": 800, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_events_after_ack\": 400}",
+        "Actual RuntimeReplayResponder accepts all legal events and ACKs",
+        "All original N frames remain after ACK, preserving replay evidence",
+        "Exact event duplicate writes zero snapshots",
+        "Changed event duplicate returns Conflict"
+      ],
+      "notCovered": [
+        "Outer Core polling/projection five-read source estimate is not exercised.",
+        "ReplayAuthority fixture checks exact lease/stream/identity equality; does not simulate registry expiry decisions.",
+        "ACK comes from a canonical local unit helper with fixed messageId and is passed directly to the responder/outbox. Full transport and ControlPlane ACK receipt identity/idempotency round trip is not exercised."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-codex-m04-m07-c02-v1/result.json",
+          "sha256": "5ad666b8092cc3750d72a5ec06bb6a49b92a4d2d9e461a20131eb0d094050855",
+          "actualExitCode": 0,
+          "durationSeconds": 156.30284287501127,
+          "startedAtUtc": "2026-10-10T03:04:54.372590+00:00",
+          "endedAtUtc": "2026-10-10T03:07:30.936483+00:00",
+          "stdoutSha256": "039cc74fbb03bf62ac655781613449befbf438fe1115625dbdd3317e31ebef94",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M05",
+      "title": "精确回执查询随已发布outbox历史增长的成本",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=1000; observed counters/guards={\"commit\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 7030}, \"load_receipt\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 7030}, \"returned_events\": 1, \"settled_history\": 1001}",
+        "size=10000; observed counters/guards={\"commit\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 70030}, \"load_receipt\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 70030}, \"returned_events\": 1, \"settled_history\": 10001}",
+        "Canonical commit returns only its target event",
+        "Exact load_receipt replay preserves the exact event vector",
+        "Every synthetic unrelated old row is canonically published"
+      ],
+      "notCovered": [
+        "Does not establish active batch database row count, physical I/O, or transaction latency."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m05-m06-v1/result.json",
+          "sha256": "b6cb20ea6661114f448d1f887716e022716c6e5f98928b8c3c3e31e66b3882b6",
+          "actualExitCode": 0,
+          "durationSeconds": 38.15176174999215,
+          "startedAtUtc": "2026-10-10T03:09:14.411810+00:00",
+          "endedAtUtc": "2026-10-10T03:09:52.577120+00:00",
+          "stdoutSha256": "6d67737dfd538be62cc67e61e2ecd1d41923e16fecf6e0d3e58ed8eb07881898",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M06",
+      "title": "空待发审计查询遍历已落库历史",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=1000; observed counters/guards={\"empty_pending_audit\": true, \"metrics\": {\"audit_vm_steps\": 4013, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 0}, \"settled_history\": 1001}",
+        "size=10000; observed counters/guards={\"empty_pending_audit\": true, \"metrics\": {\"audit_vm_steps\": 40013, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 0}, \"settled_history\": 10001}",
+        "All synthetic audit acknowledgements go through mark_audit_event_persisted",
+        "Empty pending audit result remains empty",
+        "All N+1 settled audit rows remain retained"
+      ],
+      "notCovered": [
+        "Does not run an audit sink worker or measure real polling cadence."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m05-m06-v1/result.json",
+          "sha256": "b6cb20ea6661114f448d1f887716e022716c6e5f98928b8c3c3e31e66b3882b6",
+          "actualExitCode": 0,
+          "durationSeconds": 38.15176174999215,
+          "startedAtUtc": "2026-10-10T03:09:14.411810+00:00",
+          "endedAtUtc": "2026-10-10T03:09:52.577120+00:00",
+          "stdoutSha256": "6d67737dfd538be62cc67e61e2ecd1d41923e16fecf6e0d3e58ed8eb07881898",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M07",
+      "title": "Worker空待发查询遍历已发送传输历史",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=1000; observed counters/guards={\"empty\": true, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 5021, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}}",
+        "size=10000; observed counters/guards={\"empty\": true, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 50021, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}}",
+        "Each distinct dispatch reply is retained by real ExecutionOutbox then record_sent",
+        "No sent row is returned as pending",
+        "Empty result is checked with the canonical batch limit of 100"
+      ],
+      "notCovered": [
+        "Worker drive cursor reset and 25ms cadence are not exercised.",
+        "No active batch sent history size measured."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-codex-m04-m07-c02-v1/result.json",
+          "sha256": "5ad666b8092cc3750d72a5ec06bb6a49b92a4d2d9e461a20131eb0d094050855",
+          "actualExitCode": 0,
+          "durationSeconds": 156.30284287501127,
+          "startedAtUtc": "2026-10-10T03:04:54.372590+00:00",
+          "endedAtUtc": "2026-10-10T03:07:30.936483+00:00",
+          "stdoutSha256": "039cc74fbb03bf62ac655781613449befbf438fe1115625dbdd3317e31ebef94",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M08",
+      "title": "诊断 Artifact 查询先校验所有历史 Job 输出再按当前 Job 过滤",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"classification\": \"conditional terminal-history cost\", \"current_job_empty\": true, \"metrics\": {\"diagnostic_raw_bytes\": 204800, \"diagnostic_validations\": 200, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"records_after_final_ack\": 100, \"transport_rows_after_final_ack\": 0, \"unrelated_corrupt_record_blocks_query\": true}",
+        "size=200; observed counters/guards={\"classification\": \"conditional terminal-history cost\", \"current_job_empty\": true, \"metrics\": {\"diagnostic_raw_bytes\": 409600, \"diagnostic_validations\": 400, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"records_after_final_ack\": 200, \"transport_rows_after_final_ack\": 0, \"unrelated_corrupt_record_blocks_query\": true}",
+        "size=400; observed counters/guards={\"classification\": \"conditional terminal-history cost\", \"current_job_empty\": true, \"metrics\": {\"diagnostic_raw_bytes\": 819200, \"diagnostic_validations\": 800, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"records_after_final_ack\": 400, \"transport_rows_after_final_ack\": 0, \"unrelated_corrupt_record_blocks_query\": true}",
+        "Every upload is canonically retained and receives Accepted final ACK",
+        "Final ACK leaves zero transport rows and retains N evidence records",
+        "Current unrelated authority has no pending artifacts and no accepted references",
+        "Corruption confined to one unrelated temporary record causes the current query to fail"
+      ],
+      "notCovered": [
+        "No active batch artifact backlog measured.",
+        "Unrelated-record corruption implication is reported as observed behavior, not independently adjudicated as a product contract defect.",
+        "ACK comes from a canonical local unit helper with fixed messageId and is passed directly to the responder/outbox. Full transport and ControlPlane ACK receipt identity/idempotency round trip is not exercised."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m08-v1/result.json",
+          "sha256": "e0cae7b3c8b906b93372e938ea8071e1f4cfa470c225dabaea9c4e29e27aebac",
+          "actualExitCode": 0,
+          "durationSeconds": 4.829796625010204,
+          "startedAtUtc": "2026-10-10T03:07:31.693628+00:00",
+          "endedAtUtc": "2026-10-10T03:07:36.799901+00:00",
+          "stdoutSha256": "8bee36844974aed564fd7b596805666d4f74bb691672a91fc32e9ca1dc1c5980",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M09",
+      "title": "非空post-action记录触发两次运行快照写入",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"classification\": \"conditional nonempty post-action hook cost\", \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 69873516, \"replay_reads\": 300, \"replay_write_bytes\": 23761690, \"replay_writes\": 100, \"run_write_bytes\": 3459674, \"run_writes\": 200, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"noops\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_traces\": 100}",
+        "size=200; observed counters/guards={\"classification\": \"conditional nonempty post-action hook cost\", \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 280957566, \"replay_reads\": 600, \"replay_write_bytes\": 94593940, \"replay_writes\": 200, \"run_write_bytes\": 11909574, \"run_writes\": 400, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"noops\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_traces\": 200}",
+        "size=400; observed counters/guards={\"classification\": \"conditional nonempty post-action hook cost\", \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 1126935666, \"replay_reads\": 1200, \"replay_write_bytes\": 377528440, \"replay_writes\": 400, \"run_write_bytes\": 43809374, \"run_writes\": 800, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"noops\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 0, \"runtime_rows\": 0}, \"retained_traces\": 400}",
+        "All nonempty hooks produce retained traces",
+        "Each complete trace path performs two save_run calls",
+        "Empty hook actions and an exact retained source duplicate produce no writes"
+      ],
+      "notCovered": [
+        "Private real retain_post_action_trace path called directly; no shell execution or full Core tool-fact path."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m09-v1/result.json",
+          "sha256": "301ea755290ef4d42cc7b11235a944721e211a0a1841ee5c274444c01a110d80",
+          "actualExitCode": 0,
+          "durationSeconds": 94.65853504202096,
+          "startedAtUtc": "2026-10-10T03:07:37.701795+00:00",
+          "endedAtUtc": "2026-10-10T03:09:12.601184+00:00",
+          "stdoutSha256": "95c3bbf5b0465e45603b0e1f8ee06557d959009319110441891f8e145de5d7f5",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M10",
+      "title": "同Job多次续期后的历史回执检查成本",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"classification\": \"conditional long-job authority-history cost\", \"metrics\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 92083, \"lease_receipt_bytes\": 2240250, \"lease_receipt_rows\": 5150, \"receipt_vm_steps\": 0}, \"plan\": \"SEARCH execution_lease_request_receipts USING INDEX sqlite_autoindex_execution_lease_request_receipts_1 (operation=? AND job_id=?)\", \"replay\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 0}, \"retained_accepted_receipts\": 101}",
+        "size=200; observed counters/guards={\"classification\": \"conditional long-job authority-history cost\", \"metrics\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 364183, \"lease_receipt_bytes\": 8830500, \"lease_receipt_rows\": 20300, \"receipt_vm_steps\": 0}, \"plan\": \"SEARCH execution_lease_request_receipts USING INDEX sqlite_autoindex_execution_lease_request_receipts_1 (operation=? AND job_id=?)\", \"replay\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 0}, \"retained_accepted_receipts\": 201}",
+        "size=400; observed counters/guards={\"classification\": \"conditional long-job authority-history cost\", \"metrics\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 1448383, \"lease_receipt_bytes\": 35061000, \"lease_receipt_rows\": 80600, \"receipt_vm_steps\": 0}, \"plan\": \"SEARCH execution_lease_request_receipts USING INDEX sqlite_autoindex_execution_lease_request_receipts_1 (operation=? AND job_id=?)\", \"replay\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 0, \"lease_receipt_bytes\": 0, \"lease_receipt_rows\": 0, \"receipt_vm_steps\": 0}, \"retained_accepted_receipts\": 401}",
+        "Each advancing expiry is Accepted and stamped as requested",
+        "Exact final atomic renewal replay returns Duplicate and parses zero history",
+        "Canonical claim plus all accepted renew receipts remain retained",
+        "Matching job/operation query plan uses SEARCH"
+      ],
+      "notCovered": [
+        "No ordinary short-Job severity or production renewal latency measured.",
+        "Other-Job table-wide scan is not claimed."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-m10-v1/result.json",
+          "sha256": "ea6cf7d6060d8a02ada47a7f767b6c38591550f90f9e839d6e250896bb0f1a36",
+          "actualExitCode": 0,
+          "durationSeconds": 7.969824458006769,
+          "startedAtUtc": "2026-10-10T03:09:53.613067+00:00",
+          "endedAtUtc": "2026-10-10T03:10:01.592898+00:00",
+          "stdoutSha256": "5a3eab0815c1f13bd06396ffa4cb3bdbec9f87f05ea617eacf2f59cf59533c99",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "STORAGE-C01",
+      "title": "Worker出站队列容量边界",
+      "findingType": "guard_non_defect",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=1000; observed counters/guards={\"classification\": \"bounded necessary capacity guard\", \"default_authority_cap\": 1024, \"default_global_bytes_cap\": 67108864, \"global_capacity_rejection_verified\": true, \"metrics\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 13025, \"lease_receipt_bytes\": 435, \"lease_receipt_rows\": 1, \"receipt_vm_steps\": 0}, \"queued_rows\": 1001, \"retained_bytes\": 13023}",
+        "size=10000; observed counters/guards={\"classification\": \"bounded necessary capacity guard\", \"default_authority_cap\": 1024, \"default_global_bytes_cap\": 67108864, \"global_capacity_rejection_verified\": true, \"metrics\": {\"audit_vm_steps\": 0, \"capacity_vm_steps\": 121025, \"lease_receipt_bytes\": 435, \"lease_receipt_rows\": 1, \"receipt_vm_steps\": 0}, \"queued_rows\": 10001, \"retained_bytes\": 130023}",
+        "Every authority remains under default 1024 cap",
+        "Main measurement preserves the default 64MiB global limit",
+        "A valid constrained configuration rejects a new frame at retained-byte boundary",
+        "Exact already-retained frame replay remains accepted at the same boundary"
+      ],
+      "notCovered": [
+        "Default 64MiB exhaustion itself is not created.",
+        "Linear aggregate scan alone is not classified as a product bug."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-c01-v1/result.json",
+          "sha256": "ad7acc732c2e0d2778224c9b34d10e946a28d250edcadcaa5cec2efc7c4d06ec",
+          "actualExitCode": 0,
+          "durationSeconds": 36.411694333015475,
+          "startedAtUtc": "2026-10-10T03:10:02.398375+00:00",
+          "endedAtUtc": "2026-10-10T03:10:38.819073+00:00",
+          "stdoutSha256": "d9e03d1a3495669e9b4b5f6881aa701724ca0fa5d1d3923a5b89796a005d1940",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "STORAGE-C02",
+      "title": "ACK对其他流积压的读取与精确压缩",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "size=100; observed counters/guards={\"classification\": \"conditional backlog cost\", \"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 91872, \"runtime_rows\": 99}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 92800, \"runtime_rows\": 100}, \"remaining_other_streams\": 99}",
+        "size=200; observed counters/guards={\"classification\": \"conditional backlog cost\", \"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 184672, \"runtime_rows\": 199}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 185600, \"runtime_rows\": 200}, \"remaining_other_streams\": 199}",
+        "size=400; observed counters/guards={\"classification\": \"conditional backlog cost\", \"duplicate\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 370272, \"runtime_rows\": 399}, \"metrics\": {\"diagnostic_raw_bytes\": 0, \"diagnostic_validations\": 0, \"pending_vm_steps\": 0, \"replay_read_bytes\": 0, \"replay_reads\": 0, \"replay_write_bytes\": 0, \"replay_writes\": 0, \"run_write_bytes\": 0, \"run_writes\": 0, \"runtime_row_bytes\": 371200, \"runtime_rows\": 400}, \"remaining_other_streams\": 399}",
+        "ACK decodes N rows and compacts only the exact target stream",
+        "All N-1 other streams remain retained",
+        "Repeated ACK decodes N-1 rows and deletes no other stream"
+      ],
+      "notCovered": [
+        "ACK receipt is synthesized with legitimate accepted sequence/status; no full control-plane round trip.",
+        "Healthy per-ACK backlog size and runtime worker cadence are not measured."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/storage-codex-m04-m07-c02-v1/result.json",
+          "sha256": "5ad666b8092cc3750d72a5ec06bb6a49b92a4d2d9e461a20131eb0d094050855",
+          "actualExitCode": 0,
+          "durationSeconds": 156.30284287501127,
+          "startedAtUtc": "2026-10-10T03:04:54.372590+00:00",
+          "endedAtUtc": "2026-10-10T03:07:30.936483+00:00",
+          "stdoutSha256": "039cc74fbb03bf62ac655781613449befbf438fe1115625dbdd3317e31ebef94",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M12",
+      "title": "InputResponse 对原始租约做全等检查，拒绝已证明的同一 attempt 续期",
+      "findingType": "semantic_defect",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Stable-source v3 executes real Worker accept_control, ProductionCodexAdapter and embedded Core waiter. Three cases produce two passes and one desired red.",
+        "Legal renewal at00:10 is actually consumed; currentExpiry changes from00:15 to00:30. Valid Provided at00:11 is rejected UnexpectedMessage; the stored operation stays pending and receiptCount remains0.",
+        "No-renewal positive actually consumes the original waiter once, produces one response output, preserves one receipt and accepts exact response replay without another ModelOpen.",
+        "Changed-owner and changed-fence controls use the current lease stamp, then change identity; actual accept_control rejects and the original operation stays pending with no next ModelOpen. Late Provided at00:15:01 is rejected after the original00:15 input deadline but before renewed00:30 lease; only real timeout empty answer[] reaches the original Core waiter. All negative controls pass.",
+        "Existing timeout-after-renewal control passes with stable source."
+      ],
+      "notCovered": [
+        "The legal-renewal test stops at its desired acceptance assertion. Its subsequent original-waiter exactly-once checks are not reached.",
+        "Historical v1/v2 helper release guards failed before these behavior assertions."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/interaction-m12-v1/result.json",
+          "sha256": "016fcff8b2ce1474dc76af0dbf030324f9bfe41819b9f3706c73cbaffe3ef21c",
+          "actualExitCode": 101,
+          "durationSeconds": 4.4764549160026945,
+          "startedAtUtc": "2026-10-10T02:53:39.003789+00:00",
+          "endedAtUtc": "2026-10-10T02:53:43.841208+00:00",
+          "stdoutSha256": "688297a07f13dc77983a7891fe36ab53640e127dc23f5ee7bd2080fd1a919838",
+          "stderrSha256": "bef7f5ff2f233064561b1d333d67670ff6443de87b0680885e44de3c93b48ed8"
+        },
+        {
+          "path": "receipts/interaction-m12-v2/result.json",
+          "sha256": "1900472289ae2ee201c401d1f5b1d37727db13cb110a5da7937c9c8191fb878b",
+          "actualExitCode": 101,
+          "durationSeconds": 1.082960167026613,
+          "startedAtUtc": "2026-10-10T02:54:58.154390+00:00",
+          "endedAtUtc": "2026-10-10T02:54:59.561961+00:00",
+          "stdoutSha256": "1585422da70ed40039ae8366bfb7760600ca8495cc748ed22ba163f2f09d4840",
+          "stderrSha256": "80b41741f5ca289c9467cf4f8d80d704b7faccd953a5d35b6f665e7615f8d1d2"
+        },
+        {
+          "path": "receipts/interaction-m12-v3/result.json",
+          "sha256": "ff7350ecdd3ed1d8de7e84c63299a9abbe1848aea996fa8e54a3358d22681d08",
+          "actualExitCode": 101,
+          "durationSeconds": 89.77382062503602,
+          "startedAtUtc": "2026-10-10T03:10:20.993409+00:00",
+          "endedAtUtc": "2026-10-10T03:11:51.073872+00:00",
+          "stdoutSha256": "3f48382bc2140e71d4493c9876e88686dfc3ff3af8a9d6a4943f7c6d97ad245f",
+          "stderrSha256": "fa44e8ee5ca703741d2046d6accfead983bdf6a9185eb3ab748dad44188f5625"
+        },
+        {
+          "path": "receipts/interaction-existing-timeout-v1/result.json",
+          "sha256": "2f9a33043efe44507f5bccdb3c34ac23844aaff07e6861f27b03171684f80302",
+          "actualExitCode": 0,
+          "durationSeconds": 14.88755141600268,
+          "startedAtUtc": "2026-10-10T03:14:35.320759+00:00",
+          "endedAtUtc": "2026-10-10T03:14:50.460562+00:00",
+          "stdoutSha256": "9d39f16152ea0f65224a7b25bf68189e2b1923d7f624df3c1ff8d71fd33f0892",
+          "stderrSha256": "a1123432b88efda9be4a1d5d8a8360af9147fee6c4c619b77275ba6b1bd4e2e9"
+        }
+      ]
+    },
+    {
+      "id": "M13",
+      "title": "DeferredUntil 被压成 None，首个长 Retry-After 被误报重试预算耗尽并硬停止",
+      "findingType": "semantic_defect",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Stable-source v3 calls actual execute_model_using through one injected local TLS factory invocation and one physical request.",
+        "Actual persisted Attempt1 physical503 RetryAfter301000ms remains retryable. The same RequestRetry(4,exchange_id) decision_after applied to this real failure_json returns DeferredUntil(301.176s).",
+        "At19ms execution records retry_budget_exhausted and persists/returns final retryable=false while physical failure remains retryable.",
+        "The actual red assertion fails because a first DeferredUntil is classified as exhausted four-attempt budget."
+      ],
+      "notCovered": [
+        "Exact exchange replay assertions follow the red assertion and were not reached.",
+        "No301-second wait occurs. The fixture verifies the present immediate hard stop.",
+        "v1 is a historical TLS-hook compile failure; v2 whole source changed while compiling; v3 is stable.",
+        "policyDecision is a real policy call using the persisted actual failure, not internal execute_model_using branch telemetry."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/provider-m13-v1/result.json",
+          "sha256": "ae0a1921887ccf5d051f615a81a429f971cd0d1645e6e046f497d05e50c6b45e",
+          "actualExitCode": 101,
+          "durationSeconds": 517.7529541249969,
+          "startedAtUtc": "2026-10-10T02:11:58.569268+00:00",
+          "endedAtUtc": "2026-10-10T02:20:36.326469+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "ec4c5e27fec78bb6d5c2891bb977e49fc05d3f922394eec951ca5fc6a9705341"
+        },
+        {
+          "path": "receipts/provider-m13-v2/result.json",
+          "sha256": "45c3aa903da85bb0c3b6c2284eb6040a2127b8d71abbf207f66cffb5bed0a6b0",
+          "actualExitCode": 101,
+          "durationSeconds": 689.7471685000346,
+          "startedAtUtc": "2026-10-10T02:22:08.096122+00:00",
+          "endedAtUtc": "2026-10-10T02:33:37.848607+00:00",
+          "stdoutSha256": "87b9009836e687221ba04b44c0dad20f974315e4324f3e4496dc39575971c423",
+          "stderrSha256": "2d24cdf65fd0289e6da1e30f5c87492784d324fb99552a77c0538a81de763ae6"
+        },
+        {
+          "path": "receipts/provider-m13-v3/result.json",
+          "sha256": "df2fc75715b160425fc160a56c8d1d513fdb7720f1662a286be02aac03621151",
+          "actualExitCode": 101,
+          "durationSeconds": 0.8142139169503935,
+          "startedAtUtc": "2026-10-10T02:35:57.142023+00:00",
+          "endedAtUtc": "2026-10-10T02:35:58.003959+00:00",
+          "stdoutSha256": "3058760e571a5d0aad7c86687ea8813a1f1a096d26c745fab8c38a4002884915",
+          "stderrSha256": "cb3a5fd28ef601720bc6450699f4d1299ca3567efbddb4740f785d9bff15cd24"
+        }
+      ]
+    },
+    {
+      "id": "M14",
+      "title": "多题request_user_input的Core与Adapter契约",
+      "findingType": "semantic_defect",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Stable-source v2 executes real public exec/ALL_TOOLS discovery and actual request_user_input handler. Default uses unchanged production TurnInputRequest settings;2 legal questions emit isBlocking=false.",
+        "Test-injected existing Core Plan mode emits3 legal questions and isBlocking=true; this does not prove a public production Plan API.",
+        "Both actual model-frame acceptances pass. Each later real Worker poll reports one UnexpectedMessage during Adapter effect collection.",
+        "After real repeated poll and durable outbox flush, Default20.059s and Plan20.036s actual post-frame observation windows have inputRequests=0 and JobOutcomes=[].",
+        "Two desired assertions fail at fixture line109 because legal questions do not reach the product input projection. Adapter singleton question admission at frozen adapter.rs3256–3257 is incompatible with these real legal Core events.",
+        "Existing non-root request_user_input RespondToModel exclusion actually passes inCore v4 and v5."
+      ],
+      "notCovered": [
+        "No InfrastructureError Job terminal is observed in either v2 bounded actual window. Poll error alone is not a terminal; no synthetic terminal is inserted.",
+        "Plan is test-only Core mode injection; production Default reachability is covered separately.",
+        "v1 premature unwrap and historical Core entry96/101 remain separately retained; v2 is source stable.",
+        "Core v5 whole known-file hashes changed only for the unrelated RA test fixture during compilation. All Core hook/test source files remained stable; four actual controls pass."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/interaction-m14-v1/result.json",
+          "sha256": "cf226847a32673bdb44cde624e9474c1ace11c8d210a5348247d8d6d2f1055ec",
+          "actualExitCode": 101,
+          "durationSeconds": 31.895743708999362,
+          "startedAtUtc": "2026-10-10T03:11:51.782534+00:00",
+          "endedAtUtc": "2026-10-10T03:12:23.956703+00:00",
+          "stdoutSha256": "4cbc092b2761d2dec2983134ce250f042078f4a10791a78333b4adddd5fd0647",
+          "stderrSha256": "31005dc41622cdb94bd01a768af9b467e81816615b350bfa59f4f7ab7627e374"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v1/result.json",
+          "sha256": "58b556efa7c2633d9ff3121457ea85e784d635db2dbecc71d417c76b90858c5c",
+          "actualExitCode": 96,
+          "durationSeconds": 2.082353374978993,
+          "startedAtUtc": "2026-10-10T02:56:47.209403+00:00",
+          "endedAtUtc": "2026-10-10T02:56:49.393890+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "d214fb01a20bfaadd90b9aecc6efb763765840c7505d224663461f990af48092"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v2/result.json",
+          "sha256": "44e4810fed9d0a7233712d60c29a820d55cb99593aab2d08a775f74fb817eaca",
+          "actualExitCode": 101,
+          "durationSeconds": 2.429362625000067,
+          "startedAtUtc": "2026-10-10T02:58:53.578454+00:00",
+          "endedAtUtc": "2026-10-10T02:58:56.110639+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "3d98971b7583a0f11808867a9f9ad7542ff9f2d57ac04d56564182b2357c106a"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v3/result.json",
+          "sha256": "c6caba16c52574ce77b156bf4cd1e7794ef3f581f324ffee70347ac497c51931",
+          "actualExitCode": 101,
+          "durationSeconds": 3.36816012498457,
+          "startedAtUtc": "2026-10-10T03:00:47.388263+00:00",
+          "endedAtUtc": "2026-10-10T03:00:50.843232+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "b9368ad7e8e38e8dd5eb1b2668f17c908613e1c52e898caf157220e16afcc1e9"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v4/result.json",
+          "sha256": "c2ec6ba732a85aaafd6f1982c5099d51c54fe8ffe91c2a312cac3b6a3746ef3f",
+          "actualExitCode": 0,
+          "durationSeconds": 704.7125931660412,
+          "startedAtUtc": "2026-10-10T03:01:46.617449+00:00",
+          "endedAtUtc": "2026-10-10T03:13:31.429805+00:00",
+          "stdoutSha256": "c8e9945169bd51b7cfa92f525770410f17649ae0d5824a5c811320de00c29df2",
+          "stderrSha256": "6982f70dfce8e43614f7483a9517523f7bebb4864e7c92fd9ad2808e9ffd1904"
+        },
+        {
+          "path": "receipts/interaction-m14-v2/result.json",
+          "sha256": "6a82bb54c2b46c9146d85ae335325b4b8c4be0647dabf4931d7152adadcceb83",
+          "actualExitCode": 101,
+          "durationSeconds": 88.7918095420464,
+          "startedAtUtc": "2026-10-10T03:45:18.334177+00:00",
+          "endedAtUtc": "2026-10-10T03:46:47.421527+00:00",
+          "stdoutSha256": "b8a9c9130a24f3ba8eb807367ba5e43b958b252baf767b020a6798f3a2228a31",
+          "stderrSha256": "0f5585a2c22acae9604282e1c43d8df651c1b8d0c4c1a485b38c40a87bde75fc"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v5/result.json",
+          "sha256": "dcddd40deac18a776c6b10784ebab21a2a653673f8e469a901f4cf9f659631d0",
+          "actualExitCode": 0,
+          "durationSeconds": 637.7041189580341,
+          "startedAtUtc": "2026-10-10T03:35:55.873189+00:00",
+          "endedAtUtc": "2026-10-10T03:46:33.673873+00:00",
+          "stdoutSha256": "6bd10ab09051293bde4f09be974f2c9801ffb5842e6e9fc08f3df7da874e694c",
+          "stderrSha256": "041276122f1abb68168ac9f7d0709d5b38a91fac17f1b7d018e5b8d9c66a27cc"
+        }
+      ]
+    },
+    {
+      "id": "RA-C01",
+      "title": "交互回执、Core实际消费与崩溃重建边界",
+      "findingType": "conditional",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Stable-source worker v2 runs five cases: two normal positives pass; three restoration desired assertions fail. Actual child exit markers preserve normal0, crash/prepare73 and recovery101.",
+        "Both normal input and approval cases capture a real queued Core Op. Adapter state is resolved with a digest and one response receipt before the genuine original waiter consumes.",
+        "After release, the genuine original waiter consumes and real tool output contains the input answer or approval Denied result; exact response replay is accepted.",
+        "Both resolved-before-consumed crash cases actually exit73 at the boundary. Replacement dispatch and exact old response replay are accepted, but replacement typed request event=null, eventNewerThanSavedResponse=false, and actual waiter consumption=false.",
+        "The earlier pending-approval recovery now passes real dispatch flush/receipt preconditions: valid response is accepted before a waiter; actual Core notify.dropped=true, Adapter state=resolved, and exact replay accepted.",
+        "All three restoration fixtures produce actual persisted code_mode_result_unavailable and reconciled_execution_evidence model tool outputs. They do not recreate the replacement exact Core request or witness real replacement waiter consumption.",
+        "Actual Core v5 four controls pass: Session fallback early input buffer, ActiveTurn per-turn early input buffer, early approval drop followed by a pending real waiter/later actual decision, and non-root request_user_input exclusion."
+      ],
+      "notCovered": [
+        "Three restoration desired assertions are red, but actual code-mode durable recovery guards prevent reconstructing the replacement exact request in these fixtures. They cannot confirm response loss by a reconstructed replacement waiter.",
+        "The ordinary resolved-before-consumed window and early approval drop are directly verified; the end-to-end crash consequence remains conditional.",
+        "RA v1 pending-approval public dispatch-receipt fixture failure and final compile-v1 collector type failure are retained separately; v2 behavior source is stable.",
+        "Core v1/v2/v3 test-entry failures are not Core behavior. Core v4/v5 actual controls pass; v5 whole-source hash changes only for unrelated RA fixture, while Core files remain stable."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/interaction-ra-v1/result.json",
+          "sha256": "3e054ea4901dc5566bdc5cb097c93d702814ef646dd2ce79709bb9f300f35d9c",
+          "actualExitCode": 101,
+          "durationSeconds": 129.66921912500402,
+          "startedAtUtc": "2026-10-10T03:12:24.705049+00:00",
+          "endedAtUtc": "2026-10-10T03:14:34.660785+00:00",
+          "stdoutSha256": "6b314a369294628d5f7afa80a6f6f81e67a5b34ccebd30d329102560847f0a19",
+          "stderrSha256": "63552eec6ff34ad01719bbf50bae28a281e282c1b508188acd322445ce962402"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v1/result.json",
+          "sha256": "58b556efa7c2633d9ff3121457ea85e784d635db2dbecc71d417c76b90858c5c",
+          "actualExitCode": 96,
+          "durationSeconds": 2.082353374978993,
+          "startedAtUtc": "2026-10-10T02:56:47.209403+00:00",
+          "endedAtUtc": "2026-10-10T02:56:49.393890+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "d214fb01a20bfaadd90b9aecc6efb763765840c7505d224663461f990af48092"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v2/result.json",
+          "sha256": "44e4810fed9d0a7233712d60c29a820d55cb99593aab2d08a775f74fb817eaca",
+          "actualExitCode": 101,
+          "durationSeconds": 2.429362625000067,
+          "startedAtUtc": "2026-10-10T02:58:53.578454+00:00",
+          "endedAtUtc": "2026-10-10T02:58:56.110639+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "3d98971b7583a0f11808867a9f9ad7542ff9f2d57ac04d56564182b2357c106a"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v3/result.json",
+          "sha256": "c6caba16c52574ce77b156bf4cd1e7794ef3f581f324ffee70347ac497c51931",
+          "actualExitCode": 101,
+          "durationSeconds": 3.36816012498457,
+          "startedAtUtc": "2026-10-10T03:00:47.388263+00:00",
+          "endedAtUtc": "2026-10-10T03:00:50.843232+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "b9368ad7e8e38e8dd5eb1b2668f17c908613e1c52e898caf157220e16afcc1e9"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v4/result.json",
+          "sha256": "c2ec6ba732a85aaafd6f1982c5099d51c54fe8ffe91c2a312cac3b6a3746ef3f",
+          "actualExitCode": 0,
+          "durationSeconds": 704.7125931660412,
+          "startedAtUtc": "2026-10-10T03:01:46.617449+00:00",
+          "endedAtUtc": "2026-10-10T03:13:31.429805+00:00",
+          "stdoutSha256": "c8e9945169bd51b7cfa92f525770410f17649ae0d5824a5c811320de00c29df2",
+          "stderrSha256": "6982f70dfce8e43614f7483a9517523f7bebb4864e7c92fd9ad2808e9ffd1904"
+        },
+        {
+          "path": "receipts/interaction-existing-timeout-v1/result.json",
+          "sha256": "2f9a33043efe44507f5bccdb3c34ac23844aaff07e6861f27b03171684f80302",
+          "actualExitCode": 0,
+          "durationSeconds": 14.88755141600268,
+          "startedAtUtc": "2026-10-10T03:14:35.320759+00:00",
+          "endedAtUtc": "2026-10-10T03:14:50.460562+00:00",
+          "stdoutSha256": "9d39f16152ea0f65224a7b25bf68189e2b1923d7f624df3c1ff8d71fd33f0892",
+          "stderrSha256": "a1123432b88efda9be4a1d5d8a8360af9147fee6c4c619b77275ba6b1bd4e2e9"
+        },
+        {
+          "path": "receipts/core-interaction-controls-v5/result.json",
+          "sha256": "dcddd40deac18a776c6b10784ebab21a2a653673f8e469a901f4cf9f659631d0",
+          "actualExitCode": 0,
+          "durationSeconds": 637.7041189580341,
+          "startedAtUtc": "2026-10-10T03:35:55.873189+00:00",
+          "endedAtUtc": "2026-10-10T03:46:33.673873+00:00",
+          "stdoutSha256": "6bd10ab09051293bde4f09be974f2c9801ffb5842e6e9fc08f3df7da874e694c",
+          "stderrSha256": "041276122f1abb68168ac9f7d0709d5b38a91fac17f1b7d018e5b8d9c66a27cc"
+        },
+        {
+          "path": "receipts/interaction-ra-v2/result.json",
+          "sha256": "0e1b8ff594ad2f3b65f4d0c2ffe72ccc4612674c53edb355d7e4492cfe9f3b2b",
+          "actualExitCode": 101,
+          "durationSeconds": 107.09126991598168,
+          "startedAtUtc": "2026-10-10T03:46:47.917164+00:00",
+          "endedAtUtc": "2026-10-10T03:48:35.245486+00:00",
+          "stdoutSha256": "129d1d990de985b703f602fd9588a46a449bd1e88b64767996657c53d4819730",
+          "stderrSha256": "a63e118180f356df0d512be5272fcb63b6ac47416df477bd19ef24530e91250c"
+        }
+      ]
+    },
+    {
+      "id": "M15",
+      "title": "Fusion候选上下文逐Git blob条目启动进程",
+      "findingType": "cost_confirmed",
+      "testResult": "red",
+      "confirmedFacts": [
+        "真实candidate_context在10/100/1000个Git tree blob条目上均完成读取，实际Git调用数12/102/1002。",
+        "每次调用均是原Rust函数的成功Command::output返回；verbs为rev-parse1、ls-tree1、cat-file F。",
+        "三次读取真实用时515/3236/31361ms；同线程heartbeat均0。fixture总内容各100000字节。",
+        "测试实际exit101来自<=4个过程成本目标红断言；断言前已移除全部owned Git fixture并abort+await heartbeat。",
+        "实际执行binary hash与compile-v3回执产物相同；owned源码在编译及执行前后均稳定。"
+      ],
+      "notCovered": [
+        "<=4个Git过程是选定成本预算，不是现有语义契约。",
+        "10/100/1000是Git tree blob条目数，内容可能dedup共用objectID，不是distinct Git对象数。",
+        "耗时是当前机器有负载时的合成fixture结果，含测试hook，不是生产延迟benchmark。",
+        "未跑full Worker/Fusion调度、取消传播或正式批次；heartbeat为同线程阻塞观测。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/fusion-m15-v1/result.json",
+          "sha256": "cace3b191eb63e941a3a86c1161578bb207c9b6f478c5afc8fba771ddcff6c77",
+          "actualExitCode": 101,
+          "durationSeconds": 37.36353841703385,
+          "startedAtUtc": "2026-10-10T03:04:15.690892+00:00",
+          "endedAtUtc": "2026-10-10T03:04:53.363696+00:00",
+          "stdoutSha256": "855c243c18d154d3b8af15d2a58dbd3f5d11cc3113b9acd811ffd5cba11b3dc1",
+          "stderrSha256": "35a4c262bc0a1a2189bb30ec9a87d1af33fccc12df593bd4a1b756584a6587dc"
+        },
+        {
+          "path": "receipts/rust-libs-compile-v3/result.json",
+          "sha256": "30d20faf1f8192dd99bef9c40196ec98ce3b62507f852d2c738188995ebee341",
+          "actualExitCode": 0,
+          "durationSeconds": 3.634732124977745,
+          "startedAtUtc": "2026-10-10T02:45:29.387651+00:00",
+          "endedAtUtc": "2026-10-10T02:45:33.112596+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "f390ceedb5efa78e4a23e52e0ff878e395fa8f3353f4b67d75de400ce0a42aed"
+        }
+      ]
+    },
+    {
+      "id": "M16",
+      "title": "CodeMode取消定时器后线程保留至原截止",
+      "findingType": "cost_confirmed",
+      "testResult": "red",
+      "confirmedFacts": [
+        "真正 InProcessCodeModeSession 与 V8 执行 clear_then_close、close_without_clear、terminate 三种场景。",
+        "每种场景创建32个5秒timer。实际CellClosed回调均为1次。",
+        "OS线程数三种场景均为11→43→11。结束后150ms仍保留32线程；再等5400ms后回到原基线。",
+        "全部有限timer到期后才触发及时回收预算的红断言。实际M16测试墙钟17.053秒。"
+      ],
+      "notCovered": [
+        "<=8额外线程是测试选择的及时回收预算。未证实这是已记录的API语义或固定生产资源上限。",
+        "未证明永久线程泄漏、系统线程耗尽或运行中正式批次受到影响。",
+        "本项执行actual runtime，没有运行compact stdio host的全链路。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/codemode-runtime-m16-m17-v2/result.json",
+          "sha256": "ae7e0c88f4ea8beebb88d6c3a277be7475ca4bcbfa769f94e50ec5ddece0471c",
+          "actualExitCode": 100,
+          "durationSeconds": 300.69205541699193,
+          "startedAtUtc": "2026-10-10T02:29:09.987162+00:00",
+          "endedAtUtc": "2026-10-10T02:34:10.762634+00:00",
+          "stdoutSha256": "ae7dcc405172a1bdb712bcab41f1f0e5faf9efc5f5700b9e0fefaeb563438f9b",
+          "stderrSha256": "002d7a4e1bb5835d3587f72c69756d3574c6df4aaaad79d4ec1db79325ab13b3"
+        }
+      ]
+    },
+    {
+      "id": "M17",
+      "title": "CodeMode在Pending检查前深拷贝待保存值",
+      "findingType": "cost_confirmed",
+      "testResult": "red",
+      "confirmedFacts": [
+        "actual spawn_runtime处理32个小ToolResponse。含初次前沿在内共32次Pending检查。",
+        "1MiB String store的32次Pending深拷贝共33,554,432个String payload字节；无store基线为0。",
+        "最终存储值长度仍为1,048,576字节，runtime事件通道正常关闭。"
+      ],
+      "notCovered": [
+        "零Pending复制是选定成本预算，不是已记录的业务/API语义不变量。",
+        "计数排除最终Completed clone、键、容器、分配器开销，不等于总heap allocation。",
+        "未测量正式任务的CPU、峰值内存或吞吐影响。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/codemode-runtime-m16-m17-v2/result.json",
+          "sha256": "ae7e0c88f4ea8beebb88d6c3a277be7475ca4bcbfa769f94e50ec5ddece0471c",
+          "actualExitCode": 100,
+          "durationSeconds": 300.69205541699193,
+          "startedAtUtc": "2026-10-10T02:29:09.987162+00:00",
+          "endedAtUtc": "2026-10-10T02:34:10.762634+00:00",
+          "stdoutSha256": "ae7dcc405172a1bdb712bcab41f1f0e5faf9efc5f5700b9e0fefaeb563438f9b",
+          "stderrSha256": "002d7a4e1bb5835d3587f72c69756d3574c6df4aaaad79d4ec1db79325ab13b3"
+        }
+      ]
+    },
+    {
+      "id": "FC-R01",
+      "title": "CodeMode stdio生命周期请求的截止和取消",
+      "findingType": "semantic_defect",
+      "testResult": "red",
+      "confirmedFacts": [
+        "owned fake stdio peer合法握手后分别 withholding回包；Rust原Connection::spawn/driver及SessionInner实际执行。",
+        "open/start/initial/close在Tokio虚拟+70秒后仍Pending；真实wait/terminate deadline正控触发超时、连接失效并回收owned peer。",
+        "Opening外层execute task abort后shutdown仍Pending且无cancel frame；强制取消本fixture连接后shutdown为Ok(())。",
+        "合法600001ms wire yield请求正控通过。v2共2个红断言、1个正控通过。",
+        "v2的8个phase/control receipt均证明owned peer PID已回收。recipe真实墙钟11.306秒，70秒为Tokio虚拟时间。"
+      ],
+      "notCovered": [
+        "full Kernel close_session的截止和清理边界没有执行；不据此推断完整产品永久挂起。",
+        "fake peer只说合法wire协议，不执行JavaScript。长JS cell真实运行没有覆盖。",
+        "未连接provider/model，未验证运行中正式批次影响。",
+        "初次long-yield positive fixture的SessionCleanup误用单独保存，未计入产品错误。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/fcr01-stdio-v2/result.json",
+          "sha256": "b7a091ef57af9a16038e9fdb697f61ce63d9297b9eaedb1dd1205a2d5c41fa37",
+          "actualExitCode": 100,
+          "durationSeconds": 11.306483125023078,
+          "startedAtUtc": "2026-10-10T02:10:51.484940+00:00",
+          "endedAtUtc": "2026-10-10T02:11:02.792466+00:00",
+          "stdoutSha256": "c2d3e0d80a295d73bdd59597051ccd4aa92b1286198b341840518241d6b0b70f",
+          "stderrSha256": "73b90a98df6e2a0fc8944c6fb9a3567f0d320ffa8424a99211c4b6870c2c32a8"
+        }
+      ]
+    },
+    {
+      "id": "M18",
+      "title": "安全停派与实时进度观察范围",
+      "findingType": "conditional",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Actual JavaScript runBenchmarkSchedule/runBenchmarkPlan admitted2 cells; third remained unadmitted after the first failure.",
+        "The failed call and claimed unresolved cell were durable before sibling release.",
+        "The scheduler promise was unsettled while the controlled sibling was running; actual signature has no onState observer parameter.",
+        "The immediate admissionStopped/draining/firstFailure target-state assertion was red."
+      ],
+      "notCovered": [
+        "No existing onState API contract was violated: fixture observer is an aspirational observation seam.",
+        "No Rust scheduler or complete controller process was invoked.",
+        "This result alone does not establish a causal source of the formal MiMo Worker stall."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/scheduler-js-v2/result.json",
+          "sha256": "3c24b198eb90b106e03c64733cac13630df1b5ac3437b7a77d3f7a3bbbd35661",
+          "actualExitCode": 1,
+          "durationSeconds": 1.1120962919667363,
+          "startedAtUtc": "2026-10-10T02:08:24.086538+00:00",
+          "endedAtUtc": "2026-10-10T02:08:25.334380+00:00",
+          "stdoutSha256": "d8d53c47265f4594d85b2fa167cf3f88528ee57120509a51d04d0551fb8865f5",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M19",
+      "title": "旧租约失败报告遮蔽原任务迟到终态",
+      "findingType": "semantic_defect",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Actual persistedBenchmarkDeviceFailure in normal production ordering threw DEVICE_EXECUTION_LEASE_EXPIRED/unresolved before the current resolver; current query count0.",
+        "Actual explicit resolveRegisteredDeviceTask read3 current projections and returned DEVICE_PRODUCT_FAILED for the same original fixture launch.",
+        "Original report bytes were retained and launchCount0.",
+        "The normal-path late-terminal finalization property was red."
+      ],
+      "notCovered": [
+        "No runDeviceTaskVertical or complete controller process was invoked.",
+        "The loopback current terminal projection is a controlled adapter fixture; formal exact original-job identity is separately read-only joined.",
+        "No paid replacement launch or formal batch replay was performed.",
+        "No post-terminal formal controller re-entry was replayed or directly observed; source and offline fixture show what the normal re-entry ordering does."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/scheduler-js-v2/result.json",
+          "sha256": "3c24b198eb90b106e03c64733cac13630df1b5ac3437b7a77d3f7a3bbbd35661",
+          "actualExitCode": 1,
+          "durationSeconds": 1.1120962919667363,
+          "startedAtUtc": "2026-10-10T02:08:24.086538+00:00",
+          "endedAtUtc": "2026-10-10T02:08:25.334380+00:00",
+          "stdoutSha256": "d8d53c47265f4594d85b2fa167cf3f88528ee57120509a51d04d0551fb8865f5",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "M20",
+      "title": "Device心跳重复加载并核对Worker历史",
+      "findingType": "cost_confirmed",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Actual DeviceStore/Supervisor/DeviceDaemon reconciliation produced unchanged-history counts[10,10],[100,100],[1000,1000] across two heartbeats.",
+        "Two measured heartbeat calls took8547/26102/339671 microseconds at histories10/100/1000.",
+        "Total two-reconciliation bytes were4192/35332/346732.",
+        "All setup/count assertions completed; only the desired second-heartbeat delta0 assertion was red.",
+        "Owned daemon/test fixture hashes were identical in compile-v3 and before/after run manifests."
+      ],
+      "notCovered": [
+        "Repeated all-history reconciliation is a measured cost mechanism; the desired incremental assertion is not an existing correctness contract.",
+        "Formal MiMo Worker-stall causal attribution is not established.",
+        "The aggregate source manifest changed only in unrelated worker integration support; raw mismatch is preserved and independently scoped."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/scheduler-device-m20-sc05-v1/result.json",
+          "sha256": "c35c53a6750e5e5195e0875604ea368a2b0777ea2bae05b7610f804a27390ab9",
+          "actualExitCode": 101,
+          "durationSeconds": 54.77954212500481,
+          "startedAtUtc": "2026-10-10T03:11:07.549492+00:00",
+          "endedAtUtc": "2026-10-10T03:12:02.407378+00:00",
+          "stdoutSha256": "94d79f2636156f37f944bb9a5326e4f80909abbc2d36ab9c27fbbdabe6c20b9f",
+          "stderrSha256": "9eeba1eb8a34760203ce4a425d358b04d5d3f9bf2a4a79897ba01eb3fb5ca95c"
+        }
+      ]
+    },
+    {
+      "id": "M21",
+      "title": "未变化投影的轮询和Core审批数据库遍历",
+      "findingType": "cost_confirmed",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "Actual driveDelivery plus Core approval and Device approval reads completed5 unchanged-cursor polls with50ms poll delay.",
+        "delivery.get5, workrun.get5, approval.list5, onProjection5 and onActive5 were measured.",
+        "Known10 fixture Core databases were scanned by5 actual readDevicePendingApprovalIds invocations:50 inferred scans.",
+        "Case completed and confirmed its measurement assertions; collection process exit1 reflects M18/M19 expected red assertions."
+      ],
+      "notCovered": [
+        "Core scans use actual invocation count times known fixture database count, not a patched production read counter.",
+        "Formal benchmark latency impact and MiMo lease expiry sole cause are not established."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/scheduler-js-v2/result.json",
+          "sha256": "3c24b198eb90b106e03c64733cac13630df1b5ac3437b7a77d3f7a3bbbd35661",
+          "actualExitCode": 1,
+          "durationSeconds": 1.1120962919667363,
+          "startedAtUtc": "2026-10-10T02:08:24.086538+00:00",
+          "endedAtUtc": "2026-10-10T02:08:25.334380+00:00",
+          "stdoutSha256": "d8d53c47265f4594d85b2fa167cf3f88528ee57120509a51d04d0551fb8865f5",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "id": "SC-05",
+      "title": "串行停止Worker对Device tick的阻塞",
+      "findingType": "conditional",
+      "testResult": "red",
+      "confirmedFacts": [
+        "Actual Supervisor.spawn owned5 TERM-ignoring child processes; actual DeviceDaemon tick ingested5 valid WorkerStop frames with default10s grace.",
+        "Actual first tick completed Ok after50349ms; next heartbeat count increased from1 to2 after the next tick.",
+        "All5 owned children were exited before the target assertion and cleanup; process collection exit101 preserved both red assertions.",
+        "Only the desired tick-duration<45000ms assertion was red; the server threshold comparison uses source, not a server sweep invocation.",
+        "Formal counterexample:0 WorkerStop intents;259 published Device heartbeats during the Worker gap with258 intervals ranging4985–5026ms.",
+        "Owned daemon/test fixture hashes were identical in compile-v3 and before/after run manifests."
+      ],
+      "notCovered": [
+        "No server stale sweep evaluator was invoked.",
+        "The offline Device-loop stop delay is not the formal current MiMo Worker-loop cause.",
+        "No production Worker or Device process received signals.",
+        "This fixture covers direct owned child processes; it does not cover escaped descendant processes.",
+        "The aggregate source manifest changed only in unrelated worker integration support; raw mismatch is preserved and independently scoped."
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/scheduler-device-m20-sc05-v1/result.json",
+          "sha256": "c35c53a6750e5e5195e0875604ea368a2b0777ea2bae05b7610f804a27390ab9",
+          "actualExitCode": 101,
+          "durationSeconds": 54.77954212500481,
+          "startedAtUtc": "2026-10-10T03:11:07.549492+00:00",
+          "endedAtUtc": "2026-10-10T03:12:02.407378+00:00",
+          "stdoutSha256": "94d79f2636156f37f944bb9a5326e4f80909abbc2d36ab9c27fbbdabe6c20b9f",
+          "stderrSha256": "9eeba1eb8a34760203ce4a425d358b04d5d3f9bf2a4a79897ba01eb3fb5ca95c"
+        }
+      ]
+    },
+    {
+      "id": "M11",
+      "title": "验证命令期间控制消息的服务延迟",
+      "findingType": "conditional",
+      "testResult": "red",
+      "confirmedFacts": [
+        "最终 v3 真实 WorkerMain::drive_with_controls → JobWorkspaceRuntime::execute_change_batch → VerificationIsolation 执行单个Changed命令2秒。",
+        "健康基线实际confirmed续租且currentExpiry=08:00:10，Job保持活跃。",
+        "slow独立owned线程101ms排队，早于1200ms原截止；drive2529ms消费。真实flush报告LeaseExpired，predicate=consumed_after_expiry。",
+        "第二slow103ms排队、2525ms消费，同一准确LeaseExpired终态。1正控pass、1服务预算red，实际进程exit101。",
+        "v3源码和diff前后均稳定；FakeCodex仅供应proposal与未结束followup，产品Worker/validation/renewal未修改。",
+        "迟消费后拒绝已过期authority符合现有guard；已实际复现条件触发control starvation与lease loss机制。"
+      ],
+      "notCovered": [
+        "1200ms合成租约与2秒验证不是原900秒MiMo事件重跑。",
+        "长验证是M11独立触发，不是当前MiMo大响应触发。",
+        "0 heartbeat during drive来自显式前置heartbeat+该实际driver没有heartbeat调用；生产外循环在drive期间无法服务为源码推导，不是本fixture Server heartbeat计数。",
+        "v1存在FakeCodex默认InfrastructureError提前终态，v2缺outboxflush观察；这些历史harness失败不计产品语义红。",
+        "调试构建有test fixture与metrics；未以本次耗时量化纯生产性能。",
+        "300ms为测试选定服务预算；现有ExecutionPort合同没有该明文时限，budget red不单独证明合同语义违反。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/worker-m11-behavior-v1/result.json",
+          "sha256": "857b8c533c660dc7afddaa45208dab90c13367be4f476d275cac480ea481afe3",
+          "actualExitCode": 101,
+          "durationSeconds": 10.736127124982886,
+          "startedAtUtc": "2026-10-10T03:05:17.949920+00:00",
+          "endedAtUtc": "2026-10-10T03:05:28.763877+00:00",
+          "stdoutSha256": "a5a0e00da548cb2dc0c2c04687d35fa24d5f0337474c0aa59d1a11c914b305a9",
+          "stderrSha256": "54c4bb2f588bf5dbe37a6c1cf6fcac89556586167c98dbe11b5778df32f15d9f"
+        },
+        {
+          "path": "receipts/worker-m11-behavior-v2/result.json",
+          "sha256": "cc82f84fd5c49a02128d8063d7a2698d15b6ba2baa4f5e66e5883cbb0b0ac845",
+          "actualExitCode": 101,
+          "durationSeconds": 10.600785165966954,
+          "startedAtUtc": "2026-10-10T03:10:54.966541+00:00",
+          "endedAtUtc": "2026-10-10T03:11:05.643378+00:00",
+          "stdoutSha256": "d5ae193cb1c2f47cd97f8ae7aca3604fbf5ba440889f61647b240f3f293b4b51",
+          "stderrSha256": "eb700add2c0c3342c5b2f71c1302fe9909d79c63f187cc20747d8634209cd5f6"
+        },
+        {
+          "path": "receipts/worker-m11-behavior-v3/result.json",
+          "sha256": "59e6a7bb7e57a25b1d4efdb33d601d83d7a7695cc85cea34f81997a673db3632",
+          "actualExitCode": 101,
+          "durationSeconds": 10.06191658298485,
+          "startedAtUtc": "2026-10-10T03:13:53.715971+00:00",
+          "endedAtUtc": "2026-10-10T03:14:03.853238+00:00",
+          "stdoutSha256": "20aa6d980409eaea6a6f13196b8e938557f94fa1a29c8da6d46f75f26d696ee8",
+          "stderrSha256": "9e6f679ff92c2018e5f92582e0949a3609a01ce918813ef3c28918cdd7fc8ea9"
+        },
+        {
+          "path": "receipts/worker-m11-compile-v5/result.json",
+          "sha256": "98988235265ef9769291fc47fab44f12e94e3eba195a4e09b699532f598a9e2e",
+          "actualExitCode": 0,
+          "durationSeconds": 13.971981833979953,
+          "startedAtUtc": "2026-10-10T03:12:01.492378+00:00",
+          "endedAtUtc": "2026-10-10T03:12:15.596022+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "f8687c7cd26cc3de7335832bb8ebae1502b006e09dc98fc2a6820897af72a29b"
+        }
+      ]
+    },
+    {
+      "id": "LEASE_CAUSALITY",
+      "title": "当前MiMo租约过期的现场与原生对照因果",
+      "findingType": "conditional",
+      "testResult": "pass",
+      "confirmedFacts": [
+        "正式900秒事件只读时间链与源码auto-renew条件独立提供；没有queued-renew证据，不能把M11已排队续租套用到正式事件。",
+        "真实owned Server→Device→Worker held baseline完成CP Accepted续租，exact Worker active与真实Workspace currentExpiry同步；原生30秒租约/5秒heartbeat没有修改生产控制语义。",
+        "正文v1实际Provider完整2527返回早于摄取；同一原交换Provider/Adapter envelope逐帧全等，raw frame digest、payload digest和cursor.frames指纹全部正确，1..2527连续且final仅2527。",
+        "真实单drive持续739419ms，heartbeat_exit实际gap744146ms，跨当前已续expiry；末帧complete后drive退出且CP heartbeat恢复到17，ProviderFinal1/CoreCommitted0。",
+        "正文v1实际exit1/897.858729s为Provider只读采样database locked观测器失败；此前CP Job running/terminalnull。清理产生CANCELLED，绝不算自然LeaseExpired。",
+        "三真实OS slot holder连续持有至releaseOne；第四原Open physical0时HB1→4、CP Accepted1、Worker+Workspace实际更新expiry。releaseOne后同交换attempt1唯一HTTP+native thread hash绑定，actual slot command exit0。",
+        "正文/槽两个新fixture所有捕获进程exactPID+raw lstart后验均退出；未捕获后代不在审计声明内。",
+        "最终正文v2实际commandexit0/980.630612s；真实单drive732776ms/heartbeat_exit gap737226ms，6019个test-support记录；RO漏读0。",
+        "原交换Provider帧2527=Adapter帧2527，rawframe/payload/cursorframes全摘要匹配；cursorcompleted；ProviderFinal1/CoreCommitted1。Core原turn task_complete04:43:38.663之后，Adapter投影在04:46:09.786..10.971窗口推进。",
+        "原Job/Lease/attempt/fence自然CPfailed@04:46:10.584先于fixturecleanup；Worker实际error=CANDIDATE_PREPARATION_FAILED，causeWORKSPACE_UNCHANGED_CANDIDATE。本fixture零工具/仅1ModelOpen/1HTTP，不把此失败原因归为LeaseExpired。",
+        "实际正文v2执行v11 SHA961db9770f34112aa63f8b7faff9c1720793a0f63fd5e2c3cae19b95999e51c9；准备的v12未执行。产品/native源与build-v4一致。",
+        "M02真实intake500/1000/2527成本、native正文/heldbaseline和3实际OSslot对照构成不同层次证据；本轮未修改正式批次或执行付费模型。"
+      ],
+      "notCovered": [
+        "原生fixture使用30秒lease、debug2、test-support计时、约404708字节assistant输出帧（seq2526；final seq2527为1235字节）；现场900秒/max31492字节形状不同，不以739秒直接解释正式21分钟性能。",
+        "每250/final checkpoint及outer drive/heartbeat records的同步I/O、只读采样成本未独立测量；纯生产sole-cause及其它并行任务成本未单项剥离。",
+        "slot仅证明waiting/admission/control正控，不证明第四完整Core/WorkRun成功；实现为persistent-inode std::File.try_lock三槽，未测跨Device拓扑。",
+        "历史API前置timeout/provider RO锁失败均保留actual非零；client not_sent/connect标签不单独证明TCP未发。",
+        "完整native阳性证明响应摄取→阻塞外循环heartbeat→自动续租窗口漏过→expiry已到→旧响应仍可完整提交；正式随后新请求的LeaseExpired拒绝没有在该synthetic assistant-finalfixture重现。",
+        "本次自然终态来自未执行工具导致workspace unchanged；正式事件的失败码与当前合成终态分别解释，不以自然failed泛化因果。",
+        "v11 held-null与terminalregistry零busy-timeout是静态观测器边界；本实际运行未触发。v12准备但未执行。",
+        "testResult pass表示本轮条件性机制证据/槽对照验收通过，不表示运行未过期、产品性能合同绿色或900秒正式事件逐位复现。"
+      ],
+      "actualReceipts": [
+        {
+          "path": "receipts/fullchain-native-build-v2/result.json",
+          "sha256": "7174fe01729aff587a1b4ed920b01774c66495129b38c5d6e7dc786e22e617f8",
+          "actualExitCode": 0,
+          "durationSeconds": 4.5965133329737,
+          "startedAtUtc": "2026-10-10T03:13:28.358162+00:00",
+          "endedAtUtc": "2026-10-10T03:13:33.107881+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "9d8e8c10c3a636322ceb001a6aae671a2ca732589b5c11e37376b10ae2d797bb"
+        },
+        {
+          "path": "receipts/build-helper-release-v1/result.json",
+          "sha256": "1230f73d856dd42370c7dc30edcac40e98a92382ae6984d0ae8e5326ca8923e7",
+          "actualExitCode": 0,
+          "durationSeconds": 433.1633483329788,
+          "startedAtUtc": "2026-10-10T02:58:53.098179+00:00",
+          "endedAtUtc": "2026-10-10T03:06:06.355886+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "be55a1ad1c737f09e02c05a3ed3a5a244c0ab756cf7b3a994a5944ea05be9638"
+        },
+        {
+          "path": "receipts/owned-runtime-package-seal-v1/result.json",
+          "sha256": "7dc2e4e3d6de16e27b48e60c21d2ecedd5fbb49355edb555f8848c4fc77e6035",
+          "actualExitCode": 0,
+          "durationSeconds": 4.601709874987137,
+          "startedAtUtc": "2026-10-10T03:09:49.178775+00:00",
+          "endedAtUtc": "2026-10-10T03:09:53.873624+00:00",
+          "stdoutSha256": "8da5c59395dfb5c12780460f557196c7a668ff5dfbcdd5aa5e7c5090360739b2",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/model-intake-v1/result.json",
+          "sha256": "e2e69f3f61881c68d68ed35705dd8d91a82df7b7754ac6182702378065170bba",
+          "actualExitCode": 0,
+          "durationSeconds": 938.479233207996,
+          "startedAtUtc": "2026-10-10T02:48:15.173599+00:00",
+          "endedAtUtc": "2026-10-10T03:03:54.041317+00:00",
+          "stdoutSha256": "2d1d0df32962a6d4f130cc96924714a751a268a631070e62292b627731d73a3f",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-fullchain-v1/result.json",
+          "sha256": "8730201206acc7eeb760b2796cc72d5878fef8c11bda013aab57f0b0cda5b457",
+          "actualExitCode": 1,
+          "durationSeconds": 85.8623511249898,
+          "startedAtUtc": "2026-10-10T03:23:04.976768+00:00",
+          "endedAtUtc": "2026-10-10T03:24:30.907830+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-setup-phase-v2/result.json",
+          "sha256": "7012da5b8e722ff5a05d70afce8b5a9e208b770c9141c18e6aae7aacb5d5754b",
+          "actualExitCode": 1,
+          "durationSeconds": 85.27213816699805,
+          "startedAtUtc": "2026-10-10T03:41:27.282580+00:00",
+          "endedAtUtc": "2026-10-10T03:42:52.645675+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-setup-phase-v3/result.json",
+          "sha256": "2104d1f9c763374c4d6153a960870cf0c0e2ac88a608825777c02a0a50060533",
+          "actualExitCode": 0,
+          "durationSeconds": 92.55476416699821,
+          "startedAtUtc": "2026-10-10T03:47:20.752427+00:00",
+          "endedAtUtc": "2026-10-10T03:48:53.380762+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/fullchain-native-build-v4/result.json",
+          "sha256": "422797bbdf9594a5eceb88355a44869c8b8be14aa44d53fca40e41b4670f1c78",
+          "actualExitCode": 0,
+          "durationSeconds": 23.236696666979697,
+          "startedAtUtc": "2026-10-10T03:53:08.103782+00:00",
+          "endedAtUtc": "2026-10-10T03:53:31.410406+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "d4a0e587ad63e5768e9ecd871d8f2a48b7a179e8c92f58465484372d93ff192d"
+        },
+        {
+          "path": "receipts/owned-runtime-package-seal-v5/result.json",
+          "sha256": "46fcb929f2bb66483a2a368938b51a832b57a1e0e8432207ed5a399f52ef0453",
+          "actualExitCode": 0,
+          "durationSeconds": 2.482884249999188,
+          "startedAtUtc": "2026-10-10T03:58:53.266497+00:00",
+          "endedAtUtc": "2026-10-10T03:58:55.819311+00:00",
+          "stdoutSha256": "24c1dc6011653daa54741713f37990713148414273a02b0e8383ce19a7f2b79f",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-fullbody-v1/result.json",
+          "sha256": "9b5175892cfdbceaeccf1e2ac1fffb768bd75804a07b05a2d994b7d3a5b8d0da",
+          "actualExitCode": 1,
+          "durationSeconds": 897.8587289589923,
+          "startedAtUtc": "2026-10-10T04:04:20.682849+00:00",
+          "endedAtUtc": "2026-10-10T04:19:18.617797+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-fullbody-frame-proof-v1/result.json",
+          "sha256": "34ef8a4d5db7d497a4194a7ff4adc327078056756475108966c574ecd98c0fa9",
+          "actualExitCode": 0,
+          "durationSeconds": 0.6701472080312669,
+          "startedAtUtc": "2026-10-10T04:20:36.859793+00:00",
+          "endedAtUtc": "2026-10-10T04:20:37.530870+00:00",
+          "stdoutSha256": "b42ae9a0eb414ac3d97834d8ec3ef1556de2e77645f94b299bd9424b7dfdbf69",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-fullbody-process-audit-v1/result.json",
+          "sha256": "4e86caf216055279db3c7f13f4269883261b484652c57cbddcc8329261e5bba5",
+          "actualExitCode": 0,
+          "durationSeconds": 0.5451025419752114,
+          "startedAtUtc": "2026-10-10T04:20:36.871379+00:00",
+          "endedAtUtc": "2026-10-10T04:20:37.417040+00:00",
+          "stdoutSha256": "3f4bb25f4bef17f27139b3a7f5fb5878017f4cca45d5d18723f2fb6ce47aa52e",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-slotwait-v1/result.json",
+          "sha256": "1abf88ace996786d04f6a65977e0ced8358bca053ceb4e849c73980d060c5e6a",
+          "actualExitCode": 0,
+          "durationSeconds": 151.6109769999748,
+          "startedAtUtc": "2026-10-10T04:21:44.892835+00:00",
+          "endedAtUtc": "2026-10-10T04:24:16.560285+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-slotwait-continuity-proof-v1/result.json",
+          "sha256": "b8be9d3821ea2cef5a912250ae7967ca6a39b6728a41c78dc8d8d8962cc3cf75",
+          "actualExitCode": 0,
+          "durationSeconds": 0.5836288750288077,
+          "startedAtUtc": "2026-10-10T04:25:59.814001+00:00",
+          "endedAtUtc": "2026-10-10T04:26:00.398231+00:00",
+          "stdoutSha256": "6cf06077b7501132f8e314502e9ee98bbced5c68be1bd263c5e5d6d2713394fb",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-slotwait-continuity-proof-v2/result.json",
+          "sha256": "69a25f89f4075d50134e53dba18578d44b6a69d8393c4980312776a1d44364b1",
+          "actualExitCode": 0,
+          "durationSeconds": 0.48077770799864084,
+          "startedAtUtc": "2026-10-10T04:26:57.333703+00:00",
+          "endedAtUtc": "2026-10-10T04:26:57.815392+00:00",
+          "stdoutSha256": "1ce5ab06f6c9dd01e9bbd6404b3d8ef819977dc07051df33fca525baebedfc01",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-slotwait-process-audit-v1/result.json",
+          "sha256": "f40faf3242b4189cd199f0850c82d3ff1b50cd97632349a7767c7aa84f42f0c5",
+          "actualExitCode": 0,
+          "durationSeconds": 0.5217218330362812,
+          "startedAtUtc": "2026-10-10T04:24:57.279664+00:00",
+          "endedAtUtc": "2026-10-10T04:24:57.802089+00:00",
+          "stdoutSha256": "2c8ecdfb3e5d9ba150527f9c2edabd0bb01248879d3cda5e4a964275f16b63e1",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-native-fullbody-v2/result.json",
+          "sha256": "348780138e4b7d70232e54f2b3b9590f7e091e33f7f2cc38ca247befc2828f8d",
+          "actualExitCode": 0,
+          "durationSeconds": 980.6306123340037,
+          "startedAtUtc": "2026-10-10T04:30:21.597253+00:00",
+          "endedAtUtc": "2026-10-10T04:46:42.295889+00:00",
+          "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-fullbody-frame-proof-v2/result.json",
+          "sha256": "ee4c6ea00a5ec5785c96cf30a3449c8400332ada812afbc381f24edd5aabc5d8",
+          "actualExitCode": 0,
+          "durationSeconds": 0.7159773749881424,
+          "startedAtUtc": "2026-10-10T04:47:41.815082+00:00",
+          "endedAtUtc": "2026-10-10T04:47:42.531927+00:00",
+          "stdoutSha256": "d43558b718227683a44e4f3231fc9b29178b4c24abee73f1793c733b1201eeeb",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "receipts/owned-fullbody-process-audit-v2/result.json",
+          "sha256": "a12d561cdf2d9bcda97de3de821b34bd675ac904cc5f2e864f4808dd23cdcbed",
+          "actualExitCode": 0,
+          "durationSeconds": 0.6250559579930268,
+          "startedAtUtc": "2026-10-10T04:47:41.824277+00:00",
+          "endedAtUtc": "2026-10-10T04:47:42.450193+00:00",
+          "stdoutSha256": "0da74ca44b9b7ee0009d51320270e4c12911448ccde57ba22e7ca97f35460c1c",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    }
+  ],
+  "openFixIssues": [
+    {
+      "id": "winwincode-community.7.5.29.16.1",
+      "title": "Worker驱动公平性：长验证期间持续服务心跳与控制",
+      "status": "open",
+      "acceptance_criteria": "真实drive/验证离线fixture注入长命令，期间租约心跳、续期和远程取消按契约被服务；保持PID/fencing、command deadline及OS interrupt语义。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.2",
+      "title": "模型响应增量消费：消除逐帧与空队列全历史重扫",
+      "status": "open",
+      "acceptance_criteria": "合成100/200/400帧及foreign旧exchange，实际接收方法计数证明新增消费按增量增长、空poll成本不随已完成历史增长；保持相同序列/digest/终态防重，保留所有原始证据。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.3",
+      "title": "运行事实持久化：移除每事件与ACK的整历史快照重写",
+      "status": "open",
+      "acceptance_criteria": "真实CP transaction及RuntimeReplayResponder离线规模回归；连续追加和递增ACK按增量处理，重复/gap/冲突、receipt-first与owner语义保持正确；完整证据可审计。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.4",
+      "title": "InputResponse接受同一租约已证明的合法续期",
+      "status": "open",
+      "acceptance_criteria": "通过原期限内合法回答、同lease续期、ACK丢失精确重放及原等待者实际一次消费；不同owner/attempt/fencing、超过原输入期限仍拒绝。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.5",
+      "title": "输入工具契约对齐：合法多题请求进入产品投影",
+      "status": "open",
+      "acceptance_criteria": "对齐公开工具与产品输入契约，覆盖root Default两题、Plan三题、原等待者实际消费；非root边界保留；模型可修正错误返回模型，不伪造基础设施终态。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.6",
+      "title": "网络重试保留DeferredUntil与Stop的不同语义",
+      "status": "open",
+      "acceptance_criteria": "真实离线Device工厂首个301秒Retry-After立即验证预算仍有余量且状态为延期；持久延期/恢复以原identity及有效authority实现；实际attempt/accounting及正确停止原因保留。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.7",
+      "title": "基准控制器：即时停派进度与迟到精确终态收尾",
+      "status": "open",
+      "acceptance_criteria": "离线模拟终态迟到，按原Job/attempt/lease/fencing只观察一次失败并保留原calls/claim/launch；新增付费调用计数0；即时暴露停派/排空/未决/首错，安全排空原已启动任务。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.8",
+      "title": "持久队列查询索引：空待发与精确回执不扫描已完成历史",
+      "status": "open",
+      "acceptance_criteria": "依据准确schema/query迁移匹配索引或pending读取策略；EXPLAIN及实际方法计数随待发页变化而非已完成总历史；保留回执身份、审计记录及幂等状态。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.9",
+      "title": "CodeMode取消计时器及结束Cell时及时释放计时资源",
+      "status": "open",
+      "acceptance_criteria": "独立实际host fixture创建少量长timeout后clear和close/terminate，原期限前线程/计时资源回收；回调不误执行；不等待计时器不延长Cell的原语义保持。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.10",
+      "title": "CodeMode先检查Pending再收集待保存值",
+      "status": "open",
+      "acceptance_criteria": "实际runtime合成大store加多次小tool回包，Pending分支无无效全量clone，最终store交付及失败/取消所有权正确；不以镜像实现断言代替分配或调用次数证据。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.11",
+      "title": "条件性历史热路径与Fusion候选读取规模验证",
+      "status": "open",
+      "acceptance_criteria": "由独立runner给相同活跃数、递增旧历史/待保存字节/blob数的真实方法成本基线；区分必要权威校验与可增量处理成本，按实际影响确定改进优先级；未触发条件不宣称线上原因。"
+    },
+    {
+      "id": "winwincode-community.7.5.29.16.12",
+      "title": "协议收尾与积压边界：按实际离线回归处理",
+      "status": "open",
+      "acceptance_criteria": "合法离线fixture按阶段注入半失效/超限/积压，记录实际行为与边界；区分业务长执行和IPC失效，只确认可达且违反契约的缺陷。所有正式服务/账本及模型调用保持原状。"
+    }
+  ],
+  "submissionBoundaries": {
+    "productionDefaults": "存储、正文和reader计数仅cfg(test)；Provider replay计数允许显式test-support。默认构建不启用test-support。",
+    "explicitTestSupport": "显式test-support构建包含原生时序与交互钩子，并写入本次时序日志；不能按无钩子生产构建解释其计时。",
+    "productionVisibleRefactors": "Storage有等价源码重排：结果先绑定后计数、receipt本地绑定、prepare/query_row显式化；未宣称修复审计发现。",
+    "notCovered": [
+      "trusted_now为外部更新高水位；过期后delegated read-only、CoreControl、result-read的实际工具权限边界未回归。",
+      "便携路径、全新输出目录和代理隔离包装未重跑长原生对照；原始行为回执仍绑定原始源码。"
+    ]
+  }
+}

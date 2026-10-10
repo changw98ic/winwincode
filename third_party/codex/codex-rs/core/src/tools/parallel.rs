@@ -30,7 +30,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 
 /// Host-owned terminal handoff produced by the delegated submit tool.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ChangeBatchHandoff {
     pub(crate) call_id: String,
     pub(crate) proposal: String,
@@ -40,10 +40,13 @@ pub(crate) struct ChangeBatchHandoff {
 #[derive(Debug)]
 pub(crate) enum ToolCallCompletion {
     Response(ResponseInputItem),
-    Continuation(ToolContinuation),
+    Continuation {
+        response: ResponseInputItem,
+        continuation: ToolContinuation,
+    },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ToolContinuation {
     YieldToHost(ChangeBatchHandoff),
 }
@@ -95,28 +98,28 @@ impl ToolCallRuntime {
         call: ToolCall,
         cancellation_token: CancellationToken,
     ) -> BoxFuture<'static, Result<ToolCallCompletion, CodexErr>> {
-        if self.step_context.turn.submit_change_batch
-            && call.tool_name.name == "submit_change_batch"
-            && let ToolPayload::Custom { input } = &call.payload
-        {
-            let handoff = ChangeBatchHandoff {
-                call_id: call.call_id.clone(),
-                proposal: input.clone(),
+        let error_call = call.clone();
+        let source = call.direct_source();
+        // Delegated change batches must validate the complete response before any side effect.
+        let future: BoxFuture<'static, Result<AnyToolResult, FunctionCallError>> =
+            if self.step_context.turn.submit_change_batch {
+                Box::pin(async move {
+                    self.handle_tool_call_with_source(call, source, cancellation_token)
+                        .await
+                })
+            } else {
+                Box::pin(self.handle_tool_call_with_source(call, source, cancellation_token))
             };
-            return Box::pin(async move {
-                Ok(ToolCallCompletion::Continuation(
-                    ToolContinuation::YieldToHost(handoff),
-                ))
-            });
-        }
-
         Box::pin(
             async move {
-                let error_call = call.clone();
-                let source = call.direct_source();
-                let future = self.handle_tool_call_with_source(call, source, cancellation_token);
                 match future.await {
-                    Ok(response) => Ok(ToolCallCompletion::Response(response.into_response())),
+                    Ok(mut response) => Ok(match response.continuation.take() {
+                        Some(continuation) => ToolCallCompletion::Continuation {
+                            response: response.into_response(),
+                            continuation,
+                        },
+                        None => ToolCallCompletion::Response(response.into_response()),
+                    }),
                     Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
                     Err(other) => Ok(ToolCallCompletion::Response(Self::failure_response(
                         error_call, other,
@@ -171,11 +174,6 @@ impl ToolCallRuntime {
         let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
         let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
         let dispatch_call = call.clone();
-        let tool_call_gate = session
-            .services
-            .thread_extension_data
-            .get::<crate::ToolCallGateAttachment>();
-
         let dispatch_span = trace_span!(
             "dispatch_tool_call_with_code_mode_result",
             otel.name = %call.tool_name,
@@ -198,46 +196,16 @@ impl ToolCallRuntime {
                 } else {
                     Either::Right(lock.write().await)
                 };
-                if let Some(attachment) = tool_call_gate
-                    && !runtime_gates_action(&dispatch_call)
+                if let ToolCallSource::CodeMode { cell_id, .. } = &source
+                    && session
+                        .services
+                        .code_mode_service
+                        .terminal_handoffs
+                        .is_pending(&codex_code_mode::CellId::new(cell_id.clone()))
                 {
-                    let payload = match &dispatch_call.payload {
-                        ToolPayload::Function { arguments } => {
-                            crate::ToolCallGatePayload::Function {
-                                arguments: arguments.clone(),
-                            }
-                        }
-                        ToolPayload::ToolSearch { arguments } => {
-                            crate::ToolCallGatePayload::ToolSearch {
-                                arguments_json: serde_json::to_string(arguments).map_err(|_| {
-                                    FunctionCallError::RespondToModel(
-                                        "tool authorization payload is invalid".to_string(),
-                                    )
-                                })?,
-                            }
-                        }
-                        ToolPayload::Custom { input } => crate::ToolCallGatePayload::Custom {
-                            input: input.clone(),
-                        },
-                    };
-                    let request = crate::ToolCallGateRequest {
-                        thread_id: session.thread_id.to_string(),
-                        turn_id: turn.sub_id.clone(),
-                        call_id: dispatch_call.call_id.clone(),
-                        namespace: dispatch_call.tool_name.namespace.clone(),
-                        tool_name: dispatch_call.tool_name.name.clone(),
-                        payload,
-                    };
-                    let authorization = attachment
-                        .gate()
-                        .authorize(request.clone())
-                        .await
-                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
-                    attachment
-                        .gate()
-                        .revalidate(request, authorization)
-                        .await
-                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                    return Err(FunctionCallError::RespondToModel(
+                        "code cell has handed control to the host".to_string(),
+                    ));
                 }
                 // Admission through the parallel-execution gate marks the end
                 // of dispatch waiting and the start of handler execution.
@@ -306,14 +274,6 @@ impl ToolCallRuntime {
     }
 }
 
-fn runtime_gates_action(call: &ToolCall) -> bool {
-    call.tool_name.is_default_namespace()
-        && matches!(
-            call.tool_name.name.as_str(),
-            "shell_command" | "exec_command" | "apply_patch"
-        )
-}
-
 impl ToolCallRuntime {
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
@@ -354,6 +314,7 @@ impl ToolCallRuntime {
                 message: Self::abort_message(call, secs),
             }),
             post_tool_use_payload: None,
+            continuation: None,
         }
     }
 
@@ -556,12 +517,19 @@ mod tests {
     impl CoreToolRuntime for CountingHandler {}
 
     #[tokio::test]
-    async fn delegated_submit_is_a_lazy_host_handoff() -> anyhow::Result<()> {
+    async fn delegated_submit_dispatches_before_host_handoff() -> anyhow::Result<()> {
         let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
         turn_context.submit_change_batch = true;
         let session = Arc::new(session);
         let turn_context = Arc::new(turn_context);
         let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([Arc::new(crate::tools::handlers::SubmitChangeBatchHandler)
+                as Arc<dyn CoreToolRuntime>]),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
         let runtime = ToolCallRuntime::new(session, step_context, tracker);
         let result = runtime
@@ -577,12 +545,62 @@ mod tests {
                 CancellationToken::new(),
             )
             .await?;
-        let ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(handoff)) = result
+        let ToolCallCompletion::Continuation {
+            continuation: ToolContinuation::YieldToHost(handoff),
+            ..
+        } = result
         else {
             anyhow::bail!("delegated submit must yield to the host");
         };
         assert_eq!(handoff.call_id, "batch-1");
         assert_eq!(handoff.proposal, "{\"schemaVersion\":1}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_mode_requires_submit_through_code_mode() -> anyhow::Result<()> {
+        let (session, mut turn) = crate::session::tests::make_session_and_context().await;
+        turn.submit_change_batch = true;
+        Arc::make_mut(&mut turn.model_info).tool_mode =
+            Some(codex_protocol::openai_models::ToolMode::CodeModeOnly);
+        let step = StepContext::for_test(Arc::new(turn));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([Arc::new(crate::tools::handlers::SubmitChangeBatchHandler)
+                as Arc<dyn CoreToolRuntime>]),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        ));
+        let runtime = ToolCallRuntime::new(
+            Arc::new(session),
+            step.with_tool_router_for_test(router),
+            Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+        );
+        let completion = runtime
+            .handle_tool_call(
+                ToolCall {
+                    tool_name: codex_tools::ToolName::plain("submit_change_batch"),
+                    call_id: "direct-submit".to_string(),
+                    payload: ToolPayload::Custom {
+                        input: "fixture proposal".to_string(),
+                    },
+                    encrypted_function_args: None,
+                },
+                CancellationToken::new(),
+            )
+            .await?;
+        let ToolCallCompletion::Response(
+            codex_protocol::models::ResponseInputItem::CustomToolCallOutput { output, .. },
+        ) = completion
+        else {
+            anyhow::bail!("direct submit must return an ordinary rejection");
+        };
+        assert!(
+            output
+                .body
+                .to_text()
+                .unwrap()
+                .contains("must be invoked through Code Mode exec")
+        );
         Ok(())
     }
 
@@ -612,6 +630,7 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -676,6 +695,7 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -764,6 +784,7 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -1030,6 +1051,7 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -1108,6 +1130,7 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));

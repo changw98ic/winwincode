@@ -118,7 +118,11 @@ pub(super) fn completion_state(
 
     let promise = v8::Local::new(scope, pending_promise);
     match promise.state() {
-        v8::PromiseState::Pending => CompletionState::Pending,
+        v8::PromiseState::Pending => {
+            #[cfg(test)]
+            super::mechanism_regression_tests::record_pending_clone(&stored_value_writes);
+            CompletionState::Pending
+        }
         v8::PromiseState::Fulfilled => CompletionState::Completed {
             stored_value_writes,
             error_text: None,

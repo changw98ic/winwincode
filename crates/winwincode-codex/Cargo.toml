@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-test-support = []
+test-support = ["winwincode-kernel/test-support"]
 
 [dependencies]
 base64.workspace = true

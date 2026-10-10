@@ -27,7 +27,7 @@ use crate::{
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
         ActionEnforcementReceiptMessageKind, ActionEnforcementRequestMessage,
-        ActionEnforcementRequestMessageKind, ActionPolicyKind,
+        ActionEnforcementRequestMessageKind, ActionPolicyKind, ExecutionLeaseStamp,
     },
 };
 
@@ -163,6 +163,28 @@ impl ActionEnforcementVerifier {
         action: &WorkerActionRequest,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<ActionNormalization, ActionEnforcementError> {
+        self.verify_outcome_with_current_lease(action, receipt, &action.authority.lease)
+    }
+
+    /// Verifies an immutable receipt evaluated during a legitimate lease extension.
+    /// The caller must obtain current authority independently of the receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects changed lease identity, shortened expiry, invalid signatures, and
+    /// evaluation outside the current lease. All original action facts stay bound.
+    pub fn verify_outcome_with_current_lease(
+        &self,
+        action: &WorkerActionRequest,
+        receipt: &ActionEnforcementReceiptMessage,
+        current_lease: &ExecutionLeaseStamp,
+    ) -> Result<ActionNormalization, ActionEnforcementError> {
+        if !crate::execution_identity::retained_lease_matches_current(
+            &action.authority.lease,
+            current_lease,
+        ) {
+            return Err(ActionEnforcementError::ReceiptMismatch);
+        }
         let normalization = normalize_action(&action.intent, &action.request)
             .map_err(|_| ActionEnforcementError::InvalidAction)?;
         if !normalization.comparison.matches {
@@ -181,8 +203,9 @@ impl ActionEnforcementVerifier {
             || receipt.subject_sha256 != facts.subject_sha256
             || receipt.matched_condition_sha256 != facts.matched_condition_sha256
             || receipt.sent_at != receipt.evaluated_at
-            || receipt.evaluated_at.0 < receipt.lease.issued_at.0
-            || receipt.evaluated_at.0 >= receipt.lease.expires_at.0
+            || !crate::execution_identity::canonical_instant(&receipt.evaluated_at)
+            || receipt.evaluated_at.0 < current_lease.issued_at.0
+            || receipt.evaluated_at.0 >= current_lease.expires_at.0
             || !canonical_id(&receipt.message_id.0, "xmsg_")
             || !canonical_id(&receipt.request_id.0, "req_")
             || receipt.actor.kind != winwincode_domain::UserActorKind::User

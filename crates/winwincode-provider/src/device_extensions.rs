@@ -22,6 +22,7 @@ use winwincode_api::generated::{
 
 const CONTEXT: &str = "winwincode.device-extensions.v1";
 const MAX_SKILL_BYTES: usize = 1_048_576;
+const BENCHMARK_MCP_PREFIX: &str = "benchmark_public_smoke_";
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -448,6 +449,36 @@ impl DeviceProviderStore {
         materialize_extensions(home, &entries)
     }
 
+    /// Installs one benchmark task's public-smoke server alongside ordinary extensions.
+    /// The selected server comes from the task's sealed `WorkContract`, rather than
+    /// the execution role's `ProductSession`. Other benchmark tasks' servers are
+    /// omitted from the persisted task snapshot as well as the live catalog.
+    ///
+    /// # Errors
+    /// Rejects an invalid benchmark server identifier or unsafe configuration.
+    pub fn refresh_benchmark_extensions(
+        &self,
+        home: &Path,
+        server: &str,
+    ) -> Result<Vec<InstalledMcpTools>, DeviceProviderError> {
+        if !valid_id(server)
+            || !server.starts_with(BENCHMARK_MCP_PREFIX)
+            || server.len() == BENCHMARK_MCP_PREFIX.len()
+        {
+            return Err(DeviceProviderError);
+        }
+        let entries = self
+            .extension_entries()?
+            .into_iter()
+            .filter(|entry| {
+                entry.kind != "mcp"
+                    || !entry.id.starts_with(BENCHMARK_MCP_PREFIX)
+                    || entry.id == server
+            })
+            .collect::<Vec<_>>();
+        materialize_extensions(home, &entries)
+    }
+
     fn extension_entries(&self) -> Result<Vec<ExtensionEntry>, DeviceProviderError> {
         let mut query = self
             .connection
@@ -527,7 +558,7 @@ fn materialize_extensions(
                 let mut config = mcp_connection::validate(&entry.data)?;
                 config.enabled = true;
                 config.enabled_tools = Some(projection.tool_names.clone());
-                if std::env::var("WWC_BENCHMARK_TOOL_REPEAT_GUARD").as_deref() == Ok("1") {
+                if std::env::var("WWC_BENCHMARK_SEALED_TOOLS").as_deref() == Ok("1") {
                     config.tool_timeout_sec = Some(std::time::Duration::ZERO);
                 }
                 servers.insert(entry.id.clone(), config);

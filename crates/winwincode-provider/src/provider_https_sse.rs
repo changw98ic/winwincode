@@ -17,20 +17,20 @@ use std::{
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use ureq::unversioned::transport::{Connector as _, RustlsConnector};
+use ureq::unversioned::transport::{ConnectProxyConnector, Connector as _, RustlsConnector};
 use winwincode_domain::{ModelExchangeId, RequestId};
 
 use crate::provider_anthropic::{
-    AnthropicCodecErrorKind, AnthropicMessagesOptions, AnthropicToolBindings, ProviderTokenPricing,
-    parse_anthropic_sse, prepare_anthropic_request,
+    AnthropicCodecErrorKind, AnthropicMessagesOptions, AnthropicToolBindings,
+    PreparedAnthropicRequest, ProviderTokenPricing, parse_anthropic_sse, prepare_anthropic_request,
 };
 use crate::{
     CanonicalModelStreamFrame, ModelAttemptFailureFact, ModelExecutionCertainty,
     ProviderAdapterError, ProviderAdapterInvocation, ProviderAdapterOpenReceipt,
-    ProviderAdapterPort, ProviderFinishReason, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
-    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent,
-    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
-    ProviderToolKind, ResolvedSecret,
+    ProviderAdapterPort, ProviderFailureDiagnostic, ProviderFailureMetadata, ProviderFinishReason,
+    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderStreamControlAction,
+    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
+    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -97,6 +97,8 @@ pub struct HttpsSseProviderConfig {
     tls_roots: ProviderTlsRoots,
     protocol: HttpsSseProviderProtocol,
     custom_headers: Vec<(String, String)>,
+    codex_account_id: Option<String>,
+    http_connect_proxy: Option<ureq::Proxy>,
 }
 
 impl fmt::Debug for HttpsSseProviderConfig {
@@ -106,6 +108,10 @@ impl fmt::Debug for HttpsSseProviderConfig {
             .field("provider_id", &self.provider_id)
             .field("endpoint", &"[REDACTED]")
             .field("protocol", &self.protocol)
+            .field(
+                "http_connect_proxy",
+                &self.http_connect_proxy.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "custom_headers",
                 &self
@@ -121,8 +127,21 @@ impl fmt::Debug for HttpsSseProviderConfig {
 #[derive(Clone, Copy, Debug)]
 enum HttpsSseProviderProtocol {
     Canonical,
+    CodexChatgpt,
+    ChatgptPlan,
+    OpenAiResponses {
+        max_output_tokens: u32,
+        structured_output: ResponsesStructuredOutput,
+    },
     AnthropicMessages(AnthropicMessagesOptions),
     OpenAiChatCompletions(AnthropicMessagesOptions),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResponsesStructuredOutput {
+    JsonSchema,
+    JsonObject,
+    Text,
 }
 
 /// Maximum number of extra request headers accepted on one Provider.
@@ -178,9 +197,42 @@ impl HttpsSseProviderConfig {
             tls_roots: ProviderTlsRoots::WebPki,
             protocol: HttpsSseProviderProtocol::Canonical,
             custom_headers: Vec::new(),
+            codex_account_id: None,
+            http_connect_proxy: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Routes verified HTTPS through one explicitly configured HTTP CONNECT proxy.
+    /// No ambient proxy environment variables are read by this configuration.
+    ///
+    /// # Errors
+    /// Rejects malformed URLs, unsupported proxy protocols and URL paths or queries.
+    pub fn with_http_connect_proxy(
+        mut self,
+        proxy_url: &str,
+    ) -> Result<Self, HttpsSseProviderError> {
+        let invalid =
+            || HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration);
+        if !valid_token(proxy_url, MAX_ENDPOINT_BYTES) || proxy_url.contains('#') {
+            return Err(invalid());
+        }
+        let uri = ureq::http::Uri::from_str(proxy_url).map_err(|_| invalid())?;
+        if uri.scheme_str() != Some("http")
+            || !uri.authority().is_some_and(|authority| {
+                !authority.host().is_empty()
+                    && (authority.as_str().rsplit('@').next() == Some(authority.host())
+                        || authority.port_u16().is_some())
+            })
+            || !uri
+                .path_and_query()
+                .is_none_or(|path| matches!(path.path(), "" | "/") && path.query().is_none())
+        {
+            return Err(invalid());
+        }
+        self.http_connect_proxy = Some(ureq::Proxy::new(proxy_url).map_err(|_| invalid())?);
+        Ok(self)
     }
 
     /// Replaces `WebPKI` roots with an explicit non-empty DER trust set.
@@ -252,6 +304,55 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
+    /// Selects the native Responses API with a bounded output and ordinary API credentials.
+    /// The configured HTTPS endpoint and extra headers remain authoritative.
+    ///
+    /// # Errors
+    /// Rejects a zero output limit or invalid transport configuration.
+    pub fn with_openai_responses(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::JsonSchema,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects Responses JSON-object compatibility for structured final output.
+    ///
+    /// # Errors
+    /// Rejects invalid transport configuration or a zero output limit.
+    pub fn with_openai_responses_json_object(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::JsonObject,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects native Responses text with local structured final-output validation.
+    ///
+    /// # Errors
+    /// Rejects invalid transport configuration or a zero output limit.
+    pub fn with_openai_responses_text(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::Text,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Replaces any previous extra request headers with a bounded validated set.
     ///
     /// # Errors
@@ -277,6 +378,38 @@ impl HttpsSseProviderConfig {
         self
     }
 
+    /// Selects the fixed `ChatGPT` Codex endpoint with an account-bound OAuth token.
+    ///
+    /// # Errors
+    /// Rejects custom endpoints and invalid account header values.
+    pub fn with_codex_chatgpt(mut self, account_id: String) -> Result<Self, HttpsSseProviderError> {
+        if self.endpoint != crate::codex_login::CODEX_ENDPOINT || !valid_token(&account_id, 200) {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+        self.protocol = HttpsSseProviderProtocol::CodexChatgpt;
+        self.codex_account_id = Some(account_id);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects the official public Responses endpoint for a `WinWinCode` OAuth grant.
+    ///
+    /// # Errors
+    /// Rejects any custom endpoint to keep the account credential on its intended origin.
+    pub fn with_chatgpt_plan(mut self) -> Result<Self, HttpsSseProviderError> {
+        if self.endpoint != crate::chatgpt_oauth::ENDPOINT {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+        self.protocol = HttpsSseProviderProtocol::ChatgptPlan;
+        self.codex_account_id = None;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), HttpsSseProviderError> {
         if !valid_token(&self.provider_id, MAX_PROVIDER_ID_BYTES)
             || self.endpoint.len() > MAX_ENDPOINT_BYTES
@@ -297,12 +430,32 @@ impl HttpsSseProviderConfig {
             ));
         }
         validate_custom_headers(&self.custom_headers)?;
+        if matches!(
+            self.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+        ) && !self.custom_headers.is_empty()
+        {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
         match self.protocol {
             HttpsSseProviderProtocol::AnthropicMessages(options)
             | HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
                 options.validate().map_err(map_anthropic_configuration)?;
             }
-            HttpsSseProviderProtocol::Canonical => {}
+            HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => {}
+            HttpsSseProviderProtocol::OpenAiResponses {
+                max_output_tokens, ..
+            } => {
+                if max_output_tokens == 0 {
+                    return Err(HttpsSseProviderError::new(
+                        HttpsSseProviderErrorKind::InvalidConfiguration,
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -332,19 +485,124 @@ pub enum HttpsSseProviderErrorKind {
 }
 
 /// Secret-free HTTPS/SSE error.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct HttpsSseProviderError {
     kind: HttpsSseProviderErrorKind,
+    metadata: Box<ProviderFailureMetadata>,
+    response: Option<Vec<u8>>,
+    observed_receipt: Option<Box<(String, ProviderTokenUsage)>>,
+    network: Option<Box<winwincode_network::NetworkFailure>>,
+}
+
+impl fmt::Debug for HttpsSseProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpsSseProviderError")
+            .field("kind", &self.kind)
+            .field("metadata", &self.metadata)
+            .field("network", &self.network)
+            .field("response", &self.response.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "observed_receipt",
+                &self.observed_receipt.as_deref().map(|(_, usage)| usage),
+            )
+            .finish()
+    }
 }
 
 impl HttpsSseProviderError {
-    const fn new(kind: HttpsSseProviderErrorKind) -> Self {
-        Self { kind }
+    pub(crate) fn new(kind: HttpsSseProviderErrorKind) -> Self {
+        Self {
+            kind,
+            metadata: Box::default(),
+            response: None,
+            observed_receipt: None,
+            network: None,
+        }
     }
 
     #[must_use]
     pub const fn kind(&self) -> HttpsSseProviderErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &ProviderFailureMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub fn retryable(&self) -> bool {
+        self.network_failure().retryable()
+    }
+
+    #[must_use]
+    pub fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+        self.network.as_deref().copied().unwrap_or_else(|| {
+            if let Some(status) = self.metadata.status.filter(|status| *status >= 400) {
+                return NetworkFailure::http(
+                    status,
+                    self.metadata
+                        .provider_retry_after_millis
+                        .map(Duration::from_millis),
+                );
+            }
+            let mut failure = NetworkFailure::new(
+                match self.kind {
+                    HttpsSseProviderErrorKind::Transport => ErrorKind::TransportInterrupted,
+                    HttpsSseProviderErrorKind::IncompleteStream => ErrorKind::StreamIncomplete,
+                    HttpsSseProviderErrorKind::RateLimited => ErrorKind::RateLimited,
+                    HttpsSseProviderErrorKind::SseFraming
+                    | HttpsSseProviderErrorKind::SseEvent
+                    | HttpsSseProviderErrorKind::StreamConversion
+                    | HttpsSseProviderErrorKind::SizeLimit => ErrorKind::ProtocolInvalid,
+                    HttpsSseProviderErrorKind::CredentialLeak
+                    | HttpsSseProviderErrorKind::IdentityConflict => ErrorKind::IntegrityInvalid,
+                    HttpsSseProviderErrorKind::Paused => ErrorKind::Cancelled,
+                    HttpsSseProviderErrorKind::Unavailable => ErrorKind::StorageUnavailable,
+                    _ => ErrorKind::RequestInvalid,
+                },
+                Acceptance::ResponseReceived,
+                Phase::Stream,
+            );
+            failure.http_status = self.metadata.status;
+            failure.retry_after_ms = self.metadata.provider_retry_after_millis;
+            failure.diagnostic = Some(winwincode_network::NetworkDiagnostic::new(
+                match self.kind {
+                    HttpsSseProviderErrorKind::SseFraming => {
+                        winwincode_network::DiagnosticCode::SseFraming
+                    }
+                    HttpsSseProviderErrorKind::SseEvent => {
+                        winwincode_network::DiagnosticCode::SseEvent
+                    }
+                    HttpsSseProviderErrorKind::StreamConversion => {
+                        winwincode_network::DiagnosticCode::StreamConversion
+                    }
+                    HttpsSseProviderErrorKind::IncompleteStream => {
+                        winwincode_network::DiagnosticCode::StreamIncomplete
+                    }
+                    HttpsSseProviderErrorKind::SizeLimit => {
+                        winwincode_network::DiagnosticCode::BodyTooLarge
+                    }
+                    _ => winwincode_network::DiagnosticCode::TransportOther,
+                },
+            ));
+            failure
+        })
+    }
+
+    pub(crate) fn response(&self) -> Option<&[u8]> {
+        self.response.as_deref()
+    }
+
+    pub(crate) fn observed_receipt(&self) -> Option<&(String, ProviderTokenUsage)> {
+        self.observed_receipt.as_deref()
+    }
+
+    fn with_response(mut self, response: Vec<u8>) -> Self {
+        self.response = Some(response);
+        self
     }
 
     /// Produces the stable terminal fact used when an accepted stream breaks.
@@ -414,9 +672,19 @@ pub struct HttpsSseProviderAdapter {
     shared: Arc<SharedAdapter>,
 }
 
+struct AttemptDone<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for AttemptDone<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 struct SharedAdapter {
     config: HttpsSseProviderConfig,
     streams: Mutex<BTreeMap<String, StreamRecord>>,
+    sse_failure_log: Mutex<Option<std::path::PathBuf>>,
+    journal: Mutex<Option<winwincode_network::journal::RequestJournal>>,
+    completions: Mutex<BTreeMap<String, HttpsSseProviderCompletion>>,
     cancellation: Mutex<Option<Arc<crate::provider_transport::ExchangeCancellation>>>,
 }
 
@@ -425,8 +693,10 @@ struct StreamRecord {
     invocation_digest: [u8; 32],
     controls: u8,
     tool_bindings: AnthropicToolBindings,
+    response_schema: Option<crate::provider_response_schema::ResponseSchema>,
     state: StreamState,
     io: Arc<crate::provider_transport::ExchangeIo>,
+    metadata: ProviderFailureMetadata,
 }
 
 #[derive(Clone, Copy)]
@@ -462,6 +732,187 @@ enum StreamState {
 }
 
 impl HttpsSseProviderAdapter {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one durable attempt ownership loop keeps prepare, external effect and commit ordered"
+    )]
+    pub(crate) fn open_recovering_admitted<G>(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+        mut admit: impl FnMut() -> Result<G, ProviderAdapterError>,
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        use winwincode_network::{
+            Acceptance, ErrorKind, NetworkFailure, Phase, Replay,
+            journal::{QueuePermit, now_millis},
+        };
+        let storage = || {
+            ProviderAdapterError::from_network(NetworkFailure::new(
+                ErrorKind::StorageUnavailable,
+                Acceptance::NotSent,
+                Phase::Persist,
+            ))
+        };
+        let journal = self
+            .shared
+            .journal
+            .lock()
+            .map_err(|_| storage())?
+            .clone()
+            .ok_or_else(storage)?;
+        let operation = invocation_digest(HttpInvocation::from_adapter(invocation));
+        let cached = self
+            .shared
+            .completions
+            .lock()
+            .map_err(|_| storage())?
+            .contains_key(invocation.adapter_request_id());
+        if cached {
+            return self.open(invocation, credential);
+        }
+        let started = std::time::Instant::now();
+        let live = || {
+            can_start()
+                && (!self.shared.config.deadlines_enabled
+                    || started.elapsed() < self.shared.config.total_timeout)
+        };
+        let stopped = || {
+            ProviderAdapterError::from_network(NetworkFailure::new(
+                if can_start() {
+                    ErrorKind::Timeout
+                } else {
+                    ErrorKind::AuthorityExpired
+                },
+                Acceptance::Unknown,
+                Phase::Stream,
+            ))
+        };
+        loop {
+            if !live() {
+                return Err(stopped());
+            }
+            let sequence = match journal
+                .prepare(
+                    &operation,
+                    Replay::RetryInference,
+                    winwincode_network::defaults().max_attempts,
+                    now_millis(),
+                )
+                .map_err(ProviderAdapterError::from_network)?
+            {
+                QueuePermit::Ready(sequence) => sequence,
+                QueuePermit::Stopped(failure) => {
+                    return Err(ProviderAdapterError::from_network(failure));
+                }
+                QueuePermit::Waiting(delay, _) => {
+                    let until = std::time::Instant::now() + delay;
+                    while let Some(remaining) =
+                        until.checked_duration_since(std::time::Instant::now())
+                    {
+                        if !live() {
+                            return Err(stopped());
+                        }
+                        std::thread::sleep(remaining.min(Duration::from_millis(
+                            winwincode_network::defaults().authority_check_ms,
+                        )));
+                    }
+                    continue;
+                }
+            };
+            let permit = match admit() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    journal
+                        .finish(
+                            &operation,
+                            sequence,
+                            Some(error.network_failure()),
+                            now_millis(),
+                        )
+                        .map_err(ProviderAdapterError::from_network)?;
+                    return Err(error);
+                }
+            };
+            let result = self.recovering_attempt(invocation, credential, receipt, &live);
+            drop(permit);
+            let failure = result
+                .as_ref()
+                .err()
+                .map(ProviderAdapterError::network_failure);
+            journal
+                .finish(&operation, sequence, failure, now_millis())
+                .map_err(ProviderAdapterError::from_network)?;
+            match result {
+                Ok((ack, mut completion)) => {
+                    if journal
+                        .has_unknown_usage(&operation)
+                        .map_err(ProviderAdapterError::from_network)?
+                        && let ProviderGatewayTerminal::Completed {
+                            actual_cost_micros, ..
+                        } = &mut completion.terminal
+                    {
+                        *actual_cost_micros = None;
+                    }
+                    self.shared
+                        .completions
+                        .lock()
+                        .map_err(|_| storage())?
+                        .insert(invocation.adapter_request_id().to_owned(), completion);
+                    return Ok(ack);
+                }
+                Err(error) => {
+                    // Only an exact failed drain can reopen. Terminal controls remain fences.
+                    let mut streams = self.shared.streams.lock().map_err(|_| storage())?;
+                    if let Some(record) = streams.get(invocation.adapter_request_id())
+                        && matches!(record.state, StreamState::Drained)
+                        && record.model_exchange_id == *invocation.model_exchange_id()
+                        && record.invocation_digest == operation
+                    {
+                        streams.remove(invocation.adapter_request_id());
+                    }
+                    if !error.network_failure().retryable() {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    fn recovering_attempt(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        live: &(dyn Fn() -> bool + Sync),
+    ) -> Result<(ProviderAdapterOpenReceipt, HttpsSseProviderCompletion), ProviderAdapterError>
+    {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    if !live()
+                        && let Ok(streams) = self.shared.streams.lock()
+                        && let Some(record) = streams.get(invocation.adapter_request_id())
+                    {
+                        record.io.cancel();
+                    }
+                    // Observe until open has installed its cancellable record.
+                    std::thread::sleep(Duration::from_millis(
+                        winwincode_network::defaults().authority_check_ms,
+                    ));
+                }
+            });
+            let _done = AttemptDone(&done);
+            self.open(invocation, credential).and_then(|ack| {
+                self.drain_attempt(receipt)
+                    .map(|completion| (ack, completion))
+                    .map_err(|error| ProviderAdapterError::from_network(error.network_failure()))
+            })
+        })
+    }
+
     fn agent(
         config: &HttpsSseProviderConfig,
         io: Arc<crate::provider_transport::ExchangeIo>,
@@ -483,7 +934,7 @@ impl HttpsSseProviderAdapter {
         let agent_config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(None)
+            .proxy(config.http_connect_proxy.clone())
             .timeout_connect(Some(config.connect_timeout))
             // ureq 3.1.4 also applies recv_response's deadline while reading the body.
             // When enabled, the global deadline bounds headers and the complete stream.
@@ -491,8 +942,12 @@ impl HttpsSseProviderAdapter {
             .timeout_global(config.deadlines_enabled.then_some(config.total_timeout))
             .tls_config(tls)
             .build();
-        let connector =
-            crate::provider_transport::ExchangeConnector(io).chain(RustlsConnector::default());
+        // CONNECT recursively opens its proxy through this same chain without
+        // proxy settings. ExchangeConnector retains that TCP socket for real
+        // cancellation, then preserves the tunnel for target TLS verification.
+        let connector = ConnectProxyConnector::default()
+            .chain(crate::provider_transport::ExchangeConnector(io))
+            .chain(RustlsConnector::default());
         ureq::Agent::with_parts(
             agent_config,
             connector,
@@ -500,7 +955,7 @@ impl HttpsSseProviderAdapter {
         )
     }
 
-    /// Builds a verified no-proxy HTTP agent from one validated configuration.
+    /// Builds a verified HTTP agent from one validated, explicitly routed configuration.
     ///
     /// # Errors
     ///
@@ -511,9 +966,30 @@ impl HttpsSseProviderAdapter {
             shared: Arc::new(SharedAdapter {
                 config,
                 streams: Mutex::new(BTreeMap::new()),
+                sse_failure_log: Mutex::new(None),
+                journal: Mutex::new(None),
+                completions: Mutex::new(BTreeMap::new()),
                 cancellation: Mutex::new(None),
             }),
         })
+    }
+
+    /// Attaches the durable logical-request attempt journal.
+    #[must_use]
+    pub fn with_journal(self, journal: winwincode_network::journal::RequestJournal) -> Self {
+        if let Ok(mut current) = self.shared.journal.lock() {
+            *current = Some(journal);
+        }
+        self
+    }
+
+    /// Retains private failed response bytes with a payload-free log reference.
+    #[must_use]
+    pub fn with_sse_failure_log(self, directory: std::path::PathBuf) -> Self {
+        if let Ok(mut current) = self.shared.sse_failure_log.lock() {
+            *current = Some(directory);
+        }
+        self
     }
 
     pub(crate) fn with_cancellation(
@@ -554,9 +1030,50 @@ impl HttpsSseProviderAdapter {
                 HttpsSseProviderErrorKind::IdentityConflict,
             ));
         }
+        if let Some(completion) = self
+            .shared
+            .completions
+            .lock()
+            .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?
+            .remove(&receipt.adapter_request_id)
+        {
+            return Ok(completion);
+        }
+        self.drain_attempt(receipt)
+    }
+
+    fn drain_attempt(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut body = self.take_body(receipt)?;
         let tool_bindings = self.stream_tool_bindings(receipt)?;
-        let result = self.convert_response(receipt, &mut body, &tool_bindings);
+        let response_schema = self.stream_response_schema(receipt)?;
+        let result = self
+            .convert_response(receipt, &mut body, &tool_bindings, response_schema.as_ref())
+            .map_err(|mut error| {
+                if let Ok(streams) = self.shared.streams.lock()
+                    && let Some(record) = streams.get(&receipt.adapter_request_id)
+                {
+                    let diagnostic = error.metadata.diagnostic.take();
+                    error.metadata = Box::new(record.metadata.clone());
+                    error.metadata.diagnostic = diagnostic;
+                }
+                let mut failure = error.network_failure();
+                if let Some(bytes) = error.response.as_deref() {
+                    failure = self.retain_failed_response(
+                        failure,
+                        &serde_json::json!({
+                            "schemaVersion": 1,
+                            "failure": failure,
+                            "providerDiagnostic": error.metadata.diagnostic,
+                        }),
+                        bytes,
+                    );
+                }
+                error.network = Some(Box::new(failure));
+                error
+            });
         self.finish_drain(receipt)?;
         result
     }
@@ -566,20 +1083,104 @@ impl HttpsSseProviderAdapter {
         receipt: &ProviderGatewayOpenReceipt,
         body: &mut ureq::Body,
         tool_bindings: &AnthropicToolBindings,
+        schema: Option<&crate::provider_response_schema::ResponseSchema>,
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut receipt = receipt.clone();
-        for (_, value) in &self.shared.config.custom_headers {
+        for (name, value) in &self.shared.config.custom_headers {
+            // This public protocol switch is a literal boolean, not a credential.
+            if matches!(
+                self.shared.config.protocol,
+                HttpsSseProviderProtocol::OpenAiResponses { .. }
+            ) && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
+                && value == "true"
+            {
+                continue;
+            }
             let secret = ResolvedSecret::from_bytes(value.as_bytes().to_vec()).map_err(|_| {
                 HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration)
             })?;
             receipt.stream_leak_gate.track_secret(&secret);
         }
         let receipt = &receipt;
-        let bytes = self.read_bounded(receipt, body)?;
+        let bytes = match self.read_bounded(receipt, body) {
+            Ok(bytes) => bytes,
+            Err(mut error) => {
+                if let Some(bytes) = error.response.as_deref() {
+                    error.observed_receipt = self.observed_receipt(bytes, receipt).map(Box::new);
+                    let cancelled = self.shared.cancellation.lock().map_or(true, |value| {
+                        value
+                            .as_ref()
+                            .is_some_and(|cancellation| cancellation.is_cancelled())
+                    });
+                    if matches!(
+                        self.shared.config.protocol,
+                        HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+                            | HttpsSseProviderProtocol::OpenAiResponses { .. }
+                            | HttpsSseProviderProtocol::CodexChatgpt
+                            | HttpsSseProviderProtocol::ChatgptPlan
+                    ) && error.kind == HttpsSseProviderErrorKind::Transport
+                        && !cancelled
+                        && !self.drain_interrupted(receipt)?
+                        && let Ok(completion) =
+                            self.convert_bytes(receipt, tool_bindings, bytes, schema)
+                        && matches!(
+                            completion.terminal,
+                            ProviderGatewayTerminal::Completed { .. }
+                                | ProviderGatewayTerminal::Failed { .. }
+                        )
+                    {
+                        return Ok(completion);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        self.convert_bytes(receipt, tool_bindings, &bytes, schema)
+            .map_err(|mut error| {
+                error.observed_receipt = self.observed_receipt(&bytes, receipt).map(Box::new);
+                error.with_response(bytes)
+            })
+    }
+
+    fn convert_bytes(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+        tool_bindings: &AnthropicToolBindings,
+        bytes: &[u8],
+        schema: Option<&crate::provider_response_schema::ResponseSchema>,
+    ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::OpenAiResponses { .. }
+        ) {
+            return crate::provider_codex::parse_api_response_with_schema(
+                bytes,
+                receipt,
+                self.shared.config.max_event_bytes,
+                self.shared.config.max_events,
+                schema,
+            );
+        }
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+        ) {
+            return crate::provider_codex::parse_response(
+                bytes,
+                receipt,
+                self.shared.config.max_event_bytes,
+                self.shared.config.max_events,
+            );
+        }
         let (events, terminal) = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan
+            | HttpsSseProviderProtocol::OpenAiResponses { .. } => {
+                unreachable!("Responses protocols return above")
+            }
             HttpsSseProviderProtocol::Canonical => {
                 let parsed = parse_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                 )?;
@@ -587,7 +1188,7 @@ impl HttpsSseProviderAdapter {
             }
             HttpsSseProviderProtocol::AnthropicMessages(options) => {
                 let parsed = parse_anthropic_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                     tool_bindings,
@@ -598,7 +1199,7 @@ impl HttpsSseProviderAdapter {
             }
             HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
                 let parsed = crate::provider_openai::parse_openai_chat_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                     tool_bindings,
@@ -631,6 +1232,51 @@ impl HttpsSseProviderAdapter {
         Ok(HttpsSseProviderCompletion { frames, terminal })
     }
 
+    fn observed_receipt(
+        &self,
+        bytes: &[u8],
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Option<(String, ProviderTokenUsage)> {
+        let observed = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::AnthropicMessages(options) => {
+                crate::provider_anthropic::observed_anthropic_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                    options,
+                )
+            }
+            HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {
+                crate::provider_openai::observed_openai_usage(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan => {
+                crate::provider_codex::observed_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
+            HttpsSseProviderProtocol::OpenAiResponses { .. } => {
+                crate::provider_codex::observed_api_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
+            HttpsSseProviderProtocol::Canonical => None,
+        };
+        observed.filter(|(id, _)| {
+            receipt
+                .stream_leak_gate
+                .inspect_bytes(crate::CredentialOutputBoundary::Persistence, id.as_bytes())
+                .is_ok()
+        })
+    }
+
     fn stream_tool_bindings(
         &self,
         receipt: &ProviderGatewayOpenReceipt,
@@ -651,6 +1297,25 @@ impl HttpsSseProviderAdapter {
         Ok(record.tool_bindings.clone())
     }
 
+    fn stream_response_schema(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Result<Option<crate::provider_response_schema::ResponseSchema>, HttpsSseProviderError>
+    {
+        let streams = self
+            .shared
+            .streams
+            .lock()
+            .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?;
+        let record = streams
+            .get(&receipt.adapter_request_id)
+            .filter(|record| record.model_exchange_id == receipt.model_exchange_id)
+            .ok_or_else(|| {
+                HttpsSseProviderError::new(HttpsSseProviderErrorKind::IdentityConflict)
+            })?;
+        Ok(record.response_schema.clone())
+    }
+
     fn read_bounded(
         &self,
         receipt: &ProviderGatewayOpenReceipt,
@@ -661,16 +1326,37 @@ impl HttpsSseProviderAdapter {
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             if self.drain_interrupted(receipt)? {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::Transport,
-                ));
+                return Err(
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
+                        .with_response(bytes),
+                );
             }
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport))?;
+            let read = match reader.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    let mut failure =
+                        HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
+                            .with_response(bytes);
+                    failure.network = Some(Box::new(
+                        winwincode_network::NetworkFailure::new(
+                            if error.kind() == std::io::ErrorKind::TimedOut {
+                                winwincode_network::ErrorKind::Timeout
+                            } else {
+                                winwincode_network::ErrorKind::TransportInterrupted
+                            },
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::ResponseBody,
+                        )
+                        .with_diagnostic(winwincode_network::NetworkDiagnostic::io(&error)),
+                    ));
+                    return Err(failure);
+                }
+            };
             if read == 0 {
                 return Ok(bytes);
             }
+            #[cfg(test)]
+            tests::audit_record_reader_read(bytes.len(), read);
             if bytes.len().saturating_add(read) > self.shared.config.max_response_bytes {
                 return Err(HttpsSseProviderError::new(
                     HttpsSseProviderErrorKind::SizeLimit,
@@ -812,6 +1498,7 @@ impl HttpsSseProviderAdapter {
         invocation: HttpInvocation<'_>,
         digest: [u8; 32],
         tool_bindings: AnthropicToolBindings,
+        response_schema: Option<crate::provider_response_schema::ResponseSchema>,
     ) -> Result<(), ProviderAdapterError> {
         let mut streams = self
             .shared
@@ -828,8 +1515,10 @@ impl HttpsSseProviderAdapter {
                 invocation_digest: digest,
                 controls: 0,
                 tool_bindings,
+                response_schema,
                 state: StreamState::Pending,
                 io: self.exchange_io(),
+                metadata: ProviderFailureMetadata::default(),
             },
         );
         Ok(())
@@ -895,17 +1584,15 @@ impl HttpsSseProviderAdapter {
         }
     }
 
-    fn open_https(
+    fn prepare_request(
         &self,
         invocation: HttpInvocation<'_>,
-        credential: &[u8],
-    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
-        let digest = invocation_digest(invocation);
-        if let Some(replay) = self.existing_open(invocation, &digest)? {
-            return Ok(replay);
-        }
-        let prepared = match self.shared.config.protocol {
-            HttpsSseProviderProtocol::Canonical => None,
+    ) -> Result<Option<PreparedAnthropicRequest>, ProviderAdapterError> {
+        Ok(match self.shared.config.protocol {
+            HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::OpenAiResponses { .. }
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => None,
             HttpsSseProviderProtocol::AnthropicMessages(options) => Some(
                 prepare_anthropic_request(invocation.payload, invocation.model_id, options)
                     .map_err(map_anthropic_request)?,
@@ -918,13 +1605,241 @@ impl HttpsSseProviderAdapter {
                 )
                 .map_err(map_anthropic_request)?,
             ),
+        })
+    }
+
+    fn prepare_responses_payload(
+        &self,
+        invocation: HttpInvocation<'_>,
+    ) -> Result<Option<Vec<u8>>, ProviderAdapterError> {
+        let payload = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::CodexChatgpt => {
+                crate::provider_codex::prepare_request(invocation.payload, invocation.model_id)
+            }
+            HttpsSseProviderProtocol::ChatgptPlan => {
+                crate::provider_codex::prepare_plan_request(invocation.payload, invocation.model_id)
+            }
+            HttpsSseProviderProtocol::OpenAiResponses {
+                max_output_tokens,
+                structured_output,
+            } => match structured_output {
+                ResponsesStructuredOutput::JsonObject => {
+                    crate::provider_codex::prepare_api_json_object_request(
+                        invocation.payload,
+                        invocation.model_id,
+                        max_output_tokens,
+                    )
+                }
+                ResponsesStructuredOutput::JsonSchema => {
+                    crate::provider_codex::prepare_api_request(
+                        invocation.payload,
+                        invocation.model_id,
+                        max_output_tokens,
+                    )
+                }
+                ResponsesStructuredOutput::Text => crate::provider_codex::prepare_api_text_request(
+                    invocation.payload,
+                    invocation.model_id,
+                    max_output_tokens,
+                ),
+            },
+            _ => return Ok(None),
         };
+        payload
+            .map(Some)
+            .map_err(|_| ProviderAdapterError::request_translation())
+    }
+
+    fn prepare_response_schema(
+        &self,
+        invocation: HttpInvocation<'_>,
+    ) -> Result<Option<crate::provider_response_schema::ResponseSchema>, ProviderAdapterError> {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::OpenAiResponses {
+                structured_output: ResponsesStructuredOutput::JsonObject
+                    | ResponsesStructuredOutput::Text,
+                ..
+            }
+        ) {
+            crate::provider_codex::response_schema(invocation.payload)
+                .map_err(|_| ProviderAdapterError::request_translation())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn retain_failed_response(
+        &self,
+        mut failure: winwincode_network::NetworkFailure,
+        metadata: &serde_json::Value,
+        body: &[u8],
+    ) -> winwincode_network::NetworkFailure {
+        let directory = match self.shared.sse_failure_log.lock() {
+            Ok(directory) => directory.clone(),
+            Err(_) => return failure,
+        };
+        let Some(directory) = directory else {
+            return failure;
+        };
+        let mut diagnostic = failure.diagnostic.unwrap_or_else(|| {
+            winwincode_network::NetworkDiagnostic::new(winwincode_network::DiagnosticCode::SseEvent)
+        });
+        match crate::provider_sse_failure_log::retain(&directory, metadata, body) {
+            Ok(id) => {
+                diagnostic.response_log =
+                    winwincode_network::SseResponseLogId::parse(&format!("{id}.log"));
+                diagnostic.response_log_status =
+                    Some(winwincode_network::ResponseLogStatus::Retained);
+            }
+            Err(_) => {
+                diagnostic.response_log_status =
+                    Some(winwincode_network::ResponseLogStatus::WriteFailed);
+            }
+        }
+        failure.diagnostic = Some(diagnostic);
+        failure
+    }
+
+    fn retain_http_error_response(
+        &self,
+        response: &mut ureq::http::Response<ureq::Body>,
+        failure: winwincode_network::NetworkFailure,
+        metadata: &ProviderFailureMetadata,
+    ) -> winwincode_network::NetworkFailure {
+        if !self
+            .shared
+            .sse_failure_log
+            .lock()
+            .is_ok_and(|directory| directory.is_some())
+        {
+            return failure;
+        }
+        // Capture is bounded even when successful inference streams have no total limit.
+        // ExchangeIo remains in its finite opening stage; cancellation and ureq's
+        // original global deadline continue to bound each read.
+        let limit = self.shared.config.max_response_bytes.min(64 * 1024);
+        let mut bytes = Vec::new();
+        let result = response
+            .body_mut()
+            .as_reader()
+            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+            .read_to_end(&mut bytes);
+        let truncated = bytes.len() > limit;
+        bytes.truncate(limit);
+        let read_failure = result
+            .as_ref()
+            .err()
+            .map(winwincode_network::NetworkDiagnostic::io);
+        self.retain_failed_response(
+            failure,
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "failure": failure,
+                "providerDiagnostic": metadata.diagnostic,
+                "capture": {
+                    "complete": result.is_ok() && !truncated,
+                    "truncated": truncated,
+                    "limitBytes": limit,
+                    "readFailure": read_failure,
+                },
+            }),
+            &bytes,
+        )
+    }
+
+    fn validate_http_response(
+        &self,
+        invocation: HttpInvocation<'_>,
+        response: &mut ureq::http::Response<ureq::Body>,
+        credential: &[u8],
+    ) -> Result<ProviderFailureMetadata, ProviderAdapterError> {
+        let status = response.status().as_u16();
+        let metadata = response_metadata(
+            response.headers(),
+            status,
+            credential,
+            &self.shared.config.custom_headers,
+        );
+        if !(200..=299).contains(&status) {
+            let failure = self.retain_http_error_response(
+                response,
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    metadata
+                        .provider_retry_after_millis
+                        .map(Duration::from_millis),
+                ),
+                &metadata,
+            );
+            if failure.retryable() {
+                self.abandon_retryable_open(invocation)?;
+            } else {
+                self.finish_open(invocation, StreamState::Fenced)?;
+            }
+            return Err(ProviderAdapterError::from_network(failure).with_metadata(metadata));
+        }
+        let content_type = response.headers().get("content-type");
+        // These fixed official endpoints can omit MIME; the bounded Responses parser
+        // still validates every event before it reaches the embedded Core.
+        let responses_without_mime = content_type.is_none()
+            && matches!(
+                self.shared.config.protocol,
+                HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+            );
+        if !responses_without_mime
+            && !content_type
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(canonical_event_stream_content_type)
+        {
+            self.abandon_retryable_open(invocation)?;
+            return Err(ProviderAdapterError::response_content_type().with_metadata(metadata));
+        }
+        Ok(metadata)
+    }
+
+    fn http_open_failure(
+        io: &winwincode_network::transport::ExchangeIo,
+        error: &ureq::Error,
+    ) -> winwincode_network::NetworkFailure {
+        if io.is_cancelled() {
+            winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::Cancelled,
+                winwincode_network::Acceptance::Unknown,
+                winwincode_network::Phase::ResponseHeaders,
+            )
+        } else {
+            winwincode_network::classify_ureq(
+                error,
+                !io.connection_established(),
+                winwincode_network::Phase::ResponseHeaders,
+            )
+        }
+    }
+
+    fn open_https(
+        &self,
+        invocation: HttpInvocation<'_>,
+        credential: &[u8],
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        let digest = invocation_digest(invocation);
+        if let Some(replay) = self.existing_open(invocation, &digest)? {
+            return Ok(replay);
+        }
+        let native_headers = native_request_headers(
+            invocation.payload,
+            &self.shared.config.endpoint,
+            &self.shared.config.custom_headers,
+        )?;
+        let prepared = self.prepare_request(invocation)?;
         let tool_bindings = prepared
             .as_ref()
             .map_or_else(AnthropicToolBindings::default, |request| {
                 request.tool_bindings.clone()
             });
-        self.begin_open(invocation, digest, tool_bindings)?;
+        let responses_payload = self.prepare_responses_payload(invocation)?;
+        let response_schema = self.prepare_response_schema(invocation)?;
+        self.begin_open(invocation, digest, tool_bindings, response_schema)?;
         let authorization = authorization_value(credential).inspect_err(|_error| {
             let _ = self.finish_open(invocation, StreamState::Fenced);
         })?;
@@ -943,16 +1858,40 @@ impl HttpsSseProviderAdapter {
             .header("Authorization", &authorization)
             .header("Idempotency-Key", invocation.adapter_request_id)
             .header("X-WinWinCode-Model", invocation.model_id);
+        for (name, value) in &native_headers {
+            request = request.header(*name, value.as_str());
+        }
         for (name, value) in &self.shared.config.custom_headers {
             request = request.header(name.as_str(), value.as_str());
         }
-        let payload = if let Some(prepared) = prepared.as_ref() {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt
+        ) {
+            let account = self
+                .shared
+                .config
+                .codex_account_id
+                .as_deref()
+                .ok_or_else(ProviderAdapterError::rejected)?;
+            request = request
+                .header("ChatGPT-Account-Id", account)
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("originator", "codex_cli_rs");
+        }
+        let payload = if let Some(payload) = responses_payload.as_ref() {
+            request = request.header("Content-Type", "application/json");
+            payload.as_slice()
+        } else if let Some(prepared) = prepared.as_ref() {
             request = request.header("Content-Type", "application/json");
             match self.shared.config.protocol {
                 HttpsSseProviderProtocol::AnthropicMessages(_) => {
                     request = request.header("Anthropic-Version", "2023-06-01");
                 }
                 HttpsSseProviderProtocol::Canonical
+                | HttpsSseProviderProtocol::OpenAiResponses { .. }
+                | HttpsSseProviderProtocol::CodexChatgpt
+                | HttpsSseProviderProtocol::ChatgptPlan
                 | HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {}
             }
             prepared.body.as_slice()
@@ -962,32 +1901,23 @@ impl HttpsSseProviderAdapter {
         };
         let response = request.send(payload);
         drop(authorization);
-        let Ok(response) = response else {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::connection());
+        let mut response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                self.abandon_retryable_open(invocation)?;
+                return Err(ProviderAdapterError::from_network(Self::http_open_failure(
+                    &io, &error,
+                )));
+            }
         };
-        let status = response.status().as_u16();
-        if status == 429 {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::rate_limited());
-        }
-        if (500..=599).contains(&status) {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::upstream());
-        }
-        if !(200..=299).contains(&status) {
-            self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::rejected());
-        }
-        if !response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(canonical_event_stream_content_type)
-        {
-            self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::response_content_type());
-        }
+        let metadata = self.validate_http_response(invocation, &mut response, credential)?;
+        self.shared
+            .streams
+            .lock()
+            .map_err(|_| ProviderAdapterError::unavailable())?
+            .get_mut(invocation.adapter_request_id)
+            .ok_or_else(ProviderAdapterError::unavailable)?
+            .metadata = metadata;
         io.body_started();
         self.finish_open(invocation, StreamState::Open(Some(response.into_body())))?;
         ProviderAdapterOpenReceipt::try_new(invocation.adapter_request_id.to_owned())
@@ -1008,6 +1938,16 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
             HttpInvocation::from_adapter(invocation),
             credential.expose(),
         )
+    }
+
+    fn open_recovering(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        self.open_recovering_admitted(invocation, credential, receipt, can_start, || Ok(()))
     }
 
     fn control(
@@ -1031,8 +1971,10 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 invocation_digest: [0; 32],
                 controls: 0,
                 tool_bindings: AnthropicToolBindings::default(),
+                response_schema: None,
                 state: StreamState::Fenced,
                 io: self.exchange_io(),
+                metadata: ProviderFailureMetadata::default(),
             });
         if record.model_exchange_id != *model_exchange_id {
             return Err(ProviderAdapterError::identity_conflict());
@@ -1558,14 +2500,75 @@ fn map_anthropic_request(
 fn map_anthropic_response(
     error: crate::provider_anthropic::AnthropicCodecError,
 ) -> HttpsSseProviderError {
-    HttpsSseProviderError::new(match error.kind() {
+    let mut mapped = HttpsSseProviderError::new(match error.kind() {
         AnthropicCodecErrorKind::InvalidRequest | AnthropicCodecErrorKind::Protocol => {
             HttpsSseProviderErrorKind::SseEvent
         }
         AnthropicCodecErrorKind::InvalidSse => HttpsSseProviderErrorKind::SseFraming,
         AnthropicCodecErrorKind::IncompleteStream => HttpsSseProviderErrorKind::IncompleteStream,
         AnthropicCodecErrorKind::SizeLimit => HttpsSseProviderErrorKind::SizeLimit,
-    })
+    });
+    mapped.metadata.diagnostic = error
+        .diagnostic()
+        .map(|diagnostic| ProviderFailureDiagnostic {
+            stage: diagnostic.stage.to_owned(),
+            event_type: diagnostic.event_type.to_owned(),
+            field_path: diagnostic.field_path.to_owned(),
+        });
+    mapped
+}
+
+fn response_metadata(
+    headers: &ureq::http::HeaderMap,
+    status: u16,
+    credential: &[u8],
+    custom_headers: &[(String, String)],
+) -> ProviderFailureMetadata {
+    let provider_retry_after_millis = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let value = value.trim();
+            value
+                .parse::<u64>()
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .or_else(|| {
+                    httpdate::parse_http_date(value).ok().map(|deadline| {
+                        u64::try_from(
+                            deadline
+                                .duration_since(std::time::SystemTime::now())
+                                .unwrap_or(Duration::ZERO)
+                                .as_millis(),
+                        )
+                        .unwrap_or(u64::MAX)
+                    })
+                })
+        });
+    let provider_request_id = ["x-request-id", "request-id", "x-amzn-requestid"]
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|value| value.to_str().ok()))
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .filter(|value| {
+            !value
+                .as_bytes()
+                .windows(credential.len().max(1))
+                .any(|window| window == credential)
+                && !custom_headers
+                    .iter()
+                    .any(|(_, secret)| !secret.is_empty() && value.contains(secret))
+        })
+        .map(str::to_owned);
+    ProviderFailureMetadata {
+        status: Some(status),
+        provider_retry_after_millis,
+        provider_request_id,
+        diagnostic: None,
+    }
 }
 
 fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
@@ -1585,6 +2588,15 @@ fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
     digest.finalize().into()
 }
 
+#[cfg(test)]
+fn classify_open_error(error: &ureq::Error) -> ProviderAdapterError {
+    ProviderAdapterError::from_network(winwincode_network::classify_ureq(
+        error,
+        false,
+        winwincode_network::Phase::ResponseHeaders,
+    ))
+}
+
 fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
     if secret.is_empty()
         || secret.len() > 16 * 1024
@@ -1596,6 +2608,70 @@ fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
     value.extend_from_slice(AUTHORIZATION_PREFIX);
     value.extend_from_slice(secret);
     String::from_utf8(value).map_err(|_| ProviderAdapterError::rejected())
+}
+
+/// Derive routing headers from the kernel's original request envelope before
+/// protocol translation removes it. Never mutate shared Provider configuration:
+/// concurrent conversations and physical retries retain their own identities.
+fn native_request_headers(
+    payload: &[u8],
+    endpoint: &str,
+    custom_headers: &[(String, String)],
+) -> Result<Vec<(&'static str, String)>, ProviderAdapterError> {
+    let mut headers = Vec::with_capacity(4);
+    let mut append = |name: &'static str, value: &str| {
+        if !custom_headers
+            .iter()
+            .any(|(configured, _)| configured.eq_ignore_ascii_case(name))
+        {
+            headers.push((name, value.to_owned()));
+        }
+    };
+    append(
+        "User-Agent",
+        concat!("WinWinCode/", env!("CARGO_PKG_VERSION")),
+    );
+    // Raw canonical payloads are also supported; they have no Core envelope.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return Ok(headers);
+    };
+    let Some(envelope) = value.as_object() else {
+        return Ok(headers);
+    };
+    if !["requestId", "provider", "request"]
+        .iter()
+        .all(|field| envelope.contains_key(*field))
+    {
+        return Ok(headers);
+    }
+    let identity = |field| {
+        envelope
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 512
+                    && id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            })
+            .ok_or_else(ProviderAdapterError::request_translation)
+    };
+    let session_id = identity("sessionId")?;
+    let thread_id = identity("threadId")?;
+    append("session-id", session_id);
+    append("thread-id", thread_id);
+    // OpenCode Go/Zen expects an explicit per-conversation routing alias from
+    // clients with their own User-Agent. Restrict it to the official HTTPS origin.
+    let opencode_origin = ureq::http::Uri::from_str(endpoint).is_ok_and(|uri| {
+        uri.scheme_str() == Some("https")
+            && uri.authority().is_some_and(|authority| {
+                authority.as_str().eq_ignore_ascii_case("opencode.ai")
+                    || authority.as_str().eq_ignore_ascii_case("opencode.ai:443")
+            })
+    });
+    if opencode_origin {
+        append("x-opencode-session", thread_id);
+    }
+    Ok(headers)
 }
 
 /// Canonical HTTPS endpoint shape for every Provider module: a trimmed
@@ -1646,9 +2722,10 @@ fn valid_token(value: &str, max_len: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("provider_model_boundary_regression_tests.rs");
     use std::{
         io::{Read, Write},
-        net::{TcpListener, TcpStream},
+        net::{Shutdown, TcpListener, TcpStream},
         sync::{Arc, mpsc},
         thread,
     };
@@ -1661,13 +2738,653 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn only_transient_connection_failures_request_another_attempt() {
+        for error in [
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert!(classify_open_error(&error).retryable());
+        }
+        for error in [
+            ureq::Error::Tls("private TLS diagnostic"),
+            ureq::Error::TlsRequired,
+            ureq::Error::InvalidProxyUrl,
+            ureq::Error::BadUri("private request".to_owned()),
+            ureq::Error::TooManyRedirects,
+            ureq::Error::Rustls(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            )),
+            ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName),
+            )),
+        ] {
+            let failure = classify_open_error(&error);
+            assert!(
+                !failure.retryable(),
+                "error category {:?}, safe failure {failure:?}",
+                std::mem::discriminant(&error)
+            );
+            assert!(!format!("{failure:?}").contains("private"));
+        }
+    }
+
     const SECRET: &[u8] = b"provider-https-sse-secret-fixture";
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
 
-    struct TestResponse {
+    include!("provider_http_error_diagnostics.test.rs");
+    include!("provider_request_identity_diagnostics.test.rs");
+
+    fn responses_api_payload() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"request":{
+            "model":"fixture-model", "instructions":"Use native tools", "stream":true, "store":false,
+            "tools":[{"type":"custom","name":"exec","description":"Raw JavaScript","format":{"type":"grammar","syntax":"lark","definition":"start: /[\\s\\S]+/"}}],
+            "input":[{"type":"custom_tool_call","name":"exec","call_id":"old-call","input":"text('previous');"},{"type":"custom_tool_call_output","call_id":"old-call","output":"previous"}]
+        }})).unwrap()
+    }
+
+    fn responses_api_body(source: &str) -> String {
+        use std::fmt::Write as _;
+
+        let events = [
+            serde_json::json!({"type":"response.created","response":{"id":"resp-api","model":"observed-api-model"}}),
+            serde_json::json!({"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ct-api","call_id":"call-api","name":"exec","input":""}}),
+            serde_json::json!({"type":"response.custom_tool_call_input.delta","item_id":"ct-api","call_id":"call-api","delta":source}),
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"ct-api","call_id":"call-api","name":"exec","input":source}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp-api","model":"observed-api-model","usage":{"input_tokens":20,"output_tokens":7},"end_turn":true}}),
+        ];
+        let mut body = String::new();
+        for event in events {
+            write!(&mut body, "data: {event}\n\n").unwrap();
+        }
+        body
+    }
+
+    fn responses_api_receipt(
+        exchange: ModelExchangeId,
+        request_id: RequestId,
+    ) -> ProviderGatewayOpenReceipt {
+        let mut stream_leak_gate = crate::CredentialLeakGate::new();
+        stream_leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate,
+        }
+    }
+
+    fn json_object_payload() -> Vec<u8> {
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&responses_api_payload()).unwrap();
+        payload["request"]["text"] = serde_json::json!({"format":{
+            "type":"json_schema","strict":true,"name":"fixture_result",
+            "schema":{"type":"object","additionalProperties":false,
+                "required":["ok","findings"],"properties":{
+                    "ok":{"type":"boolean"},
+                    "findings":{"type":"array","items":{"type":"object",
+                        "additionalProperties":false,"required":["verdict"],
+                        "properties":{"verdict":{"type":"string","enum":["pass","fail"]}}}}
+                }}
+        }});
+        serde_json::to_vec(&payload).unwrap()
+    }
+
+    fn json_object_body(answer: &str) -> String {
+        use std::fmt::Write as _;
+
+        let mut events = Vec::new();
+        events.push(serde_json::json!({"type":"response.created","response":{"id":"resp-api","model":"observed-api-model"}}));
+        events.push(serde_json::json!({"type":"response.output_item.added","item":{"type":"message","id":"message-api","role":"assistant","phase":"final_answer","content":[]}}));
+        events.push(serde_json::json!({"type":"response.output_item.done","item":{"type":"message","id":"message-api","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":answer}]}}));
+        events.push(serde_json::json!({"type":"response.completed","response":{"id":"resp-api","model":"observed-api-model","usage":{"input_tokens":20,"output_tokens":7},"end_turn":true}}));
+        let mut body = String::new();
+        for event in events {
+            writeln!(&mut body, "data: {event}\n").unwrap();
+        }
+        body
+    }
+
+    #[test]
+    fn json_object_responses_https_maps_only_format_and_keeps_canonical_schema() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let body = json_object_body(r#"{"ok":true,"findings":[{"verdict":"pass"}]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let requests = fixture.finish();
+        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+        assert_eq!(
+            sent["text"]["format"],
+            serde_json::json!({"type":"json_object"})
+        );
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        let instructions = sent["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with(original["request"]["instructions"].as_str().unwrap()));
+        assert!(instructions.contains(
+            &serde_json::to_string(&original["request"]["text"]["format"]["schema"]).unwrap()
+        ));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn text_responses_https_omits_text_and_retains_native_tools_and_schema() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let body = json_object_body(r#"{"ok":true,"findings":[{"verdict":"pass"}]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let requests = fixture.finish();
+        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+        assert!(
+            sent.get("text").is_none(),
+            "Text mode uses native default format"
+        );
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        let instructions = sent["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with(original["request"]["instructions"].as_str().unwrap()));
+        assert_eq!(
+            instructions
+                .matches(
+                    &serde_json::to_string(&original["request"]["text"]["format"]["schema"])
+                        .unwrap()
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn text_responses_https_rejects_invalid_final_with_paid_usage_and_real_model() {
+        let payload = json_object_payload();
+        let body = json_object_body(r#"{"ok":"wrong","findings":[]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(
+            matches!(completion.terminal, ProviderGatewayTerminal::Failed { charge: Some(charge), .. } if charge.usage.input_tokens == 20 && charge.usage.output_tokens == 7)
+        );
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(!frames.iter().any(|frame| frame["type"] == "completed"));
+        assert_eq!(
+            frames.last().unwrap()["error"]["code"],
+            "RESPONSE_SCHEMA_INVALID"
+        );
+        assert_eq!(frames.last().unwrap()["error"]["retryable"], false);
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn text_responses_https_accepts_native_tool_input_with_a_final_schema() {
+        let payload = json_object_payload();
+        let source = "const result = await tools.exec_command({cmd:'printf ready'}); text(result);";
+        let body = responses_api_body(source);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        let item = &frames
+            .iter()
+            .find(|frame| frame["type"] == "output_item_done")
+            .unwrap()["item"];
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["id"], "ct-api");
+        assert_eq!(item["call_id"], "call-api");
+        assert_eq!(item["input"], source);
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn text_responses_device_config_selects_explicit_wire_mode_and_keeps_defaults() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        for mode in [None, Some("json_schema"), Some("json_object"), Some("text")] {
+            let mut config = serde_json::json!({
+                "providerId":"provider-https-fixture","displayName":"Public fixture",
+                "endpoint":"https://models.example/v1/responses","protocol":"openai_responses",
+                "modelIds":["fixture-model"],"enabled":true
+            });
+            if let Some(mode) = mode {
+                config["responsesStructuredOutput"] = mode.into();
+            }
+            let config = serde_json::from_value(config).unwrap();
+            let adapter = crate::device_store::adapter(&config, BTreeMap::new(), None).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            let bytes = adapter.prepare_responses_payload(request).unwrap().unwrap();
+            let sent: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(sent["tools"], original["request"]["tools"]);
+            assert_eq!(sent["input"], original["request"]["input"]);
+            match mode {
+                Some("text") => assert!(sent.get("text").is_none()),
+                Some("json_object") => assert_eq!(
+                    sent["text"]["format"],
+                    serde_json::json!({"type":"json_object"})
+                ),
+                None | Some("json_schema") => {
+                    assert_eq!(sent["text"], original["request"]["text"]);
+                    assert_eq!(sent["instructions"], original["request"]["instructions"]);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn text_responses_rejects_unknown_schema_before_network() {
+        let fixture = TlsFixture::start(Vec::new());
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&json_object_payload()).unwrap();
+        payload["request"]["text"]["format"]["schema"]["properties"]["ok"]["pattern"] =
+            serde_json::json!("unsupported");
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        assert!(adapter.open_https(request, SECRET).is_err());
+        assert_eq!(fixture.finish().len(), 0);
+    }
+
+    #[test]
+    fn json_object_responses_https_rejects_invalid_final_retaining_usage_and_model() {
+        let payload = json_object_payload();
+        let body = json_object_body(r#"{"ok":"wrong","findings":[]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(
+            matches!(completion.terminal, ProviderGatewayTerminal::Failed { charge: Some(charge), .. } if charge.usage.input_tokens == 20 && charge.usage.output_tokens == 7)
+        );
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(!frames.iter().any(|frame| frame["type"] == "completed"));
+        assert_eq!(frames.last().unwrap()["type"], "error");
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn json_object_responses_rejects_unknown_schema_before_network() {
+        let fixture = TlsFixture::start(Vec::new());
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&json_object_payload()).unwrap();
+        payload["request"]["text"]["format"]["schema"]["properties"]["ok"]["pattern"] =
+            serde_json::json!("unsupported");
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        assert!(adapter.prepare_responses_payload(request).is_err());
+        assert_eq!(fixture.finish().len(), 0);
+    }
+
+    #[test]
+    fn openai_responses_https_preserves_custom_contract_and_observes_real_model() {
+        let payload = responses_api_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let source = "text(true);\ntext('中文');";
+        let body = responses_api_body(source);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let settings = config(&fixture)
+            .with_openai_responses(32_768)
+            .unwrap()
+            .with_custom_headers([(
+                "x-openai-internal-codex-responses-lite".into(),
+                "true".into(),
+            )])
+            .unwrap();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "output_item_done"
+                    && frame["item"]["type"] == "custom_tool_call"
+                    && frame["item"]["input"] == source)
+        );
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(contains_ascii_case_insensitive(
+            request,
+            b"x-openai-internal-codex-responses-lite: true"
+        ));
+        assert!(contains_ascii_case_insensitive(
+            request,
+            b"Authorization: Bearer provider-https-sse-secret-fixture"
+        ));
+        for header in [
+            b"ChatGPT-Account-Id:".as_slice(),
+            b"OpenAI-Beta:",
+            b"Anthropic-Version:",
+            b"originator:",
+        ] {
+            assert!(!contains_ascii_case_insensitive(request, header));
+        }
+        let start = find_bytes(request, b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&request[start..]).unwrap();
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        assert_eq!(sent["max_output_tokens"], 32_768);
+    }
+
+    #[test]
+    fn openai_responses_https_still_blocks_keys_and_private_header_echoes() {
+        for echoed in ["private-header-token", std::str::from_utf8(SECRET).unwrap()] {
+            let body = responses_api_body(&format!("text('{echoed}');"));
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: &body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let settings = config(&fixture)
+                .with_openai_responses(32_768)
+                .unwrap()
+                .with_custom_headers([
+                    (
+                        "x-openai-internal-codex-responses-lite".into(),
+                        "true".into(),
+                    ),
+                    (
+                        "x-private-provider-header".into(),
+                        "private-header-token".into(),
+                    ),
+                ])
+                .unwrap();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = responses_api_payload();
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            adapter.open_https(request, SECRET).unwrap();
+            assert_eq!(
+                adapter
+                    .drain_canonical(&responses_api_receipt(exchange, request_id))
+                    .unwrap_err()
+                    .kind(),
+                HttpsSseProviderErrorKind::CredentialLeak
+            );
+            assert_eq!(fixture.finish().len(), 1);
+        }
+    }
+
+    #[test]
+    fn openai_responses_https_requires_sse_mime() {
+        for content_type in ["", "application/json"] {
+            let body = responses_api_body("text(true);");
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type,
+                body: &body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let adapter = HttpsSseProviderAdapter::try_new(
+                config(&fixture).with_openai_responses(32_768).unwrap(),
+            )
+            .unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = responses_api_payload();
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    adapter.open_https(request, SECRET).unwrap_err().kind()
+                ),
+                "ResponseContentType"
+            );
+            assert_eq!(fixture.finish().len(), 1);
+        }
+    }
+
+    #[test]
+    fn openai_responses_https_accepts_complete_terminal_before_http_tail_cut() {
+        let body = responses_api_body("text(true);");
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: Some(100_000),
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let payload = responses_api_payload();
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert_eq!(
+            completion.terminal.outcome(),
+            crate::ProviderGatewayTerminalOutcome::Succeeded
+        );
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn retry_after_retains_delta_and_http_date_without_copying_secret_headers() {
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert("retry-after", "12".parse().unwrap());
+        headers.insert("x-request-id", "provider-request-1".parse().unwrap());
+        let facts = response_metadata(&headers, 429, SECRET, &[]);
+        assert_eq!(facts.status, Some(429));
+        assert_eq!(facts.provider_retry_after_millis, Some(12_000));
+        assert_eq!(
+            facts.provider_request_id.as_deref(),
+            Some("provider-request-1")
+        );
+        let date = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_mins(1));
+        headers.insert("retry-after", date.parse().unwrap());
+        let wait = response_metadata(&headers, 503, SECRET, &[])
+            .provider_retry_after_millis
+            .unwrap();
+        assert!((58_000..=60_000).contains(&wait));
+        headers.insert("retry-after", "not a date or number".parse().unwrap());
+        headers.insert(
+            "x-request-id",
+            std::str::from_utf8(SECRET).unwrap().parse().unwrap(),
+        );
+        let facts = response_metadata(&headers, 403, SECRET, &[]);
+        assert_eq!(facts.provider_retry_after_millis, None);
+        assert_eq!(facts.provider_request_id, None);
+    }
+
+    struct TestResponse<'body> {
         status: &'static str,
         content_type: &'static str,
-        body: &'static str,
+        body: &'body str,
         declared_length: Option<usize>,
         delay: Duration,
     }
@@ -1680,11 +3397,11 @@ mod tests {
     }
 
     impl TlsFixture {
-        fn start(responses: Vec<TestResponse>) -> Self {
+        fn start(responses: Vec<TestResponse<'_>>) -> Self {
             Self::start_streaming(responses, Duration::ZERO)
         }
 
-        fn start_streaming(responses: Vec<TestResponse>, chunk_delay: Duration) -> Self {
+        fn start_streaming(responses: Vec<TestResponse<'_>>, chunk_delay: Duration) -> Self {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let CertifiedKey { cert, signing_key } =
                 generate_simple_self_signed(vec!["localhost".to_owned()])
@@ -1698,9 +3415,28 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS fixture");
             let address = listener.local_addr().expect("TLS fixture address");
             let (request_tx, requests) = mpsc::channel();
+            let responses = responses
+                .into_iter()
+                .map(|response| {
+                    (
+                        response.status,
+                        response.content_type,
+                        response.body.to_owned(),
+                        response.declared_length,
+                        response.delay,
+                    )
+                })
+                .collect::<Vec<_>>();
             let server = thread::spawn(move || {
                 let config = Arc::new(config);
-                for response in responses {
+                for (status, content_type, body, declared_length, delay) in responses {
+                    let response = TestResponse {
+                        status,
+                        content_type,
+                        body: &body,
+                        declared_length,
+                        delay,
+                    };
                     let (socket, _) = listener.accept().expect("accept TLS request");
                     let connection =
                         ServerConnection::new(Arc::clone(&config)).expect("TLS connection");
@@ -1725,6 +3461,69 @@ mod tests {
         }
     }
 
+    struct ConnectFixture {
+        url: String,
+        requests: mpsc::Receiver<Vec<u8>>,
+        server: thread::JoinHandle<()>,
+    }
+
+    impl ConnectFixture {
+        fn start(target: Option<&str>) -> Self {
+            let target = target.map(|endpoint| {
+                ureq::http::Uri::from_str(endpoint)
+                    .expect("target URI")
+                    .port_u16()
+                    .expect("target port")
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind CONNECT proxy");
+            let address = listener.local_addr().expect("proxy address");
+            let (request_tx, requests) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut client, _) = listener.accept().expect("proxy connection");
+                client
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .expect("proxy read timeout");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    client.read_exact(&mut byte).expect("CONNECT header");
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                request_tx.send(request).expect("record CONNECT");
+                let Some(port) = target else {
+                    let mut byte = [0];
+                    assert_eq!(client.read(&mut byte).expect("cancelled CONNECT socket"), 0);
+                    return;
+                };
+                let mut upstream = TcpStream::connect(("127.0.0.1", port)).expect("proxy target");
+                client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .expect("CONNECT response");
+                client.set_read_timeout(None).expect("relay timeout");
+                let mut read_client = client.try_clone().expect("client relay");
+                let mut write_upstream = upstream.try_clone().expect("upstream relay");
+                let outbound = thread::spawn(move || {
+                    let _ = std::io::copy(&mut read_client, &mut write_upstream);
+                    let _ = write_upstream.shutdown(Shutdown::Both);
+                });
+                let _ = std::io::copy(&mut upstream, &mut client);
+                let _ = client.shutdown(Shutdown::Both);
+                outbound.join().expect("outbound relay");
+            });
+            Self {
+                url: format!("http://fixture-user:fixture-password@{address}"),
+                requests,
+                server,
+            }
+        }
+
+        fn finish(self) -> Vec<Vec<u8>> {
+            self.server.join().expect("join CONNECT fixture");
+            self.requests.try_iter().collect()
+        }
+    }
+
     fn read_http_request(stream: &mut StreamOwned<ServerConnection, TcpStream>) -> Vec<u8> {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4 * 1024];
@@ -1744,14 +3543,19 @@ mod tests {
 
     fn write_http_response(
         stream: &mut StreamOwned<ServerConnection, TcpStream>,
-        response: &TestResponse,
+        response: &TestResponse<'_>,
         chunk_delay: Duration,
     ) {
+        let content_type = if response.content_type.is_empty() {
+            String::new()
+        } else {
+            format!("Content-Type: {}\r\n", response.content_type)
+        };
         if write!(
             stream,
-            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
             response.status,
-            response.content_type,
+            content_type,
             response.declared_length.unwrap_or(response.body.len()),
         )
         .is_err()
@@ -2165,6 +3969,216 @@ mod tests {
     }
 
     #[test]
+    fn explicit_http_connect_proxy_validates_and_redacts_its_route() {
+        let fixture = TlsFixture::start(Vec::new());
+        let settings = config(&fixture);
+        let io = crate::provider_transport::ExchangeIo::new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        assert!(
+            HttpsSseProviderAdapter::agent(&settings, io)
+                .config()
+                .proxy()
+                .is_none()
+        );
+        for url in [
+            "proxy.example:8080",
+            "https://proxy.example:8080",
+            "socks5://proxy.example:8080",
+            "http://",
+            "http://proxy.example/path",
+            "http://proxy.example/?query=secret",
+            "http://proxy.example/#fragment",
+            "http://proxy.example:not-a-port",
+            "http://proxy.example:65536",
+            " http://proxy.example",
+            "http://proxy.example\n",
+        ] {
+            assert_eq!(
+                settings
+                    .clone()
+                    .with_http_connect_proxy(url)
+                    .expect_err("invalid proxy")
+                    .kind(),
+                HttpsSseProviderErrorKind::InvalidConfiguration
+            );
+        }
+        let routed = settings
+            .with_http_connect_proxy("http://private-user:private-password@localhost:8080")
+            .expect("explicit HTTP proxy");
+        let debug = format!("{routed:?}");
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
+        assert!(!debug.contains("localhost:8080"));
+        fixture.finish();
+    }
+
+    #[test]
+    fn verified_tls_sse_through_http_connect_preserves_replay_and_private_headers() {
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: successful_sse(),
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let proxy = ConnectFixture::start(Some(&fixture.endpoint));
+        let settings = config(&fixture)
+            .with_http_connect_proxy(&proxy.url)
+            .expect("proxy config");
+        let adapter = HttpsSseProviderAdapter::try_new(settings).expect("adapter");
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let request = invocation(&exchange, &request_id);
+        let first = adapter
+            .open_https(request, SECRET)
+            .expect("proxied TLS open");
+        assert_eq!(
+            adapter.open_https(request, SECRET).expect("exact replay"),
+            first
+        );
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate: crate::CredentialLeakGate::new(),
+        };
+        assert!(matches!(
+            adapter
+                .drain_canonical(&receipt)
+                .expect("proxied SSE")
+                .terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let provider_requests = fixture.finish();
+        assert_eq!(provider_requests.len(), 1);
+        assert!(
+            provider_requests[0]
+                .windows(SECRET.len())
+                .any(|window| window == SECRET)
+        );
+        assert!(!contains_ascii_case_insensitive(
+            &provider_requests[0],
+            b"proxy-authorization:"
+        ));
+        let proxy_requests = proxy.finish();
+        assert_eq!(proxy_requests.len(), 1);
+        assert!(proxy_requests[0].starts_with(b"CONNECT localhost:"));
+        assert!(contains_ascii_case_insensitive(
+            &proxy_requests[0],
+            b"proxy-authorization: basic "
+        ));
+        assert!(
+            !proxy_requests[0]
+                .windows(SECRET.len())
+                .any(|window| window == SECRET)
+        );
+        assert!(
+            !proxy_requests[0]
+                .windows(PAYLOAD.len())
+                .any(|window| window == PAYLOAD)
+        );
+    }
+
+    #[test]
+    fn cancel_and_release_interrupt_a_pending_http_connect_socket() {
+        for action in [
+            ProviderStreamControlAction::Cancel,
+            ProviderStreamControlAction::Release,
+        ] {
+            let fixture = TlsFixture::start(Vec::new());
+            let proxy = ConnectFixture::start(None);
+            let adapter = HttpsSseProviderAdapter::try_new(
+                config(&fixture)
+                    .with_http_connect_proxy(&proxy.url)
+                    .expect("proxy config"),
+            )
+            .expect("adapter");
+            let exchange = ModelExchangeId("mdl_00000000000000000000000004".into());
+            let request_id = RequestId("req_00000000000000000000000004".into());
+            let opener_adapter = adapter.clone();
+            let opener_exchange = exchange.clone();
+            let opener_request_id = request_id.clone();
+            let opener = thread::spawn(move || {
+                opener_adapter.open_https(invocation(&opener_exchange, &opener_request_id), SECRET)
+            });
+            proxy
+                .requests
+                .recv_timeout(Duration::from_secs(2))
+                .expect("pending CONNECT");
+            let started = std::time::Instant::now();
+            adapter
+                .control(&exchange, "pad_00000000000000000000000001", action)
+                .expect("interrupt proxy socket");
+            assert_eq!(
+                opener.join().expect("pending open"),
+                Err(ProviderAdapterError::rejected())
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "control must close the TCP socket immediately"
+            );
+            assert_eq!(
+                adapter.open_https(invocation(&exchange, &request_id), SECRET),
+                Err(ProviderAdapterError::rejected())
+            );
+            assert!(fixture.finish().is_empty());
+            assert!(proxy.finish().is_empty());
+        }
+    }
+
+    #[test]
+    fn proxied_sse_body_keeps_the_progress_idle_timeout_without_a_total_deadline() {
+        let fixture = TlsFixture::start_streaming(
+            vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            }],
+            Duration::from_millis(350),
+        );
+        let proxy = ConnectFixture::start(Some(&fixture.endpoint));
+        let mut settings = config(&fixture)
+            .without_deadlines()
+            .with_http_connect_proxy(&proxy.url)
+            .expect("proxy config");
+        settings.idle_timeout = Duration::from_millis(100);
+        let io = crate::provider_transport::ExchangeIo::new(
+            settings.connect_timeout,
+            settings.idle_timeout,
+        );
+        let agent = HttpsSseProviderAdapter::agent(&settings, Arc::clone(&io));
+        let mut response = agent
+            .post(&fixture.endpoint)
+            .send(PAYLOAD)
+            .expect("proxied headers");
+        io.body_started();
+        let started = std::time::Instant::now();
+        assert!(
+            response
+                .body_mut()
+                .as_reader()
+                .read_to_end(&mut Vec::new())
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(response);
+        assert_eq!(fixture.finish().len(), 1);
+        assert_eq!(proxy.finish().len(), 1);
+    }
+
+    #[test]
     fn cancellation_while_tls_open_is_pending_fences_the_late_response() {
         let fixture = TlsFixture::start(vec![TestResponse {
             status: "200 OK",
@@ -2208,6 +4222,20 @@ mod tests {
     fn retryable_status_reuses_identity_and_sse_is_strict_and_accounted() {
         let fixture = TlsFixture::start(vec![
             TestResponse {
+                status: "408 Request Timeout",
+                content_type: "application/json",
+                body: "{}",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
+                status: "425 Too Early",
+                content_type: "application/json",
+                body: "{}",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
                 status: "500 Internal Server Error",
                 content_type: "application/json",
                 body: "{}",
@@ -2233,19 +4261,27 @@ mod tests {
         let exchange = ModelExchangeId("mdl_00000000000000000000000002".to_owned());
         let request_id = RequestId("req_00000000000000000000000002".to_owned());
         let request = invocation(&exchange, &request_id);
+        for status in [408, 425] {
+            let failure = adapter
+                .open_https(request, SECRET)
+                .expect_err("retryable HTTP")
+                .network_failure();
+            assert_eq!(failure.http_status, Some(status));
+            assert!(failure.retryable());
+        }
         assert_eq!(
-            adapter.open_https(request, SECRET).expect_err("5xx"),
-            ProviderAdapterError::upstream()
+            adapter.open_https(request, SECRET).expect_err("5xx").kind(),
+            crate::ProviderAdapterErrorKind::Upstream
         );
         assert_eq!(
-            adapter.open_https(request, SECRET).expect_err("429"),
-            ProviderAdapterError::rate_limited()
+            adapter.open_https(request, SECRET).expect_err("429").kind(),
+            crate::ProviderAdapterErrorKind::RateLimited
         );
         adapter
             .open_https(request, SECRET)
             .expect("retry exact idempotency identity");
         let requests = fixture.finish();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 5);
         assert!(
             requests
                 .iter()
@@ -2385,6 +4421,420 @@ mod tests {
             result.expect_err("fragment-bearing endpoint").kind(),
             HttpsSseProviderErrorKind::InvalidConfiguration
         );
+    }
+    #[test]
+    fn codex_missing_mime_preserves_account_headers_and_unwraps_request() {
+        use winwincode_api::generated::ModelRoute;
+        use winwincode_domain::CredentialReferenceId;
+        for plan in [false, true] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "",
+                body: concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-one\"}}\n\n",
+                    "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}],\"phase\":\"final_answer\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-one\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+                ),
+                declared_length: Some(100_000),
+                delay: Duration::ZERO,
+            }]);
+            let mut settings = config(&fixture);
+            settings.endpoint = if plan {
+                crate::chatgpt_oauth::ENDPOINT
+            } else {
+                crate::codex_login::CODEX_ENDPOINT
+            }
+            .into();
+            let mut settings = if plan {
+                settings.with_chatgpt_plan().unwrap()
+            } else {
+                settings
+                    .with_codex_chatgpt("account-fixture".into())
+                    .unwrap()
+            };
+            // Only this private TLS test substitutes a local endpoint after validating production settings.
+            settings.endpoint = fixture.endpoint.clone();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload=br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
+            adapter.open_https(request, SECRET).unwrap();
+            let mut leak_gate = crate::CredentialLeakGate::new();
+            leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+            let adapter_request_id = request.adapter_request_id.to_owned();
+            let receipt = ProviderGatewayOpenReceipt {
+                model_exchange_id: exchange,
+                request_id,
+                route: ModelRoute {
+                    provider_id: "provider-https-fixture".into(),
+                    model_id: "fixture-model".into(),
+                    credential_reference_id: CredentialReferenceId(
+                        "crd_00000000000000000000000001".into(),
+                    ),
+                },
+                adapter_request_id,
+                idempotent_replay: false,
+                stream_leak_gate: leak_gate,
+            };
+            assert_eq!(
+                adapter
+                    .drain_canonical(&receipt)
+                    .unwrap()
+                    .terminal
+                    .outcome(),
+                crate::ProviderGatewayTerminalOutcome::Succeeded
+            );
+            let requests = fixture.finish();
+            assert_eq!(
+                contains_ascii_case_insensitive(
+                    &requests[0],
+                    b"ChatGPT-Account-Id: account-fixture"
+                ),
+                !plan
+            );
+            assert!(contains_ascii_case_insensitive(
+                &requests[0],
+                b"Authorization: Bearer provider-https-sse-secret-fixture"
+            ));
+            let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+            let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+            assert_eq!(body["model"], "fixture-model");
+            assert!(body.get("request").is_none());
+        }
+    }
+
+    fn responses_fixture_adapter(
+        fixture: &TlsFixture,
+        plan: bool,
+    ) -> (HttpsSseProviderAdapter, ProviderGatewayOpenReceipt) {
+        let mut settings = config(fixture);
+        settings.endpoint = if plan {
+            crate::chatgpt_oauth::ENDPOINT
+        } else {
+            crate::codex_login::CODEX_ENDPOINT
+        }
+        .into();
+        let mut settings = if plan {
+            settings.with_chatgpt_plan().unwrap()
+        } else {
+            settings
+                .with_codex_chatgpt("account-fixture".into())
+                .unwrap()
+        };
+        // Validate the production origin before substituting this private TLS fixture.
+        settings.endpoint = fixture.endpoint.clone();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
+        adapter.open_https(request, SECRET).unwrap();
+        let mut leak_gate = crate::CredentialLeakGate::new();
+        leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate: leak_gate,
+        };
+        (adapter, receipt)
+    }
+
+    fn failed_responses_events(
+        code: &str,
+        prefix_usage: bool,
+        terminal_usage: bool,
+    ) -> Vec<serde_json::Value> {
+        let mut events = vec![serde_json::json!({
+            "type": "response.created", "response": { "id": "failed-response" },
+        })];
+        if prefix_usage {
+            events.push(serde_json::json!({
+                "type": "response.in_progress", "response": {
+                    "id": "failed-response", "usage": {
+                        "input_tokens": 7, "output_tokens": 3,
+                        "input_tokens_details": { "cached_tokens": 2 },
+                        "output_tokens_details": { "reasoning_tokens": 1 },
+                    },
+                },
+            }));
+        }
+        events.push(serde_json::json!({
+            "type": "response.output_text.delta", "delta": "partial output",
+        }));
+        let mut terminal = serde_json::json!({
+            "type": "response.failed", "response": {
+                "id": "failed-response",
+                "error": { "code": code, "message": "private failure diagnostic" },
+            },
+        });
+        if terminal_usage {
+            terminal["response"]["usage"] = serde_json::json!({
+                "input_tokens": 10, "output_tokens": 4,
+                "input_tokens_details": { "cached_tokens": 2 },
+                "output_tokens_details": { "reasoning_tokens": 1 },
+            });
+        }
+        events.push(terminal);
+        events
+    }
+
+    fn responses_wire(events: &[serde_json::Value]) -> String {
+        use std::fmt::Write as _;
+        let mut wire = String::new();
+        for event in events {
+            writeln!(wire, "data: {event}\n").unwrap();
+        }
+        wire
+    }
+
+    fn assert_failed_responses_usage(
+        completion: &HttpsSseProviderCompletion,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let charge = completion.terminal.charge().expect("observed paid usage");
+        assert_eq!(charge.usage.input_tokens, input_tokens);
+        assert_eq!(charge.usage.output_tokens, output_tokens);
+        assert_eq!(charge.usage.cached_input_tokens, Some(2));
+        assert_eq!(charge.usage.reasoning_output_tokens, 1);
+        assert_eq!(charge.actual_cost_micros, None);
+        let frame = completion.frames.last().expect("canonical failed frame");
+        assert!(frame.is_terminal());
+        let value: serde_json::Value = serde_json::from_str(frame.payload_json()).unwrap();
+        assert_eq!(value["tokenUsage"]["input_tokens"], input_tokens);
+        assert_eq!(value["tokenUsage"]["output_tokens"], output_tokens);
+        assert_eq!(value["tokenUsage"]["cached_input_tokens"], 2);
+        assert_eq!(value["tokenUsage"]["reasoning_output_tokens"], 1);
+        assert_eq!(
+            value["tokenUsage"]["total_tokens"],
+            input_tokens + output_tokens
+        );
+    }
+
+    #[test]
+    fn responses_http_tail_cut_preserves_failed_terminal_classification_and_usage() {
+        for plan in [false, true] {
+            for (code, category, expected_code) in [
+                (
+                    "invalid_api_key",
+                    crate::ModelAttemptFailureKind::Authentication,
+                    "AUTH",
+                ),
+                (
+                    "insufficient_quota",
+                    crate::ModelAttemptFailureKind::Quota,
+                    "QUOTA",
+                ),
+                (
+                    "context_length_exceeded",
+                    crate::ModelAttemptFailureKind::ContextWindowExceeded,
+                    "CONTEXT_WINDOW_EXCEEDED",
+                ),
+                (
+                    "rate_limit_exceeded",
+                    crate::ModelAttemptFailureKind::RateLimit,
+                    "RATE_LIMIT",
+                ),
+            ] {
+                let body = responses_wire(&failed_responses_events(code, false, true));
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1, "one actual HTTPS attempt");
+                let completion = result.expect("complete Failed must survive HTTP tail-cut");
+                let ProviderGatewayTerminal::Failed { failure, .. } = completion.terminal else {
+                    panic!("expected a canonical Failed terminal for {code}, plan={plan}");
+                };
+                assert_eq!(failure.kind, category);
+                assert_eq!(failure.certainty, ModelExecutionCertainty::OutputObserved);
+                assert_failed_responses_usage(&completion, 10, 4);
+                let last = completion.frames.last().unwrap().payload_json();
+                let value: serde_json::Value = serde_json::from_str(last).unwrap();
+                assert_eq!(value["error"]["code"], expected_code);
+                assert!(!last.contains("private failure diagnostic"));
+                assert!(!last.contains(std::str::from_utf8(SECRET).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_preserves_prefix_usage_and_prefers_terminal_usage() {
+        for plan in [false, true] {
+            for terminal_usage in [false, true] {
+                let body = responses_wire(&failed_responses_events(
+                    "insufficient_quota",
+                    true,
+                    terminal_usage,
+                ));
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1);
+                let completion = result.expect("complete Failed retains known usage");
+                let ProviderGatewayTerminal::Failed { failure, .. } = completion.terminal else {
+                    panic!("expected a canonical Failed terminal");
+                };
+                assert_eq!(failure.kind, crate::ModelAttemptFailureKind::Quota);
+                assert_eq!(failure.certainty, ModelExecutionCertainty::OutputObserved);
+                let (input, output) = if terminal_usage { (10, 4) } else { (7, 3) };
+                assert_failed_responses_usage(&completion, input, output);
+            }
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_does_not_recover_after_cancellation() {
+        for plan in [false, true] {
+            let body = responses_wire(&failed_responses_events("insufficient_quota", false, true));
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: &body,
+                declared_length: Some(body.len() + 100),
+                delay: Duration::ZERO,
+            }]);
+            let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+            assert_eq!(fixture.finish().len(), 1);
+            // Set the late task cancellation flag without interrupting the already-sent
+            // fixture bytes, so the recovery gate must reject a complete Failed body.
+            let cancellation = Arc::new(crate::provider_transport::ExchangeCancellation::default());
+            let adapter = adapter.with_cancellation(Arc::clone(&cancellation));
+            cancellation.cancel();
+            let error = adapter
+                .drain_canonical(&receipt)
+                .expect_err("task cancellation takes priority over a parsed Failed terminal");
+            assert_eq!(error.kind(), HttpsSseProviderErrorKind::Transport);
+            let (response_id, usage) = error.observed_receipt().expect("actual HTTP body was read");
+            assert_eq!(response_id, "failed-response");
+            assert_eq!(usage.input_tokens, 10);
+            assert_eq!(usage.output_tokens, 4);
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_recovery_keeps_identity_leak_and_structure_gates() {
+        for plan in [false, true] {
+            for fault in [
+                "identity",
+                "prefix_identity",
+                "prefix_without_identity",
+                "prefix_usage",
+                "credential",
+                "after_terminal",
+            ] {
+                let mut events = failed_responses_events("insufficient_quota", true, true);
+                match fault {
+                    "identity" => {
+                        events.last_mut().unwrap()["response"]["id"] = "foreign-response".into();
+                    }
+                    "prefix_identity" => {
+                        events[1]["response"]["id"] = "foreign-response".into();
+                    }
+                    "prefix_without_identity" => {
+                        events[1]["response"].as_object_mut().unwrap().remove("id");
+                    }
+                    "prefix_usage" => {
+                        events[1]["response"]["usage"]["input_tokens"] = "invalid".into();
+                    }
+                    "credential" => {
+                        events[2]["delta"] = std::str::from_utf8(SECRET).unwrap().into();
+                    }
+                    "after_terminal" => events.push(serde_json::json!({
+                        "type": "response.output_text.delta", "delta": "late output",
+                    })),
+                    _ => unreachable!(),
+                }
+                let body = responses_wire(&events);
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1);
+                let error =
+                    result.expect_err("invalid response cannot become canonical completion");
+                assert_eq!(
+                    error.kind(),
+                    HttpsSseProviderErrorKind::Transport,
+                    "{fault}, plan={plan}"
+                );
+                assert!(!format!("{error:?}").contains(std::str::from_utf8(SECRET).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn chatgpt_plan_uses_the_public_endpoint_protocol_without_codex_headers() {
+        for content_type in ["text/event-stream", "", "application/json"] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type,
+                body: "data: {}\n\n",
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            assert!(config(&fixture).with_chatgpt_plan().is_err());
+            let mut settings = config(&fixture);
+            settings.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+            let mut settings = settings.with_chatgpt_plan().unwrap();
+            // Production pins are validated before substituting this private TLS fixture.
+            settings.endpoint = fixture.endpoint.clone();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = br#"{"request":{"model":"fixture-model","input":[],"stream":false,"store":true,"max_output_tokens":128}}"#;
+            assert_eq!(
+                adapter.open_https(request, SECRET).is_ok(),
+                content_type != "application/json"
+            );
+            let requests = fixture.finish();
+            assert!(!contains_ascii_case_insensitive(
+                &requests[0],
+                b"ChatGPT-Account-Id:"
+            ));
+            assert!(!contains_ascii_case_insensitive(
+                &requests[0],
+                b"originator:"
+            ));
+            assert!(contains_ascii_case_insensitive(
+                &requests[0],
+                b"Authorization: Bearer provider-https-sse-secret-fixture"
+            ));
+            let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+            let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+            assert_eq!(body["max_output_tokens"], 128);
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["store"], false);
+            assert!(body.get("request").is_none());
+        }
     }
 }
 

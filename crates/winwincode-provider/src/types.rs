@@ -122,15 +122,52 @@ pub enum ProviderAdapterErrorKind {
 }
 
 /// Provider adapter error which cannot copy upstream response text.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProviderAdapterError {
     kind: ProviderAdapterErrorKind,
     message: &'static str,
+    metadata: Option<Box<ProviderFailureMetadata>>,
+    network: Option<Box<winwincode_network::NetworkFailure>>,
 }
+
+/// Validated transport facts; response bodies and arbitrary header values are absent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderFailureMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_retry_after_millis: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ProviderFailureDiagnostic>,
+}
+
+/// Static parser locations, never copied from a response field or value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderFailureDiagnostic {
+    pub stage: String,
+    pub event_type: String,
+    pub field_path: String,
+}
+
+static EMPTY_PROVIDER_FAILURE_METADATA: ProviderFailureMetadata = ProviderFailureMetadata {
+    status: None,
+    provider_retry_after_millis: None,
+    provider_request_id: None,
+    diagnostic: None,
+};
 
 impl ProviderAdapterError {
     const fn new(kind: ProviderAdapterErrorKind, message: &'static str) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            metadata: None,
+            network: None,
+        }
     }
 
     #[must_use]
@@ -191,39 +228,163 @@ impl ProviderAdapterError {
 
     #[must_use]
     pub const fn rejected() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Rejected,
-            message: "Provider rejected the request",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Rejected,
+            "Provider rejected the request",
+        )
     }
 
     #[must_use]
     pub const fn rate_limited() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::RateLimited,
-            message: "Provider rate limit rejected the request",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::RateLimited,
+            "Provider rate limit rejected the request",
+        )
     }
 
     #[must_use]
     pub const fn unavailable() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Unavailable,
-            message: "Provider adapter is unavailable",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Unavailable,
+            "Provider adapter is unavailable",
+        )
     }
 
     #[must_use]
     pub const fn protocol() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Protocol,
-            message: "Provider adapter response is invalid",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Protocol,
+            "Provider adapter response is invalid",
+        )
     }
 
     #[must_use]
     pub const fn kind(&self) -> ProviderAdapterErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ProviderFailureMetadata) -> Self {
+        self.metadata = (metadata != EMPTY_PROVIDER_FAILURE_METADATA).then(|| Box::new(metadata));
+        self
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &ProviderFailureMetadata {
+        self.metadata
+            .as_deref()
+            .unwrap_or(&EMPTY_PROVIDER_FAILURE_METADATA)
+    }
+
+    #[must_use]
+    pub fn retryable(&self) -> bool {
+        self.network_failure().retryable()
+    }
+}
+
+impl ProviderAdapterError {
+    #[must_use]
+    pub fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+        self.network.as_deref().copied().unwrap_or_else(|| {
+            if let Some(status) = self.metadata().status.filter(|status| *status >= 400) {
+                return NetworkFailure::http(
+                    status,
+                    self.metadata()
+                        .provider_retry_after_millis
+                        .map(std::time::Duration::from_millis),
+                );
+            }
+            let mut failure = NetworkFailure::new(
+                match self.kind {
+                    ProviderAdapterErrorKind::Connection => ErrorKind::ConnectionUnavailable,
+                    ProviderAdapterErrorKind::Upstream => ErrorKind::TransportInterrupted,
+                    ProviderAdapterErrorKind::RateLimited => ErrorKind::RateLimited,
+                    ProviderAdapterErrorKind::ResponseContentType
+                    | ProviderAdapterErrorKind::Protocol => ErrorKind::ProtocolInvalid,
+                    ProviderAdapterErrorKind::IdentityConflict => ErrorKind::IntegrityInvalid,
+                    ProviderAdapterErrorKind::Unavailable => ErrorKind::StorageUnavailable,
+                    _ => ErrorKind::RequestInvalid,
+                },
+                Acceptance::Unknown,
+                Phase::ResponseHeaders,
+            );
+            failure.http_status = self.metadata().status;
+            failure.retry_after_ms = self.metadata().provider_retry_after_millis;
+            failure.diagnostic = Some(winwincode_network::NetworkDiagnostic::new(
+                match self.kind {
+                    ProviderAdapterErrorKind::ResponseContentType => {
+                        winwincode_network::DiagnosticCode::ContentType
+                    }
+                    ProviderAdapterErrorKind::Protocol => {
+                        winwincode_network::DiagnosticCode::HttpProtocol
+                    }
+                    _ => winwincode_network::DiagnosticCode::TransportOther,
+                },
+            ));
+            failure
+        })
+    }
+
+    pub(crate) fn from_network(failure: winwincode_network::NetworkFailure) -> Self {
+        use winwincode_network::ErrorKind;
+        let mut error = match failure.kind {
+            ErrorKind::RateLimited => Self::rate_limited(),
+            ErrorKind::ConnectionUnavailable | ErrorKind::Timeout => Self::connection(),
+            ErrorKind::ProtocolInvalid | ErrorKind::StreamIncomplete | ErrorKind::TlsInvalid => {
+                Self::protocol()
+            }
+            ErrorKind::TransportInterrupted | ErrorKind::ServerTransient => Self::upstream(),
+            ErrorKind::StorageUnavailable => Self::unavailable(),
+            ErrorKind::IntegrityInvalid => Self::identity_conflict(),
+            _ => Self::rejected(),
+        }
+        .with_metadata(ProviderFailureMetadata {
+            status: failure.http_status,
+            provider_retry_after_millis: failure.retry_after_ms,
+            ..Default::default()
+        });
+        error.network = Some(Box::new(failure));
+        error
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
+        self.metadata()
+            .provider_retry_after_millis
+            .map(std::time::Duration::from_millis)
+    }
+}
+
+impl winwincode_network::RetryFailure for ProviderAdapterError {
+    fn retryable(&self) -> bool {
+        self.retryable()
+    }
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after()
+    }
+    fn wait_for_connection(&self) -> bool {
+        let failure = self.network_failure();
+        failure.acceptance == winwincode_network::Acceptance::NotSent
+            && matches!(
+                failure.kind,
+                winwincode_network::ErrorKind::ConnectionUnavailable
+                    | winwincode_network::ErrorKind::Timeout
+            )
+    }
+    fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        self.network_failure()
+    }
+}
+
+impl fmt::Debug for ProviderAdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderAdapterError")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("metadata", self.metadata())
+            .field("network", &self.network)
+            .finish()
     }
 }
 
@@ -290,6 +451,24 @@ pub trait ProviderAdapterPort: Send + Sync {
         invocation: &ProviderAdapterInvocation<'_>,
         credential: &ResolvedSecret,
     ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError>;
+
+    /// Opens a logical request under one recovery owner. HTTP adapters override
+    /// this to retain complete-response retries before exposing a stream.
+    ///
+    /// # Errors
+    /// Returns a safe adapter or expired-authority failure.
+    fn open_recovering(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        _receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        if !can_start() {
+            return Err(ProviderAdapterError::rejected());
+        }
+        self.open(invocation, credential)
+    }
 
     /// Applies one transport-level stream control transition. The tuple
     /// (`model_exchange_id`, `adapter_request_id`, `action`) is the mandatory

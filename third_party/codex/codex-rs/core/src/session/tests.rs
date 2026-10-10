@@ -227,6 +227,7 @@ impl StepContext {
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
+                std::collections::BTreeMap::new(),
             )),
             loaded_agents_md: None,
         })
@@ -1114,10 +1115,10 @@ async fn managed_network_proxy_decider_survives_full_access_start() -> anyhow::R
         .expect("HTTP proxy URL")
         .parse::<std::net::SocketAddr>()?;
     let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
+    // The decider rejects before connecting. A public IP literal keeps local
+    // DNS overrides from preempting the policy callback under test.
     stream
-        .write_all(
-            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(b"GET http://1.1.1.1/ HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n")
         .await?;
     let mut buffer = [0_u8; 4096];
     let bytes_read = tokio::time::timeout(StdDuration::from_secs(2), stream.read(&mut buffer))
@@ -11087,7 +11088,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
 }
 
 #[tokio::test]
-async fn fatal_tool_error_stops_turn_and_reports_error() {
+async fn incompatible_tool_payload_is_reported_to_model() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
@@ -11122,16 +11123,16 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         )
         .await
         .err()
-        .expect("expected fatal error");
+        .expect("expected model-visible payload error");
 
     match err {
-        FunctionCallError::Fatal(message) => {
+        FunctionCallError::RespondToModel(message) => {
             assert_eq!(
                 message,
-                "tool shell_command invoked with incompatible payload"
+                "tool shell_command invoked with incompatible payload. Use the tool's declared input format."
             );
         }
-        other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
+        other => panic!("expected FunctionCallError::RespondToModel, got {other:?}"),
     }
 }
 

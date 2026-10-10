@@ -1,0 +1,105 @@
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -98,11 +98,20 @@
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+     ) -> BoxFuture<'static, Result<ToolCallCompletion, CodexErr>> {
++        let error_call = call.clone();
++        let source = call.direct_source();
++        // Delegated change batches must validate the complete response before any side effect.
++        let future: BoxFuture<'static, Result<AnyToolResult, FunctionCallError>> =
++            if self.step_context.turn.submit_change_batch {
++                Box::pin(async move {
++                    self.handle_tool_call_with_source(call, source, cancellation_token)
++                        .await
++                })
++            } else {
++                Box::pin(self.handle_tool_call_with_source(call, source, cancellation_token))
++            };
+         Box::pin(
+             async move {
+-                let error_call = call.clone();
+-                let source = call.direct_source();
+-                let future = self.handle_tool_call_with_source(call, source, cancellation_token);
+                 match future.await {
+                     Ok(mut response) => Ok(match response.continuation.take() {
+                         Some(continuation) => ToolCallCompletion::Continuation {
+diff --git a/codex-rs/core/tests/suite/tool_parallelism.rs b/codex-rs/core/tests/suite/tool_parallelism.rs
+--- a/codex-rs/core/tests/suite/tool_parallelism.rs
++++ b/codex-rs/core/tests/suite/tool_parallelism.rs
+@@ -300,8 +300,12 @@
+     Ok(())
+ }
+ 
++#[test_case::test_case(false; "legacy")]
++#[test_case::test_case(true; "code_mode")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn shell_tools_start_before_response_completed_when_stream_delayed() -> anyhow::Result<()> {
++async fn shell_tools_start_before_response_completed_when_stream_delayed(
++    code_mode: bool,
++) -> anyhow::Result<()> {
+     skip_if_no_network!(Ok(()));
+ 
+     let output_file = tempfile::NamedTempFile::new()?;
+@@ -315,18 +319,30 @@
+     );
+     // Use a non-login shell to avoid slow, user-specific shell init (e.g. zsh profiles)
+     // from making this timing-based test flaky.
+-    let args = json!({
+-        "command": command,
+-        "login": false,
+-        "timeout_ms": 5_000,
+-    });
+-
++    let args = if code_mode {
++        json!({"cmd": command, "login": false, "yield_time_ms": 1_000})
++    } else {
++        json!({"command": command, "login": false, "timeout_ms": 5_000})
++    };
++
++    let call = |call_id| {
++        if code_mode {
++            core_test_support::responses::ev_code_mode_call(
++                call_id,
++                "functions",
++                "exec_command",
++                &args.to_string(),
++            )
++        } else {
++            ev_shell_command_call_with_args(call_id, &args)
++        }
++    };
+     let first_chunk = sse(vec![
+         ev_response_created(first_response_id),
+-        ev_shell_command_call_with_args("call-1", &args),
+-        ev_shell_command_call_with_args("call-2", &args),
+-        ev_shell_command_call_with_args("call-3", &args),
+-        ev_shell_command_call_with_args("call-4", &args),
++        call("call-1"),
++        call("call-2"),
++        call("call-3"),
++        call("call-4"),
+     ]);
+     let second_chunk = sse(vec![ev_completed(first_response_id)]);
+     let follow_up = sse(vec![
+@@ -355,7 +371,18 @@
+     ])
+     .await;
+ 
+-    let mut builder = test_codex().with_model("gpt-5.4");
++    let mut builder = test_codex()
++        .with_model("gpt-5.4")
++        .with_config(move |config| {
++            if code_mode {
++                let _ = config
++                    .features
++                    .enable(codex_features::Feature::CodeModeOnly);
++                config.web_search_mode = codex_config::Constrained::allow_any(
++                    codex_protocol::config_types::WebSearchMode::Disabled,
++                );
++            }
++        });
+     let test = builder
+         .build_with_streaming_server(&streaming_server)
+         .await?;

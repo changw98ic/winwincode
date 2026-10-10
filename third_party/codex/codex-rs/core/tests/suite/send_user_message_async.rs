@@ -9,8 +9,8 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_code_mode_call;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -35,7 +35,7 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn() -> Resul
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call_with_namespace(
+                ev_code_mode_call(
                     CALL_ID,
                     "functions",
                     "send_user_message_async",
@@ -57,6 +57,11 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn() -> Resul
             model
                 .experimental_supported_tools
                 .push("send_user_message_async".to_string());
+        })
+        .with_config(|config| {
+            config.web_search_mode = codex_config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
         })
         .build_with_auto_env(&server)
         .await?;
@@ -81,10 +86,12 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn() -> Resul
         Some(message.clone())
     })
     .await;
+    assert!(!started.id.is_empty());
+    let message_id = started.id.clone();
     assert_eq!(
         serde_json::to_value(&started)?,
         serde_json::to_value(AgentMessageItem {
-            id: CALL_ID.to_string(),
+            id: message_id.clone(),
             content: vec![AgentMessageContent::Text {
                 text: MESSAGE.to_string(),
             }],
@@ -119,20 +126,27 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn() -> Resul
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
-    assert!(
-        requests[0].body_json()["tools"]
-            .as_array()
-            .is_some_and(|tools| {
-                tools.iter().any(|tool| {
-                    tool["type"] == "function" && tool["name"] == "send_user_message_async"
-                })
-            }),
-        "the async message tool should be directly visible to the model"
-    );
-    assert_eq!(
-        requests[1].function_call_output_text(CALL_ID),
-        Some(r#"{"accepted":true}"#.to_string())
-    );
+    let tool_names = requests[0].body_json()["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names, vec!["exec", "wait"]);
+    let output = requests[1].custom_tool_call_output(CALL_ID);
+    assert_eq!(output["output"][1]["text"], r#"{"accepted":true}"#);
+    let facts = test
+        .codex
+        .state_db()
+        .expect("Core state runtime")
+        .list_tool_fact_events(&test.session_configured.session_id.to_string(), 0, 200)
+        .await?;
+    assert!(facts.iter().any(|event| {
+        let request = &event.fact.request;
+        request.logical_id == message_id
+            && request.tool_name == "send_user_message_async"
+            && request.parent_call_id.as_deref() == Some(CALL_ID)
+    }));
     let has_synthetic_assistant_message = requests[1].input().into_iter().any(|item| {
         item["type"] == "message"
             && item["role"] == "assistant"

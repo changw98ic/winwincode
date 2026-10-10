@@ -141,6 +141,27 @@ fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
         })
 }
 
+/// Compares a retained stamp with independently authenticated current authority.
+/// Only the expiry may advance; this comparison does not authenticate a renewal.
+#[must_use]
+pub fn retained_lease_matches_current(
+    retained: &ExecutionLeaseStamp,
+    current: &ExecutionLeaseStamp,
+) -> bool {
+    let mut expected = retained.clone();
+    expected.expires_at = current.expires_at.clone();
+    [
+        &retained.issued_at,
+        &retained.expires_at,
+        &current.expires_at,
+    ]
+    .into_iter()
+    .all(canonical_instant)
+        && retained.issued_at.0 < retained.expires_at.0
+        && retained.expires_at.0 <= current.expires_at.0
+        && expected == *current
+}
+
 /// Validates a live same-attempt lease extension or its unchanged replay.
 #[must_use]
 pub fn valid_lease_renewal(
@@ -148,9 +169,18 @@ pub fn valid_lease_renewal(
     renewal: &LeaseRenewMessage,
     now: &Instant,
 ) -> bool {
-    let mut expected = current.clone();
-    expected.expires_at = renewal.lease.expires_at.clone();
-    [
+    lease_renewal_rejection(current, renewal, now).is_none()
+}
+
+/// Identifies the first rejected renewal predicate without exposing identity values.
+/// The boolean validator and diagnostics share this single set of checks.
+#[must_use]
+pub fn lease_renewal_rejection(
+    current: &ExecutionLeaseStamp,
+    renewal: &LeaseRenewMessage,
+    now: &Instant,
+) -> Option<&'static str> {
+    if ![
         &current.issued_at,
         &current.expires_at,
         &renewal.prior_expires_at,
@@ -160,11 +190,31 @@ pub fn valid_lease_renewal(
     ]
     .into_iter()
     .all(canonical_instant)
-        && expected == renewal.lease
-        && current.issued_at.0 <= renewal.sent_at.0
-        && renewal.sent_at.0 <= now.0
-        && renewal.sent_at.0 < renewal.prior_expires_at.0
-        && renewal.prior_expires_at.0 < renewal.lease.expires_at.0
-        && now.0 < current.expires_at.0
-        && (current.expires_at == renewal.prior_expires_at || *current == renewal.lease)
+    {
+        return Some("noncanonical_time");
+    }
+    let mut expected = current.clone();
+    expected.expires_at = renewal.lease.expires_at.clone();
+    if expected != renewal.lease {
+        return Some("authority_mismatch");
+    }
+    if current.issued_at.0 > renewal.sent_at.0 {
+        return Some("sent_before_issued");
+    }
+    if renewal.sent_at.0 > now.0 {
+        return Some("sent_in_future");
+    }
+    if renewal.sent_at.0 >= renewal.prior_expires_at.0 {
+        return Some("sent_after_prior_expiry");
+    }
+    if renewal.prior_expires_at.0 >= renewal.lease.expires_at.0 {
+        return Some("nonextending_expiry");
+    }
+    if now.0 >= current.expires_at.0 {
+        return Some("consumed_after_expiry");
+    }
+    if current.expires_at != renewal.prior_expires_at && *current != renewal.lease {
+        return Some("prior_expiry_mismatch");
+    }
+    None
 }

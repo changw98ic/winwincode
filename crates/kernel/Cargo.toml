@@ -7,12 +7,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-support = ["codex-core-api/mechanism-test-support"]
+
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "code_mode_kernel"
+path = "../../tests/code_mode_kernel.rs"
 
 [dependencies]
 codex-api.workspace = true
 codex-core-api.workspace = true
+codex-code-mode.workspace = true
 codex-skills-extension = { path = "../../third_party/codex/codex-rs/ext/skills" }
 codex-protocol.workspace = true
 codex-model-provider-info.workspace = true
@@ -21,6 +29,10 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 winwincode-execution-port.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

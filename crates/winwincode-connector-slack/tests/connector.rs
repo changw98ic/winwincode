@@ -1057,6 +1057,15 @@ fn assert_oversized_block_kit_is_rejected_before_credentials() {
 
 #[test]
 fn lost_local_receipt_is_reconciled_by_metadata_without_a_second_post() {
+    assert_abandoned_write_reconciliation(true);
+}
+
+#[test]
+fn unknown_write_lookup_miss_after_restart_does_not_authorize_another_post() {
+    assert_abandoned_write_reconciliation(false);
+}
+
+fn assert_abandoned_write_reconciliation(found: bool) {
     let operation = outbound_request(
         "slack-recovery-operation",
         "slack.attention.notify",
@@ -1076,7 +1085,7 @@ fn lost_local_receipt_is_reconciled_by_metadata_without_a_second_post() {
         HttpReply::json(
             200,
             &json!({
-                "messages": [{
+                "messages": if found { vec![json!({
                     "metadata": {"event_payload": {
                         "app_id": APP_ID,
                         "bot_id": BOT_ID,
@@ -1084,7 +1093,7 @@ fn lost_local_receipt_is_reconciled_by_metadata_without_a_second_post() {
                         "team_id": WORKSPACE_ID
                     }},
                     "ts": "1712345678.123457"
-                }],
+                })] } else { vec![] },
                 "ok": true,
                 "response_metadata": {"next_cursor": ""}
             }),
@@ -1134,13 +1143,19 @@ fn lost_local_receipt_is_reconciled_by_metadata_without_a_second_post() {
         )
         .expect("recovery claim")
         .expect("recovered operation");
-    let receipt = connector
-        .deliver_outbound(&recovered)
-        .expect("metadata reconciliation");
-    assert!(!receipt.remote_write_performed());
-    restarted
-        .record_success(&integration_scope(), &recovered, &receipt, 106)
-        .expect("record recovered success");
+    assert!(recovered.requires_reconciliation());
+    let result = connector.deliver_outbound(&recovered);
+    if found {
+        let receipt = result.expect("metadata reconciliation");
+        assert!(!receipt.remote_write_performed());
+        restarted
+            .record_success(&integration_scope(), &recovered, &receipt, 106)
+            .expect("record recovered success");
+    } else {
+        let failure = result.expect_err("lookup miss cannot prove an unknown write was rejected");
+        assert_eq!(failure.code(), "INTEGRATION_WRITE_OUTCOME_UNKNOWN");
+        assert!(failure.requires_reconciliation());
+    }
     let requests = fixture.finish();
     assert_eq!(
         requests

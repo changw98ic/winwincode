@@ -32,6 +32,7 @@ use crate::tools::context::ToolOutput;
 use crate::tools::context::boxed_tool_output;
 use codex_protocol::protocol::McpInvocation;
 
+mod authorization;
 mod list_mcp_resource_templates;
 mod list_mcp_resources;
 mod read_mcp_resource;

@@ -60,7 +60,10 @@
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::application::StandaloneApplicationClock;
+use crate::application::SystemStandaloneApplicationClock;
 use crate::client_exchange::is_canonical_client_node_id;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -235,10 +238,21 @@ pub struct OfflineSweepOutcome {
 /// database directory. Like the connect flow, every operation opens and
 /// closes its own storage connection so concurrent flows never share state in
 /// memory and the bounded wait holds no database lock.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientOccupancyApplication {
     data_directory: PathBuf,
     config: ClientOccupancyConfig,
+    clock: Arc<dyn StandaloneApplicationClock>,
+}
+
+impl fmt::Debug for ClientOccupancyApplication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientOccupancyApplication")
+            .field("data_directory", &self.data_directory)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What one validated claim prepared before the bounded wait.
@@ -271,6 +285,24 @@ impl ClientOccupancyApplication {
         data_directory: impl Into<PathBuf>,
         config: &ClientOccupancyConfig,
     ) -> Result<Self, ClientOccupancyError> {
+        Self::open_with_clock(
+            data_directory,
+            config,
+            Arc::new(SystemStandaloneApplicationClock),
+        )
+    }
+
+    /// Composes occupancy with the trusted application clock. The ACK wait
+    /// still uses Tokio's monotonic timer independently of this wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration violates its bounds.
+    pub fn open_with_clock(
+        data_directory: impl Into<PathBuf>,
+        config: &ClientOccupancyConfig,
+        clock: Arc<dyn StandaloneApplicationClock>,
+    ) -> Result<Self, ClientOccupancyError> {
         if config.offer_wait.is_zero()
             || config.poll_interval.is_zero()
             || config.recovery_window.is_zero()
@@ -287,6 +319,7 @@ impl ClientOccupancyApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config: config.clone(),
+            clock,
         })
     }
 
@@ -367,7 +400,7 @@ impl ClientOccupancyApplication {
 
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released_lease, state_text) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -478,7 +511,7 @@ impl ClientOccupancyApplication {
         let public_client_id = required_client_id(fields.get("clientId"))?;
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released, new_token) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -627,7 +660,7 @@ impl ClientOccupancyApplication {
                 continue;
             }
             if occupancy
-                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline)
+                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline, now)
                 .is_ok()
             {
                 leases_pending_recovery.push(lease.occupancy_lease_id);
@@ -647,7 +680,7 @@ impl ClientOccupancyApplication {
     ///
     /// Propagates the [`Self::run_offline_sweep`] failures.
     pub fn run_server_sweep(&self) -> Result<OfflineSweepOutcome, ClientOccupancyError> {
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let cutoff = offset_instant(&now, -duration_millis(self.config.heartbeat_stale_after))
             .ok_or_else(ClientOccupancyError::unavailable)?;
         self.run_offline_sweep(&cutoff, &now)
@@ -677,7 +710,7 @@ impl ClientOccupancyApplication {
         if lease.state != OccupancyLeaseState::RecoveryPending {
             return Ok(false);
         }
-        let now = now_instant();
+        let now = self.clock.now_instant();
         Ok(lease
             .recovery_deadline_at
             .as_ref()
@@ -708,9 +741,11 @@ impl ClientOccupancyApplication {
         // fixed window shape as the connect flow.
         {
             let mut connect = ConnectCodeService::new(&mut storage);
-            let anchor =
-                connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-                    .map_err(|_| ClientOccupancyError::unavailable())?;
+            let anchor = connect_attempt_window_anchor(
+                &self.clock.now_instant(),
+                self.config.rate_window_seconds,
+            )
+            .map_err(|_| ClientOccupancyError::unavailable())?;
             for (dimension, subject) in [
                 (AttemptDimension::User, user_id),
                 (AttemptDimension::Client, node.client_node_id.as_str()),
@@ -774,7 +809,7 @@ impl ClientOccupancyApplication {
             }
         }
 
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let claim = OccupancyClaim::try_new(
             generate_prefixed_id("ocl_").map_err(|_| ClientOccupancyError::unavailable())?,
             node.client_node_id.clone(),
@@ -881,7 +916,7 @@ impl ClientOccupancyApplication {
                         occupancy_lease_id,
                         lease.fencing_token,
                         OccupancyReleaseReason::AckTimeout,
-                        &now_instant(),
+                        &self.clock.now_instant(),
                     )
                     .map_err(|_| ClientOccupancyError::unavailable())?;
             }
@@ -927,8 +962,11 @@ impl ClientOccupancyApplication {
         user_id: &str,
         client_node_id: &str,
     ) -> Result<(), ClientOccupancyError> {
-        let anchor = connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-            .map_err(|_| ClientOccupancyError::unavailable())?;
+        let anchor = connect_attempt_window_anchor(
+            &self.clock.now_instant(),
+            self.config.rate_window_seconds,
+        )
+        .map_err(|_| ClientOccupancyError::unavailable())?;
         let mut storage = self.open_storage()?;
         let mut connect = ConnectCodeService::new(&mut storage);
         for (dimension, subject) in [
@@ -1175,15 +1213,103 @@ fn open_mirror_view_connection(
     data_directory: &Path,
 ) -> Result<rusqlite::Connection, MirrorRevisionViewError> {
     std::fs::create_dir_all(data_directory).map_err(|_| MirrorRevisionViewError::Storage)?;
-    let connection = rusqlite::Connection::open(data_directory.join(MIRROR_VIEW_DATABASE_FILE))
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    let database = data_directory.join(MIRROR_VIEW_DATABASE_FILE);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(MirrorRevisionViewError::Storage);
+        }
+        let initialized = SqliteStorage::open_sidecar_until(&database, deadline, |connection| {
+            initialize_mirror_view_connection(connection, deadline)
+        });
+        match initialized {
+            Ok(connection) => {
+                return Ok(connection);
+            }
+            Err(MirrorInitializationError::Storage) => {
+                return Err(MirrorRevisionViewError::Storage);
+            }
+            Err(MirrorInitializationError::Busy) => {
+                // A WAL-mode lock upgrade can skip SQLite's busy handler while
+                // the connection owns a read cut. The shared open boundary
+                // drops that failed connection before this retry starts.
+                #[cfg(test)]
+                observe_mirror_init_retry_for_test();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(MirrorRevisionViewError::Storage);
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+type MirrorInitRetryObserver = Box<dyn FnMut()>;
+
+#[cfg(test)]
+thread_local! {
+    static MIRROR_INIT_RETRY_OBSERVER: std::cell::RefCell<Option<MirrorInitRetryObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_mirror_init_retry_for_test() {
+    MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer();
+        }
+    });
+}
+
+enum MirrorInitializationError {
+    Busy,
+    Storage,
+}
+
+impl From<winwincode_storage::StorageError> for MirrorInitializationError {
+    fn from(_: winwincode_storage::StorageError) -> Self {
+        Self::Storage
+    }
+}
+
+fn initialize_mirror_view_connection(
+    connection: &rusqlite::Connection,
+    deadline: std::time::Instant,
+) -> Result<(), MirrorInitializationError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
+    // The shared open boundary has already installed its absolute-deadline
+    // busy handler. Do not replace it with a new relative waiting budget.
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if mode != "wal" {
+        return Err(MirrorInitializationError::Storage);
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
     connection
         .execute_batch(MIRROR_VIEW_SCHEMA)
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    Ok(connection)
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if std::time::Instant::now() >= deadline {
+        return Err(MirrorInitializationError::Storage);
+    }
+    Ok(())
+}
+
+fn mirror_initialization_error(error: &rusqlite::Error) -> MirrorInitializationError {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+        MirrorInitializationError::Busy
+    } else {
+        MirrorInitializationError::Storage
+    }
 }
 
 /// Enqueues one `client.occupancy.*` downlink frame into the durable outbox
@@ -1273,12 +1399,6 @@ const fn presence_text(record: &ClientNodeRecord) -> &'static str {
         | ClientPresenceState::PendingEnrollment
         | ClientPresenceState::Revoked => "offline",
     }
-}
-
-/// The canonical application instant the boundary shares across one flow.
-fn now_instant() -> Instant {
-    use crate::application::StandaloneApplicationClock as _;
-    crate::application::SystemStandaloneApplicationClock.now_instant()
 }
 
 /// Signed millisecond amount of one duration, clamped to the `i64` range.
@@ -1418,6 +1538,123 @@ mod tests {
 
     fn canonical_node(suffix_digit: char) -> String {
         format!("cnd_{suffix_digit}{}", "A".repeat(25))
+    }
+
+    fn mirror_writer_fixture(label: &str) -> (PathBuf, rusqlite::Connection) {
+        let directory = view_directory(label);
+        std::fs::create_dir_all(&directory).expect("isolated mirror directory");
+        let writer = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))
+            .expect("real SQLite writer");
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("initial rollback journal mode");
+        assert_eq!(
+            mode, "delete",
+            "the mirror WAL/schema must not be preheated"
+        );
+        writer
+            .execute_batch(
+                "CREATE TABLE adxi_mirror_busy_fixture(value INTEGER NOT NULL);
+                 BEGIN IMMEDIATE;
+                 INSERT INTO adxi_mirror_busy_fixture VALUES(1);",
+            )
+            .expect("hold a real RESERVED writer lock");
+        assert!(!writer.is_autocommit());
+        (directory, writer)
+    }
+
+    #[test]
+    fn the_mirror_revision_view_recovers_after_real_init_busy() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-recovery");
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_directory = directory.clone();
+        let worker = std::thread::spawn(move || {
+            let mut gate = Some((arrived_tx, resume_rx));
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    if let Some((arrived, resume)) = gate.take() {
+                        arrived
+                            .send(())
+                            .expect("actual Busy reached after connection drop");
+                        resume
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .expect("bounded test release after writer commit");
+                    }
+                }));
+            });
+            client_mirror_revision_view(&worker_directory, &canonical_node('B'))
+        });
+        let arrived = arrived_rx.recv_timeout(std::time::Duration::from_secs(10));
+        // The initializer is held only after its failed connection was dropped.
+        // Committing here checks that this retry boundary leaves no blocking cut.
+        let committed = writer.execute_batch("COMMIT");
+        let resumed = resume_tx.send(());
+        let joined = worker.join();
+        drop(writer);
+        let persisted = (|| {
+            let connection = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))?;
+            let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM adxi_mirror_busy_fixture WHERE value=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            Ok::<_, rusqlite::Error>((mode, count, integrity))
+        })();
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            arrived.is_ok(),
+            "the native initialization must actually observe Busy"
+        );
+        committed.expect("no failed initializer connection blocks writer commit");
+        resumed.expect("resume the fresh native initialization attempt");
+        assert_eq!(joined.expect("native initializer thread"), Ok(0));
+        assert_eq!(
+            persisted.expect("reopen real database"),
+            ("wal".to_owned(), 1, "ok".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_mirror_revision_view_stops_init_busy_at_its_deadline() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-deadline");
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_retries = retries.clone();
+        let worker_directory = directory.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    observed_retries.fetch_add(1, Ordering::Relaxed);
+                }));
+            });
+            let result = client_mirror_revision_view(&worker_directory, &canonical_node('B'));
+            done_tx.send(()).expect("native initialization returned");
+            result
+        });
+        // This guard bounds a broken test. The writer is never released until
+        // initialization returns; no wall-clock performance threshold is scored.
+        let returned_while_locked = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let released = writer.execute_batch("ROLLBACK");
+        let joined = worker.join();
+        drop(writer);
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            returned_while_locked.is_ok(),
+            "initialization must stop while the writer remains held"
+        );
+        released.expect("release held native writer");
+        assert!(
+            retries.load(Ordering::Relaxed) > 1,
+            "multiple real Busy attempts must precede exhaustion"
+        );
+        assert_eq!(
+            joined.expect("native initializer thread"),
+            Err(MirrorRevisionViewError::Storage)
+        );
     }
 
     #[test]

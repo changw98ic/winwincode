@@ -349,6 +349,14 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     '--directory', fixtureRoot,
   ], { capture: true, env: verificationChildEnvironment() }))
   assertReleaseApiReport(report)
+  run(process.execPath, [
+    '--test', '--test-name-pattern=public API cancellation closes',
+    'tests/api-production-vertical.test.mjs',
+  ], { env: {
+    ...verificationChildEnvironment(),
+    WWC_API_SKIP_BUILD: '1',
+    WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: binaryRoot,
+  } })
 }
 
 const { target, sourceCommit, sourceDateEpoch, output } = parseArguments(process.argv.slice(2))

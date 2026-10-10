@@ -255,13 +255,10 @@ impl SqliteAuthSessionManager {
         std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| AuthSessionError::storage())?;
         let connection =
-            Connection::open(&database_path).map_err(|_| AuthSessionError::storage())?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|_| AuthSessionError::storage())?;
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode=DELETE;
+            winwincode_storage::SqliteStorage::open_sidecar(&database_path, |connection| {
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=DELETE;
                  PRAGMA synchronous=FULL;
                  CREATE TABLE IF NOT EXISTS auth_sessions (
                    session_digest TEXT PRIMARY KEY NOT NULL
@@ -283,9 +280,10 @@ impl SqliteAuthSessionManager {
                    owner_user_id TEXT NOT NULL,
                    initialized_at_millis INTEGER NOT NULL
                  );",
-            )
-            .map_err(|_| AuthSessionError::storage())?;
-        ensure_session_context_columns(&connection)?;
+                    )
+                    .map_err(|_| AuthSessionError::storage())?;
+                ensure_session_context_columns(connection)
+            })?;
         let opened_at_millis = clock.unix_millis()?;
         // The durable marker is the persistent half of the permanent close;
         // once present, initialization stays closed across restarts no matter
@@ -894,6 +892,12 @@ pub(crate) fn cleared_session_cookie_header(secure: bool) -> &'static str {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthSessionError {
     kind: AuthSessionErrorKind,
+}
+
+impl From<winwincode_storage::StorageError> for AuthSessionError {
+    fn from(_: winwincode_storage::StorageError) -> Self {
+        Self::storage()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

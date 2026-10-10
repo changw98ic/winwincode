@@ -45,10 +45,9 @@ use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWrite
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
     DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionAdmissionBoundary,
-    ExecutionAdmissionErrorCode, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
-    ExecutionJobRecord, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationState, ProductStateStorage, SqliteStorage,
-    WorkerPoolId,
+    ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionQueueScope,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationState,
+    ProductStateStorage, SqliteStorage, WorkerPoolId,
 };
 
 use crate::client_launch_grant::{
@@ -64,26 +63,6 @@ use crate::quick_device_execution::derived_id;
 /// from the Quick device pool and the supervised local pool so reservation
 /// accounting of every execution surface stays separable.
 pub const STRONGFLOW_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000F7";
-
-/// Admission bounds of the `StrongFlow` device dispatch reservation. The
-/// boundaries shared with the supervised local driver and the Quick device
-/// dispatch (organization, project, repository, product session, delivery)
-/// must repeat those paths' policy values exactly — admission policies are
-/// first-writer-wins and refuse a different reconfiguration. The concurrency
-/// headroom for concurrently dispatched roles lives on the `StrongFlow` worker
-/// pool boundary alone, which no other path configures.
-const STRONGFLOW_DEVICE_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
-    max_concurrent: 1,
-    max_queued: 10_000,
-    token_budget: None,
-    cost_budget_microunits: None,
-    max_runtime_millis: Some(604_800_000),
-};
-
-/// The concurrency capacity of the `StrongFlow` device worker pool itself:
-/// the flow's roles may hold reservations at the same time, each on its own
-/// `WorkerSession`, within the Client's worker-session capacity.
-const STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT: u64 = 4;
 
 /// The canonical Delivery execution roles a `WorkRun` job can dispatch as. A job
 /// whose profile is not in this set is not a `StrongFlow` role execution and
@@ -463,6 +442,11 @@ fn ensure_device_admission_reservation(
     let mut admission = storage
         .execution_admission()
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
+    for boundary in admission_boundaries(&record.scope) {
+        admission
+            .configure_runtime_policy(boundary, runtime_limit_millis.is_some())
+            .map_err(|error| admission_error(&error))?;
+    }
     if let Some(existing) = admission
         .load_reservation_by_job(&record.job_id)
         .map_err(|_| StrongflowDeviceDispatchError::storage())?
@@ -476,22 +460,6 @@ fn ensure_device_admission_reservation(
                 ))
             }
         };
-    }
-    for boundary in admission_boundaries(&record.scope) {
-        // The pool boundary carries the multi-role concurrency headroom; the
-        // shared boundaries repeat the exact policy every path configures.
-        let mut limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
-            ExecutionAdmissionLimits {
-                max_concurrent: STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT,
-                ..STRONGFLOW_DEVICE_ADMISSION_LIMITS
-            }
-        } else {
-            STRONGFLOW_DEVICE_ADMISSION_LIMITS
-        };
-        limits.max_runtime_millis = runtime_limit_millis.and(limits.max_runtime_millis);
-        admission
-            .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
-            .map_err(|error| admission_error(&error))?;
     }
     let request = ExecutionReservationRequest {
         scope: record.scope.clone(),

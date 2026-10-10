@@ -10,6 +10,7 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml"]
 
 [dependencies]
+winwincode-network = { workspace = true, features = ["journal"] }
 winwincode-api.workspace = true
 winwincode-provider.workspace = true
 base64.workspace = true
@@ -22,9 +23,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 # RFC 3339 stamps for exchange envelopes and durable cursors; the same
-# formatting dependency the server side already uses. The `parsing` feature
-# is required locally to compare stored code expiry stamps against the wall
-# clock when answering access challenges.
+# formatting dependency the server side already uses. Parsing is used for
+# persisted worker-log and candidate-retention timestamps.
 time = { workspace = true, features = ["parsing"] }
 # Direct path dependency on purpose: `winwincode-client-port` is not part of
 # `[workspace.dependencies]`, matching how `winwincode-server` and
@@ -42,6 +42,7 @@ workspace = true
 # `winwincode-worker --managed-session` entry, so the reader runs against
 # supervisor-written files in the launch tests.
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 rcgen.workspace = true
 tokio-rustls.workspace = true
 winwincode-worker = { path = "../winwincode-worker" }

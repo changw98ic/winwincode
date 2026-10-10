@@ -66,6 +66,349 @@ fn seatbelt_policy_arg(args: &[String]) -> &str {
 }
 
 #[cfg(target_os = "macos")]
+fn minimal_policy_with_literal_deny(denied: &Path) -> FileSystemSandboxPolicy {
+    let mut policy = FileSystemSandboxPolicy::read_only();
+    policy.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Minimal,
+        },
+        FileSystemAccessMode::Read,
+    ));
+    policy.entries.push(FileSystemSandboxEntry::new(
+        AbsolutePathBuf::from_absolute_path(denied)
+            .expect("absolute denied path")
+            .into(),
+        FileSystemAccessMode::Deny,
+    ));
+    policy
+}
+
+#[cfg(target_os = "macos")]
+fn assert_seatbelt_actual_file_access(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    target: &Path,
+    expected: (bool, bool),
+) {
+    let run = |command| {
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command,
+            file_system_sandbox_policy: policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: cwd,
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("generate actual Seatbelt policy");
+        Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run actual sandbox-exec")
+            .status
+            .success()
+    };
+    let read = run(vec![
+        "/bin/cat".to_string(),
+        target.to_string_lossy().into_owned(),
+    ]);
+    let write = run(vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "printf controlled-write >> \"$1\"".to_string(),
+        "fixture".to_string(),
+        target.to_string_lossy().into_owned(),
+    ]);
+    assert_eq!(
+        (read, write),
+        expected,
+        "actual read/write must match the selected permission boundary"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn literal_deny_overrides_minimal_scratch_file_read_and_write() {
+    let root = TempDir::new_in("/tmp").expect("owned scratch fixture");
+    let target = root.path().join("denied.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = minimal_policy_with_literal_deny(&target);
+    assert!(!policy.can_read_path_with_cwd(&target, root.path()));
+    assert!(!policy.can_write_path_with_cwd(&target, root.path()));
+    assert_seatbelt_actual_file_access(&policy, root.path(), &target, (false, false));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn literal_deny_overrides_minimal_scratch_directory_child_access() {
+    let root = TempDir::new_in("/tmp").expect("owned scratch fixture");
+    let denied = root.path().join("denied");
+    fs::create_dir(&denied).expect("create denied fixture directory");
+    let target = denied.join("child.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = minimal_policy_with_literal_deny(&denied);
+    assert!(!policy.can_read_path_with_cwd(&target, root.path()));
+    assert!(!policy.can_write_path_with_cwd(&target, root.path()));
+    assert_seatbelt_actual_file_access(&policy, root.path(), &target, (false, false));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn literal_deny_preserves_normal_minimal_scratch_access() {
+    let root = TempDir::new_in("/tmp").expect("owned scratch fixture");
+    let target = root.path().join("normal.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = minimal_policy_with_literal_deny(&root.path().join("unrelated-denied"));
+    assert_seatbelt_actual_file_access(&policy, root.path(), &target, (true, true));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn literal_deny_preserves_more_specific_read_and_write_carveouts() {
+    let root = TempDir::new_in("/tmp").expect("owned scratch fixture");
+    let denied = root.path().join("denied");
+    let writable = denied.join("writable");
+    fs::create_dir_all(&writable).expect("create fixture directories");
+    let read_only = denied.join("read-only.txt");
+    let writable_file = writable.join("writable.txt");
+    let nested_read_only = writable.join("read-only.txt");
+    for target in [&read_only, &writable_file, &nested_read_only] {
+        fs::write(target, b"controlled-file").expect("write fixture");
+    }
+    let mut policy = minimal_policy_with_literal_deny(&denied);
+    for (path, access) in [
+        (&read_only, FileSystemAccessMode::Read),
+        (&writable, FileSystemAccessMode::Write),
+        (&nested_read_only, FileSystemAccessMode::Read),
+    ] {
+        policy.entries.push(FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(path)
+                .expect("absolute carveout path")
+                .into(),
+            access,
+        ));
+    }
+    for (target, expected) in [
+        (&read_only, (true, false)),
+        (&writable_file, (true, true)),
+        (&nested_read_only, (true, false)),
+    ] {
+        assert_eq!(
+            (
+                policy.can_read_path_with_cwd(target, root.path()),
+                policy.can_write_path_with_cwd(target, root.path()),
+            ),
+            expected,
+            "permission model must preserve the selected carveout"
+        );
+        assert_seatbelt_actual_file_access(&policy, root.path(), target, expected);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn literal_deny_prevents_parent_rename_escape_and_preserves_unrelated_scratch() {
+    let root = TempDir::new_in("/tmp").expect("owned scratch fixture");
+    let parent = root.path().join("protected-parent");
+    let destination = root.path().join("relocated-parent");
+    fs::create_dir(&parent).expect("create protected fixture directory");
+    let denied = parent.join("denied.txt");
+    fs::write(&denied, b"controlled-file").expect("write denied fixture");
+    let unrelated = root.path().join("unrelated.txt");
+    fs::write(&unrelated, b"controlled-file").expect("write unrelated fixture");
+    let policy = minimal_policy_with_literal_deny(&denied);
+    let command = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        concat!(
+            "renamed=0; read=0; write=0; ",
+            "if /bin/mv \"$1\" \"$2\" 2>/dev/null; then renamed=1; target=\"$2/denied.txt\"; ",
+            "else target=\"$1/denied.txt\"; fi; ",
+            "if /bin/cat \"$target\" >/dev/null 2>&1; then read=1; fi; ",
+            "if printf controlled-write >>\"$target\" 2>/dev/null; then write=1; fi; ",
+            "printf 'renamed=%s read=%s write=%s\\n' \"$renamed\" \"$read\" \"$write\""
+        )
+        .to_string(),
+        "fixture".to_string(),
+        parent.to_string_lossy().into_owned(),
+        destination.to_string_lossy().into_owned(),
+    ];
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command,
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: root.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("generate actual Seatbelt policy");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(args)
+        .current_dir(root.path())
+        .output()
+        .expect("run controlled rename under sandbox-exec");
+    assert!(output.status.success(), "controlled probe must finish");
+    assert_seatbelt_actual_file_access(&policy, root.path(), &unrelated, (true, true));
+    assert_eq!(
+        output.stdout, b"renamed=0 read=0 write=0\n",
+        "a denied file must remain protected when its parent is renamed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn file_system_helper_policy(root: &Path, access: FileSystemAccessMode) -> FileSystemSandboxPolicy {
+    FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(root)
+                .expect("absolute allowed root")
+                .into(),
+            access,
+        ),
+    ])
+}
+
+#[cfg(target_os = "macos")]
+fn assert_file_system_helper_actual_access(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    target: &Path,
+    expected: (bool, bool),
+) {
+    use crate::SandboxCommand;
+    use crate::SandboxManager;
+    use crate::SandboxTransformRequest;
+    use crate::SandboxType;
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfile;
+    use codex_utils_path_uri::PathUri;
+    use std::collections::HashMap;
+
+    assert_eq!(
+        (
+            policy.can_read_path_with_cwd(target, cwd),
+            policy.can_write_path_with_cwd(target, cwd)
+        ),
+        expected,
+        "permission model must enforce the selected helper boundary",
+    );
+    let permissions =
+        PermissionProfile::from_runtime_permissions(policy, NetworkSandboxPolicy::Restricted);
+    let cwd_uri =
+        PathUri::from_abs_path(&AbsolutePathBuf::from_absolute_path(cwd).expect("absolute cwd"));
+    let run = |program: &str, args| {
+        let request = SandboxManager::for_file_system_helpers()
+            .transform(SandboxTransformRequest {
+                command: SandboxCommand {
+                    program: program.into(),
+                    args,
+                    cwd: cwd_uri.clone(),
+                    env: HashMap::new(),
+                    managed_network: None,
+                    additional_permissions: None,
+                },
+                permissions: &permissions,
+                sandbox: SandboxType::MacosSeatbelt,
+                enforce_managed_network: false,
+                environment_id: None,
+                network: None,
+                sandbox_policy_cwd: &cwd_uri,
+                codex_linux_sandbox_exe: None,
+                use_legacy_landlock: false,
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                windows_sandbox_private_desktop: false,
+            })
+            .expect("transform through public FileSystemHelper manager");
+        Command::new(&request.command[0])
+            .args(&request.command[1..])
+            .current_dir(cwd)
+            .env_clear()
+            .envs(&request.env)
+            .output()
+            .expect("execute actual sandbox-exec helper profile")
+            .status
+            .success()
+    };
+    let read = run("/bin/cat", vec![target.to_string_lossy().into_owned()]);
+    let write = run(
+        "/bin/sh",
+        vec![
+            "-c".to_string(),
+            "printf controlled-write >> \"$1\"".to_string(),
+            "fixture".to_string(),
+            target.to_string_lossy().into_owned(),
+        ],
+    );
+    assert_eq!(
+        (read, write),
+        expected,
+        "actual helper read/write must match the model"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn file_system_helper_minimal_read_preserves_read_only_root() {
+    let root = TempDir::new_in("/tmp").expect("owned helper scratch fixture");
+    let allowed = root.path().join("allowed");
+    fs::create_dir(&allowed).expect("create allowed root");
+    let target = allowed.join("read-only.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = file_system_helper_policy(&allowed, FileSystemAccessMode::Read);
+    assert_file_system_helper_actual_access(&policy, root.path(), &target, (true, false));
+    assert_eq!(
+        fs::read(target).expect("read unchanged fixture"),
+        b"controlled-file"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn file_system_helper_minimal_read_does_not_grant_outside_root() {
+    let root = TempDir::new_in("/tmp").expect("owned helper scratch fixture");
+    let allowed = root.path().join("allowed");
+    fs::create_dir(&allowed).expect("create allowed root");
+    let target = root.path().join("outside.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = file_system_helper_policy(&allowed, FileSystemAccessMode::Read);
+    assert_file_system_helper_actual_access(&policy, root.path(), &target, (false, false));
+    assert_eq!(
+        fs::read(target).expect("read unchanged fixture"),
+        b"controlled-file"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn file_system_helper_explicit_write_allows_controlled_scratch_target() {
+    let root = TempDir::new_in("/tmp").expect("owned helper scratch fixture");
+    let allowed = root.path().join("allowed");
+    fs::create_dir(&allowed).expect("create allowed root");
+    let target = allowed.join("writable.txt");
+    fs::write(&target, b"controlled-file").expect("write fixture");
+    let policy = file_system_helper_policy(&allowed, FileSystemAccessMode::Write);
+    assert_file_system_helper_actual_access(&policy, root.path(), &target, (true, true));
+    assert_eq!(
+        fs::read(target).expect("read written fixture"),
+        b"controlled-filecontrolled-write"
+    );
+    let outside = root.path().join("outside.txt");
+    fs::write(&outside, b"controlled-file").expect("write outside fixture");
+    assert_file_system_helper_actual_access(&policy, root.path(), &outside, (false, false));
+}
+
+#[cfg(target_os = "macos")]
 fn restricted_write_policy(paths: &[&Path]) -> FileSystemSandboxPolicy {
     let mut entries = vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -354,9 +697,32 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
             "-DWRITABLE_ROOT_0=/".to_string(),
             "-DWRITABLE_ROOT_0_EXCLUDED_0=/.codex".to_string(),
             format!("-DWRITABLE_ROOT_0_EXCLUDED_1={}", unreadable_root.display()),
+            format!("-DWRITABLE_ROOT_DENY_0={}", unreadable_root.display()),
         ],
         "unexpected write carveout parameters in args: {args:#?}"
     );
+    for (action, parameter) in [
+        ("file-read*", "READABLE_ROOT_DENY_0"),
+        ("file-write*", "WRITABLE_ROOT_DENY_0"),
+    ] {
+        let explicit_deny = format!(
+            "(deny {action} (require-all (require-any (literal (param \"{parameter}\")) (subpath (param \"{parameter}\")))"
+        );
+        let deny_index = policy
+            .find(&explicit_deny)
+            .expect("explicit literal and subpath deny must exist");
+        let last_allow = policy
+            .rfind(&format!("(allow {action}"))
+            .expect("ordinary access allowance must remain");
+        assert!(
+            deny_index > last_allow,
+            "explicit deny must follow allowances"
+        );
+        assert!(
+            args.iter()
+                .any(|arg| { arg == &format!("-D{parameter}={}", unreadable_root.display()) })
+        );
+    }
 }
 
 #[test]
@@ -1348,8 +1714,23 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_"))
         .cloned()
         .collect();
+    let normalize = |definitions: &[String]| {
+        let mut definitions = definitions
+            .iter()
+            .map(|definition| {
+                let (name, value) = definition.split_once('=').expect("parameter definition");
+                let name = name
+                    .split_once("_EXCLUDED_")
+                    .map_or_else(|| name.to_string(), |(root, _)| format!("{root}_EXCLUDED"));
+                (name, value.to_string())
+            })
+            .collect::<Vec<_>>();
+        definitions.sort();
+        definitions
+    };
     assert_eq!(
-        writable_definitions, expected_definitions,
+        normalize(&writable_definitions),
+        normalize(&expected_definitions),
         "unexpected writable-root parameter definitions in {args:#?}"
     );
     let command_index = args
@@ -1911,29 +2292,22 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         args.contains(&expected_root),
         "missing {expected_root}: {args:#?}"
     );
-    let expected_dot_git = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
-        dot_git_canonical.to_string_lossy()
-    );
-    assert!(
-        args.contains(&expected_dot_git),
-        "missing {expected_dot_git}: {args:#?}"
-    );
-    let expected_dot_codex = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
-        dot_codex_canonical.to_string_lossy()
-    );
-    assert!(
-        args.contains(&expected_dot_codex),
-        "missing {expected_dot_codex}: {args:#?}"
-    );
-    let unexpected_dot_agents = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
-        dot_agents_canonical.to_string_lossy()
-    );
-    assert!(
-        !args.contains(&unexpected_dot_agents),
-        "missing .agents should be handled by regex rather than materialized as a path param: {args:#?}"
+    let excluded_metadata = args
+        .iter()
+        .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_0_EXCLUDED_"))
+        .map(|arg| {
+            arg.split_once('=')
+                .expect("metadata definition")
+                .1
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        excluded_metadata,
+        [dot_git_canonical, dot_agents_canonical, dot_codex_canonical]
+            .map(|path| path.to_string_lossy().into_owned())
+            .into_iter()
+            .collect()
     );
     let expected_slash_tmp = format!("-DWRITABLE_ROOT_1={}", slash_tmp.to_string_lossy());
     assert!(

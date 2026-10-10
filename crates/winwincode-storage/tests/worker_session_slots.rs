@@ -645,3 +645,82 @@ fn restart_recovers_only_slots_with_new_exact_lease_and_fails_the_rest() {
     drop(storage);
     fs::remove_dir_all(root).expect("directory release");
 }
+
+#[test]
+fn expired_slot_can_report_progress_cancel_and_release_capacity() {
+    let root = temporary_directory("expired-slot-cleanup");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    prepare_admission(&mut storage, &scope(1), &pool(1), &[1]);
+    let leases = prepare_worker_and_leases(&mut storage, 1, 1, 1, &[1]);
+    let authority = authority(&leases[0], 1, 1);
+    let mut slots = storage.worker_session_slots().unwrap();
+    slots
+        .configure_resources(
+            &authority.worker_id,
+            &authority.worker_instance_id,
+            resource_limits(),
+        )
+        .unwrap();
+    let opened = slots
+        .open(&open_request(
+            authority.clone(),
+            1500,
+            WorkerSlotResources {
+                memory_bytes: 50,
+                disk_bytes: 50,
+                process_slots: 1,
+            },
+        ))
+        .unwrap();
+    let advanced = slots
+        .advance_event_cursor(&WorkerSlotEventAdvance {
+            authority: authority.clone(),
+            request_id: RequestId(id("req", 1501)),
+            expected_cursor: 0,
+            next_cursor: 1,
+            observed_at: at(21),
+        })
+        .unwrap();
+    let cancelled = slots
+        .request_cancellation(&WorkerSlotCancellation {
+            authority: authority.clone(),
+            request_id: RequestId(id("req", 1502)),
+            expected_revision: advanced.slot.revision,
+            requested_at: at(22),
+        })
+        .unwrap();
+    let closed = slots
+        .close(&WorkerSlotCloseRequest {
+            authority: authority.clone(),
+            request_id: RequestId(id("req", 1503)),
+            expected_revision: cancelled.slot.revision,
+            outcome: WorkerSlotState::Cancelled,
+            closed_at: at(23),
+        })
+        .unwrap();
+    let mut denied = open_request(
+        authority.clone(),
+        1504,
+        WorkerSlotResources {
+            memory_bytes: 50,
+            disk_bytes: 50,
+            process_slots: 1,
+        },
+    );
+    denied.opened_at = at(24);
+    assert_eq!(
+        slots.open(&denied).unwrap_err().code(),
+        WorkerSlotErrorCode::LeaseExpired
+    );
+    assert_eq!(opened.slot.state, WorkerSlotState::Running);
+    assert_eq!(closed.slot.state, WorkerSlotState::Cancelled);
+    assert_eq!(
+        slots
+            .capacity(&authority.worker_id, &authority.worker_instance_id)
+            .unwrap()
+            .available_slots,
+        1
+    );
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -59,6 +59,7 @@ use crate::request_user_input::RequestUserInputResponse;
 use crate::turn_input::TurnInputMode;
 use crate::turn_input::TurnInputRequest;
 use crate::turn_input::TurnInputSubmission;
+use crate::turn_input::TurnStartOptions;
 use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -577,7 +578,7 @@ pub enum Op {
     /// Resume an interrupted regular turn.
     RecoverTurn {
         thread_settings: ThreadSettingsOverrides,
-        submit_change_batch: bool,
+        start: TurnStartOptions,
         reply: oneshot::Sender<CodexResult<TurnInputSubmission>>,
     },
 

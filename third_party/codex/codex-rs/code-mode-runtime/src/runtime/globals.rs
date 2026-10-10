@@ -10,6 +10,7 @@ use super::callbacks::set_timeout_callback;
 use super::callbacks::store_callback;
 use super::callbacks::text_callback;
 use super::callbacks::tool_callback;
+use super::callbacks::tool_definition_callback;
 use super::callbacks::yield_control_callback;
 
 pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
@@ -21,6 +22,7 @@ pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), St
 
     let tools = build_tools_object(scope)?;
     let all_tools = build_all_tools_value(scope)?;
+    let tool_definition = helper_function(scope, "toolDefinition", tool_definition_callback)?;
     let clear_timeout = helper_function(scope, "clearTimeout", clear_timeout_callback)?;
     let set_timeout = helper_function(scope, "setTimeout", set_timeout_callback)?;
     let text = helper_function(scope, "text", text_callback)?;
@@ -35,6 +37,7 @@ pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), St
 
     set_global(scope, global, "tools", tools.into())?;
     set_global(scope, global, "ALL_TOOLS", all_tools)?;
+    set_global(scope, global, "toolDefinition", tool_definition.into())?;
     set_global(scope, global, "clearTimeout", clear_timeout.into())?;
     set_global(scope, global, "setTimeout", set_timeout.into())?;
     set_global(scope, global, "text", text.into())?;

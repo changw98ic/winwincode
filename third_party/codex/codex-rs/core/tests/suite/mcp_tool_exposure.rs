@@ -429,6 +429,48 @@ async fn rapid_mcp_refreshes_coalesce_to_the_latest_config() -> Result<()> {
     Ok(())
 }
 
+fn assert_code_mode_catalog(body: &Value) {
+    let names = body["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["exec", "wait"]);
+}
+
+async fn assert_calendar_discoverable(
+    test: &core_test_support::test_codex::TestCodex,
+    server: &wiremock::MockServer,
+) -> Result<()> {
+    let name = codex_tools::code_mode_name_for_tool_name(&codex_protocol::ToolName::namespaced(
+        SEARCH_CALENDAR_NAMESPACE,
+        SEARCH_CALENDAR_CREATE_TOOL,
+    ));
+    let code = format!("text(ALL_TOOLS.some(tool => tool.name === {name:?}));");
+    let response = mount_sse_sequence(
+        server,
+        vec![
+            sse(vec![
+                responses::ev_custom_tool_call("discover-calendar", "exec", &code),
+                ev_completed("discover-calendar-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("calendar-ready", "Calendar ready"),
+                ev_completed("discover-calendar-2"),
+            ]),
+        ],
+    )
+    .await;
+    test.submit_turn("Discover Calendar through Code Mode")
+        .await?;
+    let requests = response.requests();
+    assert_eq!(requests.len(), 2);
+    let output = requests[1].custom_tool_call_output("discover-calendar");
+    assert_eq!(output["output"][1]["text"], "true");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -459,6 +501,8 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url)
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
+            config.web_search_mode =
+                Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
             config
                 .features
                 .enable(Feature::CodeModeOnly)
@@ -545,16 +589,9 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
         .count();
     assert_eq!(list_requests, 1);
     let body = response.single_request().body_json();
-    assert!(
-        namespace_child_tool(
-            &body,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_some(),
-        "shared Apps tools should remain model-visible after root reconciliation: {body}"
-    );
+    assert_code_mode_catalog(&body);
 
+    assert_calendar_discoverable(&test, &server).await?;
     Ok(())
 }
 
@@ -718,7 +755,7 @@ async fn elevated_apps_catalog_limit_requires_host_owned_registration() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()> {
+async fn code_mode_only_routes_configured_mcp_namespaces_through_exec() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -739,11 +776,14 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
                 .features
                 .enable(Feature::CodeModeOnly)
                 .expect("test config should allow feature update");
+            config.web_search_mode = codex_core::config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
             config.code_mode.direct_only_tool_namespaces =
                 vec![SEARCH_CALENDAR_NAMESPACE.to_string()];
         });
     let test = builder.build(&server).await?;
-    test.submit_turn("inspect directly exposed MCP tools")
+    test.submit_turn("inspect Code Mode MCP tool exposure")
         .await?;
     let body = response.single_request().body_json();
     let tools = body
@@ -751,35 +791,12 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
         .and_then(Value::as_array)
         .expect("request should contain tools");
 
-    assert!(
-        namespace_child_tool(
-            &body,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_some(),
-        "configured MCP namespace should remain top-level: {body}"
-    );
-    assert!(
-        !tools.iter().any(|tool| {
-            tool.get("name")
-                .or_else(|| tool.get("type"))
-                .and_then(Value::as_str)
-                == Some("tool_search")
-        }),
-        "configured MCP namespace should not be deferred: {body}"
-    );
-    let exec_description = tools.iter().find_map(|tool| {
-        (tool.get("name").and_then(Value::as_str) == Some("exec"))
-            .then(|| tool.get("description").and_then(Value::as_str))
-            .flatten()
-    });
-    assert!(
-        exec_description.is_some_and(|description| {
-            !description.contains("mcp__codex_apps__calendar_create_event(args:")
-        }),
-        "direct-model-only MCP namespace should not be available through exec: {body}"
-    );
+    let mut names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["exec", "wait"]);
 
     Ok(())
 }
@@ -1210,6 +1227,8 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
 
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
         .with_config(move |config| {
+            config.web_search_mode =
+                Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config
                 .permissions
@@ -1228,15 +1247,7 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
         .await?;
 
     let initial_request = response.requests()[0].body_json();
-    assert!(
-        namespace_child_tool(
-            &initial_request,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_some(),
-        "Calendar should be available before the MCP refresh: {initial_request}"
-    );
+    assert_code_mode_catalog(&initial_request);
 
     tokio::fs::remove_dir_all(test.codex_home_path().join("cache/codex_apps_tools")).await?;
     startup_control.fail_next_initialize_attempts(/*attempts*/ 1);
@@ -1279,16 +1290,9 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
     let requests = response.requests();
     assert_eq!(requests.len(), 3);
     let recovered_request = requests[2].body_json();
-    assert!(
-        namespace_child_tool(
-            &recovered_request,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_some(),
-        "Calendar should recover on the follow-up turn: {recovered_request}",
-    );
+    assert_code_mode_catalog(&recovered_request);
     assert_eq!(startup_control.initialize_attempts(), 3);
 
+    assert_calendar_discoverable(&test, &server).await?;
     Ok(())
 }

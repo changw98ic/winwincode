@@ -780,6 +780,7 @@ impl UnifiedExecProcessManager {
             .prepare_process_handles(process_id, &locked_process)
             .await?;
         let mut status_after_write = None;
+        super::action_admission::authorize_interaction(&request, &call_id).await?;
 
         if !request.input.is_empty() {
             if !tty {
@@ -908,7 +909,8 @@ impl UnifiedExecProcessManager {
 
         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
         if should_emit_interaction
-            && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
+            && let Some(WriteStdinInteractionEvent { session, turn, .. }) =
+                request.interaction_event
         {
             let interaction = TerminalInteractionEvent {
                 call_id: response.event_call_id.clone(),

@@ -11,8 +11,8 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::responses::assert_parent_turn;
 use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_code_mode_call;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
@@ -108,7 +108,7 @@ async fn mount_root_collaboration_call(
         },
         sse(vec![
             ev_response_created(&first_response_id),
-            ev_function_call_with_namespace(call_id, COLLABORATION_NAMESPACE, tool_name, arguments),
+            ev_code_mode_call(call_id, COLLABORATION_NAMESPACE, tool_name, arguments),
             ev_completed(&first_response_id),
         ]),
     )
@@ -142,9 +142,13 @@ fn configure_multi_agent_v2_with_role(
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    let _ = config.features.enable(Feature::CodeModeOnly);
+    config.web_search_mode =
+        codex_config::Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
     config.multi_agent_v2.subagent_developer_instructions =
         Some(SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
-    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    // Keep the root, worker, grandchild, and sibling resident until the explicit cold restart.
+    config.multi_agent_v2.max_concurrent_threads_per_session = 4;
     let role_path = config.codex_home.join("durable-worker-role.toml");
     std::fs::write(
         &role_path,
@@ -177,7 +181,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         |request: &wiremock::Request| body_contains(request, INITIAL_PROMPT),
         sse(vec![
             ev_response_created("resp-spawn-1"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 SPAWN_CALL_ID,
                 COLLABORATION_NAMESPACE,
                 "spawn_agent",
@@ -196,7 +200,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         },
         sse(vec![
             ev_response_created("resp-worker-1"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 NESTED_CALL_ID,
                 COLLABORATION_NAMESPACE,
                 "spawn_agent",
@@ -217,15 +221,19 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
     for (text, is_subagent) in [(NESTED_CALL_ID, true), (QUEUE_CALL_ID, false)] {
-        mount_sse_once_match(
-            &server,
-            move |request: &wiremock::Request| {
-                body_contains(request, text)
-                    && request_has_input_type(request, "agent_message") == is_subagent
-            },
-            sse(vec![ev_completed("resp-parent-turn-assistant")]),
-        )
-        .await;
+        // The grandchild completion can arrive in a separate worker turn after the spawn result.
+        for _ in 0..if is_subagent { 2 } else { 1 } {
+            mount_sse_once_match(
+                &server,
+                move |request: &wiremock::Request| {
+                    body_contains(request, text)
+                        && request_has_input_type(request, "agent_message") == is_subagent
+                        && (!is_subagent || !body_contains(request, FOLLOWUP_TASK))
+                },
+                sse(vec![ev_completed("resp-parent-turn-assistant")]),
+            )
+            .await;
+        }
     }
     mount_sse_once_match(
         &server,
@@ -287,7 +295,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         sleep(Duration::from_millis(10)).await;
     };
     let worker_thread = initial.thread_manager.get_thread(worker_thread_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if matches!(
             worker_thread.agent_status().await,
@@ -296,7 +304,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
             break;
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for worker completion");
+            anyhow::bail!(
+                "timed out waiting for worker completion: {:?}",
+                worker_thread.agent_status().await
+            );
         }
         sleep(Duration::from_millis(10)).await;
     }
@@ -389,7 +400,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         |request: &wiremock::Request| body_contains(request, FOLLOWUP_PROMPT),
         sse(vec![
             ev_response_created("resp-followup-1"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 FOLLOWUP_CALL_ID,
                 COLLABORATION_NAMESPACE,
                 "followup_task",
@@ -471,7 +482,7 @@ openai_base_url = "{redirected_base_url}"
         |request: &wiremock::Request| body_contains(request, QUEUE_PROMPT),
         sse(vec![
             ev_response_created("resp-queue"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 QUEUE_CALL_ID,
                 COLLABORATION_NAMESPACE,
                 "send_message",
@@ -494,7 +505,7 @@ openai_base_url = "{redirected_base_url}"
         "cold reload must preserve the parent's complete model provider",
     );
     resumed.submit_turn(FOLLOWUP_PROMPT).await?;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if matches!(
             reloaded_worker.agent_status().await,

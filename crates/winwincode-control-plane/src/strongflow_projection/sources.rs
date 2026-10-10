@@ -47,7 +47,7 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// contains no `SessionBinding` rows. Keeping the aggregate identity optional
 /// prevents a `ProductSession` read from being represented as a fabricated
 /// Delivery or a generic session binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TrustedRuntimeFoldSnapshot {
     pub delivery_id: Option<DeliveryId>,
     pub product_session_id: Option<ProductSessionId>,
@@ -61,7 +61,7 @@ pub struct TrustedRuntimeFoldSnapshot {
 /// still exposes one `sessionBindingId` field, so the mapping layer derives a
 /// stable projection key from those two durable identities. No independent
 /// binding authority is created here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrustedProductSessionRuntimeSession {
     pub(crate) product_session_id: ProductSessionId,
     pub(crate) execution_job_id: ExecutionJobId,
@@ -71,6 +71,7 @@ pub(crate) struct TrustedProductSessionRuntimeSession {
     pub(crate) attempt: u64,
     pub(crate) fencing_token: FencingToken,
     pub(crate) as_of_sequence: u64,
+    pub(crate) activities: Vec<RuntimeActivityProjection>,
 }
 
 impl TrustedRuntimeFoldSnapshot {
@@ -827,6 +828,10 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             attempt: ledger.attempt,
             fencing_token: ledger.fencing_token.clone(),
             as_of_sequence: ledger.revision(),
+            activities: winwincode_delivery::projection::runtime::fold_runtime_activities(
+                &persisted_runtime_events(&ledger.events)?,
+            )
+            .map_err(|_| TrustedProjectionReadError::Invalid)?,
         };
         let ledger_revision = Revision(
             i64::try_from(ledger.revision()).map_err(|_| TrustedProjectionReadError::Invalid)?,
@@ -1033,96 +1038,110 @@ fn persisted_runtime_events(
     let mut recoveries = 0_u64;
     let mut last_failure_source_ref = None;
     let mut latest_recovery_source_ref = None;
+    let mut core_tools = super::core_tool_facts::CoreToolProjector::default();
     entries
         .iter()
         .map(|entry| {
             let sequence = u64::try_from(entry.event.sequence.0)
                 .map_err(|_| TrustedProjectionReadError::Invalid)?;
             let source_ref = format!("runtime:{}", entry.event.event_id.0);
-            let fact = match decode_runtime_trace(&entry.event)? {
-                Some(RuntimeTraceFact::Runtime {
-                    state: WorkerRuntimeTraceState::Disconnected,
-                }) => {
-                    failures = failures
-                        .checked_add(1)
-                        .filter(|value| *value <= MAX_SAFE_INTEGER)
-                        .ok_or(TrustedProjectionReadError::Invalid)?;
-                    last_failure_source_ref = Some(source_ref.clone());
-                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
-                        state: RuntimeRecoveryState::Required,
-                        failure_count: failures,
-                        recovery_count: recoveries,
-                        last_failure_source_ref: last_failure_source_ref.clone(),
-                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
-                    })
-                }
-                Some(RuntimeTraceFact::Runtime {
-                    state: WorkerRuntimeTraceState::Parked,
-                }) if failures > recoveries => {
-                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
-                        state: RuntimeRecoveryState::InProgress,
-                        failure_count: failures,
-                        recovery_count: recoveries,
-                        last_failure_source_ref: last_failure_source_ref.clone(),
-                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
-                    })
-                }
-                Some(RuntimeTraceFact::Runtime {
-                    state: WorkerRuntimeTraceState::Reconnected,
-                }) if failures > recoveries => {
-                    recoveries = failures;
-                    latest_recovery_source_ref = Some(source_ref.clone());
-                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
-                        state: RuntimeRecoveryState::Recovered,
-                        failure_count: failures,
-                        recovery_count: recoveries,
-                        last_failure_source_ref: last_failure_source_ref.clone(),
-                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
-                    })
-                }
-                Some(RuntimeTraceFact::PerformanceBaseline { report }) => {
-                    let values = [
-                        ("input_tokens", report.primary_model_input_tokens),
-                        ("output_tokens", Some(report.primary_model_output_tokens)),
-                        ("tool_calls", Some(report.tool_call_count)),
-                        ("runtime_ms", Some(report.total_runtime_ms)),
-                    ];
-                    let totals = values
-                        .into_iter()
-                        .filter_map(|(name, value)| value.map(|value| (name, value)))
-                        .map(|(name, value)| {
-                            u64::try_from(value)
-                                .map(|value| RuntimeUsageMetricProjection {
-                                    name: name.to_owned(),
-                                    value,
-                                })
-                                .map_err(|_| TrustedProjectionReadError::Invalid)
+            let fact = if let Some(activity) =
+                core_tools.decode(&entry.event, source_ref.clone())?
+            {
+                PersistedRuntimeFact::Activity(activity)
+            } else {
+                match decode_runtime_trace(&entry.event)? {
+                    Some(RuntimeTraceFact::Runtime {
+                        state: WorkerRuntimeTraceState::Disconnected,
+                    }) => {
+                        failures = failures
+                            .checked_add(1)
+                            .filter(|value| *value <= MAX_SAFE_INTEGER)
+                            .ok_or(TrustedProjectionReadError::Invalid)?;
+                        last_failure_source_ref = Some(source_ref.clone());
+                        PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                            state: RuntimeRecoveryState::Required,
+                            failure_count: failures,
+                            recovery_count: recoveries,
+                            last_failure_source_ref: last_failure_source_ref.clone(),
+                            latest_recovery_source_ref: latest_recovery_source_ref.clone(),
                         })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    PersistedRuntimeFact::Usage(RuntimeUsageProjection { totals, source_ref })
+                    }
+                    Some(RuntimeTraceFact::Runtime {
+                        state: WorkerRuntimeTraceState::Parked,
+                    }) if failures > recoveries => {
+                        PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                            state: RuntimeRecoveryState::InProgress,
+                            failure_count: failures,
+                            recovery_count: recoveries,
+                            last_failure_source_ref: last_failure_source_ref.clone(),
+                            latest_recovery_source_ref: latest_recovery_source_ref.clone(),
+                        })
+                    }
+                    Some(RuntimeTraceFact::Runtime {
+                        state: WorkerRuntimeTraceState::Reconnected,
+                    }) if failures > recoveries => {
+                        recoveries = failures;
+                        latest_recovery_source_ref = Some(source_ref.clone());
+                        PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                            state: RuntimeRecoveryState::Recovered,
+                            failure_count: failures,
+                            recovery_count: recoveries,
+                            last_failure_source_ref: last_failure_source_ref.clone(),
+                            latest_recovery_source_ref: latest_recovery_source_ref.clone(),
+                        })
+                    }
+                    Some(RuntimeTraceFact::PerformanceBaseline { report }) => {
+                        let totals = runtime_usage_totals(&report)?;
+                        PersistedRuntimeFact::Usage(RuntimeUsageProjection { totals, source_ref })
+                    }
+                    Some(trace) => trace_activity(&trace, &entry.event, source_ref).map_or(
+                        PersistedRuntimeFact::Checkpoint,
+                        PersistedRuntimeFact::Activity,
+                    ),
+                    None if entry.event.category == ExecutionEventCategory::Activity => {
+                        PersistedRuntimeFact::Activity(RuntimeActivityProjection {
+                            core_tool: None,
+                            call_id: entry.event.event_id.0.clone(),
+                            activity_type: RuntimeActivityType::Command,
+                            command: Some(entry.event.summary.clone()),
+                            status: RuntimeActivityStatus::Completed,
+                            outcome: RuntimeActivityOutcome::Observed,
+                            exit_code: None,
+                            source_ref,
+                        })
+                    }
+                    None => PersistedRuntimeFact::Checkpoint,
                 }
-                Some(trace) => trace_activity(&trace, &entry.event, source_ref).map_or(
-                    PersistedRuntimeFact::Checkpoint,
-                    PersistedRuntimeFact::Activity,
-                ),
-                None if entry.event.category == ExecutionEventCategory::Activity => {
-                    PersistedRuntimeFact::Activity(RuntimeActivityProjection {
-                        call_id: entry.event.event_id.0.clone(),
-                        activity_type: RuntimeActivityType::Command,
-                        command: Some(entry.event.summary.clone()),
-                        status: RuntimeActivityStatus::Completed,
-                        outcome: RuntimeActivityOutcome::Observed,
-                        exit_code: None,
-                        source_ref,
-                    })
-                }
-                None => PersistedRuntimeFact::Checkpoint,
             };
             Ok(PersistedRuntimeEvent {
                 sequence,
                 event_id: entry.event.event_id.clone(),
                 fact,
             })
+        })
+        .collect()
+}
+
+fn runtime_usage_totals(
+    report: &winwincode_execution_port::runtime_trace_outbox::PerformanceBaselineReport,
+) -> Result<Vec<RuntimeUsageMetricProjection>, TrustedProjectionReadError> {
+    let values = [
+        ("input_tokens", report.primary_model_input_tokens),
+        ("output_tokens", Some(report.primary_model_output_tokens)),
+        ("tool_calls", Some(report.tool_call_count)),
+        ("runtime_ms", Some(report.total_runtime_ms)),
+    ];
+    values
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .map(|(name, value)| {
+            u64::try_from(value)
+                .map(|value| RuntimeUsageMetricProjection {
+                    name: name.to_owned(),
+                    value,
+                })
+                .map_err(|_| TrustedProjectionReadError::Invalid)
         })
         .collect()
 }
@@ -1207,6 +1226,7 @@ fn trace_activity(
         _ => return None,
     };
     Some(RuntimeActivityProjection {
+        core_tool: None,
         call_id: event.event_id.0.clone(),
         activity_type: RuntimeActivityType::Command,
         command: Some(event.summary.clone()),

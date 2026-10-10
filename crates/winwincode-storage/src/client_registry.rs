@@ -58,6 +58,23 @@ CREATE TABLE IF NOT EXISTS client_exchange_cursors (
         CHECK (server_to_client_ack_sequence >= 0),
     FOREIGN KEY (client_node_id) REFERENCES client_nodes(client_node_id) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS client_exchange_frames (
+    client_node_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, sequence),
+    UNIQUE (client_node_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS client_exchange_commands (
+    client_node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, idempotency_key)
+);
+DROP TABLE IF EXISTS client_credential_rotations;
 ";
 
 /// Machine-level presence of one `ClientNode` (plan 4.1, contract 1).
@@ -411,6 +428,139 @@ impl SqliteStorage {
 }
 
 impl<'storage> ClientNodeRegistry<'storage> {
+    /// Binds a received frame and command to immutable bytes before applying
+    /// effects. A pending reservation is retried after a crash; a completed
+    /// command is replayed without applying its effects again.
+    ///
+    /// # Errors
+    /// Rejects reused identities with different bytes or unavailable storage.
+    pub fn reserve_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        message_id: &str,
+        digest: &str,
+        command_key: Option<&str>,
+    ) -> Result<bool, ClientRegistryError> {
+        validate_client_node_id(node)?;
+        validate_sequence(sequence, "received sequence")?;
+        let tx = self.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO client_exchange_frames
+             (client_node_id, sequence, message_id, payload_digest) VALUES (?1, ?2, ?3, ?4)",
+            params![node, sql_integer(sequence)?, message_id, digest],
+        )
+        .map_err(|sql| sql_error(&sql))?;
+        let stored: Option<(String, String, bool)> = tx
+            .query_row(
+                "SELECT message_id, payload_digest, completed FROM client_exchange_frames
+             WHERE client_node_id = ?1 AND sequence = ?2",
+                params![node, sql_integer(sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        let Some((stored_id, stored_digest, mut completed)) = stored else {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange message identity conflict",
+            ));
+        };
+        if stored_id != message_id || stored_digest != digest {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame payload conflict",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "INSERT OR IGNORE INTO client_exchange_commands
+                 (client_node_id, idempotency_key, payload_digest) VALUES (?1, ?2, ?3)",
+                params![node, key, digest],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+            let (prior, settled): (String, bool) = tx
+                .query_row(
+                    "SELECT payload_digest, completed FROM client_exchange_commands
+                 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                    params![node, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|sql| sql_error(&sql))?;
+            if prior != digest {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "exchange idempotency conflict",
+                ));
+            }
+            completed |= settled;
+        }
+        tx.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(completed)
+    }
+
+    /// Atomically records completion and its cumulative acknowledgement.
+    ///
+    /// # Errors
+    /// Rejects an unavailable store or an unreserved frame.
+    pub fn complete_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+    ) -> Result<(), ClientRegistryError> {
+        self.complete_exchange_frame_with_reply(node, sequence, command_key, None)
+    }
+
+    /// Commits a rejected command's durable reply with completion and ACK, so
+    /// a crash can never acknowledge a rejection whose result was lost.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unreserved frame, conflicting downlink sequence, or storage failure.
+    pub fn complete_exchange_frame_with_reply(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+        reply: Option<(&crate::ClientDownlinkAppend, &Instant)>,
+    ) -> Result<(), ClientRegistryError> {
+        let tx = self.transaction()?;
+        if let Some((reply, now)) = reply {
+            let next: i64 = tx.query_row("SELECT MAX(COALESCE((SELECT MAX(sequence) FROM client_downlink_frames WHERE client_node_id = ?1), 0), server_to_client_ack_sequence) + 1 FROM client_exchange_cursors WHERE client_node_id = ?1", [node], |row| row.get(0)).map_err(|sql| sql_error(&sql))?;
+            if reply.client_node_id() != node || sql_integer(reply.sequence())? != next {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "downlink reply sequence changed",
+                ));
+            }
+            tx.execute("INSERT INTO client_downlink_frames (client_node_id, sequence, message_id, frame, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![node, next, reply.message_id(), reply.frame(), now.0]).map_err(|sql| sql_error(&sql))?;
+        }
+        let changed = tx.execute(
+            "UPDATE client_exchange_frames SET completed = 1 WHERE client_node_id = ?1 AND sequence = ?2",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        if changed != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame is not reserved",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "UPDATE client_exchange_commands SET completed = 1 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                params![node, key],
+            ).map_err(|sql| sql_error(&sql))?;
+        }
+        tx.execute(
+            "UPDATE client_exchange_cursors SET client_to_server_ack_sequence = MAX(client_to_server_ack_sequence, ?2)
+             WHERE client_node_id = ?1",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        tx.commit().map_err(|sql| sql_error(&sql))
+    }
+
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, ClientRegistryError> {
         let connection = storage
             .connection()
@@ -553,6 +703,57 @@ impl<'storage> ClientNodeRegistry<'storage> {
             return Err(error(
                 ClientRegistryErrorKind::RevisionConflict,
                 "client node revision changed during presence update",
+            ));
+        }
+        let updated_record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(updated_record)
+    }
+
+    /// Persists the connection policy reported by a Device Client under
+    /// `expectedRevision` CAS, independently of its presence state.
+    /// Repeated reports of the same policy leave the revision unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown client node, a stale `expectedRevision`, or storage
+    /// failure.
+    pub fn update_connection_policy(
+        &mut self,
+        client_node_id: &str,
+        accepting_connections: bool,
+        lock_state: ClientLockState,
+        expected_revision: u64,
+    ) -> Result<ClientNodeRecord, ClientRegistryError> {
+        validate_client_node_id(client_node_id)?;
+        validate_revision(expected_revision)?;
+        let transaction = self.transaction()?;
+        let record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        ensure_revision(&record, expected_revision)?;
+        if record.accepting_connections == accepting_connections && record.lock_state == lock_state
+        {
+            transaction.commit().map_err(|sql| sql_error(&sql))?;
+            return Ok(record);
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE client_nodes
+                 SET accepting_connections = ?2, lock_state = ?3, revision = revision + 1
+                 WHERE client_node_id = ?1 AND revision = ?4",
+                params![
+                    client_node_id,
+                    accepting_connections,
+                    lock_state.as_str(),
+                    sql_integer(record.revision)?,
+                ],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        if updated != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::RevisionConflict,
+                "client node revision changed during connection policy update",
             ));
         }
         let updated_record =
@@ -1123,7 +1324,29 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientRegist
             "client_to_server_ack_sequence",
             "server_to_client_ack_sequence",
         ],
-    )
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_frames",
+        &[
+            "client_node_id",
+            "sequence",
+            "message_id",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_commands",
+        &[
+            "client_node_id",
+            "idempotency_key",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_columns(

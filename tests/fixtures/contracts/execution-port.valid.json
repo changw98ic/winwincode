@@ -39,30 +39,6 @@
       "serverTime": "2026-08-24T12:00:00.000Z"
     },
     {
-      "kind": "worker.capabilities",
-      "schemaVersion": "winwincode/v1",
-      "messageId": "xmsg_00000000000000000000000003",
-      "sentAt": "2026-08-24T12:00:00.000Z",
-      "requestId": "req_00000000000000000000000002",
-      "workerId": "wrk_00000000000000000000000001",
-      "workerInstanceId": "wki_00000000000000000000000002",
-      "observedAt": "2026-08-24T12:00:00.000Z",
-      "capabilities": {
-        "platform": "aarch64-apple-darwin",
-        "maxConcurrentJobs": 4,
-        "features": [
-          "artifact_stream",
-          "approval",
-          "git",
-          "interactive_input",
-          "model_proxy",
-          "sandbox",
-          "shell"
-        ],
-        "capabilityDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
-    {
       "kind": "worker.heartbeat",
       "schemaVersion": "winwincode/v1",
       "messageId": "xmsg_00000000000000000000000004",

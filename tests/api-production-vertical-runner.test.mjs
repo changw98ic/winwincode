@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   mkdtempSync,
@@ -10,10 +11,13 @@ import {
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
+import { projectSourceDigest } from '../scripts/product-build-contract.mjs'
 import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
 
 import {
   prepareControlledRepository,
+  probeDeviceErrorTruthfulness,
+  stopDevicePath,
   appendDeliveryTransition,
   DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY,
   driveDelivery,
@@ -22,11 +26,29 @@ import {
   writeApiProductionSourceSeal,
   writeHelperReleaseManifest,
   runApiProductionVertical,
+  waitForDeviceWorkerRegistered,
 } from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
+
+test('registration reads the exact Worker beyond a full historical first page', async () => {
+  const historical = Array.from({ length: 201 }, (_, index) => ({ id: `old-${index}`, state: 'drained' }))
+  const target = { id: 'target', state: 'enabled', lastHeartbeatAt: '2026-10-03T00:00:00Z' }
+  const queries = []
+  const api = { async query(name, parameters, pagination) {
+    queries.push(name)
+    if (name === 'worker.list') return { result: { items: historical.slice(0, 200) },
+      page: { hasMore: true, nextCursor: 'later' } }
+    assert.equal(name, 'worker.get')
+    assert.deepEqual(parameters, { workerId: target.id })
+    assert.deepEqual(pagination, { cursor: null, limit: 1 })
+    return { result: target }
+  } }
+  assert.deepEqual(await waitForDeviceWorkerRegistered(api, { workerId: target.id }, 1), target)
+  assert.deepEqual(queries, ['worker.get'])
+})
 
 test('external Provider without a credential fails before build or deterministic fallback', async () => {
   await assert.rejects(runApiProductionVertical({
@@ -133,6 +155,169 @@ test('WorkRun contract drives canonical WorkItem creation payload', async () => 
     deliveryId: payload.deliveryId,
     dispatchProfile: 'executor',
   })
+})
+
+test('Delivery helpers keep each task on its own canonical Delivery identity', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const client = deliveryDriverClient(1)
+  const query = client.query.bind(client)
+  client.query = (name, payload) => {
+    assert.equal(payload.deliveryId, deliveryId)
+    return query(name, payload)
+  }
+  const aggregate = { contract: { revision: 1, criteria: [{ id: 'criterion' }] }, items: [],
+    readCursor: { deliveryId } }
+  assert.equal(workItemCreatePayload(aggregate, 1).deliveryId, deliveryId)
+  assert.equal(workItemCreatePayload(aggregate, 1).items[0].id, 'wit_01J00000000000000000000003')
+  const result = await driveDelivery(client, 10_000, undefined, Date.now, { deliveryId })
+  assert.equal(result.detail.status, 'done')
+})
+
+function completedDeliveryObservation(deliveryId, token = 'terminal') {
+  const readCursor = { deliveryId, token }
+  return {
+    detail: { deliveryId, readCursor, deliveryRevision: 44, status: 'done', attention: [],
+      currentCandidate: { candidateRef: 'frozen-candidate' },
+      evidence: [{ id: 'real-command-evidence' }],
+      verdict: { status: 'pass', criteria: [{ verdict: 'pass' }] } },
+    workRunAggregate: { readCursor, items: [{ id: 'item', state: 'done' }],
+      runs: [{ id: 'run', workItemId: 'item', executionJobId: 'job', state: 'settled' }] },
+  }
+}
+
+test('temporary Delivery and cursor-bound WorkRun 503 queries re-read the same task before accepting completion', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  const stale = { ...terminal.detail, deliveryRevision: 43, status: 'waiting_human',
+    readCursor: { deliveryId, token: 'unavailable-cursor' },
+    attention: [{ id: 'stale-approval', status: 'open' }] }
+  const original = structuredClone({ stale, terminal })
+  const queries = []
+  const projections = []
+  const unavailable = () => Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+    code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+  })
+  const client = {
+    async query(name, parameters) {
+      queries.push({ name, parameters })
+      assert.equal(parameters.deliveryId, deliveryId)
+      switch (queries.length) {
+        case 1:
+          assert.equal(name, 'delivery.get')
+          throw unavailable()
+        case 2:
+          assert.equal(name, 'delivery.get')
+          return { result: stale }
+        case 3:
+          assert.equal(name, 'workrun.get')
+          assert.deepEqual(parameters.atCursor, stale.readCursor)
+          throw unavailable()
+        case 4:
+          assert.equal(name, 'delivery.get')
+          return { result: terminal.detail }
+        case 5:
+          assert.equal(name, 'workrun.get')
+          assert.deepEqual(parameters.atCursor, terminal.detail.readCursor)
+          return { result: terminal.workRunAggregate }
+        default:
+          assert.fail('completion must use its successful cursor-bound pair')
+      }
+    },
+    command: () => assert.fail('query recovery must not issue a product command'),
+    requestId: () => assert.fail('query recovery must not create a command request'),
+  }
+  const result = await driveDelivery(client, null, undefined, Date.now, {
+    deliveryId, resolveAttention: false,
+    onProjection: projection => projections.push(projection),
+    onActiveWorkRuns: () => assert.fail('unavailable observations must not launch work'),
+  })
+  assert.deepEqual(projections, [terminal])
+  assert.equal(result.detail, terminal.detail)
+  assert.equal(result.workRunAggregate, terminal.workRunAggregate)
+  assert.deepEqual(result.actions, [])
+  assert.deepEqual(result.observations, [{ revision: 44, status: 'done' }])
+  assert.deepEqual({ stale, terminal }, original, 'query recovery must not rewrite product evidence')
+})
+
+test('uncapped Delivery query recovery is not limited by the local stalled-projection budget', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  let failures = 85
+  let acceptedQueries = 0
+  const client = {
+    async query(name) {
+      if (failures-- > 0) {
+        assert.equal(name, 'delivery.get')
+        throw Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+          code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+        })
+      }
+      acceptedQueries += 1
+      return { result: name === 'delivery.get' ? terminal.detail : terminal.workRunAggregate }
+    },
+    command: () => assert.fail('repeated query unavailability cannot dispatch work'),
+  }
+  const result = await driveDelivery(client, null, undefined, () => Number.MAX_SAFE_INTEGER, { deliveryId })
+  assert.equal(result.detail, terminal.detail)
+  assert.equal(acceptedQueries, 2)
+  assert.equal(result.totalTransitionCount, 1)
+})
+
+test('temporary query unavailability respects the existing deadline and retains its typed unresolved cause', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  for (const failedQuery of ['delivery.get', 'workrun.get']) {
+    let instant = 0
+    let queries = 0
+    const unavailable = Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+      code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+    })
+    const client = {
+      async query(name) {
+        queries += 1
+        if (name === failedQuery) throw unavailable
+        return { result: terminal.detail }
+      },
+      command: () => assert.fail('an unresolved deadline cannot dispatch work'),
+    }
+    await assert.rejects(driveDelivery(client, 1, undefined, () => instant++, {
+      deliveryId, onProjection: () => assert.fail('a partial query pair is not evidence'),
+    }), error => {
+      assert.equal(error, unavailable)
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+      assert.equal(error.unresolvedDeviceExecution, true)
+      return true
+    })
+    assert.equal(queries, failedQuery === 'delivery.get' ? 1 : 2)
+  }
+})
+
+test('Delivery query recovery does not swallow invalid queries or unrelated transport failures', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  for (const failedQuery of ['delivery.get', 'workrun.get']) {
+    for (const fields of [
+      { code: 'INVALID_QUERY', status: 503 },
+      { code: 'TRUSTED_FACTS_UNAVAILABLE', status: 400 },
+      { code: 'ECONNRESET' },
+    ]) {
+      let queries = 0
+      const failure = Object.assign(new Error('query failed'), fields)
+      const client = {
+        async query(name) {
+          queries += 1
+          if (name === failedQuery) throw failure
+          return { result: terminal.detail }
+        },
+        command: () => assert.fail('invalid queries cannot dispatch work'),
+      }
+      await assert.rejects(driveDelivery(client, null, undefined, Date.now, {
+        deliveryId, onProjection: () => assert.fail('failed queries are not evidence'),
+      }), error => error === failure)
+      assert.equal(queries, failedQuery === 'delivery.get' ? 1 : 2)
+    }
+  }
 })
 
 test('Delivery transition evidence keeps the newest bounded window without limiting progress', () => {
@@ -362,6 +547,42 @@ test('source seal binds the Device Worker and CLI binaries', () => {
   } finally { rmSync(target, { recursive: true, force: true }) }
 })
 
+test('source seal rejects a changed helper build script at the same Git HEAD', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-build-source-seal-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = resolve(directory, 'source')
+  const binaryRoot = resolve(directory, 'bin')
+  mkdirSync(resolve(sourceRoot, 'scripts'), { recursive: true })
+  mkdirSync(resolve(sourceRoot, 'crates/helper/src'), { recursive: true })
+  mkdirSync(binaryRoot)
+  writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+  writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n')
+  writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+    writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
+  }
+  const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  git('add', '.')
+  git('-c', 'user.name=Source Seal Test', '-c', 'user.email=source-seal@example.invalid',
+    '-c', 'commit.gpgSign=false', 'commit', '--quiet', '-m', 'fixture')
+  const head = git('rev-parse', 'HEAD')
+  for (const name of ['winwincode-server', 'winwincode-kernel-helper', 'winwincode-worker', 'wwc']) {
+    const path = resolve(binaryRoot, name)
+    writeFileSync(path, '#!/bin/sh\nexit 0\n')
+    chmodSync(path, 0o755)
+  }
+  const serverBinary = resolve(binaryRoot, 'winwincode-server')
+  const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
+  const options = { root: sourceRoot, serverBinary, helperExecutable }
+  writeApiProductionSourceSeal({ ...options,
+    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  verifyApiProductionSourceSeal(options)
+  writeFileSync(resolve(sourceRoot, 'scripts/compact-kernel-helper.mjs'), '// changed build input\n')
+  assert.equal(git('rev-parse', 'HEAD'), head)
+  assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+})
+
 test('browser skip-build verifies the production source seal before replacing artifacts', () => {
   const source = readFileSync(browserGatePath, 'utf8')
   const verification = source.indexOf('verifyApiProductionSourceSeal({')
@@ -382,6 +603,24 @@ test('production scenario files enter the committed repository and reject path e
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('the retained controlled repository reopens without writing or replacing its baseline', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'wwc-reopen-repository-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const options = { fixtureDirectory: directory, files: { 'TASK.md': 'frozen task\n' } }
+  const first = prepareControlledRepository(options)
+  const git = (...args) => execFileSync('git', ['-C', first.repository, ...args], { encoding: 'utf8' }).trim()
+  const objects = git('count-objects', '-v')
+  assert.deepEqual(prepareControlledRepository(options), first)
+  assert.equal(git('count-objects', '-v'), objects)
+  assert.throws(() => prepareControlledRepository({ ...options, files: { 'TASK.md': 'changed\n' } }),
+    /retained.*(input|baseline)/u)
+  assert.equal(readFileSync(resolve(first.repository, 'TASK.md'), 'utf8'), 'frozen task\n')
+  writeFileSync(resolve(first.repository, 'TASK.md'), 'retained dirty evidence\n')
+  assert.throws(() => prepareControlledRepository(options), /retained.*dirty/u)
+  assert.equal(readFileSync(resolve(first.repository, 'TASK.md'), 'utf8'), 'retained dirty evidence\n')
+  assert.equal(git('rev-parse', 'HEAD'), first.revision)
 })
 
 
@@ -510,5 +749,114 @@ test('Device runner confirms only the current verified candidate without publica
       await assert.rejects(run, error => error.code === 'DEVICE_TASK_ATTENTION')
       assert.equal(commands.length, 0)
     }
+  }
+})
+
+test('product source identity includes embedded Core while excluding build outputs', t => {
+  const fixture = mkdtempSync(resolve(tmpdir(), 'wwc-core-source-'))
+  t.after(() => rmSync(fixture, { recursive: true, force: true }))
+  const source = resolve(fixture, 'third_party/codex/codex-rs/core/src')
+  const target = resolve(fixture, 'third_party/codex/codex-rs/target')
+  mkdirSync(source, { recursive: true })
+  mkdirSync(target, { recursive: true })
+  writeFileSync(resolve(source, 'lib.rs'), 'pub const VERSION: u32 = 1;\n')
+  const original = projectSourceDigest(fixture)
+  writeFileSync(resolve(target, 'generated'), 'build output')
+  assert.equal(projectSourceDigest(fixture), original)
+  writeFileSync(resolve(source, 'lib.rs'), 'pub const VERSION: u32 = 2;\n')
+  assert.notEqual(projectSourceDigest(fixture), original)
+})
+
+
+test('source seal rejects changes in every locally patched Cargo dependency', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-vendor-source-seal-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = resolve(directory, 'source')
+  const binaryRoot = resolve(directory, 'bin')
+  mkdirSync(resolve(sourceRoot, 'scripts'), { recursive: true })
+  mkdirSync(resolve(sourceRoot, 'crates/helper/src'), { recursive: true })
+  mkdirSync(binaryRoot)
+  writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+  writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n[patch.crates-io]\nrusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }\ni18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }\n')
+  writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+    writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
+  }
+  const dependencies = ['rusqlite-0.39.0', 'i18n-embed-fl-0.9.4']
+  for (const dependency of dependencies) {
+    mkdirSync(resolve(sourceRoot, 'upstream/vendor', dependency, 'src'), { recursive: true })
+    writeFileSync(resolve(sourceRoot, 'upstream/vendor', dependency, 'src/lib.rs'), 'pub const VERSION: u32 = 1;\n')
+  }
+  const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  git('config', 'core.filemode', 'true')
+  git('add', '.')
+  git('-c', 'user.name=Source Seal Test', '-c', 'user.email=source-seal@example.invalid',
+    '-c', 'commit.gpgSign=false', 'commit', '--quiet', '-m', 'fixture')
+  const head = git('rev-parse', 'HEAD')
+  for (const name of ['winwincode-server', 'winwincode-kernel-helper', 'winwincode-worker', 'wwc']) {
+    const path = resolve(binaryRoot, name)
+    writeFileSync(path, '#!/bin/sh\nexit 0\n')
+    chmodSync(path, 0o755)
+  }
+  const serverBinary = resolve(binaryRoot, 'winwincode-server')
+  const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
+  const options = { root: sourceRoot, serverBinary, helperExecutable }
+  const sealed = writeApiProductionSourceSeal({ ...options,
+    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  const originalDigest = projectSourceDigest(sourceRoot)
+  verifyApiProductionSourceSeal(options)
+  for (const dependency of dependencies) {
+    const path = resolve(sourceRoot, 'upstream/vendor', dependency, 'src/lib.rs')
+    writeFileSync(path, 'pub const VERSION: u32 = 2;\n')
+    assert.equal(git('rev-parse', 'HEAD'), head)
+    assert.notEqual(projectSourceDigest(sourceRoot), originalDigest,
+      `${dependency}: patched dependency is a Rust build input`)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+    writeFileSync(path, 'pub const VERSION: u32 = 1;\n')
+    verifyApiProductionSourceSeal(options)
+    // Equal bytes with a changed tracked file mode still invalidate the sealed input.
+    chmodSync(path, 0o755)
+    assert.equal(projectSourceDigest(sourceRoot), originalDigest)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /tracked diff is stale/u)
+    chmodSync(path, 0o644)
+    assert.equal(verifyApiProductionSourceSeal(options).seal.gitHead, sealed.seal.gitHead)
+  }
+})
+
+test('Device prerequisite truthfulness rejects accepted chats and unrelated error codes', async () => {
+  const api = result => ({ async command(command) {
+    if (command === 'session.create') return { outcome: 'completed', currentRevision: 1 }
+    if (result === 'accepted') return { outcome: 'completed' }
+    throw Object.assign(new Error('public probe error'), { code: result, status: 409 })
+  } })
+  for (const code of ['DEVICE_SESSION_REQUIRED', 'DEVICE_MODEL_UNAVAILABLE']) {
+    const probe = await probeDeviceErrorTruthfulness(api(code))
+    assert.equal(probe.truthfulDeviceCodes, true)
+    assert.equal(probe.notWrongStateDisguise, true)
+    assert.equal(probe.chatSubmit.accepted, false)
+    assert.equal(probe.chatSubmit.code, code)
+  }
+  for (const code of ['WRONG_STATE', 'INTERNAL', 'accepted']) {
+    await assert.rejects(probeDeviceErrorTruthfulness(api(code)),
+      /Device prerequisite probe must reject with a dedicated Device error/u)
+  }
+  await assert.rejects(probeDeviceErrorTruthfulness({ async command() {
+    throw Object.assign(new Error('public probe error'), { code: 'WRONG_STATE' })
+  } }), /Device prerequisite probe must reject with a dedicated Device error/u)
+})
+
+test('Device cleanup records the final Provider request count and preserves its failure', async () => {
+  for (const fails of [false, true]) {
+    const requests = []
+    const report = { devicePath: { modelServerRequestCount: 0 } }
+    const failure = new Error('Device cleanup failed')
+    const devicePath = { modelServer: { requests }, async stop() {
+      requests.push({ request: 'first' }, { request: 'during shutdown' })
+      if (fails) throw failure
+    } }
+    if (fails) await assert.rejects(stopDevicePath(report, devicePath), error => error === failure)
+    else await stopDevicePath(report, devicePath)
+    assert.equal(report.devicePath.modelServerRequestCount, 2)
   }
 })

@@ -52,7 +52,7 @@ revoked
 | 当前状态 | 目标状态 | 触发事件 | 触发者 / 权威所有者 | ACK / fencing 要求 |
 | --- | --- | --- | --- | --- |
 | —（初始） | `pending_enrollment` | Device Client 首次注册，提交 `client.enroll` | Device Client 发起；Control Plane 创建登记记录 | 无 |
-| `pending_enrollment` | `online` | 登记被接受（`client.enrollment_accepted`）且首次 hello / 心跳成功 | Control Plane 判定；Device Client 上报 | 无 |
+| `pending_enrollment` | `online` | 注册响应中的设备 ID 和凭据已保存，且首次 hello / 心跳成功 | Control Plane 判定；Device Client 上报 | 无 |
 | `pending_enrollment` | `revoked` | 登记被拒绝、过期或设备凭据被吊销 | Control Plane | 无 |
 | `online` | `offline` | 心跳 / 交换在超时窗口内未到达 | Control Plane 持久投影（时间判定） | 无 |
 | `online` | `degraded` | Device Client 重启后报告本地 Worker / 占用镜像未完成对账 | Device Client 上报，Control Plane 投影 | 无 |
@@ -87,7 +87,7 @@ revoked
 | 当前状态 | 目标状态 | 触发事件 | 触发者 / 权威所有者 | ACK / fencing 要求 |
 | --- | --- | --- | --- | --- |
 | —（初始） | `active` | Device Client 生成一次性 code 并发布摘要（`client.connect_code.published`） | Device Client 生成；Control Plane 只保存 HMAC / 摘要 | 无 |
-| `active` | `consumed` | 校验通过、Device Client 确认该 code generation 仍有效并 ACK challenge 后，Control Plane 原子创建 ClientAccessGrant | Control Plane 判定 | 必须：Device Client challenge ACK（`client.access.challenge_ack`） |
+| `active` | `consumed` | Server 校验已存连接码的摘要、generation、有效期与策略后，原子消费并创建 ClientAccessGrant | Control Plane 判定 | 无需 Device ACK |
 | `active` | `expired` | `expiresAt` 到期（默认 2 分钟） | Control Plane（时间判定） | 无 |
 | `active` | `revoked` | Client 刷新连接码或主动作废该 code | Device Client 本地操作并发布更新 | 无 |
 
@@ -97,7 +97,7 @@ revoked
 - code 一次性：`consumed` 后重放一律拒绝。
 - 错误尝试由用户级、IP 级和 Client 级限流处理；限流是策略执行，不改变 code 状态，
   不进入本状态机。
-- 最终授权前必须收到在线 Client 对 challenge 的 ACK；Client 离线时校验直接失败。
+- 访问授权完全由 Server 决定，不等待 Device 回复；Client 离线不影响连接码校验和授权创建。
 
 ## 3. ClientAccessGrant
 
@@ -111,7 +111,7 @@ expired
 
 | 当前状态 | 目标状态 | 触发事件 | 触发者 / 权威所有者 | ACK / fencing 要求 |
 | --- | --- | --- | --- | --- |
-| —（初始） | `active` | connect code 流程完成、管理员创建或本地确认（`grantSource` 三选一） | Control Plane 原子创建 | `grantSource=connect_code` 时必须先有 Device Client challenge ACK |
+| —（初始） | `active` | connect code 流程完成、管理员创建或本地确认（`grantSource` 三选一） | Control Plane 原子创建 | `grantSource=connect_code` 时由 Server 原子消费已校验的连接码 |
 | `active` | `revoked` | Owner 或持有 manage / share 权限的用户撤销访问 | Control Plane | 无；撤销立即生效，不等待 Device Client |
 | `active` | `expired` | `expiresAt` 到期（temporary grant） | Control Plane（时间判定） | 无 |
 

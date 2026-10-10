@@ -224,7 +224,11 @@ impl ToolSearchHandler {
     }
 }
 
-impl CoreToolRuntime for ToolSearchHandler {}
+impl CoreToolRuntime for ToolSearchHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+}
 
 impl ToolSearchHandler {
     fn search(

@@ -18,7 +18,7 @@
 //! - [`connect_code`]: the dynamic connect code lifecycle (CLIENT-200.2,
 //!   plan 11.1/11.3) — strong 8-digit code generation, 120-second
 //!   publications, refresh-superseded generations, the local connection
-//!   policy (lock / new connections), challenge verdicts, and the durable
+//!   policy (lock / new connections), and the durable
 //!   `client.connect_code.published` frame.
 //! - [`repository`]: the local repository registry (plan 8.1, 13.1–13.3,
 //!   13.5) — the registration check chain (canonicalize with symlink
@@ -64,7 +64,7 @@
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
 //!   enrollment adoption, hello announcement, heartbeat reporting,
-//!   acknowledgement advancement, gap replay, access-challenge answering,
+//!   acknowledgement advancement, gap replay,
 //!   client-lock application, occupancy mirroring (offer → durable mirror →
 //!   ack, release intents, force-fence overwrites), and exponential-backoff
 //!   recovery on a plain `std` thread — no async runtime.
@@ -163,8 +163,8 @@ pub use candidate_retention::{
     enqueue_candidate_discarded,
 };
 pub use connect_code::{
-    CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ChallengeVerdict, ConnectCodeError,
-    ConnectCodePlaintext, PublishedConnectCode,
+    CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ConnectCodeError, ConnectCodePlaintext,
+    PublishedConnectCode,
 };
 pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,

@@ -52,6 +52,9 @@ Web 不直接连接 Worker；页面只显示投影，也不保存业务事实。
 只能导入 `apps/client/src/community-control-plane-client.ts`；产品无关能力来自 `@winwincode/control-plane-client`；页面不手写 wire
 DTO、路径、事件 frame 或 Worker 地址。
 
+生成网络实现使用 `@winwincode/network-request` 统一执行网络重试和安全错误分类。
+该共享模块不声明业务 DTO、Control Plane 路径或订阅状态；这些合同仍由生成网络实现持有。
+
 ## HTTP 合同
 
 首次加载通过唯一 facade 的 `GET /api/v1/auth/session` 恢复 secret-free Actor、Scope 和

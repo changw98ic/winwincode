@@ -50,7 +50,7 @@ test('architecture guide names the canonical owners, objects and roles', () => {
 })
 
 test('architecture guide keeps diagrams, approval boundaries and evidence sources explicit', () => {
-  assert.equal((documentText.match(/```mermaid/gu) ?? []).length, 2)
+  assert.equal((documentText.match(/```mermaid/gu) ?? []).length, 3)
   for (const state of ['before-execution', 'executing', 'execution-finished']) {
     assert.equal(documentText.includes(`\`${state}\``), true, state)
   }

@@ -57,8 +57,10 @@ use winwincode_client_port::messages::{
 /// version-1 through version-5 database ever shipped, so older databases fail
 /// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
 /// stop-intent/receipt table, including the stop reason in its command
-/// identity.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 7;
+/// identity. Version 8 adds durable Server command results and credential
+/// rotation proposals for exchange recovery. Version 9 removes the unused
+/// rotation proposals while retaining the device identity and command results.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -246,8 +248,7 @@ pub struct ClientInboxCursorUpdate {
 /// (CLIENT-200.2, plan 11.3).
 ///
 /// LOCAL ONLY: the plaintext code never persists — this record carries the
-/// `sha256:` digest plus the metadata needed to answer
-/// `client.access.challenge` with the code-generation verdict.
+/// `sha256:` digest and generation used to publish code state to Server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeStateRecord {
     pub connect_code_id: String,
@@ -268,9 +269,8 @@ pub struct ConnectCodeStateRecord {
 
 /// Durable local connection policy (CLIENT-200.2, plan 11.1/12.1).
 ///
-/// Mirrored into every `client.hello` / `client.heartbeat` report and
-/// enforced against `client.access.challenge`: while the node is locked or
-/// new connections are disabled, every challenge is rejected.
+/// Mirrored into every `client.hello` / `client.heartbeat` report. Server
+/// uses the published policy when authorizing new access.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionPolicyRecord {
     pub accepting_connections: bool,
@@ -458,6 +458,53 @@ pub struct DeviceStore {
 }
 
 impl DeviceStore {
+    /// Persists the business result independently of the transport acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or a result that cannot be encoded.
+    pub fn record_command_result(
+        &mut self,
+        result: &winwincode_client_port::messages::ClientCommandAckPayload,
+    ) -> Result<(), DeviceStoreError> {
+        let payload = serde_json::to_vec(result)
+            .map_err(|_| DeviceStoreError::invalid("invalid command receipt"))?;
+        self.connection()?
+            .execute(
+                "INSERT INTO server_command_results (command_message_id, payload) VALUES (?1, ?2)
+             ON CONFLICT(command_message_id) DO UPDATE SET payload = excluded.payload",
+                params![result.command_message_id, payload],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Returns a retained Server result, including rejected commands after restart.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt result.
+    pub fn command_result(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<winwincode_client_port::messages::ClientCommandAckPayload>, DeviceStoreError>
+    {
+        let payload: Option<Vec<u8>> = self
+            .connection()?
+            .query_row(
+                "SELECT payload FROM server_command_results WHERE command_message_id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        payload
+            .map(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| DeviceStoreError::adapter("invalid stored command receipt"))
+            })
+            .transpose()
+    }
     /// Opens the local database and applies all schema migrations before return.
     ///
     /// # Errors
@@ -1033,8 +1080,7 @@ impl DeviceStore {
     /// Loads the durable state of the currently published connect code.
     ///
     /// The plaintext code is never stored; only this digest-bearing record
-    /// survives a restart so challenges stay answerable across process
-    /// launches.
+    /// survives a restart so publications retain their original identity.
     ///
     /// # Errors
     ///
@@ -1121,29 +1167,6 @@ impl DeviceStore {
             )
             .map_err(sql_error)?;
         transaction.commit().map_err(sql_error)
-    }
-
-    /// Marks the stored connect code `revoked` (the local disable). A no-op
-    /// returning `false` when no active code exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the write fails or the store is
-    /// closed.
-    pub fn revoke_connect_code_state(
-        &mut self,
-        revoked_at: &str,
-    ) -> Result<bool, DeviceStoreError> {
-        require_non_empty(revoked_at, "revoked at", MAX_ID_BYTES)?;
-        let changed = self
-            .connection_mut()?
-            .execute(
-                "UPDATE connect_code_state SET state = 'revoked', updated_at = ?1 \
-                 WHERE singleton = 1 AND state = 'active'",
-                params![revoked_at],
-            )
-            .map_err(sql_error)?;
-        Ok(changed > 0)
     }
 
     /// Loads the durable local connection policy.
@@ -2029,14 +2052,18 @@ impl FrameOutbox for DeviceStore {
     type Error = DeviceStoreError;
 
     fn load(&mut self) -> Result<Option<OutboxSnapshot>, Self::Error> {
-        let stream = self.outbox_stream()?;
-        let connection = self.connection()?;
+        let stream = self.outbox_stream()?.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sql_error)?;
         let (ack_sequence, highest_sequence) =
-            outbox_stream_cursor(connection, &stream.client_node_id)?;
+            outbox_stream_cursor(&transaction, &stream.client_node_id)?;
         let Some(highest_sequence) = highest_sequence else {
+            transaction.commit().map_err(sql_error)?;
             return Ok(None);
         };
-        let mut statement = connection
+        let mut statement = transaction
             .prepare(
                 "SELECT message_id, envelope_sequence, kind, payload, occurred_at \
                  FROM client_outbox \
@@ -2068,6 +2095,8 @@ impl FrameOutbox for DeviceStore {
                 &occurred_at,
             )?);
         }
+        drop(statement);
+        transaction.commit().map_err(sql_error)?;
         Ok(Some(OutboxSnapshot {
             ack_sequence: ack_sequence.unwrap_or(0),
             highest_sequence,
@@ -3115,8 +3144,7 @@ CREATE TABLE client_inbox_cursor (
 );
 -- CLIENT-200.2 (plan 11.3): local state of the currently published dynamic
 -- connect code. The plaintext code never persists; only its sha256 digest
--- plus the metadata needed to answer client.access.challenge survive a
--- restart. A refresh replaces the single row at generation + 1.
+-- and publication metadata survive a restart. A refresh replaces the single row at generation + 1.
 CREATE TABLE connect_code_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     connect_code_id TEXT NOT NULL,
@@ -3129,8 +3157,7 @@ CREATE TABLE connect_code_state (
     updated_at TEXT NOT NULL
 );
 -- CLIENT-200.2 (plan 11.1/12.1): durable local connection policy, mirrored
--- into client.hello / client.heartbeat and enforced against
--- client.access.challenge.
+-- into client.hello / client.heartbeat for Server-owned access policy.
 CREATE TABLE client_connection_policy (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     accepting_connections INTEGER NOT NULL CHECK (accepting_connections IN (0, 1)),
@@ -3148,7 +3175,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
     let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 6 | CLIENT_STORE_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 6 | 7 | 8 | CLIENT_STORE_SCHEMA_VERSION) {
         return Err(DeviceStoreError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -3180,6 +3207,14 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
             )
             .map_err(sql_error)?;
     }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS server_command_results (
+            command_message_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL
+        );
+        DROP TABLE IF EXISTS device_credential_rotations;",
+        )
+        .map_err(sql_error)?;
     validate_store_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
@@ -3202,6 +3237,11 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
 /// serves traffic. The pragma queries are static per table so the adapter
 /// keeps the no-dynamic-SQL-identifier rule of `winwincode-storage`.
 const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
+    (
+        "server_command_results",
+        "PRAGMA table_info(server_command_results)",
+        &["command_message_id", "payload"],
+    ),
     (
         "device_identity",
         "PRAGMA table_info(device_identity)",
@@ -3605,5 +3645,240 @@ mod migration_concurrency_tests {
             .expect("second initializer must reread committed version");
         drop(first);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod outbox_read_cut_tests {
+    use super::{DeviceStore, DeviceStoreError};
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::time::Duration;
+    use winwincode_client_port::exchange::{
+        CompactingOutbox, FrameCodec, FrameOutbox, OutboxSession, OutboxSnapshot, StoredFrame,
+    };
+    use winwincode_client_port::messages::{
+        CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
+        ClientToServerMessage, CommandContext,
+    };
+
+    type CommitResult = Result<(), String>;
+
+    struct TraceGate {
+        start: Sender<()>,
+        committed: Receiver<CommitResult>,
+    }
+
+    thread_local! {
+        static LOAD_GATE: RefCell<Option<TraceGate>> = const { RefCell::new(None) };
+        static TRACE_RESULT: RefCell<Option<CommitResult>> = const { RefCell::new(None) };
+    }
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        Append,
+        Compact,
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        reader: DeviceStore,
+        writer: DeviceStore,
+    }
+
+    struct RaceCapture {
+        first: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        later: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        trace: Option<CommitResult>,
+        writer: CommitResult,
+    }
+
+    fn frame(sequence: u64) -> StoredFrame {
+        let envelope = ClientToServerEnvelope {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            message_id: format!("read-cut-{sequence}"),
+            client_node_id: "read-cut-node".to_owned(),
+            client_instance_id: "read-cut-instance".to_owned(),
+            sequence,
+            occurred_at: "2026-10-09T00:00:00.000Z".to_owned(),
+            message: ClientToServerMessage::RepositoryRemoved(ClientRepositoryRemovedPayload {
+                command: CommandContext {
+                    expected_revision: 0,
+                    idempotency_key: format!("read-cut-idempotency-{sequence}"),
+                },
+                repository_binding_id: "read-cut-binding".to_owned(),
+            }),
+        };
+        FrameCodec::default()
+            .encode_envelope(&envelope)
+            .expect("encode canonical fixture frame")
+    }
+
+    fn bind(store: &mut DeviceStore) {
+        store
+            .bind_outbox_stream("read-cut-node", "read-cut-instance")
+            .expect("bind canonical fixture stream");
+    }
+
+    fn fixture(mutation: Mutation) -> Fixture {
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "wwc-outbox-read-cut-{}-{suffix}",
+            std::process::id()
+        ));
+        let mut reader = DeviceStore::open(&root).expect("open fixture reader");
+        bind(&mut reader);
+        let session = OutboxSession::new();
+        for sequence in 1..=14 {
+            session
+                .enqueue(&mut reader, sequence, &frame(sequence))
+                .expect("retain canonical seed frame");
+        }
+        if matches!(mutation, Mutation::Append) {
+            session
+                .acknowledge(&mut reader, 14)
+                .expect("acknowledge seed frames");
+        }
+        let mut writer = DeviceStore::open(&root).expect("pre-open writer before reader cut");
+        bind(&mut writer);
+        Fixture {
+            root,
+            reader,
+            writer,
+        }
+    }
+
+    fn trace_pending_frames(event: &TraceEvent<'_>) {
+        let TraceEvent::Stmt(_, sql) = event else {
+            return;
+        };
+        if !sql.starts_with("SELECT message_id, envelope_sequence, kind, payload, occurred_at")
+            || !sql.contains("published = 0")
+        {
+            return;
+        }
+        let Some(gate) = LOAD_GATE.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let committed = gate
+            .start
+            .send(())
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                gate.committed
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?
+            });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = Some(committed));
+    }
+
+    fn mutate(writer: &mut DeviceStore, mutation: Mutation) -> CommitResult {
+        match mutation {
+            Mutation::Append => OutboxSession::new()
+                .enqueue(writer, 15, &frame(15))
+                .map(|_| ())
+                .map_err(|error| format!("atomic append failed: {error:?}")),
+            Mutation::Compact => writer
+                .compact_through(14)
+                .map(|_| ())
+                .map_err(|error| format!("atomic compaction failed: {error:?}")),
+        }
+    }
+
+    fn capture_race(mutation: Mutation) -> RaceCapture {
+        let Fixture {
+            root,
+            mut reader,
+            mut writer,
+        } = fixture(mutation);
+        let (start_tx, start_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let join_handle = std::thread::spawn(move || {
+            let committed = start_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())
+                .and_then(|()| mutate(&mut writer, mutation));
+            let _ = committed_tx.send(committed.clone());
+            (writer, committed)
+        });
+        LOAD_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(TraceGate {
+                start: start_tx,
+                committed: committed_rx,
+            });
+        });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = None);
+        reader.connection().expect("reader connection").trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event| trace_pending_frames(&event)),
+        );
+        let first = FrameOutbox::load(&mut reader);
+        reader
+            .connection()
+            .expect("reader connection after load")
+            .trace_v2(TraceEventCodes::empty(), None);
+        LOAD_GATE.with(|slot| drop(slot.borrow_mut().take()));
+        let trace = TRACE_RESULT.with(|slot| slot.borrow_mut().take());
+        let (writer_store, writer_result) = join_handle.join().expect("join fixture writer");
+        let later = FrameOutbox::load(&mut reader);
+        writer_store.close().expect("close writer after reader cut");
+        reader.close().expect("close reader fixture");
+        fs::remove_dir_all(root).expect("remove closed fixture");
+        RaceCapture {
+            first,
+            later,
+            trace,
+            writer: writer_result,
+        }
+    }
+
+    fn snapshots(capture: RaceCapture) -> (OutboxSnapshot, OutboxSnapshot) {
+        assert_eq!(
+            capture.trace,
+            Some(Ok(())),
+            "pending SELECT must wait until the other connection has committed"
+        );
+        capture.writer.expect("writer mutation must commit");
+        let first = capture.first.expect("load pinned cut").expect("seed rows");
+        let later = capture
+            .later
+            .expect("load fresh cut")
+            .expect("durable rows");
+        later.validate().expect("fresh load must remain valid");
+        (first, later)
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_append() {
+        let (first, later) = snapshots(capture_race(Mutation::Append));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during append");
+        assert_eq!(first.ack_sequence, 14);
+        assert_eq!(first.highest_sequence, 14);
+        assert!(first.frames.is_empty());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 15);
+        assert_eq!(later.frames, vec![frame(15)]);
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_compaction() {
+        let (first, later) = snapshots(capture_race(Mutation::Compact));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during compaction");
+        assert_eq!(first.ack_sequence, 0);
+        assert_eq!(first.highest_sequence, 14);
+        assert_eq!(first.frames, (1..=14).map(frame).collect::<Vec<_>>());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 14);
+        assert!(later.frames.is_empty());
     }
 }

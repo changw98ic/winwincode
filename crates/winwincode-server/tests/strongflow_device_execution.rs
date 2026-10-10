@@ -202,6 +202,14 @@ fn compose_application_with_runtime(
     root: &Path,
     runtime: Option<i64>,
 ) -> StandaloneControlPlaneApplication {
+    compose_application_with_clock(root, runtime, Arc::new(FixedClock))
+}
+
+fn compose_application_with_clock(
+    root: &Path,
+    runtime: Option<i64>,
+    clock: Arc<dyn StandaloneApplicationClock>,
+) -> StandaloneControlPlaneApplication {
     let hub = Arc::new(
         DurableEventHub::open(root.join("events"), DurableEventHubConfig::default())
             .expect("open event hub"),
@@ -234,7 +242,7 @@ fn compose_application_with_runtime(
         storage,
         worker_outbound,
         hub,
-        Arc::new(FixedClock),
+        clock,
         execution,
     )
     .expect("compose application")
@@ -430,6 +438,83 @@ fn settle_launch(root: &Path, anchor: &AnchorLaunch, lease_id: &str, token: u64)
         outcome,
         winwincode_storage::LaunchAckOutcome::Consumed(_)
     ));
+}
+
+#[test]
+fn existing_worker_authentication_survives_device_recovery_but_not_release() {
+    use winwincode_control_plane::{RemoteWorkerAuthenticator, RemoteWorkerCredential};
+    use winwincode_server::{WorkerSessionCredentialService, WorkerSessionRemoteAuthenticator};
+    use winwincode_storage::WorkerRegistryScope;
+    for consumed in [false, true] {
+        let root = temporary_root("recovery-authentication");
+        let user = canonical_id("usr", 71);
+        let (node, instance, lease_id, token, binding) = work_run_device_fixture(&root, 710, &user);
+        let anchor = work_run_anchor(
+            &root,
+            720,
+            &node,
+            &instance,
+            &user,
+            &lease_id,
+            token,
+            &binding,
+            &canonical_id("psn", 730),
+            &canonical_id("wrn", 731),
+        );
+        if consumed {
+            settle_launch(&root, &anchor, &lease_id, token);
+        }
+        let now = instant("2026-09-04T12:03:00.000Z");
+        let material = winwincode_server::issue_credential_material().unwrap();
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        WorkerSessionCredentialService::new(&mut storage)
+            .issue_for_launch(
+                &anchor.worker_session_id,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                &anchor.worker_launch_grant_id,
+                material.credential_digest(),
+                &now,
+            )
+            .unwrap();
+        let auth =
+            WorkerSessionRemoteAuthenticator::new(&root, WorkerRegistryScope::local_default());
+        let proof = RemoteWorkerCredential::new(material.material().as_bytes().to_vec()).unwrap();
+        let principal = auth.authenticate(&proof, &now).unwrap();
+        storage
+            .client_node_registry()
+            .unwrap()
+            .update_presence(&node, ClientPresenceState::Offline, 2)
+            .unwrap();
+        storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .mark_recovery_pending(&lease_id, &instant("2026-09-04T12:05:00.000Z"), &now)
+            .unwrap();
+        if consumed {
+            auth.authenticate(&proof, &now)
+                .expect("temporary Device loss must preserve the exact launched Worker");
+            auth.ensure_active(&principal, &now)
+                .expect("existing Worker can report and renew during recovery");
+        } else {
+            assert!(
+                auth.authenticate(&proof, &now).is_err(),
+                "recovery cannot authorize an unconsumed launch"
+            );
+            assert!(auth.ensure_active(&principal, &now).is_err());
+        }
+        storage
+            .client_occupancy_ledger()
+            .unwrap()
+            .force_release(&lease_id, &instant("2026-09-04T12:06:00.000Z"))
+            .unwrap();
+        assert!(
+            auth.authenticate(&proof, &instant("2026-09-04T12:06:01.000Z"))
+                .is_err()
+        );
+        drop(storage);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 // ---- generated command helpers ---------------------------------------------
@@ -968,3 +1053,6 @@ fn the_work_run_dispatch_replays_exactly_without_new_facts() {
     application.shutdown().expect("shutdown");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[path = "support/recovery_credential_renewal.rs"]
+mod recovery_credential_renewal;

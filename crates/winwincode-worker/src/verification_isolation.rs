@@ -611,6 +611,9 @@ async fn run_isolated_command(
     timeout: Duration,
     output_limit_bytes: usize,
 ) -> Result<IsolatedOutput, IsolationError> {
+    // EOF can precede exit. Both waits share one deadline, including time
+    // already spent spawning and draining the process's output.
+    let deadline = tokio::time::Instant::now() + timeout;
     command.kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
         IsolationError::new(format!(
@@ -666,8 +669,8 @@ async fn run_isolated_command(
         }
         Ok::<(), IsolationError>(())
     };
-    let read_result = tokio::time::timeout(timeout, Box::pin(read)).await;
-    let timed_out = read_result.is_err();
+    let read_result = tokio::time::timeout_at(deadline, Box::pin(read)).await;
+    let mut timed_out = read_result.is_err();
     let read_error = if timed_out {
         None
     } else {
@@ -678,14 +681,17 @@ async fn run_isolated_command(
     };
     let status = if timed_out || overflowed || read_error.is_some() {
         terminate_process_group(&mut child, process_group).await?
-    } else {
-        let status = child.wait().await.map_err(|error| {
+    } else if let Ok(status) = tokio::time::timeout_at(deadline, child.wait()).await {
+        let status = status.map_err(|error| {
             IsolationError::new(format!("isolated command cannot be reaped: {error}"))
         })?;
         if let Some(process_group) = process_group {
             kill_process_group_by_id(process_group)?;
         }
         status
+    } else {
+        timed_out = true;
+        terminate_process_group(&mut child, process_group).await?
     };
     if let Some(error) = read_error {
         return Err(error);
@@ -807,4 +813,46 @@ fn resolve_below(root: &Path, relative: &Path, context: &str) -> Result<PathBuf,
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn early_eof_does_not_remove_the_process_exit_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let descendant = root.path().join("descendant.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "exec 1>&- 2>&-; sleep 10 & printf '%s' \"$!\" > \"$1\"; sleep 1",
+                "fixture",
+            ])
+            .arg(&descendant)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let began = std::time::Instant::now();
+        let result = run_isolated_command(command, Duration::from_millis(100), 1024)
+            .await
+            .unwrap();
+        assert!(result.timed_out, "EOF is not proof of process termination");
+        assert!(began.elapsed() < Duration::from_millis(800));
+        let pid = fs::read_to_string(descendant).unwrap();
+        for _ in 0..20 {
+            let status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&status.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("descendant must be terminated with the verification process group");
+    }
 }

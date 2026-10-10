@@ -1,0 +1,676 @@
+diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
+index 2fedbe7d..a7812bbe 100644
+--- a/codex-rs/core/src/tools/handlers/apply_patch.rs
++++ b/codex-rs/core/src/tools/handlers/apply_patch.rs
+@@ -453,6 +453,10 @@ impl ApplyPatchHandler {
+ }
+ 
+ impl CoreToolRuntime for ApplyPatchHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Custom { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/current_time.rs b/codex-rs/core/src/tools/handlers/current_time.rs
+index 983e33e2..169f9245 100644
+--- a/codex-rs/core/src/tools/handlers/current_time.rs
++++ b/codex-rs/core/src/tools/handlers/current_time.rs
+@@ -104,4 +104,8 @@ impl ToolExecutor<ToolInvocation> for CurrentTimeHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for CurrentTimeHandler {}
++impl CoreToolRuntime for CurrentTimeHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/close_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents/close_agent.rs
+index 2ce3dd0c..5a92e1a4 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/close_agent.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/close_agent.rs
+@@ -130,6 +130,10 @@ async fn handle_close_agent(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
+index 8e97b2af..01c9c507 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
+@@ -152,6 +152,10 @@ async fn handle_resume_agent(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs b/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
+index 87e4aba5..21e9e513 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
+@@ -125,6 +125,10 @@ impl Handler {
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+index 73443cdf..db437a43 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+@@ -221,6 +221,10 @@ async fn handle_spawn_agent(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
+index 1ccad426..e5f48530 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
+@@ -265,6 +265,10 @@ fn wait_receiver_agents(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
+index bd4dafe7..3489925d 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
+@@ -40,6 +40,10 @@ impl Handler {
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs
+index a418dec4..db9f7969 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs
+@@ -96,6 +96,10 @@ async fn handle_interrupt_agent(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
+index 99e54e1c..a496e00b 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
+@@ -48,6 +48,10 @@ impl Handler {
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
+index 717e3bc9..99012c78 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
+@@ -40,6 +40,10 @@ impl Handler {
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+index 898064d2..593d9cfb 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+@@ -203,6 +203,10 @@ async fn handle_spawn_agent(
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
+index 6a23e801..54087c41 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
+@@ -115,6 +115,10 @@ impl Handler {
+ }
+ 
+ impl CoreToolRuntime for Handler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/new_context_window.rs b/codex-rs/core/src/tools/handlers/new_context_window.rs
+index e1cd6563..be8cb998 100644
+--- a/codex-rs/core/src/tools/handlers/new_context_window.rs
++++ b/codex-rs/core/src/tools/handlers/new_context_window.rs
+@@ -42,4 +42,8 @@ impl ToolExecutor<ToolInvocation> for NewContextWindowHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for NewContextWindowHandler {}
++impl CoreToolRuntime for NewContextWindowHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/plan.rs b/codex-rs/core/src/tools/handlers/plan.rs
+index d9623147..509187f0 100644
+--- a/codex-rs/core/src/tools/handlers/plan.rs
++++ b/codex-rs/core/src/tools/handlers/plan.rs
+@@ -97,6 +97,10 @@ impl PlanHandler {
+ }
+ 
+ impl CoreToolRuntime for PlanHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn is_builtin_control_tool(&self) -> bool {
+         true
+     }
+diff --git a/codex-rs/core/src/tools/handlers/request_permissions.rs b/codex-rs/core/src/tools/handlers/request_permissions.rs
+index 4d66985c..14600db6 100644
+--- a/codex-rs/core/src/tools/handlers/request_permissions.rs
++++ b/codex-rs/core/src/tools/handlers/request_permissions.rs
+@@ -119,4 +119,8 @@ impl RequestPermissionsHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for RequestPermissionsHandler {}
++impl CoreToolRuntime for RequestPermissionsHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input.rs b/codex-rs/core/src/tools/handlers/request_user_input.rs
+index f586f7af..21f3a690 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input.rs
+@@ -99,6 +99,10 @@ impl RequestUserInputHandler {
+ }
+ 
+ impl CoreToolRuntime for RequestUserInputHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
+     fn is_builtin_control_tool(&self) -> bool {
+         true
+     }
+diff --git a/codex-rs/core/src/tools/handlers/send_user_message_async.rs b/codex-rs/core/src/tools/handlers/send_user_message_async.rs
+index b6636b0b..dbfb4f8e 100644
+--- a/codex-rs/core/src/tools/handlers/send_user_message_async.rs
++++ b/codex-rs/core/src/tools/handlers/send_user_message_async.rs
+@@ -98,4 +98,8 @@ impl ToolExecutor<ToolInvocation> for SendUserMessageAsyncHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for SendUserMessageAsyncHandler {}
++impl CoreToolRuntime for SendUserMessageAsyncHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/shell/shell_command.rs b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
+index 2dbbc926..be5fca0e 100644
+--- a/codex-rs/core/src/tools/handlers/shell/shell_command.rs
++++ b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
+@@ -252,6 +252,10 @@ impl ShellCommandHandler {
+ }
+ 
+ impl CoreToolRuntime for ShellCommandHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/sleep.rs b/codex-rs/core/src/tools/handlers/sleep.rs
+index c3068e6e..5b8f3554 100644
+--- a/codex-rs/core/src/tools/handlers/sleep.rs
++++ b/codex-rs/core/src/tools/handlers/sleep.rs
+@@ -13,7 +13,6 @@ use codex_tools::JsonSchema;
+ use codex_tools::ResponsesApiNamespace;
+ use codex_tools::ResponsesApiNamespaceTool;
+ use codex_tools::ResponsesApiTool;
+-use codex_tools::ToolExposure;
+ use codex_tools::ToolName;
+ use codex_tools::ToolSpec;
+ use serde::Deserialize;
+@@ -69,10 +68,6 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
+         create_sleep_tool()
+     }
+ 
+-    fn exposure(&self) -> ToolExposure {
+-        ToolExposure::DirectModelOnly
+-    }
+-
+     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+         Box::pin(async move {
+             let ToolInvocation {
+@@ -153,4 +148,8 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for SleepHandler {}
++impl CoreToolRuntime for SleepHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/submit_change_batch.rs b/codex-rs/core/src/tools/handlers/submit_change_batch.rs
+index 4a17b371..534870b1 100644
+--- a/codex-rs/core/src/tools/handlers/submit_change_batch.rs
++++ b/codex-rs/core/src/tools/handlers/submit_change_batch.rs
+@@ -1,6 +1,10 @@
+ use crate::function_tool::FunctionCallError;
++use crate::tools::context::FunctionToolOutput;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
++use crate::tools::parallel::ChangeBatchHandoff;
++use crate::tools::parallel::ToolContinuation;
++use crate::tools::registry::CoreToolOutput;
+ use crate::tools::registry::CoreToolRuntime;
+ use crate::tools::registry::ToolExecutor;
+ use codex_tools::FreeformTool;
+@@ -12,8 +16,8 @@ pub(crate) const SUBMIT_CHANGE_BATCH_TOOL_NAME: &str = "submit_change_batch";
+ const SUBMIT_CHANGE_BATCH_GRAMMAR: &str = include_str!("submit_change_batch.lark");
+ 
+ /// The terminal delegated tool is advertised only on turns explicitly opted
+-/// into host handoff. Its runtime is intercepted by Core before dispatch; a
+-/// direct handler is deliberately fail-closed so it cannot mutate a workspace.
++/// into host handoff. The common dispatch boundary authorizes its proposal and
++/// runs hooks before accepting the terminal continuation.
+ pub(crate) struct SubmitChangeBatchHandler;
+ 
+ impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
+@@ -34,16 +38,49 @@ impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
+         })
+     }
+ 
+-    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+-        Box::pin(async {
+-            Err(FunctionCallError::Fatal(
+-                "submit_change_batch must be handled by the host handoff boundary".to_string(),
+-            ))
++    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++        Box::pin(async move {
++            self.handle_core(invocation)
++                .await
++                .map(|result| result.output)
+         })
+     }
+ }
+ 
+ impl CoreToolRuntime for SubmitChangeBatchHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
++    fn handle_core(
++        &self,
++        invocation: ToolInvocation,
++    ) -> futures::future::BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
++        Box::pin(async move {
++            let ToolPayload::Custom { input } = invocation.payload else {
++                return Err(FunctionCallError::RespondToModel(
++                    "submit_change_batch expects a ChangeBatch proposal".to_string(),
++                ));
++            };
++            if !invocation.turn.submit_change_batch {
++                return Err(FunctionCallError::RespondToModel(
++                    "this turn does not allow host handoff".to_string(),
++                ));
++            }
++            Ok(CoreToolOutput {
++                output: Box::new(FunctionToolOutput::from_text(
++                    "ChangeBatch proposal handed to host for application and validation."
++                        .to_string(),
++                    Some(true),
++                )),
++                continuation: Some(ToolContinuation::YieldToHost(ChangeBatchHandoff {
++                    call_id: invocation.call_id,
++                    proposal: input,
++                })),
++            })
++        })
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Custom { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 428ddb40..f7828da1 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -405,6 +405,10 @@ impl ExecCommandHandler {
+ }
+ 
+ impl CoreToolRuntime for ExecCommandHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 5c296280..8eccb059 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -1,4 +1,6 @@
+ mod approvals;
++mod authorization;
++pub(crate) use authorization::authorize_request;
+ pub(crate) mod code_mode;
+ pub(crate) mod context;
+ mod control_tool_analytics;
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index e7c416d0..148645dc 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -53,6 +53,24 @@ pub use codex_tools::ToolExposure;
+ /// Implementers provide the shared `ToolExecutor` behavior plus optional
+ /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
+ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
++    /// Declares the authority used for this exact registered implementation.
++    fn authorization_policy(&self) -> super::authorization::AuthorizationPolicy {
++        super::authorization::AuthorizationPolicy::HostOperation
++    }
++
++    /// Core continuations remain typed until hooks accept the tool result.
++    fn handle_core(
++        &self,
++        invocation: ToolInvocation,
++    ) -> BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
++        Box::pin(async move {
++            self.handle(invocation).await.map(|output| CoreToolOutput {
++                output,
++                continuation: None,
++            })
++        })
++    }
++
+     /// Whether this built-in control tool needs a structured tool-call event.
+     fn is_builtin_control_tool(&self) -> bool {
+         false
+@@ -78,6 +96,12 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+         None
+     }
+ 
++    /// Whether this implementation reads the step's MCP connection scope.
++    /// Resource tools have a dynamic server and still depend on that scope.
++    fn uses_mcp_binding(&self) -> bool {
++        self.mcp_server_name().is_some()
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(
+             payload,
+@@ -103,8 +127,10 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+         invocation: &ToolInvocation,
+         result: &dyn ToolOutput,
+     ) -> Option<PostToolUsePayload> {
+-        let ToolPayload::Function { arguments } = &invocation.payload else {
+-            return None;
++        let tool_input = match &invocation.payload {
++            ToolPayload::Function { arguments } => function_hook_tool_input(arguments),
++            ToolPayload::Custom { input } => Value::String(input.clone()),
++            ToolPayload::ToolSearch { .. } => return None,
+         };
+ 
+         Some(PostToolUsePayload {
+@@ -112,20 +138,25 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+             tool_use_id: result.post_tool_use_id(&invocation.call_id),
+             tool_input: result
+                 .post_tool_use_input(&invocation.payload)
+-                .unwrap_or_else(|| function_hook_tool_input(arguments)),
++                .unwrap_or(tool_input),
+             tool_response: result
+                 .post_tool_use_response(&invocation.call_id, &invocation.payload)
+                 .or_else(|| {
+                     // Most function tools can expose their model-facing output
+                     // as the hook response. Outputs with a more stable hook
+                     // contract should override post_tool_use_response above.
+-                    let ResponseInputItem::FunctionCallOutput {
+-                        output: FunctionCallOutputPayload { body, .. },
+-                        ..
+-                    } = result.to_response_item(&invocation.call_id, &invocation.payload)
+-                    else {
+-                        return None;
+-                    };
++                    let body =
++                        match result.to_response_item(&invocation.call_id, &invocation.payload) {
++                            ResponseInputItem::FunctionCallOutput {
++                                output: FunctionCallOutputPayload { body, .. },
++                                ..
++                            }
++                            | ResponseInputItem::CustomToolCallOutput {
++                                output: FunctionCallOutputPayload { body, .. },
++                                ..
++                            } => body,
++                            _ => return None,
++                        };
+ 
+                     serde_json::to_value(body).ok()
+                 })?,
+@@ -133,13 +164,15 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+     }
+ 
+     fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
+-        let ToolPayload::Function { arguments } = &invocation.payload else {
+-            return None;
++        let tool_input = match &invocation.payload {
++            ToolPayload::Function { arguments } => function_hook_tool_input(arguments),
++            ToolPayload::Custom { input } => Value::String(input.clone()),
++            ToolPayload::ToolSearch { .. } => return None,
+         };
+ 
+         Some(PreToolUsePayload {
+             tool_name: function_hook_tool_name(invocation),
+-            tool_input: function_hook_tool_input(arguments),
++            tool_input,
+         })
+     }
+ 
+@@ -152,20 +185,33 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+         invocation: ToolInvocation,
+         updated_input: Value,
+     ) -> Result<ToolInvocation, FunctionCallError> {
+-        let ToolPayload::Function { .. } = &invocation.payload else {
+-            return Err(FunctionCallError::RespondToModel(
+-                "hook input rewrite received unsupported function tool payload".to_string(),
+-            ));
++        let payload = match &invocation.payload {
++            ToolPayload::Custom { .. } => ToolPayload::Custom {
++                input: updated_input
++                    .as_str()
++                    .ok_or_else(|| {
++                        FunctionCallError::RespondToModel(
++                            "freeform hook input must remain a string".to_string(),
++                        )
++                    })?
++                    .to_string(),
++            },
++            ToolPayload::Function { .. } => ToolPayload::Function {
++                arguments: serde_json::to_string(&updated_input).map_err(|err| {
++                    FunctionCallError::RespondToModel(format!(
++                        "failed to serialize rewritten {} arguments: {err}",
++                        flat_tool_name(&invocation.tool_name)
++                    ))
++                })?,
++            },
++            ToolPayload::ToolSearch { .. } => {
++                return Err(FunctionCallError::RespondToModel(
++                    "hook input rewrite received unsupported tool search payload".to_string(),
++                ));
++            }
+         };
+-
+-        let arguments = serde_json::to_string(&updated_input).map_err(|err| {
+-            FunctionCallError::RespondToModel(format!(
+-                "failed to serialize rewritten {} arguments: {err}",
+-                flat_tool_name(&invocation.tool_name)
+-            ))
+-        })?;
+         Ok(ToolInvocation {
+-            payload: ToolPayload::Function { arguments },
++            payload,
+             ..invocation
+         })
+     }
+@@ -189,11 +235,17 @@ pub(crate) trait ToolArgumentDiffConsumer: Send {
+     }
+ }
+ 
++pub(crate) struct CoreToolOutput {
++    pub(crate) output: Box<dyn ToolOutput>,
++    pub(crate) continuation: Option<super::parallel::ToolContinuation>,
++}
++
+ pub(crate) struct AnyToolResult {
+     pub(crate) call_id: String,
+     pub(crate) payload: ToolPayload,
+     pub(crate) result: Box<dyn ToolOutput>,
+     pub(crate) post_tool_use_payload: Option<PostToolUsePayload>,
++    pub(crate) continuation: Option<super::parallel::ToolContinuation>,
+ }
+ 
+ impl AnyToolResult {
+@@ -627,6 +679,21 @@ impl ToolRegistry {
+             }
+         }
+ 
++        if let Err(err) = super::authorization::authorize(&invocation, tool.as_ref()).await {
++            if tool.is_builtin_control_tool() {
++                let mut analytics = ControlToolCallGuard::new(&invocation);
++                analytics.finish(ControlToolCallStatus::Rejected);
++            }
++            dispatch_trace.record_failed(&err);
++            notify_tool_finish_if_unclaimed(
++                &invocation,
++                terminal_outcome_reached.as_deref(),
++                ToolCallOutcome::Blocked,
++            )
++            .await;
++            return Err(err);
++        }
++
+         notify_tool_start(&invocation).await;
+         let mut control_tool_analytics = tool
+             .is_builtin_control_tool()
+@@ -772,6 +839,20 @@ impl ToolRegistry {
+                     }
+                 }
+                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
++                if let Some(continuation) = &result.continuation
++                    && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
++                        &invocation.source
++                {
++                    invocation
++                        .session
++                        .services
++                        .code_mode_service
++                        .terminal_handoffs
++                        .publish(
++                            codex_code_mode::CellId::new(cell_id.clone()),
++                            continuation.clone(),
++                        )?;
++                }
+                 dispatch_trace.record_completed(
+                     &invocation,
+                     &result.call_id,
+@@ -807,7 +888,10 @@ async fn handle_any_tool(
+ ) -> Result<AnyToolResult, FunctionCallError> {
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+-    let output = tool.handle(invocation.clone()).await?;
++    let CoreToolOutput {
++        output,
++        continuation,
++    } = tool.handle_core(invocation.clone()).await?;
+     if output.contains_external_context()
+         && invocation.turn.config.memories.disable_on_external_context
+     {
+@@ -825,6 +909,7 @@ async fn handle_any_tool(
+         payload,
+         result: output,
+         post_tool_use_payload,
++        continuation,
+     })
+ }
+ 
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index 0555a6e3..27eb0ee1 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -591,6 +591,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
+             ),
+         }),
+         post_tool_use_payload: None,
++        continuation: None,
+     };
+ 
+     assert_eq!(
+@@ -618,6 +619,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
+             ),
+         }),
+         post_tool_use_payload: None,
++        continuation: None,
+     };
+ 
+     assert_eq!(

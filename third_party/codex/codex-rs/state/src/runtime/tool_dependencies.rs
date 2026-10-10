@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: Apache-2.0
+use super::StateRuntime;
+use crate::ToolDependencySnapshot;
+use crate::ToolExecutionFact;
+use crate::ToolInputBindingFact;
+use crate::ToolInputProof;
+use crate::ToolInputValidation;
+use crate::ToolInputValidationFact;
+use crate::ToolProgressFact;
+use crate::ToolReusePermission;
+use crate::ToolRuntimeFact;
+use anyhow::ensure;
+use sqlx::Row;
+use sqlx::SqliteConnection;
+
+impl StateRuntime {
+    /// Binds trusted dependencies to the original claimed attempt before dispatch.
+    /// Repeated writes must preserve the exact frozen policy and snapshot.
+    pub async fn bind_tool_input(&self, fact: &ToolInputBindingFact) -> anyhow::Result<()> {
+        validate_snapshot(&fact.snapshot)?;
+        ensure!(
+            fact.schema_version == 1 && digest_valid(&fact.operation_digest),
+            "invalid input binding"
+        );
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_attempts a JOIN tool_requests r ON r.sequence=a.request_sequence WHERE r.thread_id=? AND a.request_sequence=? AND a.operation_digest=? AND a.execution='running')")
+            .bind(&fact.thread_id).bind(fact.request_sequence).bind(&fact.operation_digest).fetch_one(&mut *tx).await?;
+        ensure!(
+            current,
+            "input binding requires the original running attempt"
+        );
+        let snapshot = serde_json::to_string(&fact.snapshot)?;
+        let inserted = sqlx::query("INSERT INTO tool_input_bindings(request_sequence,thread_id,operation_digest,snapshot_json) VALUES (?,?,?,?) ON CONFLICT(request_sequence) DO NOTHING")
+            .bind(fact.request_sequence).bind(&fact.thread_id).bind(&fact.operation_digest).bind(&snapshot).execute(&mut *tx).await?.rows_affected() == 1;
+        let retained: String = sqlx::query_scalar(
+            "SELECT snapshot_json FROM tool_input_bindings WHERE request_sequence=?",
+        )
+        .bind(fact.request_sequence)
+        .fetch_one(&mut *tx)
+        .await?;
+        ensure!(retained == snapshot, "frozen tool input binding conflict");
+        if inserted {
+            append(
+                &mut tx,
+                &fact.thread_id,
+                fact.request_sequence,
+                &ToolRuntimeFact::InputBinding(fact.clone()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records whether the real execution consumed the bound input. A mismatch
+    /// remains an observation and cannot qualify the result for reuse.
+    pub async fn validate_tool_input(
+        &self,
+        thread: &str,
+        sequence: i64,
+        proof: Option<ToolInputProof>,
+    ) -> anyhow::Result<ToolInputValidationFact> {
+        if let Some(proof) = &proof {
+            ensure!(
+                digest_valid(&proof.input_digest) && digest_valid(&proof.evidence_digest),
+                "invalid adapter proof"
+            );
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query("SELECT b.snapshot_json,b.validation_json FROM tool_input_bindings b JOIN tool_attempts a ON a.request_sequence=b.request_sequence WHERE b.thread_id=? AND b.request_sequence=? AND a.execution='completed'")
+            .bind(thread).bind(sequence).fetch_one(&mut *tx).await?;
+        let snapshot: ToolDependencySnapshot = serde_json::from_str(row.try_get("snapshot_json")?)?;
+        let validation = match &proof {
+            Some(proof) if proof.input_digest == snapshot.dependency_digest => {
+                ToolInputValidation::Verified
+            }
+            Some(_) => ToolInputValidation::Mismatch,
+            None => ToolInputValidation::Unknown,
+        };
+        let fact = ToolInputValidationFact {
+            schema_version: 1,
+            thread_id: thread.into(),
+            request_sequence: sequence,
+            validation,
+            proof,
+        };
+        let encoded = serde_json::to_string(&fact)?;
+        let retained: Option<String> = row.try_get("validation_json")?;
+        if let Some(retained) = retained {
+            ensure!(retained == encoded, "tool input validation conflict");
+        } else {
+            sqlx::query("UPDATE tool_input_bindings SET validation=?,validation_json=? WHERE request_sequence=?")
+                .bind(serde_json::to_value(validation)?.as_str().unwrap_or("unknown")).bind(encoded).bind(sequence).execute(&mut *tx).await?;
+            append(
+                &mut tx,
+                thread,
+                sequence,
+                &ToolRuntimeFact::InputValidation(fact.clone()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(fact)
+    }
+
+    /// Returns metadata only. Current read authority and exact receipt revision
+    /// are required separately before any retained result bytes are read.
+    pub async fn reusable_tool_execution(
+        &self,
+        thread: &str,
+        operation: &str,
+        snapshot: &ToolDependencySnapshot,
+    ) -> anyhow::Result<Option<ToolExecutionFact>> {
+        validate_snapshot(snapshot)?;
+        if snapshot.reuse != ToolReusePermission::ImmutableValue {
+            return Ok(None);
+        }
+        let logical: Option<String> = sqlx::query_scalar("SELECT r.logical_id FROM tool_input_bindings b JOIN tool_attempts a ON a.request_sequence=b.request_sequence JOIN tool_requests r ON r.sequence=b.request_sequence WHERE b.thread_id=? AND b.operation_digest=? AND b.snapshot_json=? AND b.validation='verified' AND a.execution='completed' AND a.disposition='accepted' AND a.accepted_result IS NOT NULL AND a.execution_result IS NOT NULL ORDER BY b.request_sequence DESC LIMIT 1")
+            .bind(thread).bind(operation).bind(serde_json::to_string(snapshot)?).fetch_optional(self.pool.as_ref()).await?;
+        match logical {
+            Some(logical) => self.tool_request_fact(thread, &logical).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Trusted payload-free binding metadata for historical recovery admission.
+    pub async fn verified_tool_input_binding(
+        &self,
+        sequence: i64,
+    ) -> anyhow::Result<Option<ToolInputBindingFact>> {
+        let row = sqlx::query("SELECT thread_id,operation_digest,snapshot_json FROM tool_input_bindings WHERE request_sequence=? AND validation='verified'").bind(sequence).fetch_optional(self.pool.as_ref()).await?;
+        row.map(|row| {
+            Ok(ToolInputBindingFact {
+                schema_version: 1,
+                thread_id: row.try_get("thread_id")?,
+                request_sequence: sequence,
+                operation_digest: row.try_get("operation_digest")?,
+                snapshot: serde_json::from_str(row.try_get("snapshot_json")?)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Exact receipt and verified dependency checks precede access to raw bytes.
+    /// The caller authorizes this source revision under current read authority.
+    pub async fn read_verified_tool_execution(
+        &self,
+        sequence: i64,
+        attempt: &str,
+        revision: i64,
+        snapshot: &ToolDependencySnapshot,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT a.execution_result FROM tool_attempts a JOIN tool_input_bindings b ON b.request_sequence=a.request_sequence WHERE a.request_sequence=? AND a.attempt_id=? AND a.revision=? AND a.execution='completed' AND b.validation='verified' AND b.snapshot_json=? AND a.execution_result IS NOT NULL")
+            .bind(sequence).bind(attempt).bind(revision).bind(serde_json::to_string(snapshot)?)
+            .fetch_optional(self.pool.as_ref()).await?)
+    }
+
+    /// A proof's stable information digest excludes execution ids and timing.
+    pub async fn record_verified_tool_progress(
+        &self,
+        thread: &str,
+        sequence: i64,
+    ) -> anyhow::Result<bool> {
+        let encoded: Option<String> = sqlx::query_scalar("SELECT b.validation_json FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence JOIN tool_input_bindings b ON b.request_sequence=COALESCE(s.source_request_sequence,r.sequence) WHERE r.thread_id=? AND r.sequence=? AND b.validation='verified'")
+            .bind(thread).bind(sequence).fetch_optional(self.pool.as_ref()).await?;
+        let Some(encoded) = encoded else {
+            return Ok(false);
+        };
+        let validation: ToolInputValidationFact = serde_json::from_str(&encoded)?;
+        let Some(proof) = validation.proof else {
+            return Ok(false);
+        };
+        self.record_tool_progress(&ToolProgressFact {
+            schema_version: 1,
+            thread_id: thread.into(),
+            request_sequence: sequence,
+            evidence_digest: proof.evidence_digest,
+            source: "adapter-verified-information".into(),
+        })
+        .await
+    }
+
+    /// Only a new adapter-verified information receipt advances the diagnostic
+    /// window. Source changes and repeated result timestamps do not qualify.
+    pub async fn record_tool_progress(&self, fact: &ToolProgressFact) -> anyhow::Result<bool> {
+        ensure!(
+            fact.schema_version == 1
+                && digest_valid(&fact.evidence_digest)
+                && !fact.source.is_empty()
+                && fact.source.len() <= 256,
+            "invalid progress receipt"
+        );
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let encoded: Option<String> = sqlx::query_scalar("SELECT b.validation_json FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence JOIN tool_input_bindings b ON b.request_sequence=COALESCE(s.source_request_sequence,r.sequence) JOIN tool_attempts a ON a.request_sequence=b.request_sequence WHERE r.thread_id=? AND r.sequence=? AND b.validation='verified' AND a.execution='completed' AND ((s.request_sequence IS NULL AND a.disposition='accepted') OR (json_extract(s.fact_json,'$.disposition')='accepted' AND json_extract(s.fact_json,'$.cancelled')=0)) AND NOT EXISTS(SELECT 1 FROM tool_waiter_cancellations c WHERE c.request_sequence=r.sequence)")
+            .bind(&fact.thread_id).bind(fact.request_sequence).fetch_optional(&mut *tx).await?;
+        let validation: ToolInputValidationFact =
+            serde_json::from_str(&encoded.ok_or_else(|| {
+                anyhow::anyhow!("progress requires a verified accepted logical result")
+            })?)?;
+        ensure!(
+            validation
+                .proof
+                .is_some_and(|proof| proof.evidence_digest == fact.evidence_digest),
+            "progress evidence differs from the verified result"
+        );
+        let inserted = sqlx::query("INSERT INTO tool_progress_receipts(thread_id,evidence_digest,request_sequence) VALUES (?,?,?) ON CONFLICT(thread_id,evidence_digest) DO NOTHING")
+            .bind(&fact.thread_id).bind(&fact.evidence_digest).bind(fact.request_sequence).execute(&mut *tx).await?.rows_affected() == 1;
+        if inserted {
+            append(
+                &mut tx,
+                &fact.thread_id,
+                fact.request_sequence,
+                &ToolRuntimeFact::Progress(fact.clone()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(inserted)
+    }
+}
+
+fn digest_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+fn validate_snapshot(snapshot: &ToolDependencySnapshot) -> anyhow::Result<()> {
+    ensure!(
+        [
+            &snapshot.policy_revision,
+            &snapshot.dependency_digest,
+            &snapshot.account_scope_digest,
+            &snapshot.session_scope_digest,
+            &snapshot.validity_epoch
+        ]
+        .iter()
+        .all(|value| digest_valid(value)),
+        "invalid trusted dependency identity"
+    );
+    Ok(())
+}
+async fn append(
+    connection: &mut SqliteConnection,
+    thread: &str,
+    sequence: i64,
+    fact: &ToolRuntimeFact,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO tool_fact_events(request_sequence,thread_id,fact_json) VALUES (?,?,?)",
+    )
+    .bind(sequence)
+    .bind(thread)
+    .bind(serde_json::to_string(fact)?)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "tool_dependencies_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "tool_sharing_tests.rs"]
+mod sharing_tests;

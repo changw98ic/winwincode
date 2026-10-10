@@ -95,7 +95,8 @@ fn intersection(
 
 #[test]
 fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
-    let temp = TempDir::new().expect("workspace");
+    let temp = TempDir::new_in(std::env::current_dir().expect("checkout"))
+        .expect("workspace outside TMPDIR");
     let root = canonical(&temp);
     let project = root.join("project");
     std::fs::create_dir(project.as_path()).expect("project directory");

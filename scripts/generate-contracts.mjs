@@ -708,6 +708,7 @@ function renderControlPlaneClient(context, digest) {
 }
 
 const CONTROL_PLANE_CLIENT_TEMPLATE = String.raw`
+import { executeFetch, withResponseFailure, decide as decideNetwork, policy as networkPolicy, type NetworkFailure } from '@winwincode/network-request'
 import type {
   Actor,
   CommandAcceptedResponse,
@@ -777,6 +778,17 @@ export class ControlPlaneClientError {
   readonly retryable: boolean
   readonly details: ErrorDetails
 
+  get networkFailure(): NetworkFailure {
+    return {
+      kind: this.code === 'REQUEST_CANCELLED' ? 'cancelled' : this.code === 'NETWORK_ERROR' ? 'transport_interrupted'
+        : this.code === 'AUTHENTICATION_REQUIRED' ? 'authentication' : this.code === 'PERMISSION_DENIED' ? 'authorization'
+          : ['SCHEMA_VERSION_MISMATCH', 'CLIENT_UPGRADE_REQUIRED', 'INVALID_CLIENT_REQUEST'].includes(this.code) ? 'request_invalid'
+            : this.retryable ? 'protocol_invalid' : 'request_invalid',
+      acceptance: 'unknown', phase: 'response_headers', httpStatus: null, retryAfterMs: null,
+      ...(this.code === 'SCHEMA_VERSION_MISMATCH' || this.code === 'CLIENT_UPGRADE_REQUIRED' ? { diagnostic: { code: 'schema_version' } } : {}),
+    }
+  }
+
   constructor(fields: ControlPlaneClientErrorFields) {
     this.code = fields.code
     this.message = fields.message
@@ -791,9 +803,11 @@ export interface ControlPlaneHttpRequestInit {
   readonly headers: Readonly<Record<string, string>>
   readonly body: string
   readonly credentials: 'same-origin'
+  readonly signal?: AbortSignal
 }
 
 export interface ControlPlaneHttpResponse {
+  readonly headers?: { get(name: string): string | null }
   readonly ok: boolean
   readonly status: number
   text(): Promise<string>
@@ -1134,11 +1148,10 @@ export function createControlPlaneHttpClient(
   options: ControlPlaneHttpClientOptions = {},
 ): ControlPlaneHttpClient {
   const fetchImplementation = options.fetch ?? defaultFetch
-  const maximumRetries = options.maxNetworkRetries ?? 0
+  const maximumRetries = options.maxNetworkRetries ?? networkPolicy.maxAttempts - 1
   if (!Number.isSafeInteger(maximumRetries) || maximumRetries < 0 || maximumRetries > 5) {
     throw clientFailure('INVALID_CLIENT_OPTIONS', 'maxNetworkRetries must be between zero and five.')
   }
-  const waitBeforeRetry = options.waitBeforeRetry ?? (async () => {})
 
   async function send(
     path: string,
@@ -1163,38 +1176,28 @@ export function createControlPlaneHttpClient(
       body: serialized,
       credentials: 'same-origin',
     }
-    let attempt = 0
-    for (;;) {
-      let response: ControlPlaneHttpResponse
-      try {
-        response = await fetchImplementation(endpoint(options.baseUrl, path), init)
-      } catch (error) {
-        if (error instanceof ControlPlaneClientError) throw error
-        if (attempt >= maximumRetries) {
-          throw clientFailure(
-            'NETWORK_ERROR',
-            'The Control Plane request did not reach the server.',
-            request.requestId,
-            true,
-          )
-        }
-        attempt += 1
-        try {
-          await waitBeforeRetry(attempt)
-        } catch {
-          throw clientFailure(
-            'NETWORK_ERROR',
-            'The Control Plane request retry was interrupted.',
-            request.requestId,
-            true,
-          )
-        }
-        continue
-      }
-      const parsed = await responseJson(response, request.requestId)
-      if (!response.ok) throw parseErrorEnvelope(parsed, request.requestId)
-      return parsed
+    let response: ControlPlaneHttpResponse
+    try {
+      response = await executeFetch(fetchImplementation, endpoint(options.baseUrl, path), init, {
+        replay: 'replay_exact',
+        maxAttempts: maximumRetries + 1,
+        ...(options.waitBeforeRetry === undefined ? {} : { waitBeforeRetry: options.waitBeforeRetry }),
+      })
+    } catch (error) {
+      if (error instanceof ControlPlaneClientError) throw error
+      const failure = clientFailure('NETWORK_ERROR', 'The Control Plane request failed after network recovery.', request.requestId, true)
+      Object.defineProperty(failure, 'cause', { value: error, configurable: true })
+      throw failure
     }
+    let parsed: unknown
+    try {
+      parsed = await responseJson(response, request.requestId)
+    } catch (error) {
+      if (!response.ok && typeof error === 'object' && error !== null) throw withResponseFailure(error, response)
+      throw error
+    }
+    if (!response.ok) throw withResponseFailure(parseErrorEnvelope(parsed, request.requestId), response)
+    return parsed
   }
 
   return {
@@ -1367,7 +1370,7 @@ export function createControlPlaneWebSocketClient(
   options: ControlPlaneWebSocketClientOptions,
 ): ControlPlaneWebSocketClient {
   const createSocket = options.createSocket ?? defaultSocketFactory
-  const reconnectDelay = options.reconnectDelayMillis ?? 250
+  const reconnectDelay = options.reconnectDelayMillis ?? networkPolicy.initialDelayMs
   if (!Number.isSafeInteger(reconnectDelay) || reconnectDelay < 0 || reconnectDelay > 60_000) {
     throw clientFailure(
       'INVALID_CLIENT_OPTIONS',
@@ -1377,6 +1380,7 @@ export function createControlPlaneWebSocketClient(
   let socket: ControlPlaneWebSocketConnection | null = null
   let generation = 0
   let subscriptionGeneration = 0
+  let reconnectAttempt = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let currentSubscriptionId: ControlPlaneWebSocketSubscriptionId | null = null
   let currentSubscription: ControlPlaneWebSocketSubscription | null = null
@@ -1807,6 +1811,7 @@ export function createControlPlaneWebSocketClient(
         )
         resumeAfterCursor = null
         phase = 'active'
+        reconnectAttempt = 0
         sendAcknowledgement()
         return
       case 'transport.backpressure.v1':
@@ -1826,12 +1831,17 @@ export function createControlPlaneWebSocketClient(
 
   function scheduleReconnect(): void {
     if (manuallyClosed || blocked || currentSubscription === null || reconnectTimer !== null) return
+    reconnectAttempt += 1
+    const decision = decideNetwork({ kind: 'connection_unavailable', acceptance: 'not_sent', phase: 'connect', httpStatus: null, retryAfterMs: null }, {
+      replay: 'replay_exact', connectionAttempt: reconnectAttempt,
+    })
+    const delay = options.reconnectDelayMillis === undefined ? decision.delayMs ?? reconnectDelay : reconnectDelay
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       if (!manuallyClosed && !blocked && currentSubscription !== null) {
         connect(acknowledgedCursor === null ? 'subscribe' : 'resume')
       }
-    }, reconnectDelay)
+    }, delay)
   }
 
   function connect(mode: ConnectMode): void {
@@ -2569,10 +2579,13 @@ function rustSharedDefinitionNamesForExecutionPort(context) {
   for (const name of [
     'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'Snapshot', 'VerificationSession', 'VerifierResult', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
     'WorkItemState', 'WorkRunState', 'WorkContract', 'WorkItem', 'WorkRun',
-    'VerificationPlan', 'Evidence', 'Verdict',
+    'VerificationPlan', 'Evidence', 'Verdict', 'CoreToolRuntimeProjection',
   ]) {
     const entry = context.registry.get(name)
-    if (entry?.document.fileName === 'domain.schema.json') names.add(name)
+    if (entry?.document.fileName === 'domain.schema.json') {
+      names.add(name)
+      pending.push(entry)
+    }
   }
   const visited = new Set()
 
@@ -3513,7 +3526,7 @@ function generate(options) {
   if (options.typescriptClientOutput !== undefined) {
     outputs.set(options.typescriptClientOutput, renderControlPlaneClient(context, digest))
     const deviceTypes = [...context.registry.values()]
-      .filter(entry => (entry.name.startsWith('DeviceProvider') || entry.name.startsWith('DeviceExtension') || entry.name === 'DeviceConfigurationEnvelope') && !entry.name.endsWith('View'))
+      .filter(entry => (entry.name.startsWith('DeviceProvider') || entry.name.startsWith('DeviceExtension') || entry.name === 'DeviceConfigurationEnvelope' || entry.name === 'DeviceResponsesStructuredOutput') && !entry.name.endsWith('View'))
       .sort((left, right) => left.name.localeCompare(right.name))
       .map(entry => renderTypescriptDefinition(entry, context))
     if (options.typescriptOutput === join(root, 'apps/client/src/generated/contracts.ts')) outputs.set(

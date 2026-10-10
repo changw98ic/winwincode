@@ -45,14 +45,38 @@ Core 请求工具许可时，页面通过现有审批列表显示 MCP 服务、�
 
 ## Device Provider 请求协议与私有请求头
 
-设备的模型设置支持 `anthropic_messages`、`openai_chat_completions` 和
-`canonical`。API 地址必须填写所选协议的完整 HTTPS 请求地址；设备不会改写路径。
+设备的模型设置支持 `anthropic_messages`、`openai_chat_completions`、
+`openai_responses` 和 `canonical`。API 地址必须填写所选协议的完整 HTTPS
+请求地址；设备不会改写路径。
 模型名使用服务商的 API 标识。
 
 “自定义请求头”输入 JSON 对象，例如 `{"x-opencode-session":"<session>"}`。
 留空保留设备已有值，填写 `{}` 清除。请求头与 API Key 一起加密发送到设备，
 仅存储在设备的私有数据库中，服务器配置查询不返回名称或值。请求头不能覆盖
 认证、目标主机、内容类型、请求身份或连接控制字段。
+
+MiMo `mimo-v2.6-pro` 的原生 CodeMode 工具使用 `openai_responses`。标准 API
+地址为 `https://api.xiaomimimo.com/v1/responses`；中国区 Token Plan 地址为
+`https://token-plan-cn.xiaomimimo.com/v1/responses`。自定义请求头填写：
+
+```json
+{"x-openai-internal-codex-responses-lite":"true"}
+```
+
+此请求头显式启用 MiMo Responses Lite。工具保留原生 custom 输入和 Lark
+语法。配置依据见服务商的[Codex 配置说明](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
+与 [Responses API 参考](https://mimo.mi.com/docs/en-US/api/chat/responses)。
+
+MiMo 在“结构化输出格式”中显式选择“文本（本地 JSON 校验）”，对应
+`responsesStructuredOutput: "text"`。需要结构化结果时，Device Provider 将
+完整的原 JSON Schema 加入指令，并省略请求中的 `text` 字段，使用 API 默认
+文本格式。最终结果仍须解析为 JSON，并通过原 schema 的本地严格校验。
+工具清单、custom 输入和 Lark 语法保持原样。
+
+此设置仅用于 `openai_responses`。省略配置时仍使用 `json_schema`；已有
+`json_object` 配置继续请求服务端 JSON 对象格式。设备不会根据服务商名称、
+模型名或请求头自动切换格式。`text` 和 `json_object` 只接受已实现的 schema
+子集；未知关键词在发送模型请求前拒绝。
 
 设备数据库从版本 2 升级到 3 时，在事务中增加 `provider_headers` 表，保留
 已有 Provider、密钥和设备身份。升级后只运行当前版本；不要用旧程序打开新库。

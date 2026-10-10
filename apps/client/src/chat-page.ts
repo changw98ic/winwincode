@@ -2,6 +2,7 @@
 
 import { mountChatAttachments, showChatAttachment } from './chat-attachments.js'
 import { readPreferences } from './preferences.js'
+import { renderRuntimeActivity } from './runtime-activity.js'
 
 import { repositoryDisplayName } from './display-labels.js'
 import { mountChatMarkdown } from './dsh-ui.js'
@@ -350,6 +351,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const errorText = element(document, 'span', 'wwc-chat-error-text')
   const retry = element(document, 'button', 'wwc-chat-retry')
   const messages = element(document, 'ol', 'wwc-chat-messages')
+  const runtime = element(document, 'details', 'wwc-chat-runtime')
+  const runtimeHeading = element(document, 'summary', 'wwc-chat-runtime-heading')
+  runtimeHeading.textContent = '工具与运行状态'
+  const runtimeActivities = element(document, 'ol', 'wwc-chat-runtime-activities')
+  runtime.append(runtimeHeading, runtimeActivities)
   const empty = element(document, 'div', 'wwc-chat-empty')
   const loadEarlier = element(document, 'button', 'wwc-chat-load-earlier')
   const decisionRoot = element(document, 'div', 'wwc-chat-decisions')
@@ -715,6 +721,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     error,
     loadEarlier,
     messages,
+    runtime,
     empty,
     receipt,
     form,
@@ -867,6 +874,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       confirmation.checked = false
     }
     status.textContent = presentation.statusText
+    const activities = state.runtime?.sessions.flatMap(session => session.activities) ?? []
+    runtime.hidden = activities.length === 0
+    runtimeActivities.replaceChildren()
+    for (const activity of activities.slice(-100)) {
+      const row = element(document, 'li', 'wwc-chat-runtime-activity')
+      row.append(renderRuntimeActivity(document, activity))
+      runtimeActivities.append(row)
+    }
     // 设计稿 03b:侧栏高亮当前会话行,并抑制「新对话」的重复高亮。
     // 列表由外壳渲染,这里只按当前会话标记激活行(FakeDocument 下无查询能力时跳过)。
     if (typeof document.querySelectorAll === 'function') {

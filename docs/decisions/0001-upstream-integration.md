@@ -66,6 +66,12 @@ Codex 的 Thread、Turn、Plan、Agent Graph、工具、Shell、沙箱、权限�
 | `codex/0003-export-config-builder.patch` | `codex-rs/core-api/src/lib.rs` | 导出上游已有 `ConfigBuilder` |
 | `codex/0005-remount-split-bwrap-root-read-only.patch` | `codex-rs/linux-sandbox/src/bwrap.rs` | 完成批准挂载后把合成根重新挂为只读 |
 | `codex/0006-tool-gate-and-exact-turn-replay.patch` | `codex-rs/core` 及对应 lock/module 文件 | 固定工具调用门禁和精确 Turn replay |
+| `codex/0007-bind-tool-gate-executable-identity.patch` | `codex-rs/core` 与 `core-api` | 工具门禁绑定实际可执行身份 |
+| `codex/0008-atomic-apply-patch.patch` | `codex-rs/apply-patch` | 补丁失败时原子回滚 |
+| `codex/0009-canonicalize-intercepted-apply-patch.patch` | `codex-rs/core/src/tools/handlers` | 被拦截的补丁统一使用规范输入 |
+| `codex/0010-submit-change-batch-handoff.patch` | `codex-rs/core` 与 `protocol` | 委托验证的 ChangeBatch 交给宿主处理 |
+| `codex/0011-deterministic-tool-context-gc.patch` | `codex-rs/core/src/context_manager` | 确定性回收工具上下文 |
+| `codex/0012-record-delegated-handoff-output.patch` | `codex-rs/core/src/session/turn.rs` 与 `turn_tests.rs` | 交接后、继续下一轮前保留原始 CustomToolCallOutput 及对应原生回归 |
 
 每个补丁必须能对记录的上游身份精确应用。补丁失败表示上游边界已经改变，需要重新审查，不能放宽断言或保留第二条旧路径。
 

@@ -10,6 +10,7 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [dependencies]
+winwincode-network = { workspace = true, features = ["journal"] }
 rusqlite.workspace = true
 serde_json.workspace = true
 winwincode-connector-slack.workspace = true

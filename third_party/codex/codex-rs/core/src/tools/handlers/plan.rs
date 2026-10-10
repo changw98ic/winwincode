@@ -97,6 +97,10 @@ impl PlanHandler {
 }
 
 impl CoreToolRuntime for PlanHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         true
     }

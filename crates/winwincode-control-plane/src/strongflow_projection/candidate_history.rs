@@ -13,11 +13,14 @@ use winwincode_api::generated::{
     CandidateHistoryListResultResponseQuery, CandidateHistoryPage, CandidateHistoryPageKind,
     PageInfo, QueryResultResponse, StrongFlowReadCursor,
 };
-use winwincode_delivery::domain::{DeliveryVerdict, EvidenceRef, FrozenDeliveryCandidate};
+use winwincode_delivery::{
+    application::candidate_rejection::{CandidateRejectionFact, current_candidate_rejection},
+    domain::{Delivery, DeliveryVerdict, EvidenceRef, FrozenDeliveryCandidate},
+};
 use winwincode_domain::{DeliveryId, OpaqueCursor, RepositoryScope, Revision, SchemaVersion};
 use winwincode_storage::{
     CandidateGitPinReceipt, CandidateGitRetentionError, CandidateGitRetentionErrorKind,
-    CandidateGitRetentionState, ProductStateStorage as _, SqliteStorage,
+    CandidateGitRetentionState,
 };
 
 use super::{StrongFlowProjectionError, application, mapping};
@@ -247,6 +250,46 @@ pub(super) fn review_get(
     )
 }
 
+// Read only the already verified journal cut. A later Spec may clear its
+// current Attention, but the exact refusal remains in this bounded history.
+// A read ending before that refusal cannot borrow a future classification.
+fn refusals_in_verified_cut(snapshots: &[Delivery]) -> Vec<CandidateRejectionFact> {
+    snapshots
+        .iter()
+        .filter_map(|snapshot| {
+            let fact = current_candidate_rejection(snapshot)?;
+            (fact.source_delivery_revision.checked_add(1) == Some(snapshot.revision()))
+                .then_some(fact)
+        })
+        .collect()
+}
+
+fn candidate_for_verified_history(
+    candidate_join: Result<Option<FrozenDeliveryCandidate>, crate::DeliveryAuthorityError>,
+    refusals: &[CandidateRejectionFact],
+) -> Result<Option<FrozenDeliveryCandidate>, StrongFlowProjectionError> {
+    match candidate_join {
+        Ok(candidate) => Ok(candidate),
+        Err(error)
+            if error
+                .candidate_rejection
+                .as_deref()
+                .is_some_and(|observed| {
+                    // The old revision's terminal, Artifact, Git source and sealed
+                    // authorization were resolved again. Every coordinate, including
+                    // source revision, must equal a refusal retained in this cut.
+                    // Generic IO/storage errors and foreign/tampered sources remain errors.
+                    refusals.iter().any(|retained| observed == retained)
+                }) =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "historical Candidate facts cannot be rebuilt".to_owned(),
+        )),
+    }
+}
+
 fn rebuild_history(
     control_plane: &ControlPlane,
     scope: &RepositoryScope,
@@ -273,18 +316,15 @@ fn rebuild_history(
     let snapshots =
         application::load_history_through(control_plane, delivery_id, through_revision)?;
     let pins = load_retention(control_plane, delivery_id)?;
+    let refusals = refusals_in_verified_cut(&snapshots);
     let mut history: Vec<CandidateHistoryFact> = Vec::new();
     for snapshot in snapshots {
-        let Some((candidate, _source)) =
+        let candidate_join =
             crate::delivery_verdict_authority::resolve_current_candidate_with_source(
                 storage, artifacts, resolver, scope, &snapshot,
             )
-            .map_err(|_| {
-                StrongFlowProjectionError::TrustedFactsUnavailable(
-                    "historical Candidate facts cannot be rebuilt".to_owned(),
-                )
-            })?
-        else {
+            .map(|joined| joined.map(|(candidate, _source)| candidate));
+        let Some(candidate) = candidate_for_verified_history(candidate_join, &refusals)? else {
             continue;
         };
         let availability = candidate_availability(&candidate, &pins)?;
@@ -339,14 +379,9 @@ fn load_retention(
     control_plane: &ControlPlane,
     delivery_id: &DeliveryId,
 ) -> Result<Vec<CandidateGitPinReceipt>, StrongFlowProjectionError> {
-    let database = control_plane.local_database_path().ok_or_else(|| {
+    control_plane.local_database_path().ok_or_else(|| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "Candidate retention requires canonical local storage".to_owned(),
-        )
-    })?;
-    let parent = database.parent().ok_or_else(|| {
-        StrongFlowProjectionError::ServiceUnavailable(
-            "canonical database directory is unavailable".to_owned(),
         )
     })?;
     let repository_root = control_plane.git_repository_root.as_ref().ok_or_else(|| {
@@ -354,25 +389,14 @@ fn load_retention(
             "Candidate retention repository root is unavailable".to_owned(),
         )
     })?;
-    let mut storage = SqliteStorage::open(parent).map_err(|_| {
+    let storage = control_plane.storage_ref().map_err(|_| {
         StrongFlowProjectionError::ServiceUnavailable(
             "Candidate retention storage is unavailable".to_owned(),
         )
     })?;
-    let receipts = {
-        let mut retention = storage
-            .git_candidate_retention(repository_root)
-            .map_err(|error| retention_error(&error))?;
-        retention
-            .load_by_delivery(delivery_id)
-            .map_err(|error| retention_error(&error))?
-    };
-    Box::new(storage).close().map_err(|_| {
-        StrongFlowProjectionError::ServiceUnavailable(
-            "Candidate retention storage could not be closed cleanly".to_owned(),
-        )
-    })?;
-    Ok(receipts)
+    storage
+        .read_candidate_git_retention_for_delivery(repository_root, delivery_id)
+        .map_err(|error| retention_error(&error))
 }
 
 fn candidate_availability(

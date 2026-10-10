@@ -3269,133 +3269,6 @@
         ],
         "type": "object"
       },
-      "ClientAccessChallengeAckMessage": {
-        "additionalProperties": false,
-        "description": "Confirms that the challenged connect code generation is still valid on the Device Client; the Control Plane may create the ClientAccessGrant only after this ACK.",
-        "properties": {
-          "challengeId": {
-            "$ref": "#/components/schemas/ClientAccessChallengeId"
-          },
-          "clientInstanceId": {
-            "$ref": "#/components/schemas/ClientInstanceId"
-          },
-          "clientNodeId": {
-            "$ref": "#/components/schemas/ClientNodeId"
-          },
-          "connectCodeId": {
-            "$ref": "#/components/schemas/ClientConnectCodeId"
-          },
-          "expectedRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "idempotencyKey": {
-            "$ref": "#/components/schemas/IdempotencyKey"
-          },
-          "kind": {
-            "const": "client.access.challenge_ack"
-          },
-          "messageId": {
-            "$ref": "#/components/schemas/ClientControlMessageId"
-          },
-          "occurredAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "schemaVersion": {
-            "$ref": "#/components/schemas/SchemaVersion"
-          },
-          "sequence": {
-            "$ref": "#/components/schemas/ClientExchangeSequence"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ClientChallengeAckStatus"
-          }
-        },
-        "required": [
-          "kind",
-          "schemaVersion",
-          "messageId",
-          "clientNodeId",
-          "clientInstanceId",
-          "sequence",
-          "occurredAt",
-          "challengeId",
-          "connectCodeId",
-          "status",
-          "expectedRevision",
-          "idempotencyKey"
-        ],
-        "title": "client.access.challenge_ack",
-        "type": "object",
-        "x-authority": "access-write",
-        "x-direction": "client-to-control-plane",
-        "x-message-class": "command"
-      },
-      "ClientAccessChallengeId": {
-        "description": "Identity of one pending access challenge sent to the Device Client before a grant is created.",
-        "pattern": "^cac_[0-9A-HJKMNP-TV-Z]{26}$",
-        "type": "string"
-      },
-      "ClientAccessChallengeMessage": {
-        "additionalProperties": false,
-        "description": "Asks the Device Client to verify that the challenged connect code generation is still valid before a ClientAccessGrant is created; the plaintext code never crosses this contract.",
-        "properties": {
-          "challengeId": {
-            "$ref": "#/components/schemas/ClientAccessChallengeId"
-          },
-          "clientInstanceId": {
-            "$ref": "#/components/schemas/ClientInstanceId"
-          },
-          "clientNodeId": {
-            "$ref": "#/components/schemas/ClientNodeId"
-          },
-          "codeDigest": {
-            "$ref": "#/components/schemas/Sha256Digest"
-          },
-          "connectCodeId": {
-            "$ref": "#/components/schemas/ClientConnectCodeId"
-          },
-          "expiresAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "kind": {
-            "const": "client.access.challenge"
-          },
-          "messageId": {
-            "$ref": "#/components/schemas/ClientControlMessageId"
-          },
-          "occurredAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "requesterUserId": {
-            "$ref": "#/components/schemas/UserId"
-          },
-          "schemaVersion": {
-            "$ref": "#/components/schemas/SchemaVersion"
-          },
-          "sequence": {
-            "$ref": "#/components/schemas/ClientExchangeSequence"
-          }
-        },
-        "required": [
-          "kind",
-          "schemaVersion",
-          "messageId",
-          "clientNodeId",
-          "clientInstanceId",
-          "sequence",
-          "occurredAt",
-          "challengeId",
-          "connectCodeId",
-          "codeDigest",
-          "requesterUserId",
-          "expiresAt"
-        ],
-        "title": "client.access.challenge",
-        "type": "object",
-        "x-authority": "access-write",
-        "x-direction": "control-plane-to-client",
-        "x-message-class": "request"
-      },
       "ClientAccessGrant": {
         "additionalProperties": false,
         "description": "Many-to-many user-to-client permission relation. A grant never implies occupancy. Ownership: Control Plane.",
@@ -3750,18 +3623,9 @@
         "title": "ClientCapacityReport",
         "type": "object"
       },
-      "ClientChallengeAckStatus": {
-        "description": "Device Client verdict for one access challenge.",
-        "enum": [
-          "confirmed",
-          "stale_generation"
-        ],
-        "title": "ClientChallengeAckStatus",
-        "type": "string"
-      },
       "ClientCommandAckMessage": {
         "additionalProperties": false,
-        "description": "Universal idempotent acknowledgement for control-plane-to-client commands that have no dedicated ack message.",
+        "description": "Durable command result in either direction. Server reports rejected client commands; Device acknowledges server commands without a dedicated result. Transport acknowledgement alone does not imply business success.",
         "properties": {
           "clientInstanceId": {
             "$ref": "#/components/schemas/ClientInstanceId"
@@ -3815,7 +3679,7 @@
         "title": "client.command_ack",
         "type": "object",
         "x-authority": "control-ack",
-        "x-direction": "client-to-control-plane",
+        "x-direction": "bidirectional",
         "x-message-class": "ack"
       },
       "ClientConnectCode": {
@@ -4008,9 +3872,6 @@
             "$ref": "#/components/schemas/ClientConnectCodePublishedMessage"
           },
           {
-            "$ref": "#/components/schemas/ClientAccessChallengeAckMessage"
-          },
-          {
             "$ref": "#/components/schemas/ClientOccupancyAckMessage"
           },
           {
@@ -4044,12 +3905,6 @@
             "$ref": "#/components/schemas/ClientCommandAckMessage"
           },
           {
-            "$ref": "#/components/schemas/ClientEnrollmentAcceptedMessage"
-          },
-          {
-            "$ref": "#/components/schemas/ClientAccessChallengeMessage"
-          },
-          {
             "$ref": "#/components/schemas/ClientOccupancyOfferMessage"
           },
           {
@@ -4072,9 +3927,6 @@
           },
           {
             "$ref": "#/components/schemas/ClientLockMessage"
-          },
-          {
-            "$ref": "#/components/schemas/ClientCredentialRotateMessage"
           },
           {
             "$ref": "#/components/schemas/ClientProviderReportMessage"
@@ -4115,7 +3967,6 @@
           "client.hello",
           "client.heartbeat",
           "client.connect_code.published",
-          "client.access.challenge_ack",
           "client.occupancy.ack",
           "client.occupancy.rejected",
           "client.repository.upsert",
@@ -4127,8 +3978,6 @@
           "client.candidate.retained",
           "client.candidate.apply_result",
           "client.command_ack",
-          "client.enrollment_accepted",
-          "client.access.challenge",
           "client.occupancy.offer",
           "client.occupancy.release",
           "client.occupancy.force_fence",
@@ -4137,7 +3986,6 @@
           "client.worker.stop",
           "client.candidate.apply",
           "client.client_lock",
-          "client.credential_rotate",
           "client.provider.report",
           "client.provider.apply",
           "client.extension.apply",
@@ -4150,128 +3998,11 @@
         "title": "ClientControlMessageKind",
         "type": "string"
       },
-      "ClientCredentialRotateMessage": {
-        "additionalProperties": false,
-        "description": "Requests device credential rotation; the rotation handshake and credential material stay outside this contract.",
-        "properties": {
-          "clientInstanceId": {
-            "$ref": "#/components/schemas/ClientInstanceId"
-          },
-          "clientNodeId": {
-            "$ref": "#/components/schemas/ClientNodeId"
-          },
-          "expectedRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "idempotencyKey": {
-            "$ref": "#/components/schemas/IdempotencyKey"
-          },
-          "kind": {
-            "const": "client.credential_rotate"
-          },
-          "messageId": {
-            "$ref": "#/components/schemas/ClientControlMessageId"
-          },
-          "occurredAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "reason": {
-            "$ref": "#/components/schemas/ClientCredentialRotateReason"
-          },
-          "schemaVersion": {
-            "$ref": "#/components/schemas/SchemaVersion"
-          },
-          "sequence": {
-            "$ref": "#/components/schemas/ClientExchangeSequence"
-          }
-        },
-        "required": [
-          "kind",
-          "schemaVersion",
-          "messageId",
-          "clientNodeId",
-          "clientInstanceId",
-          "sequence",
-          "occurredAt",
-          "reason",
-          "expectedRevision",
-          "idempotencyKey"
-        ],
-        "title": "client.credential_rotate",
-        "type": "object",
-        "x-authority": "control-command",
-        "x-direction": "control-plane-to-client",
-        "x-message-class": "command"
-      },
-      "ClientCredentialRotateReason": {
-        "description": "Why device credential rotation is requested; credential material itself never crosses this contract.",
-        "enum": [
-          "scheduled",
-          "suspected_compromise"
-        ],
-        "title": "ClientCredentialRotateReason",
-        "type": "string"
-      },
       "ClientDisplayName": {
         "description": "User-chosen display name for a ClientNode or repository binding.",
         "maxLength": 200,
         "minLength": 1,
         "type": "string"
-      },
-      "ClientEnrollmentAcceptedMessage": {
-        "additionalProperties": false,
-        "description": "Completes enrollment and returns the stable public Client ID; the public Client ID is not a credential. Device credential material never crosses this contract.",
-        "properties": {
-          "clientInstanceId": {
-            "$ref": "#/components/schemas/ClientInstanceId"
-          },
-          "clientNodeId": {
-            "$ref": "#/components/schemas/ClientNodeId"
-          },
-          "heartbeatIntervalMs": {
-            "maximum": 300000,
-            "minimum": 1000,
-            "type": "integer"
-          },
-          "kind": {
-            "const": "client.enrollment_accepted"
-          },
-          "messageId": {
-            "$ref": "#/components/schemas/ClientControlMessageId"
-          },
-          "occurredAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "publicClientId": {
-            "$ref": "#/components/schemas/PublicClientId"
-          },
-          "schemaVersion": {
-            "$ref": "#/components/schemas/SchemaVersion"
-          },
-          "sequence": {
-            "$ref": "#/components/schemas/ClientExchangeSequence"
-          },
-          "serverTime": {
-            "$ref": "#/components/schemas/Instant"
-          }
-        },
-        "required": [
-          "kind",
-          "schemaVersion",
-          "messageId",
-          "clientNodeId",
-          "clientInstanceId",
-          "sequence",
-          "occurredAt",
-          "publicClientId",
-          "serverTime",
-          "heartbeatIntervalMs"
-        ],
-        "title": "client.enrollment_accepted",
-        "type": "object",
-        "x-authority": "device-enrollment",
-        "x-direction": "control-plane-to-client",
-        "x-message-class": "response"
       },
       "ClientEnrollMessage": {
         "additionalProperties": false,
@@ -8878,6 +8609,700 @@
         ],
         "type": "object"
       },
+      "CoreToolAgentWaitProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "edge": {
+            "$ref": "#/components/schemas/CoreToolWaitEdgeProjection"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CoreToolWaitState"
+          }
+        },
+        "required": [
+          "edge",
+          "state"
+        ],
+        "type": "object"
+      },
+      "CoreToolCallProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "attemptId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "cellId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolOutputDelivery"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "disposition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolOutputDisposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolExecutionState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "inputValidation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolInputValidation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logicalId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "parentCallId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parentRequestSequence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionSequence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "toolName": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestSequence",
+          "logicalId",
+          "toolName",
+          "parentCallId",
+          "cellId",
+          "attemptId",
+          "execution",
+          "disposition",
+          "delivery",
+          "cancelled",
+          "inputValidation",
+          "parentRequestSequence"
+        ],
+        "type": "object"
+      },
+      "CoreToolCallReference": {
+        "additionalProperties": false,
+        "properties": {
+          "cellId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logicalId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "parentCallId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "toolName": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestSequence",
+          "logicalId",
+          "toolName",
+          "parentCallId",
+          "cellId"
+        ],
+        "type": "object"
+      },
+      "CoreToolCellLifecycle": {
+        "enum": [
+          "live",
+          "closed"
+        ],
+        "type": "string"
+      },
+      "CoreToolCellProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "cellId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/CoreToolCellLifecycle"
+          },
+          "parentRequestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          }
+        },
+        "required": [
+          "sequence",
+          "cellId",
+          "parentRequestSequence",
+          "lifecycle"
+        ],
+        "type": "object"
+      },
+      "CoreToolDiagnosticDelivery": {
+        "enum": [
+          "queued",
+          "offered"
+        ],
+        "type": "string"
+      },
+      "CoreToolDiagnosticKind": {
+        "enum": [
+          "repeated_operation",
+          "alternating_cycle",
+          "branch_expansion",
+          "wait_cycle",
+          "unavailable_wait"
+        ],
+        "type": "string"
+      },
+      "CoreToolDiagnosticProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolDiagnosticDelivery"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diagnosticId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/CoreToolCallReference"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "evidenceVersion": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolDiagnosticKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "question": {
+            "oneOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "waitGraph": {
+            "items": {
+              "$ref": "#/components/schemas/CoreToolWaitEdgeProjection"
+            },
+            "maxItems": 8,
+            "type": "array"
+          }
+        },
+        "required": [
+          "diagnosticId",
+          "evidenceVersion",
+          "kind",
+          "question",
+          "evidence",
+          "delivery"
+        ],
+        "type": "object"
+      },
+      "CoreToolExecutionState": {
+        "enum": [
+          "running",
+          "completed",
+          "uncertain"
+        ],
+        "type": "string"
+      },
+      "CoreToolFactKind": {
+        "enum": [
+          "request",
+          "cell",
+          "wait",
+          "reconciliation",
+          "diagnostic",
+          "progress",
+          "diagnostic_response",
+          "sharing",
+          "waiter_cancellation",
+          "input_binding",
+          "input_validation",
+          "agent_wait"
+        ],
+        "type": "string"
+      },
+      "CoreToolInputValidation": {
+        "enum": [
+          "verified",
+          "mismatch",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "CoreToolOutputDelivery": {
+        "enum": [
+          "pending",
+          "offered"
+        ],
+        "type": "string"
+      },
+      "CoreToolOutputDisposition": {
+        "enum": [
+          "pending",
+          "accepted",
+          "rejected"
+        ],
+        "type": "string"
+      },
+      "CoreToolRecoveryProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "businessId": {
+            "oneOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exitCode": {
+            "oneOf": [
+              {
+                "maximum": 2147483647,
+                "minimum": -2147483648,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CoreToolRecoveryState"
+          }
+        },
+        "required": [
+          "requestSequence",
+          "state",
+          "businessId",
+          "exitCode"
+        ],
+        "type": "object"
+      },
+      "CoreToolRecoveryState": {
+        "enum": [
+          "unavailable",
+          "unconfirmed",
+          "running",
+          "exited"
+        ],
+        "type": "string"
+      },
+      "CoreToolRuntimeFactPayload": {
+        "additionalProperties": false,
+        "description": "Original payload-free Codex Core tool fact carried by a lease-bound runtime.event. The source cursor is independent of the Worker transport sequence.",
+        "properties": {
+          "factJson": {
+            "maxLength": 32768,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": "winwincode.core-tool-fact.v1",
+            "type": "string"
+          },
+          "sourceSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "sourceThreadId": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "sourceThreadId",
+          "sourceSequence",
+          "factJson"
+        ],
+        "type": "object"
+      },
+      "CoreToolRuntimeProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "agentWait": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolAgentWaitProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "call": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolCallProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cell": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolCellProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diagnosis": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolDiagnosticProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CoreToolFactKind"
+          },
+          "recovery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolRecoveryProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sharing": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolSharingProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "sourceThreadId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "wait": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolWaitProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "sourceThreadId",
+          "sourceSequence",
+          "kind",
+          "call",
+          "cell",
+          "wait",
+          "diagnosis",
+          "sharing",
+          "recovery"
+        ],
+        "type": "object"
+      },
+      "CoreToolSharingKind": {
+        "enum": [
+          "reuse",
+          "merged"
+        ],
+        "type": "string"
+      },
+      "CoreToolSharingProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/CoreToolSharingKind"
+          },
+          "sourceAttemptId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sourceRequestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          }
+        },
+        "required": [
+          "sourceRequestSequence",
+          "sourceAttemptId",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitEdgeProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "deadlineUnixMs": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "logicalId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "source": {
+            "$ref": "#/components/schemas/CoreToolWaitNodeProjection"
+          },
+          "targetCount": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/CoreToolWaitNodeProjection"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          },
+          "treeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "treeId",
+          "requestSequence",
+          "logicalId",
+          "source",
+          "targets",
+          "targetCount",
+          "deadlineUnixMs"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitNodeKind": {
+        "enum": [
+          "thread",
+          "cell"
+        ],
+        "type": "string"
+      },
+      "CoreToolWaitNodeProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "cellId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CoreToolWaitNodeKind"
+          },
+          "ownerId": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopeId": {
+            "oneOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threadId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "threadId",
+          "ownerId",
+          "cellId",
+          "scopeId"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CoreToolWaitState"
+          },
+          "targetCellSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          }
+        },
+        "required": [
+          "requestSequence",
+          "targetCellSequence",
+          "state"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitState": {
+        "enum": [
+          "waiting",
+          "settled"
+        ],
+        "type": "string"
+      },
       "Count": {
         "maximum": 9007199254740991,
         "minimum": 0,
@@ -12907,6 +13332,18 @@
       },
       "DeviceProviderConfig": {
         "additionalProperties": false,
+        "not": {
+          "properties": {
+            "protocol": {
+              "not": {
+                "const": "openai_responses"
+              }
+            }
+          },
+          "required": [
+            "responsesStructuredOutput"
+          ]
+        },
         "properties": {
           "displayName": {
             "maxLength": 200,
@@ -12939,6 +13376,10 @@
             "maxLength": 128,
             "minLength": 1,
             "type": "string"
+          },
+          "responsesStructuredOutput": {
+            "$ref": "#/components/schemas/DeviceResponsesStructuredOutput",
+            "description": "Structured output transport for openai_responses. Omission uses json_schema. Explicit text uses the API default text format with schema instructions and local validation."
           }
         },
         "required": [
@@ -12983,7 +13424,10 @@
         "enum": [
           "anthropic_messages",
           "openai_chat_completions",
-          "canonical"
+          "openai_responses",
+          "canonical",
+          "codex_chatgpt",
+          "chatgpt_plan"
         ],
         "type": "string"
       },
@@ -13143,6 +13587,14 @@
           "repositoryBindingId"
         ],
         "type": "object"
+      },
+      "DeviceResponsesStructuredOutput": {
+        "enum": [
+          "json_schema",
+          "json_object",
+          "text"
+        ],
+        "type": "string"
       },
       "DiagnosticBaseline": {
         "additionalProperties": false,
@@ -14809,9 +15261,6 @@
             "$ref": "#/components/schemas/WorkerRegistrationResultMessage"
           },
           {
-            "$ref": "#/components/schemas/WorkerCapabilitiesMessage"
-          },
-          {
             "$ref": "#/components/schemas/WorkerHeartbeatMessage"
           },
           {
@@ -16444,7 +16893,7 @@
             }
           }
         ],
-        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
         "properties": {
           "ackSequence": {
             "$ref": "#/components/schemas/ExecutionAckSequence"
@@ -22240,6 +22689,9 @@
               }
             ]
           },
+          "coreTool": {
+            "$ref": "#/components/schemas/CoreToolRuntimeProjection"
+          },
           "exitCode": {
             "oneOf": [
               {
@@ -22289,7 +22741,8 @@
       "RuntimeActivityType": {
         "enum": [
           "command",
-          "test"
+          "test",
+          "tool"
         ],
         "type": "string"
       },
@@ -26691,54 +27144,6 @@
         "pattern": "^wct_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
-      "WorkerCapabilitiesMessage": {
-        "additionalProperties": false,
-        "description": "Replaces the registered capability snapshot for the current Worker instance.",
-        "properties": {
-          "capabilities": {
-            "$ref": "#/components/schemas/WorkerCapabilitySet"
-          },
-          "kind": {
-            "const": "worker.capabilities"
-          },
-          "messageId": {
-            "$ref": "#/components/schemas/ExecutionMessageId"
-          },
-          "observedAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "requestId": {
-            "$ref": "#/components/schemas/RequestId"
-          },
-          "schemaVersion": {
-            "$ref": "#/components/schemas/SchemaVersion"
-          },
-          "sentAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "workerId": {
-            "$ref": "#/components/schemas/WorkerId"
-          },
-          "workerInstanceId": {
-            "$ref": "#/components/schemas/WorkerInstanceId"
-          }
-        },
-        "required": [
-          "kind",
-          "schemaVersion",
-          "messageId",
-          "sentAt",
-          "requestId",
-          "workerId",
-          "workerInstanceId",
-          "observedAt",
-          "capabilities"
-        ],
-        "title": "worker.capabilities",
-        "type": "object",
-        "x-authority": "worker-registry",
-        "x-direction": "worker-to-control-plane"
-      },
       "WorkerCapabilityFeature": {
         "enum": [
           "artifact_stream",
@@ -28825,7 +29230,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:021609a0f7b04c8057310336c1b476c32cd7d50914fbdde937ab82163e2ee551",
+  "x-source-digest": "sha256:f1ca8ca96c4af8b1a654ac7b65dfa6322c3f8652f669f60552a8929e692438d9",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

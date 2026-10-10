@@ -1,0 +1,28 @@
+diff --git a/codex-rs/v8-poc/Cargo.toml b/codex-rs/v8-poc/Cargo.toml
+--- a/codex-rs/v8-poc/Cargo.toml
++++ b/codex-rs/v8-poc/Cargo.toml
+@@ -10,6 +10,7 @@
+ doctest = false
+ 
+ [features]
++default = ["sandbox"]
+ sandbox = ["v8/v8_enable_sandbox"]
+ 
+ [lints]
+diff --git a/codex-rs/v8-poc/src/lib.rs b/codex-rs/v8-poc/src/lib.rs
+--- a/codex-rs/v8-poc/src/lib.rs
++++ b/codex-rs/v8-poc/src/lib.rs
+@@ -1,4 +1,13 @@
+ //! Bazel-wired proof-of-concept crate reserved for future V8 experiments.
++
++// V8's macOS allocator checks the process code-signing entitlements.
++#[cfg(target_os = "macos")]
++#[link(name = "CoreFoundation", kind = "framework")]
++unsafe extern "C" {}
++
++#[cfg(target_os = "macos")]
++#[link(name = "Security", kind = "framework")]
++unsafe extern "C" {}
+ 
+ /// Returns the Bazel label for this proof-of-concept crate.
+ #[must_use]

@@ -457,11 +457,15 @@ function helperReleaseManifestIdentity({ root, artifactRoot, publicKeyHex, produ
     || !/^[A-Za-z0-9_-]{86}$/u.test(manifest.signature)) {
     fail('HELPER_RELEASE_INVALID', 'helper release manifest identity is invalid')
   }
+  const signatureBytes = Buffer.from(manifest.signature, 'base64url')
+  if (signatureBytes.toString('base64url') !== manifest.signature) {
+    fail('HELPER_RELEASE_INVALID', 'helper release signature encoding is invalid')
+  }
   const signatureValid = verify(
     null,
     helperReleaseSigningBytes(manifest),
     helperReleasePublicKey(publicKeyHex),
-    Buffer.from(manifest.signature, 'base64url'),
+    signatureBytes,
   )
   if (!signatureValid) fail('HELPER_RELEASE_INVALID', 'helper release signature is invalid')
   for (const binaryName of ['winwincode-server', 'winwincode-worker']) {

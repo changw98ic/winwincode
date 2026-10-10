@@ -79,7 +79,7 @@ fn generated_probe_evidence_leaf_contracts_are_closed_required_and_bounded() {
 #[test]
 fn every_canonical_execution_port_message_round_trips_through_the_shared_crate() {
     let messages = valid_messages();
-    assert_eq!(messages.len(), 31);
+    assert_eq!(messages.len(), 30);
 
     for message in messages {
         let kind = message["kind"].as_str().expect("message kind");
@@ -109,7 +109,6 @@ fn execution_port_messages_reject_unknown_fields_at_the_shared_boundary() {
 fn execution_port_inline_string_enums_reject_unknown_values() {
     let cases = [
         ("worker.register", "capabilities.platform"),
-        ("worker.capabilities", "capabilities.platform"),
         ("worker.registration_result", "status"),
         ("worker.registration_result", "leaseRecovery"),
         ("worker.heartbeat_ack", "status"),

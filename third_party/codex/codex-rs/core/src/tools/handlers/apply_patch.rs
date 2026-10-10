@@ -453,6 +453,10 @@ impl ApplyPatchHandler {
 }
 
 impl CoreToolRuntime for ApplyPatchHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Custom { .. })
     }

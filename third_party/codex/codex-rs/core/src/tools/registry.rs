@@ -53,6 +53,39 @@ pub use codex_tools::ToolExposure;
 /// Implementers provide the shared `ToolExecutor` behavior plus optional
 /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
 pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+    /// Declares the authority used for this exact registered implementation.
+    fn authorization_policy(&self) -> super::authorization::AuthorizationPolicy {
+        super::authorization::AuthorizationPolicy::HostOperation
+    }
+
+    /// Only runtimes with historical, self-contained output may opt in. Live
+    /// process/cell/account handles need an adapter-specific validity check.
+    fn supports_result_replay(&self) -> bool {
+        false
+    }
+
+    /// Queries the original business identity without executing or retrying it.
+    /// Absence of a receipt must remain unconfirmed; it is never proof of no effect.
+    fn reconcile_execution<'a>(
+        &'a self,
+        _original: &'a ToolInvocation,
+    ) -> BoxFuture<'a, codex_state::ToolRecoveryEvidence> {
+        Box::pin(async { codex_state::ToolRecoveryEvidence::Unavailable })
+    }
+
+    /// Core continuations remain typed until hooks accept the tool result.
+    fn handle_core(
+        &self,
+        invocation: ToolInvocation,
+    ) -> BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
+        Box::pin(async move {
+            self.handle(invocation).await.map(|output| CoreToolOutput {
+                output,
+                continuation: None,
+            })
+        })
+    }
+
     /// Whether this built-in control tool needs a structured tool-call event.
     fn is_builtin_control_tool(&self) -> bool {
         false
@@ -76,6 +109,12 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
     /// Returns the owning server only for MCP-backed tool runtimes.
     fn mcp_server_name(&self) -> Option<&str> {
         None
+    }
+
+    /// Whether this implementation reads the step's MCP connection scope.
+    /// Resource tools have a dynamic server and still depend on that scope.
+    fn uses_mcp_binding(&self) -> bool {
+        self.mcp_server_name().is_some()
     }
 
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
@@ -103,8 +142,10 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         invocation: &ToolInvocation,
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        let ToolPayload::Function { arguments } = &invocation.payload else {
-            return None;
+        let tool_input = match &invocation.payload {
+            ToolPayload::Function { arguments } => function_hook_tool_input(arguments),
+            ToolPayload::Custom { input } => Value::String(input.clone()),
+            ToolPayload::ToolSearch { .. } => return None,
         };
 
         Some(PostToolUsePayload {
@@ -112,20 +153,25 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
             tool_use_id: result.post_tool_use_id(&invocation.call_id),
             tool_input: result
                 .post_tool_use_input(&invocation.payload)
-                .unwrap_or_else(|| function_hook_tool_input(arguments)),
+                .unwrap_or(tool_input),
             tool_response: result
                 .post_tool_use_response(&invocation.call_id, &invocation.payload)
                 .or_else(|| {
                     // Most function tools can expose their model-facing output
                     // as the hook response. Outputs with a more stable hook
                     // contract should override post_tool_use_response above.
-                    let ResponseInputItem::FunctionCallOutput {
-                        output: FunctionCallOutputPayload { body, .. },
-                        ..
-                    } = result.to_response_item(&invocation.call_id, &invocation.payload)
-                    else {
-                        return None;
-                    };
+                    let body =
+                        match result.to_response_item(&invocation.call_id, &invocation.payload) {
+                            ResponseInputItem::FunctionCallOutput {
+                                output: FunctionCallOutputPayload { body, .. },
+                                ..
+                            }
+                            | ResponseInputItem::CustomToolCallOutput {
+                                output: FunctionCallOutputPayload { body, .. },
+                                ..
+                            } => body,
+                            _ => return None,
+                        };
 
                     serde_json::to_value(body).ok()
                 })?,
@@ -133,13 +179,15 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
     }
 
     fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
-        let ToolPayload::Function { arguments } = &invocation.payload else {
-            return None;
+        let tool_input = match &invocation.payload {
+            ToolPayload::Function { arguments } => function_hook_tool_input(arguments),
+            ToolPayload::Custom { input } => Value::String(input.clone()),
+            ToolPayload::ToolSearch { .. } => return None,
         };
 
         Some(PreToolUsePayload {
             tool_name: function_hook_tool_name(invocation),
-            tool_input: function_hook_tool_input(arguments),
+            tool_input,
         })
     }
 
@@ -152,20 +200,33 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         invocation: ToolInvocation,
         updated_input: Value,
     ) -> Result<ToolInvocation, FunctionCallError> {
-        let ToolPayload::Function { .. } = &invocation.payload else {
-            return Err(FunctionCallError::RespondToModel(
-                "hook input rewrite received unsupported function tool payload".to_string(),
-            ));
+        let payload = match &invocation.payload {
+            ToolPayload::Custom { .. } => ToolPayload::Custom {
+                input: updated_input
+                    .as_str()
+                    .ok_or_else(|| {
+                        FunctionCallError::RespondToModel(
+                            "freeform hook input must remain a string".to_string(),
+                        )
+                    })?
+                    .to_string(),
+            },
+            ToolPayload::Function { .. } => ToolPayload::Function {
+                arguments: serde_json::to_string(&updated_input).map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to serialize rewritten {} arguments: {err}",
+                        flat_tool_name(&invocation.tool_name)
+                    ))
+                })?,
+            },
+            ToolPayload::ToolSearch { .. } => {
+                return Err(FunctionCallError::RespondToModel(
+                    "hook input rewrite received unsupported tool search payload".to_string(),
+                ));
+            }
         };
-
-        let arguments = serde_json::to_string(&updated_input).map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "failed to serialize rewritten {} arguments: {err}",
-                flat_tool_name(&invocation.tool_name)
-            ))
-        })?;
         Ok(ToolInvocation {
-            payload: ToolPayload::Function { arguments },
+            payload,
             ..invocation
         })
     }
@@ -189,11 +250,17 @@ pub(crate) trait ToolArgumentDiffConsumer: Send {
     }
 }
 
+pub(crate) struct CoreToolOutput {
+    pub(crate) output: Box<dyn ToolOutput>,
+    pub(crate) continuation: Option<super::parallel::ToolContinuation>,
+}
+
 pub(crate) struct AnyToolResult {
     pub(crate) call_id: String,
     pub(crate) payload: ToolPayload,
     pub(crate) result: Box<dyn ToolOutput>,
     pub(crate) post_tool_use_payload: Option<PostToolUsePayload>,
+    pub(crate) continuation: Option<super::parallel::ToolContinuation>,
 }
 
 impl AnyToolResult {
@@ -490,6 +557,41 @@ impl ToolRegistry {
         mut invocation: ToolInvocation,
         terminal_outcome_reached: Option<Arc<AtomicBool>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
+        let direct_surface_rejected = super::effective_tool_mode(&invocation.turn)
+            == codex_protocol::openai_models::ToolMode::CodeModeOnly
+            && !matches!(
+                invocation.source,
+                super::context::ToolCallSource::CodeMode { .. }
+            )
+            && !(invocation.tool_name.is_default_namespace()
+                && matches!(
+                    invocation.tool_name.name.as_str(),
+                    codex_code_mode::PUBLIC_TOOL_NAME | codex_code_mode::WAIT_TOOL_NAME
+                ));
+        let facts = match super::execution_facts::ToolFactRecord::begin(&invocation).await? {
+            super::execution_facts::ToolFactAdmission::New(facts) => Arc::new(facts),
+            super::execution_facts::ToolFactAdmission::Replay(replay) => {
+                if direct_surface_rejected {
+                    return Err(FunctionCallError::RespondToModel(format!(
+                        "tool {} must be invoked through Code Mode exec",
+                        invocation.tool_name
+                    )));
+                }
+                return super::result_recovery::recover(
+                    replay,
+                    &invocation,
+                    self.tool(&invocation.tool_name),
+                )
+                .await;
+            }
+        };
+        if direct_surface_rejected {
+            facts.deny().await?;
+            return Err(FunctionCallError::RespondToModel(format!(
+                "tool {} must be invoked through Code Mode exec",
+                invocation.tool_name
+            )));
+        }
         let tool_name = invocation.tool_name.clone();
         let tool_name_flat = flat_tool_name(&tool_name);
         let call_id_owned = invocation.call_id.clone();
@@ -540,6 +642,7 @@ impl ToolRegistry {
                 );
                 let err = FunctionCallError::RespondToModel(message);
                 dispatch_trace.record_failed(&err);
+                facts.deny().await?;
                 return Err(err);
             }
         };
@@ -556,7 +659,9 @@ impl ToolRegistry {
             }
         }
         if !tool.matches_kind(&invocation.payload) {
-            let message = format!("tool {tool_name} invoked with incompatible payload");
+            let message = format!(
+                "tool {tool_name} invoked with incompatible payload. Use the tool's declared input format."
+            );
             let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
             otel.tool_result_with_tags(
                 tool_name_flat.as_ref(),
@@ -568,8 +673,9 @@ impl ToolRegistry {
                 &tool_result_tags,
                 &extra_trace_fields,
             );
-            let err = FunctionCallError::Fatal(message);
+            let err = FunctionCallError::RespondToModel(message);
             dispatch_trace.record_failed(&err);
+            facts.deny().await?;
             return Err(err);
         }
 
@@ -596,6 +702,7 @@ impl ToolRegistry {
                         ToolCallOutcome::Blocked,
                     )
                     .await;
+                    facts.deny().await?;
                     return Err(err);
                 }
                 PreToolUseHookResult::Continue {
@@ -618,6 +725,7 @@ impl ToolRegistry {
                             },
                         )
                         .await;
+                        facts.deny().await?;
                         return Err(err);
                     }
                 },
@@ -627,6 +735,27 @@ impl ToolRegistry {
             }
         }
 
+        if let Err(err) = super::authorization::authorize(&invocation, tool.as_ref()).await {
+            if tool.is_builtin_control_tool() {
+                let mut analytics = ControlToolCallGuard::new(&invocation);
+                analytics.finish(ControlToolCallStatus::Rejected);
+            }
+            dispatch_trace.record_failed(&err);
+            notify_tool_finish_if_unclaimed(
+                &invocation,
+                terminal_outcome_reached.as_deref(),
+                ToolCallOutcome::Blocked,
+            )
+            .await;
+            facts.deny().await?;
+            return Err(err);
+        }
+
+        // Keep the logical sharing lease through post hooks and durable acceptance.
+        let mut dispatch =
+            super::tool_sharing::ToolDispatch::prepare(&invocation, tool.clone(), facts.clone())
+                .await?;
+        super::tool_diagnostics::ToolDiagnostics::refresh(&invocation.session).await;
         notify_tool_start(&invocation).await;
         let mut control_tool_analytics = tool
             .is_builtin_control_tool()
@@ -662,8 +791,9 @@ impl ToolRegistry {
                 || {
                     let tool = tool.clone();
                     let response_cell = &response_cell;
+                    let dispatch = &mut dispatch;
                     async move {
-                        match handle_any_tool(tool.as_ref(), invocation_for_tool).await {
+                        match dispatch.run(invocation_for_tool, tool).await {
                             Ok(result) => {
                                 let preview = result.result.log_preview();
                                 let success = result.result.success_for_logging();
@@ -677,6 +807,14 @@ impl ToolRegistry {
                 },
             )
             .await;
+        {
+            let guard = response_cell.lock().await;
+            let snapshot = guard
+                .as_ref()
+                .map(super::execution_facts::snapshot)
+                .transpose()?;
+            facts.completed(snapshot).await?;
+        }
         let success = match &result {
             Ok((_, success)) => *success,
             Err(_) => false,
@@ -757,8 +895,9 @@ impl ToolRegistry {
                         let message = outcome.feedback_message.unwrap_or_else(|| {
                             "PostToolUse hook blocked the tool result".to_string()
                         });
-                        let err = FunctionCallError::RespondToModel(message);
+                        let err = FunctionCallError::RespondToModel(message.clone());
                         dispatch_trace.record_failed(&err);
+                        facts.rejected(&message).await?;
                         return Err(err);
                     }
                     if let Some(feedback_message) = outcome.feedback_message {
@@ -771,16 +910,56 @@ impl ToolRegistry {
                         });
                     }
                 }
+                if let Err(error) =
+                    super::tool_sharing::revalidate_delivery(&invocation, tool.as_ref(), &facts)
+                        .await
+                {
+                    facts
+                        .rejected("shared_result_authority_or_input_expired")
+                        .await?;
+                    dispatch_trace.record_failed(&error);
+                    return Err(error);
+                }
+                facts
+                    .accepted(super::execution_facts::snapshot(&result)?)
+                    .await?;
+                if let Err(error) = facts
+                    .store
+                    .record_verified_tool_progress(
+                        &invocation.session.thread_id.to_string(),
+                        facts.sequence,
+                    )
+                    .await
+                {
+                    tracing::warn!(request_sequence = facts.sequence, %error,
+                        "failed to record optional tool diagnostic progress");
+                }
                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+                if let Some(continuation) = &result.continuation
+                    && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
+                        &invocation.source
+                {
+                    invocation
+                        .session
+                        .services
+                        .code_mode_service
+                        .terminal_handoffs
+                        .publish(
+                            codex_code_mode::CellId::new(cell_id.clone()),
+                            continuation.clone(),
+                        )?;
+                }
                 dispatch_trace.record_completed(
                     &invocation,
                     &result.call_id,
                     &result.payload,
                     result.result.as_ref(),
                 );
+                facts.offered().await?;
                 Ok(result)
             }
             Err(err) => {
+                facts.rejected("handler_result_unknown").await?;
                 dispatch_trace.record_failed(&err);
                 Err(err)
             }
@@ -801,13 +980,16 @@ async fn notify_tool_finish_if_unclaimed(
     true
 }
 
-async fn handle_any_tool(
+pub(super) async fn handle_any_tool(
     tool: &dyn CoreToolRuntime,
     invocation: ToolInvocation,
 ) -> Result<AnyToolResult, FunctionCallError> {
     let call_id = invocation.call_id.clone();
     let payload = invocation.payload.clone();
-    let output = tool.handle(invocation.clone()).await?;
+    let CoreToolOutput {
+        output,
+        continuation,
+    } = tool.handle_core(invocation.clone()).await?;
     if output.contains_external_context()
         && invocation.turn.config.memories.disable_on_external_context
     {
@@ -825,6 +1007,7 @@ async fn handle_any_tool(
         payload,
         result: output,
         post_tool_use_payload,
+        continuation,
     })
 }
 

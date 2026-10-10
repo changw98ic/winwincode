@@ -15,11 +15,10 @@ use std::fmt;
 
 use winwincode_domain::Instant;
 use winwincode_storage::{
-    AccessChallengeCreation, AccessChallengeRecord, AccessGrantIssuance, AccessGrantRecord,
-    AttemptDimension, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
-    ConnectAuditEntry, ConnectChallengeVerdict, ConnectCodeConsume, ConnectCodePublication,
-    ConnectCodeRecord, ConnectCodeRevocation, ConnectGrantReceipt, GrantPermissions, GrantSource,
-    SqliteStorage,
+    AccessGrantIssuance, AccessGrantRecord, AttemptDimension, ClientConnectStoreError,
+    ClientConnectStoreErrorKind, ConnectAttemptState, ConnectAuditEntry, ConnectCodeConsume,
+    ConnectCodePublication, ConnectCodeRecord, ConnectCodeRevocation, ConnectGrantReceipt,
+    GrantPermissions, GrantSource, SqliteStorage,
 };
 
 /// Stable service failure categories.
@@ -29,6 +28,10 @@ pub enum ClientConnectServiceErrorKind {
     InvalidInput,
     /// The client node identity does not exist.
     UnknownClientNode,
+    /// The device has disabled new connections.
+    ClientConnectionsForbidden,
+    /// The device is locally locked.
+    ClientLocked,
     /// No connect code matches the requested identity or presented digest.
     UnknownConnectCode,
     /// No access grant matches the requested identity.
@@ -39,7 +42,7 @@ pub enum ClientConnectServiceErrorKind {
     ConnectCodeExpired,
     /// The connect code has no remaining verification attempts.
     AttemptsExhausted,
-    /// The challenge ACK names a different code generation.
+    /// The expected generation differs from the Server-owned code.
     GenerationMismatch,
     /// A connect code digest is already registered.
     ConnectCodeDigestConflict,
@@ -48,8 +51,6 @@ pub enum ClientConnectServiceErrorKind {
     /// An active grant for the user and client already exists, or the grant
     /// id is already used.
     AccessGrantConflict,
-    /// A challenge id is already used, or the challenge was already settled.
-    ChallengeConflict,
     /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
     /// The supplied `expectedRevision` no longer matches the durable revision.
@@ -92,6 +93,12 @@ impl From<ClientConnectStoreError> for ClientConnectServiceError {
                 ClientConnectStoreErrorKind::UnknownClientNode => {
                     ClientConnectServiceErrorKind::UnknownClientNode
                 }
+                ClientConnectStoreErrorKind::ClientConnectionsForbidden => {
+                    ClientConnectServiceErrorKind::ClientConnectionsForbidden
+                }
+                ClientConnectStoreErrorKind::ClientLocked => {
+                    ClientConnectServiceErrorKind::ClientLocked
+                }
                 ClientConnectStoreErrorKind::UnknownConnectCode => {
                     ClientConnectServiceErrorKind::UnknownConnectCode
                 }
@@ -118,9 +125,6 @@ impl From<ClientConnectStoreError> for ClientConnectServiceError {
                 }
                 ClientConnectStoreErrorKind::AccessGrantConflict => {
                     ClientConnectServiceErrorKind::AccessGrantConflict
-                }
-                ClientConnectStoreErrorKind::ChallengeConflict => {
-                    ClientConnectServiceErrorKind::ChallengeConflict
                 }
                 ClientConnectStoreErrorKind::IllegalStateTransition => {
                     ClientConnectServiceErrorKind::IllegalStateTransition
@@ -295,16 +299,16 @@ impl<'storage> ConnectCodeService<'storage> {
     /// on the `active` code row, and the losing transaction rolls back
     /// entirely, so no second grant can appear. The first user ever granted
     /// on the Client receives `use+manage+share`; every later user receives
-    /// `use` (plan 11.5). The expiry and remaining-attempt budgets are
-    /// validated inside the same transaction.
+    /// `use` (plan 11.5). The current device connection policy, expiry, and
+    /// remaining-attempt budgets are validated inside the same transaction.
     ///
     /// # Errors
     ///
     /// Rejects an unknown or digest-mismatched code (indistinguishable by
     /// design), a code that is not `active`, an expired code, an exhausted
-    /// attempt budget, a challenge-ACK generation mismatch, an unknown client
-    /// node, an already-active grant for the user and client, or storage
-    /// failure.
+    /// attempt budget, a stored generation mismatch, an unknown client
+    /// node, a device policy forbidding new connections, an already-active
+    /// grant for the user and client, or storage failure.
     pub fn consume_and_grant(
         &mut self,
         consume: &ConnectCodeConsume,
@@ -375,80 +379,6 @@ impl<'storage> ConnectCodeService<'storage> {
             .connect_attempts_blocked(dimension, subject_key, window_anchor, max_attempts)?)
     }
 
-    /// Creates one pending `client.access.challenge` (plan 11.4, step 5).
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical command, an unknown client node, an
-    /// already-used challenge id, or storage failure.
-    pub fn create_challenge(
-        &mut self,
-        creation: &AccessChallengeCreation,
-        now: &Instant,
-    ) -> Result<AccessChallengeRecord, ClientConnectServiceError> {
-        Ok(self
-            .storage
-            .client_connect_ledger()?
-            .create_challenge(creation, now)?)
-    }
-
-    /// Settles one pending challenge with the Device Client's challenge-ACK
-    /// verdict (plan 11.4, step 7). Unknown or mismatched acknowledgements
-    /// settle nothing and read as `None`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical identity or storage failure.
-    pub fn settle_challenge(
-        &mut self,
-        challenge_id: &str,
-        client_node_id: &str,
-        connect_code_id: &str,
-        verdict: ConnectChallengeVerdict,
-        now: &Instant,
-    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
-        Ok(self.storage.client_connect_ledger()?.settle_challenge(
-            challenge_id,
-            client_node_id,
-            connect_code_id,
-            verdict,
-            now,
-        )?)
-    }
-
-    /// Returns one durable access challenge projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical challenge identity or storage failure.
-    pub fn challenge_snapshot(
-        &mut self,
-        challenge_id: &str,
-    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
-        Ok(self
-            .storage
-            .client_connect_ledger()?
-            .challenge_snapshot(challenge_id)?)
-    }
-
-    /// Returns the one live pending challenge of a user on a client for a
-    /// connect code, if any.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or storage failure.
-    pub fn pending_challenge_for_subject(
-        &mut self,
-        client_node_id: &str,
-        requester_user_id: &str,
-        connect_code_id: &str,
-    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
-        Ok(self
-            .storage
-            .client_connect_ledger()?
-            .pending_challenge_for_subject(client_node_id, requester_user_id, connect_code_id)?)
-    }
-
     /// Appends one connect-domain authorization audit entry.
     ///
     /// # Errors
@@ -487,7 +417,7 @@ impl<'storage> AccessGrantService<'storage> {
     ///
     /// The `connect_code` source is rejected here: that origin may only be
     /// produced by the atomic consume path, which owns the required Device
-    /// Client challenge ACK.
+    /// Server-side code validation.
     ///
     /// # Errors
     ///

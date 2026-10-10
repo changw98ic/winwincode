@@ -60,10 +60,9 @@ pub use artifact::{
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
 };
 pub use client_connect::{
-    AccessChallengeCreation, AccessChallengeRecord, AccessGrantIssuance, AccessGrantRecord,
-    AccessGrantState, AttemptDimension, ClientConnectLedger, ClientConnectStoreError,
-    ClientConnectStoreErrorKind, ConnectAttemptState, ConnectAuditAction, ConnectAuditEntry,
-    ConnectChallengeState, ConnectChallengeVerdict, ConnectCodeConsume, ConnectCodePublication,
+    AccessGrantIssuance, AccessGrantRecord, AccessGrantState, AttemptDimension,
+    ClientConnectLedger, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
+    ConnectAuditAction, ConnectAuditEntry, ConnectCodeConsume, ConnectCodePublication,
     ConnectCodeRecord, ConnectCodeRevocation, ConnectCodeState, ConnectGrantReceipt,
     GrantPermissions, GrantSource, GrantTrustMode, connect_attempt_window_anchor,
 };
@@ -202,10 +201,10 @@ pub use worker_fleet_operations::{
 };
 pub use worker_outbound_queue::{
     WorkerOutboundAcknowledgement, WorkerOutboundAuthority, WorkerOutboundClaim,
-    WorkerOutboundClaimPage, WorkerOutboundEnqueueReceipt, WorkerOutboundEnqueueRequest,
-    WorkerOutboundMessageState, WorkerOutboundPageCursor, WorkerOutboundQueue,
-    WorkerOutboundQueueConfig, WorkerOutboundQueueError, WorkerOutboundQueueErrorCode,
-    WorkerOutboundSettlement,
+    WorkerOutboundClaimPage, WorkerOutboundConfirmationProgress, WorkerOutboundEnqueueReceipt,
+    WorkerOutboundEnqueueRequest, WorkerOutboundMessageState, WorkerOutboundPageCursor,
+    WorkerOutboundQueue, WorkerOutboundQueueConfig, WorkerOutboundQueueError,
+    WorkerOutboundQueueErrorCode, WorkerOutboundSettlement,
 };
 pub use worker_placement::{
     WorkerAffinityFailure, WorkerPlacementCandidate, WorkerPlacementCandidateRejection,
@@ -2051,6 +2050,24 @@ impl std::error::Error for StorageError {}
 /// implement an at-least-once outbox with stable event ids.
 #[doc = "winwincode-community-persistence-port"]
 pub trait ProductStateStorage: Send {
+    /// Reads validated Candidate retention receipts at this storage's cut.
+    /// The controlled root remains caller-owned authority. Implementations
+    /// verify physical Git facts without repairing refs or advancing intents.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unavailable storage, corrupt receipts, changed repository
+    /// identities, or physical references inconsistent with settled receipts.
+    fn read_candidate_git_retention_for_delivery(
+        &self,
+        _controlled_repository_root: &Path,
+        _delivery_id: &DeliveryId,
+    ) -> Result<Vec<CandidateGitPinReceipt>, CandidateGitRetentionError> {
+        Err(CandidateGitRetentionError::adapter(
+            "Candidate retention reads are unavailable",
+        ))
+    }
+
     /// Commits a state mutation and its server-sealed managed-app config as
     /// one durable fact. `SQLite` overrides this with one transaction. Other
     /// adapters must override this method before accepting a config; a
@@ -2205,6 +2222,19 @@ pub trait ProductStateStorage: Send {
         &self,
         _job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+        Ok(None)
+    }
+
+    /// Proves a historical lease window from accepted Registry claim/renewal
+    /// receipts. This is identity evidence, not permission to start new work
+    /// after expiry or settlement.
+    ///
+    /// # Errors
+    /// Returns corrupt receipt or adapter failures.
+    fn load_accepted_execution_lease_for_period(
+        &mut self,
+        _period: &ExecutionLeaseRecord,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
         Ok(None)
     }
 
@@ -2546,7 +2576,7 @@ pub trait ProductStateStorage: Send {
 /// Local `SQLite` implementation of [`ProductStateStorage`].
 pub struct SqliteStorage {
     connection: Option<Connection>,
-    read_connection: Mutex<Connection>,
+    read_connection: Option<Mutex<Connection>>,
     database_path: PathBuf,
 }
 
@@ -2569,6 +2599,90 @@ impl SqliteStorage {
 }
 
 impl SqliteStorage {
+    /// Opens an application sidecar under the same bounded initialization
+    /// boundary as product-state storage.
+    ///
+    /// The initializer configures journal settings and prepares its existing
+    /// schema while openings of the same canonical database are serialized.
+    /// It must finish schema preparation before returning, without external
+    /// I/O or recursively opening this database. Runtime reads and writes use
+    /// the ordinary busy timeout after initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an open failure through `E::from`, or preserves the
+    /// initializer's own error. Lock waiting and `SQLite` busy retries share one
+    /// five-second deadline. This method does not retry application writes.
+    pub fn open_sidecar<E>(
+        database_path: impl AsRef<Path>,
+        initialize: impl FnOnce(&Connection) -> Result<(), E>,
+    ) -> Result<Connection, E>
+    where
+        E: From<StorageError>,
+    {
+        let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
+        Self::open_sidecar_until(database_path, open_deadline, initialize)
+    }
+
+    /// Opens a sidecar within a caller-owned initialization deadline.
+    ///
+    /// Use the same deadline for any safe schema-initialization retries so
+    /// reopening a connection cannot restart the waiting budget. The same
+    /// per-database lock and `SQLite` busy handler apply as in [`Self::open_sidecar`].
+    /// The caller may shorten the default five-second limit, but not extend it.
+    /// Runtime reads and writes are not retried by this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an open or deadline failure through `E::from`, or preserves the
+    /// initializer's own error. An expired deadline never enters the initializer.
+    pub fn open_sidecar_until<E>(
+        database_path: impl AsRef<Path>,
+        open_deadline: StdInstant,
+        initialize: impl FnOnce(&Connection) -> Result<(), E>,
+    ) -> Result<Connection, E>
+    where
+        E: From<StorageError>,
+    {
+        let open_deadline = open_deadline.min(StdInstant::now() + SQLITE_OPEN_TIMEOUT);
+        remaining_sqlite_open_time(open_deadline).map_err(E::from)?;
+        let requested_path = database_path.as_ref();
+        let name = requested_path.file_name().ok_or_else(|| {
+            E::from(StorageError::invalid_input(
+                "SQLite sidecar file name is missing",
+            ))
+        })?;
+        let parent = requested_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .map_err(|error| E::from(StorageError::adapter(error.to_string())))?;
+        let canonical_parent = fs::canonicalize(parent)
+            .map_err(|error| E::from(StorageError::adapter(error.to_string())))?;
+        let database_path = canonical_parent.join(name);
+        let open_lock = sqlite_open_lock(&database_path, open_deadline).map_err(E::from)?;
+        let _open_guard =
+            acquire_mutex_before_open_deadline(&open_lock, open_deadline).map_err(E::from)?;
+        let previous_deadline = SQLITE_OPEN_BUSY_DEADLINE.get();
+        let result = (|| {
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+            let connection = Connection::open_with_flags(&database_path, flags)
+                .map_err(|error| E::from(sql_error(error)))?;
+            set_open_busy_deadline(&connection, open_deadline).map_err(E::from)?;
+            initialize(&connection)?;
+            remaining_sqlite_open_time(open_deadline).map_err(E::from)?;
+            connection
+                .busy_timeout(SQLITE_BUSY_TIMEOUT)
+                .map_err(|error| E::from(sql_error(error)))?;
+            Ok(connection)
+        })();
+        SQLITE_OPEN_BUSY_DEADLINE.set(previous_deadline);
+        result
+    }
+
     /// Opens the local database and applies all schema migrations before return.
     ///
     /// # Errors
@@ -2629,7 +2743,44 @@ impl SqliteStorage {
 
         Ok(Self {
             connection: Some(connection),
-            read_connection: Mutex::new(read_connection),
+            read_connection: Some(Mutex::new(read_connection)),
+            database_path,
+        })
+    }
+
+    /// Pins a read-only transaction on an already initialized local database.
+    /// Every read, including runtime facts and their event cursor, uses this
+    /// connection until the snapshot is dropped. This never runs migrations,
+    /// recovery, an outbox replay, or a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the existing database cannot be read.
+    pub fn open_read_snapshot(database_path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let database_path = fs::canonicalize(database_path).map_err(|error| {
+            StorageError::adapter(format!("failed to resolve the existing database: {error}"))
+        })?;
+        let connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(sql_error)?;
+        connection
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(sql_error)?;
+        connection
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(sql_error)?;
+        // BEGIN is lazy. Read the database before releasing the application's
+        // mutation lock so later reads cannot establish a different cut.
+        connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(sql_error)?;
+        Ok(Self {
+            connection: Some(connection),
+            read_connection: None,
             database_path,
         })
     }
@@ -2644,6 +2795,9 @@ impl SqliteStorage {
     }
 
     pub(crate) fn connection_mut(&mut self) -> Result<&mut Connection, StorageError> {
+        if self.read_connection.is_none() {
+            return Err(StorageError::adapter("SQLite snapshot is read-only"));
+        }
         self.connection.as_mut().ok_or_else(StorageError::closed)
     }
 
@@ -2789,10 +2943,24 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Sto
     open_deadline
         .checked_duration_since(StdInstant::now())
         .filter(|remaining| *remaining >= Duration::from_millis(1))
-        .ok_or_else(|| StorageError::adapter("SQLite storage open exceeded its five-second limit"))
+        .ok_or_else(|| StorageError::adapter("SQLite storage initialization deadline exceeded"))
 }
 
 impl ProductStateStorage for SqliteStorage {
+    fn read_candidate_git_retention_for_delivery(
+        &self,
+        controlled_repository_root: &Path,
+        delivery_id: &DeliveryId,
+    ) -> Result<Vec<CandidateGitPinReceipt>, CandidateGitRetentionError> {
+        git_candidate_retention::read_candidate_retention_receipts(
+            self.connection().map_err(|_| {
+                CandidateGitRetentionError::adapter("Candidate retention storage is unavailable")
+            })?,
+            controlled_repository_root,
+            delivery_id,
+        )
+    }
+
     fn commit_with_managed_app_run_config(
         &mut self,
         commit: &StateCommit,
@@ -2898,6 +3066,14 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
         repository_scheduler::load_execution_job_by_id(self.connection()?, job_id)
+    }
+
+    fn load_accepted_execution_lease_for_period(
+        &mut self,
+        period: &ExecutionLeaseRecord,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        self.execution_registry()?
+            .load_accepted_lease_for_period(period)
     }
 
     fn load_work_run_device_binding_facts(
@@ -3175,21 +3351,26 @@ impl ProductStateStorage for SqliteStorage {
         key: &ProjectionEventStreamKey,
         expected: Option<&ProjectionEventCursor>,
     ) -> Result<ProjectionReadCut, StorageError> {
-        let mut connection = self.read_connection.lock().map_err(|_| {
+        let Some(read_connection) = self.read_connection.as_ref() else {
+            return load_projection_read_cut_from_connection(
+                self.connection()?,
+                state_stream_ids,
+                key,
+                expected,
+            );
+        };
+        let mut connection = read_connection.lock().map_err(|_| {
             StorageError::adapter("SQLite projection read connection lock is poisoned")
         })?;
         let transaction = connection.transaction().map_err(sql_error)?;
-        let states = state_stream_ids
-            .iter()
-            .map(|stream_id| load_state_from_connection(&transaction, stream_id))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let projection_event_cursor =
-            load_projection_event_cursor_from_connection(&transaction, key, expected)?;
+        let cut = load_projection_read_cut_from_connection(
+            &transaction,
+            state_stream_ids,
+            key,
+            expected,
+        )?;
         transaction.commit().map_err(sql_error)?;
-        Ok(ProjectionReadCut::new(states, projection_event_cursor))
+        Ok(cut)
     }
 
     fn load_journal(
@@ -3306,19 +3487,44 @@ impl ProductStateStorage for SqliteStorage {
             read_connection,
             database_path: _,
         } = *self;
-        let read_connection = read_connection.into_inner().map_err(|_| {
-            StorageError::adapter("SQLite projection read connection lock is poisoned")
-        })?;
-        read_connection
-            .close()
-            .map_err(|(_, error)| sql_error(error))?;
+        let read_only = read_connection.is_none();
+        if let Some(read_connection) = read_connection {
+            read_connection
+                .into_inner()
+                .map_err(|_| {
+                    StorageError::adapter("SQLite projection read connection lock is poisoned")
+                })?
+                .close()
+                .map_err(|(_, error)| sql_error(error))?;
+        }
         let connection = connection.take().ok_or_else(StorageError::closed)?;
         connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute_batch(if read_only {
+                "ROLLBACK"
+            } else {
+                "PRAGMA wal_checkpoint(PASSIVE);"
+            })
             .map_err(sql_error)?;
         connection.close().map_err(|(_, error)| sql_error(error))?;
         Ok(())
     }
+}
+
+fn load_projection_read_cut_from_connection(
+    connection: &Connection,
+    state_stream_ids: &[String],
+    key: &ProjectionEventStreamKey,
+    expected: Option<&ProjectionEventCursor>,
+) -> Result<ProjectionReadCut, StorageError> {
+    let states = state_stream_ids
+        .iter()
+        .map(|stream_id| load_state_from_connection(connection, stream_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let cursor = load_projection_event_cursor_from_connection(connection, key, expected)?;
+    Ok(ProjectionReadCut::new(states, cursor))
 }
 
 fn validate_state_execution_job_authority(
@@ -3770,11 +3976,17 @@ fn pending_audit_events(connection: &Connection) -> Result<Vec<PendingAuditEvent
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(sql_error)?;
-    rows.map(|row| {
-        let (event_id, payload) = row.map_err(sql_error)?;
-        PendingAuditEvent::new(event_id, payload)
-    })
-    .collect()
+    let result = rows
+        .map(|row| {
+            let (event_id, payload) = row.map_err(sql_error)?;
+            PendingAuditEvent::new(event_id, payload)
+        })
+        .collect();
+    #[cfg(test)]
+    storage_mechanism_regression::audit_query(
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    result
 }
 
 fn replay_receipt(
@@ -4838,48 +5050,54 @@ fn receipt_events(
             },
         )
         .map_err(sql_error)?;
-    rows.map(|row| {
-        let (
-            sequence,
-            event_id,
-            topic,
-            payload,
-            scope_key,
-            stream_kind,
-            resource_id,
-            stream_sequence,
-            public_scope,
-            public_stream,
-            public_occurred_at,
-            public_source,
-        ) = row.map_err(sql_error)?;
-        let projection_cursor = stored_projection_cursor(
-            scope_key,
-            stream_kind,
-            resource_id,
-            stream_sequence,
-            &event_id,
-        )?;
-        let public_context = stored_public_context(
-            projection_cursor.as_ref(),
-            public_scope,
-            public_stream,
-            public_occurred_at,
-            public_source,
-            identity.scope_key(),
-            Some(identity.actor_key()),
-        )?;
-        Ok(OutboxEvent {
-            sequence: u64::try_from(sequence)
-                .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
-            projection_cursor,
-            public_context,
-            event_id,
-            topic,
-            payload,
+    let result = rows
+        .map(|row| {
+            let (
+                sequence,
+                event_id,
+                topic,
+                payload,
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                public_scope,
+                public_stream,
+                public_occurred_at,
+                public_source,
+            ) = row.map_err(sql_error)?;
+            let projection_cursor = stored_projection_cursor(
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                &event_id,
+            )?;
+            let public_context = stored_public_context(
+                projection_cursor.as_ref(),
+                public_scope,
+                public_stream,
+                public_occurred_at,
+                public_source,
+                identity.scope_key(),
+                Some(identity.actor_key()),
+            )?;
+            Ok(OutboxEvent {
+                sequence: u64::try_from(sequence)
+                    .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+                projection_cursor,
+                public_context,
+                event_id,
+                topic,
+                payload,
+            })
         })
-    })
-    .collect()
+        .collect();
+    #[cfg(test)]
+    storage_mechanism_regression::receipt_query(
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    result
 }
 
 fn stored_projection_cursor(
@@ -5088,6 +5306,10 @@ impl std::error::Error for WorkerLaunchBundleError {}
 
 /// Atomically publishes one launch, its credential lifecycle row and downlink.
 /// Encrypted private material must already be fsynced before this commit.
+/// The encoder receives the next downlink sequence inside the same immediate
+/// transaction, so concurrent launches each publish at their own position.
+/// A concurrent launch for the exact same live scope reuses its committed
+/// identity without allocating another credential, frame or stream position.
 /// # Errors
 /// Rejects changed authority, duplicate publication or unavailable storage.
 pub fn issue_worker_launch_bundle(
@@ -5095,7 +5317,7 @@ pub fn issue_worker_launch_bundle(
     issuance: &LaunchGrantIssuance,
     predecessor: Option<&str>,
     credential: &CredentialIssuance,
-    append: &ClientDownlinkAppend,
+    build_downlink: impl FnOnce(u64) -> Result<ClientDownlinkAppend, StorageError>,
     now: &Instant,
 ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchBundleError> {
     storage
@@ -5107,14 +5329,33 @@ pub fn issue_worker_launch_bundle(
     storage
         .client_downlink_outbox()
         .map_err(|_| StorageError::adapter("downlink ledger unavailable"))?;
+    storage
+        .worker_session_slots()
+        .map_err(|_| StorageError::adapter("worker session slots unavailable"))?;
     let tx = storage
         .connection_mut()?
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| StorageError::adapter("launch transaction unavailable"))?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS worker_launch_publications (grant_id TEXT PRIMARY KEY, client_node_id TEXT NOT NULL, message_id TEXT NOT NULL, sequence INTEGER NOT NULL, frame_digest TEXT NOT NULL, created_at TEXT NOT NULL)")
         .map_err(|_|StorageError::adapter("launch publication unavailable"))?;
+    if let Some(grant) = client_launch_grant::reusable_launch_in_transaction(
+        &tx,
+        issuance,
+        predecessor,
+        credential,
+        now,
+    )
+    .map_err(WorkerLaunchBundleError::Launch)?
+    {
+        tx.commit()
+            .map_err(|_| StorageError::adapter("launch reuse commit failed"))?;
+        return Ok(grant);
+    }
     let grant = client_launch_grant::issue_launch_in_transaction(&tx, issuance, predecessor, now)
         .map_err(WorkerLaunchBundleError::Launch)?;
+    let sequence = client_downlink::next_sequence_in_transaction(&tx, &grant.client_node_id)
+        .map_err(|_| StorageError::adapter("launch sequence unavailable"))?;
+    let append = build_downlink(sequence)?;
     if credential.worker_session_id != grant.worker_session_id
         || credential.worker_id != grant.worker_id
         || credential.worker_instance_id != grant.worker_instance_id
@@ -5151,7 +5392,7 @@ pub fn issue_worker_launch_bundle(
     }
     worker_session_credential::issue_credential_in_transaction(&tx, credential, now)
         .map_err(|_| StorageError::invalid_input("launch credential rejected"))?;
-    let frame = client_downlink::append_launch_in_transaction(&tx, append, now)
+    let frame = client_downlink::append_launch_in_transaction(&tx, &append, now)
         .map_err(|_| StorageError::invalid_input("launch downlink rejected"))?;
     tx.execute(
         "INSERT INTO worker_launch_publications VALUES (?1,?2,?3,?4,?5,?6)",
@@ -5172,3 +5413,8 @@ pub fn issue_worker_launch_bundle(
 }
 
 pub use client_launch_grant::DeviceLaunchProcessClosure;
+
+#[cfg(test)]
+extern crate self as winwincode_storage;
+#[cfg(test)]
+mod storage_mechanism_regression;

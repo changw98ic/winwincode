@@ -3,11 +3,12 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import { openBenchmarkLedger } from './benchmark-ledger.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
+import { retainedRequestFailure } from './device-model-failures.mjs'
 
 const runFile = promisify(execFile)
 
@@ -55,6 +56,38 @@ function fail(code, message) {
 function runnerFailureCode(error) {
   return typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
     ? error.code : 'RUNNER_UNEXPECTED'
+}
+
+const retainedRunnerFailures = new WeakMap()
+
+// Retain source locations and controlled phase names, never arbitrary error
+// text, request headers, assertion values, or Provider response bodies.
+function runnerFailure(error, phase = 'cell') {
+  const cacheable = error !== null && typeof error === 'object'
+  if (cacheable && retainedRunnerFailures.has(error)) return structuredClone(retainedRunnerFailures.get(error))
+  const code = runnerFailureCode(error)
+  const root = resolve(import.meta.dirname, '..')
+  const stack = String(error?.stack ?? '').split('\n').slice(1).flatMap(line => {
+    const frame = line.match(/(?:file:\/\/)?(\/[^()\n]+):(\d+):(\d+)\)?$/u)
+    if (!frame) return []
+    const file = relative(root, frame[1])
+    if (!/^(?:scripts|tests|packages)\/[A-Za-z0-9_./-]+$/u.test(file)) return []
+    return [{ file, line: Number(frame[2]), column: Number(frame[3]) }]
+  }).slice(0, 12)
+  const cause = error?.cause ? runnerFailureCode(error.cause) : undefined
+  const controlledPhase = ['occupancy', 'launch', 'model', 'aggregation'].includes(error?.benchmarkPhase)
+    ? error.benchmarkPhase : phase
+  const request = retainedRequestFailure(error)
+  const diagnostic = { phase: controlledPhase, stack, ...(cause ? { causeCode: cause } : {}), ...(request ? { request } : {}) }
+  const failure = { code, message: code, diagnostic, ...(error?.unresolvedDeviceExecution ? { executionUnresolved: true } : {}) }
+  if (cacheable) retainedRunnerFailures.set(error, failure)
+  return structuredClone(failure)
+}
+
+function requiresBenchmarkRecovery(error) {
+  return error?.benchmarkPersistenceFailure === true
+    || error?.unresolvedDeviceExecution === true
+    || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error?.code)
 }
 
 function normalizeRepositoryUrl(value) {
@@ -119,91 +152,6 @@ export function benchmarkAggregationDigest(runId, taskId, members) {
   return createHash('sha256').update(canonicalJson({ runId, taskId, members })).digest('hex')
 }
 
-const TOOL_METADATA_KEYS = new Set([
-  'requestid',
-  'timestamp',
-  'timestampms',
-  'progress',
-  'progressmetadata',
-])
-
-function canonicalToolArgs(value) {
-  if (Array.isArray(value)) return value.map(canonicalToolArgs)
-  if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !TOOL_METADATA_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/gu, '')))
-    .map(([key, nested]) => [key, canonicalToolArgs(nested)]))
-}
-
-export function normalizeToolRequestIdentity(request) {
-  if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    throw new TypeError('tool request must be an object')
-  }
-  const { tool, target } = request
-  const args = request.args ?? request.params
-  const requestedContentDigest = request.requestedContentDigest ?? request.contentDigest
-  if (typeof tool !== 'string' || tool.length === 0 || typeof target !== 'string' || target.length === 0) {
-    throw new TypeError('tool request requires tool and target identities')
-  }
-  if (args === undefined || typeof requestedContentDigest !== 'string'
-    || !/^[0-9a-f]{64}$/u.test(requestedContentDigest)) {
-    throw new TypeError('tool request requires canonical args and a SHA-256 requested-content digest')
-  }
-  return createHash('sha256')
-    .update(canonicalJson({ tool, target, args: canonicalToolArgs(args), requestedContentDigest }))
-    .digest('hex')
-}
-
-const LEGACY_GATE_TERMINATION = Symbol('tool-repeat-termination')
-
-export function createToolRequestGuard() {
-  const occurrences = new Map()
-  let termination = null
-  return Object.freeze({
-    admit(request) {
-      if (termination) return termination
-      const identity = normalizeToolRequestIdentity(request)
-      const occurrence = (occurrences.get(identity) ?? 0) + 1
-      occurrences.set(identity, occurrence)
-      if (occurrence >= 6) {
-        termination = Object.freeze({
-          status: 'terminated',
-          reason: 'STUCK_TOOL_REPEAT_LIMIT',
-          identity,
-          occurrence: 6,
-        })
-        return termination
-      }
-      return Object.freeze({ status: 'admitted', identity, occurrence })
-    },
-  })
-}
-
-export async function executeToolRequest(request, gate, executor) {
-  if (gate && typeof gate.admit === 'function') {
-    const admission = gate.admit(request)
-    if (admission.status === 'terminated') return admission
-    return executor(request, { identity: admission.identity, occurrence: admission.occurrence })
-  }
-  if (!(gate instanceof Map)) throw new TypeError('tool gate must be a Map or tool request guard')
-  const termination = gate.get(LEGACY_GATE_TERMINATION)
-  if (termination) return termination
-  const identity = normalizeToolRequestIdentity(request)
-  const occurrence = (gate.get(identity) ?? 0) + 1
-  gate.set(identity, occurrence)
-  if (occurrence >= 6) {
-    const nextTermination = Object.freeze({
-      status: 'terminated',
-      reason: 'STUCK_TOOL_REPEAT_LIMIT',
-      identity,
-      occurrence: 6,
-    })
-    gate.set(LEGACY_GATE_TERMINATION, nextTermination)
-    return nextTermination
-  }
-  return executor(request, { identity, occurrence })
-}
-
 function taskIdentities(taskIds) {
   if (!Array.isArray(taskIds) || taskIds.length !== 20 || new Set(taskIds).size !== 20) {
     throw new TypeError('taskIds must contain exactly 20 unique task identities')
@@ -222,7 +170,9 @@ export function buildBenchmarkPlan({ taskIds }) {
           taskId,
           ...configuration,
           comparison,
-          fusionKind: comparison === 'fusion-4' ? 'independent-aggregate' : null,
+          fusionKind: comparison === 'fusion-4' ? 'native-panel' : null,
+          executionFusion: comparison === 'fusion-4' || configuration.fusion,
+          executionContractVersion: 2,
           reasoningEffort: 'max',
           budgetLimits: null,
           status: 'planned',
@@ -234,9 +184,9 @@ export function buildBenchmarkPlan({ taskIds }) {
 }
 
 export async function executeBenchmarkCell(cell, adapter, {
-  toolGate = createToolRequestGuard(),
   recordCall = () => {},
   registerLaunch = () => fail('LEDGER_REQUIRED', 'product launch registration requires a durable ledger'),
+  retainedReplay = false,
 } = {}) {
   if (cell.budgetLimits !== null) throw new TypeError('formal benchmark cells cannot set budget limits')
   if (cell.reasoningEffort !== 'max') throw new TypeError('formal benchmark model calls require max reasoning effort')
@@ -250,52 +200,44 @@ export async function executeBenchmarkCell(cell, adapter, {
     provider,
     comparison: cell.comparison,
     fusionKind: cell.fusionKind,
+    executionFusion: cell.executionFusion ?? configuration.fusion,
+    executionContractVersion: cell.executionContractVersion ?? 1,
     reasoningEffort: cell.reasoningEffort,
     budgetLimits: cell.budgetLimits,
   })
-  let persistenceFailure = null
-  const runner = Object.freeze({
-    registerLaunch: async target => {
-      try { await registerLaunch(target) } catch (error) {
-        persistenceFailure = error
-        error.benchmarkPersistenceFailure = true
-        throw error
-      }
-    },
-    requestTool: async (request, executor) => {
-      const result = await executeToolRequest(request, toolGate, executor)
-      if (result?.status === 'terminated') {
-        const error = new Error(result.reason)
-        error.code = result.reason
-        error.termination = result
-        throw error
-      }
-      return result
-    },
-  })
-
   const persistCall = call => {
     try { recordCall(call) } catch (error) {
-      persistenceFailure = error
       error.benchmarkPersistenceFailure = true
       throw error
     }
   }
 
   const executeCall = async (request, execute) => {
+    let persistenceFailure = null
+    const runner = Object.freeze({
+      registerLaunch: async target => {
+        try { await registerLaunch(target) } catch (error) {
+          persistenceFailure = error
+          error.benchmarkPersistenceFailure = true
+          throw error
+        }
+      },
+
+    })
     let result
     try {
       result = await execute(request, runner)
       if (persistenceFailure) throw persistenceFailure
     } catch (error) {
-      const code = runnerFailureCode(error)
-      persistCall({ callId: request.callId, status: 'failed', failure: { code } })
+      persistCall({ callId: request.callId, status: 'failed', failure: runnerFailure(error, 'call'),
+        ...(error?.termination ? { termination: error.termination } : {}),
+        ...(error?.unresolvedDeviceExecution === true ? { unresolvedDeviceExecution: true } : {}) })
       throw error
     }
     persistCall({ callId: request.callId, status: 'returned', result })
     const termination = runnerTermination(result)
     if (termination) {
-      throw Object.assign(new Error('product execution terminated the benchmark runner'), {
+      throw Object.assign(new Error('product execution terminated the current benchmark task'), {
         code: termination.reason, termination,
         productOutcome: result,
         ...(result.claims !== undefined ? { claims: result.claims } : {}),
@@ -305,23 +247,29 @@ export async function executeBenchmarkCell(cell, adapter, {
   }
 
   if (cell.fusionKind === 'independent-aggregate') {
-    const members = []
-    for (const provider of PROVIDERS) {
+    if (!retainedReplay) fail('BENCHMARK_FUSION_TOPOLOGY_INVALID', 'legacy independent aggregation is retained evidence only')
+    const outcomes = await Promise.allSettled(PROVIDERS.map(async provider => {
       const request = requestFor(provider, `${cell.runId}:member:${provider}`)
       try {
         const member = await executeCall(request, (input, context) => adapter.runModel(input, context))
-        members.push(member?.status === 'failed'
+        return member?.status === 'failed'
           ? { status: 'failed', provider, callId: request.callId, failure: member.failure }
-          : member)
+          : member
       } catch (error) {
-        if (runnerTermination(error) || error.benchmarkPersistenceFailure
-          || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error.code)) throw error
+        if (runnerTermination(error) || requiresBenchmarkRecovery(error)) throw error
         // A failed model is one retained member outcome, not permission to
         // omit the remaining independent members or reuse another cell.
-        members.push({ status: 'failed', provider, callId: request.callId,
-          failure: { code: runnerFailureCode(error) } })
+        return { status: 'failed', provider, callId: request.callId,
+          failure: runnerFailure(error, 'member') }
       }
-    }
+    }))
+    // Keep the ledger open until every launched member has retained its result,
+    // including when a sibling stops the task. Aggregation preserves provider
+    // order independently of completion order and starts only after this join.
+    const failure = outcomes.find(outcome => outcome.status === 'rejected' && requiresBenchmarkRecovery(outcome.reason))
+      ?? outcomes.find(outcome => outcome.status === 'rejected')
+    if (failure) throw failure.reason
+    const members = outcomes.map(outcome => outcome.value)
     const inputDigest = benchmarkAggregationDigest(cell.runId, cell.taskId, members)
     const aggregate = await executeCall({
       runId: cell.runId,
@@ -351,7 +299,12 @@ export async function executeBenchmarkCell(cell, adapter, {
       : result
   }
 
-  const model = await executeCall(requestFor(cell.comparison, `${cell.runId}:model`), (request, context) => adapter.runModel(request, context))
+  if (cell.comparison === 'fusion-4' && (cell.fusionKind !== 'native-panel' || cell.executionFusion !== true)) {
+    fail('BENCHMARK_FUSION_TOPOLOGY_INVALID', 'Fusion requires one native panel product execution')
+  }
+  const provider = cell.fusionKind === 'native-panel' ? PROVIDERS[0] : cell.comparison
+  const callId = cell.fusionKind === 'native-panel' ? `${cell.runId}:native-panel` : `${cell.runId}:model`
+  const model = await executeCall(requestFor(provider, callId), (request, context) => adapter.runModel(request, context))
   return model?.status === 'failed'
     ? { model, status: 'failed', failure: model.failure, productOutcome: model }
     : { model }
@@ -359,9 +312,7 @@ export async function executeBenchmarkCell(cell, adapter, {
 
 function runnerTermination(value) {
   if (value?.termination) return value.termination
-  if ((value?.code ?? value?.failure?.code) === 'STUCK_TOOL_REPEAT_LIMIT') {
-    return { reason: 'STUCK_TOOL_REPEAT_LIMIT' }
-  }
+
   return null
 }
 
@@ -379,8 +330,10 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
   const replay = async request => {
     const retained = observed.calls.find(call => call.callId === request.callId)
     if (retained?.status === 'returned') return retained.result
-    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED') {
-      throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
+    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED' && retained.failure.executionUnresolved !== true && retained.unresolvedDeviceExecution !== true) {
+      const error = Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true, ...(retained.termination ? { termination: retained.termination } : {}) })
+      retainedRunnerFailures.set(error, retained.failure)
+      throw error
     }
     const launch = observed.launches.find(target => target.callId === request.callId)
     if ((request.provider || request.engine === 'fusion-engine') && launch && resolveModel) return resolveModel(request, launch)
@@ -390,6 +343,7 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
   try {
     result = await executeBenchmarkCell(cell, { runModel: replay, aggregate: replay }, {
       recordCall: call => recoveredCalls.push(call),
+      retainedReplay: true,
     })
     const terminalProductCall = cell.fusionKind === 'independent-aggregate' ? result.aggregate : result.model
     if (terminalProductCall?.status === 'failed') {
@@ -397,29 +351,95 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
         productOutcome: terminalProductCall }
     }
   } catch (error) {
+    if (requiresBenchmarkRecovery(error)) throw error
     if (!error.retainedFailure && !runnerTermination(error)) throw error
-    const code = runnerFailureCode(error)
-    result = { status: 'failed', termination: runnerTermination(error), failure: { code, message: code } }
+    result = { status: 'failed', termination: runnerTermination(error), failure: runnerFailure(error, 'recovery') }
   }
-  return { ...result, calls: recoveredCalls, recovery: { kind: 'retained-product-result',
+  // Existing receipts retain their durable order for the recovery transaction;
+  // parallel member replay may finish in a different order from the first run.
+  const retainedCallIds = new Set(observed.calls.map(call => call.callId))
+  const recoveredByCallId = new Map(recoveredCalls.map(call => [call.callId, call]))
+  const calls = [
+    ...observed.calls.map(call => recoveredByCallId.get(call.callId) ?? call),
+    ...recoveredCalls.filter(call => !retainedCallIds.has(call.callId)),
+  ]
+  return { ...result, calls, recovery: { kind: 'retained-product-result',
     originalCalls: observed.calls } }
+}
+
+// Coordinate independent durable task runners. Their returned task outcomes
+// never stop admission; a thrown ledger/evidence error stops new admission and
+// waits for already running tasks to retain their results before propagating.
+export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell }) {
+  validateBenchmarkConcurrency(concurrency)
+  const results = Array(cells.length)
+  let cursor = 0
+  let failure = null
+  const worker = async () => {
+    while (cursor < cells.length && !failure) {
+      const index = cursor++
+      try { results[index] = await executeCell(cells[index], index) }
+      catch (error) { failure ??= { error } }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, cells.length) }, worker))
+  if (failure) throw failure.error
+  return results
+}
+
+function validateBenchmarkConcurrency(concurrency) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    fail('BENCHMARK_CONCURRENCY_INVALID', 'benchmark concurrency must be a positive integer')
+  }
+}
+
+// Admission policy can expand between runs without changing the frozen plan.
+// Selecting profiles never creates a smaller experiment or claims another profile.
+export function validateBenchmarkDispatchPolicy(plan, { concurrency = 1, selectedConfigurationIds } = {}) {
+  validateBenchmarkConcurrency(concurrency)
+  if (selectedConfigurationIds === undefined) return
+  const configurations = new Set(plan.cells.map(cell => cell.configurationId))
+  if (!Array.isArray(selectedConfigurationIds) || selectedConfigurationIds.length === 0
+      || new Set(selectedConfigurationIds).size !== selectedConfigurationIds.length
+      || selectedConfigurationIds.some(id => typeof id !== 'string' || !configurations.has(id))) {
+    fail('BENCHMARK_CONFIGURATION_SELECTION_INVALID', 'selected configurations must be unique profiles from the frozen plan')
+  }
+}
+
+// Validate formal configuration before initializing or checking the immutable
+// identity. This may create an unclaimed ledger, but never starts product work.
+export function verifyBenchmarkLedgerIdentity(plan, options) {
+  validateFormalBenchmarkOptions(options)
+  validateBenchmarkDispatchPolicy(plan, options)
+  const { ledgerPath, experimentBinding } = options
+  const store = openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
+  store.close()
 }
 
 export async function runBenchmarkPlan(plan, {
   executeCell,
-  createToolGate = () => createToolRequestGuard(),
   onRecord = () => {},
   ledgerPath,
   experimentBinding,
   recoverCell,
+  concurrency = 1,
+  selectedConfigurationIds,
+  retainedCompleted = [],
 }) {
+  validateBenchmarkDispatchPolicy(plan, { concurrency, selectedConfigurationIds })
+  const selected = selectedConfigurationIds === undefined ? null : new Set(selectedConfigurationIds)
   const store = ledgerPath
     ? openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
     : null
-  const records = []
-  let stopped = null
+  const records = plan.cells.map(cell => ({ ...cell, status: 'planned', verdict: null, score: null, termination: null }))
   try {
-    for (const [index, cell] of plan.cells.entries()) {
+    if (retainedCompleted.length && !store) fail('LEDGER_REQUIRED', 'retained completions require a durable ledger')
+    store?.retainCompleted(retainedCompleted)
+    for (const [index, record] of (store?.records() ?? []).entries()) {
+      if (record !== null) records[index] = record
+    }
+    const execute = async (cell, index) => {
+      if (selected && !selected.has(cell.configurationId)) return records[index]
       let claim
       try {
         claim = store?.claim(index)
@@ -455,42 +475,38 @@ export async function runBenchmarkPlan(plan, {
           }
         }
         record = { ...cell, status: 'planned', termination: null }
-        if (stopped) {
-          record = { ...record, status: 'not_run_runner_terminated', verdict: null, score: null, termination: stopped }
-        } else {
-          try {
-            const result = await executeCell(cell, { toolGate: createToolGate(cell), registerLaunch, recordCall })
-            if (persistenceError) throw persistenceError
-            const termination = runnerTermination(result)
-            record = {
-              ...record,
-              ...result,
-              runId: cell.runId,
-              status: termination ? 'failed' : result.status ?? 'completed',
-              // Benchmark grades belong to the user's independent grading machine.
-              verdict: null,
-              score: null,
-              termination,
-            }
-          } catch (error) {
-            if (persistenceError) throw persistenceError
-            if (error?.code === 'BENCHMARK_EVIDENCE_FAILED') throw error
-            const termination = runnerTermination(error)
-            record = {
-              ...record,
-              ...(error?.claims !== undefined ? { claims: error.claims } : {}),
-              ...(error?.productOutcome !== undefined ? { productOutcome: error.productOutcome } : {}),
-              status: 'failed',
-              verdict: null,
-              score: null,
-              termination,
-              failure: {
-                code: termination?.reason ?? runnerFailureCode(error),
-                // Raw adapter errors can contain request headers or credentials.
-                // Detailed diagnostics remain in the sanitized product evidence.
-                message: termination?.reason ?? runnerFailureCode(error),
-              },
-            }
+        try {
+          const result = await executeCell(cell, { registerLaunch, recordCall })
+          if (persistenceError) throw persistenceError
+          const termination = runnerTermination(result)
+          record = {
+            ...record,
+            ...result,
+            runId: cell.runId,
+            status: termination ? 'failed' : result.status ?? 'completed',
+            // Benchmark grades belong to the user's independent grading machine.
+            verdict: null,
+            score: null,
+            termination,
+          }
+        } catch (error) {
+          if (persistenceError) throw persistenceError
+          if (requiresBenchmarkRecovery(error)) throw error
+          const termination = runnerTermination(error)
+          record = {
+            ...record,
+            ...(error?.claims !== undefined ? { claims: error.claims } : {}),
+            ...(error?.productOutcome !== undefined ? { productOutcome: error.productOutcome } : {}),
+            status: 'failed',
+            verdict: null,
+            score: null,
+            termination,
+            failure: { ...runnerFailure(error),
+              code: termination?.reason ?? runnerFailureCode(error),
+              // Raw adapter errors can contain request headers or credentials.
+              // Detailed diagnostics remain in the sanitized product evidence.
+              message: termination?.reason ?? runnerFailureCode(error),
+            },
           }
         }
         // Storage/export failures must escape. They are not model failures and
@@ -499,13 +515,16 @@ export async function runBenchmarkPlan(plan, {
           record.launches = store.launches(index)
           record.calls = store.calls(index)
         }
-        if (record.status !== 'not_run_runner_terminated') record.wallMs ??= Date.now() - startedAtMs
+        record.wallMs ??= Date.now() - startedAtMs
         store?.finish(index, claim.token, record)
       }
-      records.push(record)
-      stopped ??= record.termination
+      records[index] = record
+      // A retained termination belongs to this task. Only hard persistence or
+      // evidence errors escape the loop and prevent admission of another task.
       await onRecord(record, index)
+      return record
     }
+    await runBenchmarkSchedule(plan.cells, { concurrency, executeCell: execute })
   } finally {
     store?.close()
   }
@@ -517,7 +536,7 @@ export async function runBenchmarkPlan(plan, {
   })
 }
 
-export async function executeFormalBenchmark(plan, { providerEvidence, ...options }) {
+export function validateFormalBenchmarkOptions({ providerEvidence, ...options }) {
   if (!Array.isArray(providerEvidence)) fail('MODEL_IDENTITY_MISSING', 'providerEvidence is required before execution')
   const byProvider = new Map(providerEvidence.map(evidence => [evidence.requestedModelId, evidence]))
   if (byProvider.size !== PROVIDERS.length || PROVIDERS.some(provider => !byProvider.has(provider))) {
@@ -544,6 +563,10 @@ export async function executeFormalBenchmark(plan, { providerEvidence, ...option
   if (!options.ledgerPath || !options.experimentBinding?.experimentId) {
     fail('LEDGER_REQUIRED', 'formal execution requires a durable ledger and experiment identity')
   }
+}
+
+export async function executeFormalBenchmark(plan, { providerEvidence, ...options }) {
+  validateFormalBenchmarkOptions({ providerEvidence, ...options })
   return runBenchmarkPlan(plan, options)
 }
 
@@ -606,18 +629,41 @@ function retainedUsage(record) {
     }
     assertBenchmarkExecutionReceipts(receipt)
     for (const exchange of receipt.calls) {
-      const cached = exchange.usage?.cachedTokens ?? null
-      rows.push({ callKind: 'model', requestedModelId: exchange.requestedModel,
-        observedModelId: exchange.actualModels.at(-1) ?? null,
-        reasoningEffort: exchange.reasoningEffort,
-        status: exchange.terminalType === 'completed' ? 'completed' : 'failed',
-        cacheScenario: cached === null ? 'unknown' : cached > 0 ? 'cached' : 'uncached',
-        inputTokens: exchange.usage?.inputTokens ?? null,
-        outputTokens: exchange.usage?.outputTokens ?? null,
-        cachedTokens: cached,
-        cacheHits: cached === null ? null : Number(cached > 0),
-        cacheMisses: cached === null ? null : Number(cached === 0),
-        sourceExchangeId: exchange.exchangeId })
+      const tracked = exchange.providerAttempts?.length > 0
+      const attempts = tracked ? exchange.providerAttempts.filter(attempt =>
+        !['prepared', 'not_sent'].includes(attempt.state)) : null
+      const provenUnsent = tracked && exchange.providerAttempts.every(attempt => attempt.state === 'not_sent')
+      const measured = attempts?.length ? [...attempts] : [{ usage: provenUnsent ? {
+        inputTokens: 0, outputTokens: 0, cachedTokens: 0,
+      } : tracked ? null : exchange.usage }]
+      if (attempts?.length && exchange.providerAttempts.some(attempt => attempt.state === 'prepared')) {
+        measured.push({ usage: null, state: 'prepared' })
+      }
+      for (const [index, attempt] of measured.entries()) {
+        const cached = attempt.usage?.cachedTokens ?? null
+        const invoked = attempt.state !== undefined && !['prepared', 'not_sent'].includes(attempt.state)
+        rows.push({ callKind: 'model', callCount: index === 0 ? 1 : 0,
+          requestedModelId: exchange.requestedModel,
+          observedModelId: tracked ? attempt.actualModels?.at(-1) ?? null : exchange.actualModels.at(-1) ?? null,
+          reasoningEffort: exchange.reasoningEffort,
+          status: tracked && invoked ? (attempt.state === 'completed' ? 'completed' : 'failed')
+            : exchange.terminalType === 'completed' ? 'completed' : 'failed',
+          logicalCallFailed: exchange.terminalType !== 'completed',
+          retry: tracked && invoked && index > 0,
+          ...(tracked ? { providerInvocation: invoked ? 1 : 0,
+            providerAccountingPending: attempt.state === 'prepared',
+            providerChargeUnknown: invoked && (attempt.usage == null
+              || ['invoking', 'interrupted_unknown'].includes(attempt.state)),
+            failedProviderInvocation: ['failed', 'interrupted_unknown'].includes(attempt.state) } : {}),
+          cacheScenario: provenUnsent ? 'not-sent' : cached === null ? 'unknown' : cached > 0 ? 'cached' : 'uncached',
+          inputTokens: attempt.usage?.inputTokens ?? null,
+          outputTokens: attempt.usage?.outputTokens ?? null,
+          cachedTokens: cached,
+          cacheHits: provenUnsent ? 0 : cached === null ? null : Number(cached > 0),
+          cacheMisses: provenUnsent ? 0 : cached === null ? null : Number(cached === 0),
+          sourceExchangeId: exchange.exchangeId,
+          ...(attempt.attemptNumber === undefined ? {} : { providerAttemptNumber: attempt.attemptNumber }) })
+      }
     }
     for (const jev of receipt.jev ?? []) {
       jevCalls += 1
@@ -658,6 +704,10 @@ function sumUsage(records) {
     cost: 0, wallMs: 0, modelWaitMs: 0, toolMs: 0,
     rebuildMs: 0, productCalls: 0 }
   let jevModelCalls = 0
+  let providerInvocations = 0
+  let failedProviderInvocations = 0
+  let trackedProviderInvocations = false
+  let untrackedProviderInvocations = false
   for (const record of records) {
     const evidence = retainedUsage(record)
     missing.productCalls += evidence.unmeasuredProductCalls
@@ -673,8 +723,16 @@ function sumUsage(records) {
     for (const call of evidence.rows) {
       totals.calls += call.callCount ?? 1
       totals[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
-      totals.failedCalls += call.status === 'failed' ? 1 : 0
+      totals.failedCalls += (call.logicalCallFailed ?? (call.status === 'failed')) ? call.callCount ?? 1 : 0
       totals.retryCalls += call.retry === true ? 1 : 0
+      if (call.callKind === 'model' && evidence.real) {
+        if (call.providerInvocation === undefined) untrackedProviderInvocations = true
+        else {
+          trackedProviderInvocations = true
+          providerInvocations += call.providerInvocation
+          failedProviderInvocations += call.failedProviderInvocation ? 1 : 0
+        }
+      }
       const cacheScenario = call.cacheScenario ?? 'unspecified'
       const scenario = cacheScenarios.get(cacheScenario) ?? {
         calls: 0,
@@ -692,6 +750,9 @@ function sumUsage(records) {
       }
       scenario.calls += call.callCount ?? 1
       scenario[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
+      if (call.providerInvocation !== undefined) {
+        scenario.providerInvocations = (scenario.providerInvocations ?? 0) + call.providerInvocation
+      }
       for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'rebuildTokens', 'toolTokens', 'cacheHits', 'cacheMisses']) {
         if (call[field] == null) {
           if (field in missing && call.callKind !== 'fusion-engine') missing[field] += 1
@@ -718,9 +779,14 @@ function sumUsage(records) {
       cacheScenarios.set(cacheScenario, scenario)
     }
     if (evidence.real && record.calls.length > 0) {
-      const primaryCalls = evidence.rows.filter(call => call.callKind === 'model').length
+      const primaryCalls = evidence.rows.filter(call => call.callKind === 'model')
+        .reduce((sum, call) => sum + (call.callCount ?? 1), 0)
       const measuredCalls = evidence.performance.reduce((sum, run) => sum + run.modelCalls, 0)
+      const retriedProviderCalls = evidence.rows.some(call => call.providerInvocation === 1 && call.retry)
+      const pendingProviderAccounting = evidence.rows.some(call => call.providerAccountingPending)
+      const unknownProviderCharge = evidence.rows.some(call => call.providerChargeUnknown)
       if (evidence.performance.length === 0 || measuredCalls !== primaryCalls || evidence.jevCalls > 0
+          || retriedProviderCalls || pendingProviderAccounting || unknownProviderCharge
           || evidence.performance.some(run => run.actualCostMicros == null)) {
         missing.cost += 1
       } else {
@@ -762,6 +828,10 @@ function sumUsage(records) {
       modelCalls: totals.modelCalls,
       fusionEngineCalls: totals.fusionEngineCalls,
       jevModelCalls,
+      ...(trackedProviderInvocations ? {
+        providerInvocations: untrackedProviderInvocations ? null : providerInvocations,
+        failedProviderInvocations: untrackedProviderInvocations ? null : failedProviderInvocations,
+      } : {}),
       unmeasuredProductCalls: missing.productCalls,
     }),
     cost: Object.freeze({ costUsd: missing.cost === 0 ? Number(costUsd.toFixed(6)) : null,
@@ -943,7 +1013,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
       denominator: records.length,
       completed: completed.length,
       unsuccessful: records.length - completed.length,
-      stuckToolRepeatLimit: records.filter(record => record.termination?.reason === 'STUCK_TOOL_REPEAT_LIMIT').length,
+      terminated: records.filter(record => record.termination !== null && record.termination !== undefined).length,
       runnerTerminatedNotRun: records.filter(record => record.status === 'not_run_runner_terminated').length,
     }),
     quality,

@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter, withResponseFailure } from '../packages/network-request/src/index.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   createHash,
@@ -35,12 +36,15 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
+
+import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
@@ -55,6 +59,7 @@ import {
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
   establishDeviceOnlyExecutionPath,
+  getDeviceWorker,
   seedDeviceLocalProvider,
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
@@ -95,8 +100,13 @@ const API_SOURCE_TRACKED_PATHS = [
   'Cargo.toml',
   'rust-toolchain.toml',
   'crates',
+  'third_party/codex/codex-rs',
+  'third_party/codex.UPSTREAM.json',
+  'upstream/sources.lock.json',
+  'upstream/vendor',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
+  'scripts/compact-kernel-helper.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
   'cliBinaryMode',
@@ -723,7 +733,7 @@ function commandRequest(requestId, command, expectedRevision, payload, actor = A
   }
 }
 
-function queryRequest(requestId, query, parameters, actor = ACTOR) {
+function queryRequest(requestId, query, parameters, actor = ACTOR, pagination = page()) {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId,
@@ -731,7 +741,7 @@ function queryRequest(requestId, query, parameters, actor = ACTOR) {
     scope: SCOPE,
     query,
     parameters,
-    page: page(),
+    page: pagination,
   }
 }
 
@@ -746,7 +756,7 @@ function responseSetCookie(headers) {
  * Request JSON without a UI process or global TLS switches. The fixture uses a
  * self-signed certificate, so only this local request opts out of trust.
  */
-function requestJson(url, {
+function requestJsonOnce(url, {
   method = 'GET',
   origin,
   cookie = null,
@@ -754,9 +764,11 @@ function requestJson(url, {
   body = undefined,
   timeoutMillis = 30_000,
   ca,
+  signal,
+  serializedBody,
 } = {}) {
   const target = new URL(url)
-  const serialized = body === undefined ? null : JSON.stringify(body)
+  const serialized = serializedBody === undefined ? (body === undefined ? null : JSON.stringify(body)) : serializedBody
   const headers = {
     Accept: 'application/json',
     Connection: 'close',
@@ -769,7 +781,9 @@ function requestJson(url, {
     ...(authorization === null ? {} : { Authorization: `Bearer ${authorization}` }),
   }
   return new Promise((resolvePromise, reject) => {
+    let connected = false
     const request = httpsRequest(target, {
+      signal,
       method,
       headers,
       rejectUnauthorized: ca !== undefined,
@@ -779,7 +793,18 @@ function requestJson(url, {
     }, response => {
       const chunks = []
       response.setEncoding('utf8')
-      response.on('data', chunk => chunks.push(chunk))
+      let bytes = 0
+      response.on('data', chunk => {
+        bytes += Buffer.byteLength(chunk)
+        if (bytes > 32 * 1024 * 1024) {
+          const failure = new NetworkError({ kind: 'integrity_invalid', acceptance: 'response_received', phase: 'response_body', httpStatus: response.statusCode ?? null, retryAfterMs: null })
+          reject(failure)
+          response.destroy()
+        } else chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('aborted', () => reject(Object.assign(
+        new Error('HTTP response was interrupted'), { code: 'ECONNRESET' })))
       response.on('end', () => {
         const text = chunks.join('')
         let json = null
@@ -787,8 +812,10 @@ function requestJson(url, {
           try {
             json = JSON.parse(text)
           } catch {
-            reject(new Error(`HTTP ${response.statusCode ?? 0} returned invalid JSON`))
-            return
+            if ((response.statusCode ?? 0) >= 200 && (response.statusCode ?? 0) <= 299) {
+              reject(new NetworkError({ kind: 'protocol_invalid', acceptance: 'response_received', phase: 'decode', httpStatus: response.statusCode ?? null, retryAfterMs: null }))
+              return
+            }
           }
         }
         resolvePromise({
@@ -799,14 +826,71 @@ function requestJson(url, {
         })
       })
     })
-    request.on('timeout', () => request.destroy(new Error('HTTP request timed out')))
-    request.on('error', reject)
+    request.on('timeout', () => request.destroy(Object.assign(
+      new Error('HTTP request timed out'), { code: 'ETIMEDOUT' })))
+    request.on('socket', socket => { socket.once('secureConnect', () => { connected = true }) })
+    request.on('error', error => reject(Object.assign(error, { networkFailure: classifyError(error, { notSent: !connected }) })))
     if (serialized !== null) request.write(serialized)
     request.end()
   })
 }
 
-class ApiClient {
+export async function requestJson(url, options = {}) {
+  const target = new URL(url)
+  const method = options.method ?? 'GET'
+  // Occupancy replays for the same signed-in holder and client return the
+  // existing lease or wait for its original offer acknowledgement.
+  const occupancyClaim = method === 'POST' && target.pathname === '/api/v1/clients/occupancy'
+  const prepared = { ...options, serializedBody: options.body === undefined ? null : JSON.stringify(options.body) }
+  // These three relays persist the request identity with the entire encrypted
+  // envelope and reject identity reuse with different bytes. Freeze the body
+  // first, then admit only a complete envelope to the shared exact-replay path.
+  const configurationApply = method === 'POST'
+    && /^\/api\/v1\/clients\/[^/]+\/(?:providers|extensions|repositories)$/u.test(target.pathname)
+    && retainedDeviceConfigurationEnvelope(prepared.serializedBody)
+  const exact = method === 'GET' || occupancyClaim || configurationApply
+    || ['/api/v1/queries', '/api/v1/commands'].includes(target.pathname)
+  const deadline = performance.now() + (options.timeoutMillis ?? (occupancyClaim ? 120_000 : 30_000))
+  try {
+    return await executeRequest(async ({ signal }) => {
+      const response = await requestJsonOnce(url, { ...prepared, signal, timeoutMillis: Math.max(1, deadline - performance.now()) })
+      if (response.status < 200 || response.status > 299) throw new NetworkError(httpFailure(response.status, retryAfter(response.headers['retry-after'])), response)
+      return response
+    }, { replay: exact ? 'replay_exact' : 'reconcile_first', deadline })
+  } catch (error) {
+    if (error instanceof NetworkError && error.response !== undefined) {
+      Object.defineProperty(error.response, 'networkError', { value: error, configurable: true })
+      return error.response
+    }
+    throw error
+  }
+}
+
+function retainedDeviceConfigurationEnvelope(serialized) {
+  if (typeof serialized !== 'string') return false
+  const body = JSON.parse(serialized)
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
+    && typeof body.requestId === 'string' && /^[A-Za-z0-9_-]{8,200}$/u.test(body.requestId)
+    && Number.isSafeInteger(body.expectedRevision) && body.expectedRevision >= 0
+    && ['clientNodeId', 'nonce', 'publicKey', 'ciphertext']
+      .every(key => typeof body[key] === 'string' && body[key].length > 0)
+}
+
+// Queries and commands use the same executor and their retained request identity.
+async function requestReadOnlyJson(url, options) {
+  return requestJson(url, options)
+}
+
+function controlHttpError(response, phase, requestId) {
+  const receivedCode = response.json?.error?.code
+  const code = typeof receivedCode === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(receivedCode)
+    ? receivedCode : 'HTTP_ERROR'
+  return withResponseFailure(Object.assign(new Error('Control Plane request was rejected'), {
+    code, status: response.status, phase, requestId,
+  }), response)
+}
+
+export class ApiClient {
   constructor(baseUrl, origin, nextRequest = 1, ca = undefined) {
     assert.equal(Number.isSafeInteger(nextRequest) && nextRequest > 0, true)
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
@@ -820,9 +904,10 @@ class ApiClient {
   }
 
   requestId() {
-    const value = id('req', this.nextRequest)
     this.nextRequest += 1
-    return value
+    // Reopening a retained Server must not reuse a prior command receipt's
+    // counter with a different payload. Explicit retry IDs still pass through.
+    return `req_${randomBytes(13).toString('hex').toUpperCase()}`
   }
 
   async bootstrap(proof, { login = false, localOpen = false } = {}) {
@@ -880,12 +965,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${command} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_command', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${command} request correlation`)
     assert.equal(response.json?.command, command, `${command} command correlation`)
@@ -893,8 +973,8 @@ class ApiClient {
     return response.json
   }
 
-  async query(query, parameters) {
-    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR)
+  async query(query, parameters, pagination = page()) {
+    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR, pagination)
     const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
@@ -903,12 +983,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${query} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_query', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${query} request correlation`)
     assert.equal(response.json?.query, query, `${query} query correlation`)
@@ -997,8 +1072,7 @@ export async function waitForDeviceWorkerRegistered(
   const workerId = launched?.workerId
   assert.equal(typeof workerId, 'string', 'Device launch anchor must return workerId')
   return waitFor(async () => {
-    const response = await client.query('worker.list', { states: [] })
-    const worker = response.result?.items?.find(item => item.id === workerId)
+    const worker = await getDeviceWorker(client, workerId)
     return worker?.state === 'enabled' && typeof worker.lastHeartbeatAt === 'string'
       ? worker
       : false
@@ -1018,10 +1092,19 @@ async function freePort() {
   return port
 }
 
-function createCertificate(directory) {
+export function createCertificate(directory) {
   const configuration = join(directory, 'openssl.cnf')
   const key = join(directory, 'fixture-key.pem')
   const cert = join(directory, 'fixture-cert.pem')
+  if (existsSync(cert) || existsSync(key)) {
+    const certificate = new X509Certificate(readFileSync(cert))
+    for (const path of [cert, key]) assert.equal(lstatSync(path).isFile(), true,
+      'retained TLS identity must use regular files')
+    assert.equal(certificate.checkPrivateKey(createPrivateKey(readFileSync(key))), true,
+      'retained TLS certificate and private key must match')
+    assert.ok(Date.parse(certificate.validTo) > Date.now(), 'retained TLS certificate expired')
+    return { cert, key }
+  }
   writeFileSync(configuration, `[req]
 distinguished_name = dn
 x509_extensions = extensions
@@ -1053,30 +1136,59 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
   const sourceRoot = resolve(fixtureDirectory, 'source-repositories')
   const repository = join(sourceRoot, IDS.repository)
   mkdirSync(sourceRoot, { recursive: true })
+  const expected = verificationCommand === null ? {
+    'package.json': `${JSON.stringify({ name: 'winwincode-api-fixture', private: true,
+      scripts: { verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'" } }, null, 2)}\n`,
+    'package-lock.json': '{}\n',
+    '.winwincode-api-candidate': 'deterministic StrongFlow candidate baseline\n',
+    ...files,
+  } : files
+  for (const [name, content] of Object.entries(expected)) {
+    assert.ok(resolve(repository, name).startsWith(`${repository}/`) && !name.split('/').includes('.git'),
+      'scenario files must stay inside the source repository')
+    assert.equal(typeof content, 'string', 'scenario file content must be text')
+  }
+  const checkpoint = join(fixtureDirectory, 'controlled-repository.json')
+  const inputDigest = createHash('sha256').update(JSON.stringify(
+    [verificationCommand, Object.entries(expected).sort(([a], [b]) => a.localeCompare(b))],
+  )).digest('hex')
+  if (existsSync(join(repository, '.git'))) {
+    assert.equal(lstatSync(repository).isSymbolicLink(), false, 'retained repository must not be a symlink')
+    assert.equal(lstatSync(join(repository, '.git')).isDirectory(), true,
+      'retained repository must have its original Git directory')
+    const git = args => {
+      const result = spawnSync('git', ['-C', repository, ...args], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `retained repository lookup failed: ${result.stderr}`)
+      return result.stdout.trim()
+    }
+    assert.equal(realpathSync(git(['rev-parse', '--show-toplevel'])), realpathSync(repository))
+    const revision = git(['rev-parse', 'HEAD'])
+    if (existsSync(checkpoint)) {
+      const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
+      assert.equal(saved.inputDigest, inputDigest, 'retained repository input changed')
+      assert.equal(saved.revision, revision, 'retained repository baseline changed')
+    }
+    assert.equal(git(['status', '--porcelain']), '', 'retained repository is dirty; preserve its evidence')
+    const paths = git(['ls-tree', '-r', '--name-only', revision]).split('\n').filter(Boolean).sort()
+    assert.deepEqual(paths, Object.keys(expected).sort(), 'retained repository baseline paths changed')
+    for (const [path, content] of Object.entries(expected)) {
+      const result = spawnSync('git', ['-C', repository, 'show', `${revision}:${path}`], { encoding: 'utf8' })
+      assert.equal(result.status, 0)
+      assert.equal(result.stdout, content, 'retained repository baseline content changed')
+    }
+    // A pre-checkpoint runtime is adopted only after validating its original
+    // committed tree. No reset, commit, worktree replacement or model restart.
+    if (!existsSync(checkpoint)) writeJsonAtomically(checkpoint, { inputDigest, revision })
+    return { sourceRoot, repository, revision }
+  }
+  assert.equal(existsSync(checkpoint), false, 'retained repository is missing; preserve its checkpoint')
   const init = spawnSync(
     'git',
     ['init', '--quiet', '--initial-branch=main', repository],
     { cwd: sourceRoot, encoding: 'utf8', stdio: 'pipe' },
   )
   assert.equal(init.status, 0, `controlled API fixture repository creation failed: ${init.stderr}`)
-  if (verificationCommand === null) writeFileSync(
-    join(repository, 'package.json'),
-    `${JSON.stringify({
-      name: 'winwincode-api-fixture',
-      private: true,
-      scripts: {
-        verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'",
-      },
-    }, null, 2)}\n`,
-  )
-  // Prefer npm over pnpm/corepack so the Worker sandbox can execute the
-  // scanned verification command without a package-manager bootstrap.
-  if (verificationCommand === null) writeFileSync(join(repository, 'package-lock.json'), '{}\n')
-  if (verificationCommand === null) writeFileSync(
-    join(repository, '.winwincode-api-candidate'),
-    'deterministic StrongFlow candidate baseline\n',
-  )
-  for (const [name, contents] of Object.entries(files)) {
+  for (const [name, contents] of Object.entries(expected)) {
     const destination = resolve(repository, name)
     assert.ok(destination.startsWith(`${repository}/`) && !name.split('/').includes('.git'),
       'scenario files must stay inside the source repository')
@@ -1120,6 +1232,7 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
     0,
     `controlled API fixture revision lookup failed: ${revision.stderr}`,
   )
+  writeJsonAtomically(checkpoint, { inputDigest, revision: revision.stdout.trim() })
   return { sourceRoot, repository, revision: revision.stdout.trim() }
 }
 
@@ -1251,7 +1364,7 @@ function spawnStandaloneWorker({
       WWC_WORKER_JEV_JUDGE: process.env.WWC_WORKER_JEV_JUDGE,
       WWC_WORKER_JEV_CONTEXT: process.env.WWC_WORKER_JEV_CONTEXT,
       WWC_DEVICE_JEV_SETTINGS_FILE: process.env.WWC_DEVICE_JEV_SETTINGS_FILE,
-      WWC_BENCHMARK_TOOL_REPEAT_GUARD: process.env.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
+      WWC_BENCHMARK_SEALED_TOOLS: process.env.WWC_BENCHMARK_SEALED_TOOLS,
       WWC_WORKER_ID: IDS.remoteWorker,
       WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
       WWC_WORKER_STARTED_AT: fixture.startedAt,
@@ -1557,12 +1670,14 @@ export function workItemCreatePayload(workRunAggregate, expectedRevision) {
   const items = workRunAggregate.items
   assert.ok(Array.isArray(items), 'workrun.get must return canonical WorkItems')
   if (items.length > 0) return null
+  const deliveryId = workRunAggregate.readCursor?.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   return {
-    deliveryId: IDS.delivery,
+    deliveryId,
     expectedRevision,
     contractRevision: contract.revision,
     items: [{
-      id: IDS.workItem,
+      id: `wit_${deliveryId.slice(4)}`,
       title: 'Execute the accepted API delivery',
       goal: 'Reach the terminal API delivery state from the accepted contract.',
       criterionIds: contract.criteria.map(criterion => criterion.id),
@@ -1622,11 +1737,11 @@ function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
 function transientDeliveryErrorSummary(errors) {
   const counts = new Map()
   for (const error of errors) {
-    const key = `${error.command}:${error.code}`
+    const key = `${error.query ?? error.command}:${error.code}`
     const previous = counts.get(key)
     if (previous === undefined) {
       counts.set(key, {
-        command: error.command,
+        ...(error.query === undefined ? { command: error.command } : { query: error.query }),
         code: error.code,
         status: error.status,
         count: 1,
@@ -1662,7 +1777,10 @@ export function terminalDeviceFailure(observation) {
       || items.some(item => !['done', 'candidate_ready', 'failed', 'cancelled'].includes(item.state))
       || !runs.some(run => ['failed', 'cancelled'].includes(run.state))) return null
   if (['failed', 'cancelled'].includes(delivery.status)
-      && !items.some(item => ['failed', 'cancelled'].includes(item.state))) return null
+      && !items.some(item => ['failed', 'cancelled'].includes(item.state)
+        || (item.state === 'candidate_ready' && item.id !== undefined
+          && ['failed', 'cancelled'].includes(runs.findLast(run => run.workItemId === item.id
+            && run.workItemRevision === item.revision)?.state)))) return null
   if (!['failed', 'cancelled'].includes(delivery.status) && delivery.status !== 'candidate_ready') return null
   const stalled = delivery.status === 'candidate_ready'
   return { code: stalled ? 'DEVICE_PRODUCT_STALLED'
@@ -1677,27 +1795,49 @@ export async function driveDelivery(
   now = Date.now,
   hooks = {},
 ) {
+  const deliveryId = hooks.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
   const transientErrors = []
   const deadline = timeoutMillis === null ? Infinity : now() + timeoutMillis
   let detail = null
+  let workRunAggregate = null
   let terminalCommand = null
   let idlePolls = 0
   const stuckPollLimit = 80
   for (;;) {
     await hooks.assertRunning?.()
-    detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
-    // Scheduling and completion use the current WorkRun aggregate.
-    let workRunAggregate
+    // A failed cursor-bound query invalidates the entire observation. Re-read
+    // this Delivery before querying its WorkRuns rather than acting on stale
+    // attention, status or revision facts.
+    detail = null
+    workRunAggregate = null
+    let query = 'delivery.get'
     try {
+      detail = (await client.query(query, { deliveryId })).result
+      query = 'workrun.get'
       workRunAggregate = (await client.query('workrun.get', {
-        deliveryId: IDS.delivery,
+        deliveryId,
         workItemId: null,
         atCursor: detail.readCursor,
       })).result
     } catch (error) {
-      if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
+      if (query === 'workrun.get'
+          && (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED')) continue
+      if (error?.code === 'TRUSTED_FACTS_UNAVAILABLE' && error.status === 503) {
+        detail = null
+        workRunAggregate = null
+        if (transientErrors.length < 128) {
+          transientErrors.push({ query, code: error.code, status: error.status, message: error.message })
+        }
+        if (now() >= deadline) {
+          error.unresolvedDeviceExecution = true
+          throw error
+        }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        continue
+      }
       throw error
     }
     await hooks.onProjection?.({ detail, workRunAggregate })
@@ -1783,7 +1923,7 @@ export async function driveDelivery(
       idlePolls = 0
       command = 'delivery.resolve_attention'
       payload = {
-        deliveryId: IDS.delivery,
+        deliveryId,
         attentionItemId: attention.id,
         decision: 'resolve',
         resolution: hooks.resolveAttention === 'verified-candidate'
@@ -1845,7 +1985,7 @@ export async function driveDelivery(
       let failureDetail = detail
       try {
         failureDetail = (await client.query('delivery.get', {
-          deliveryId: IDS.delivery,
+          deliveryId,
         })).result ?? detail
       } catch {
         // Preserve the command error when the diagnostic query is unavailable.
@@ -1865,11 +2005,9 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  const terminalWorkRunAggregate = (await client.query('workrun.get', {
-    deliveryId: IDS.delivery,
-    workItemId: null,
-    atCursor: terminal.readCursor ?? null,
-  })).result
+  // The successful pair already contains the authoritative terminal aggregate.
+  // Do not introduce another unpaired query after accepting completion.
+  const terminalWorkRunAggregate = workRunAggregate
   assertCompletedDelivery(terminal, terminalWorkRunAggregate)
   return {
     actions,
@@ -1952,6 +2090,75 @@ async function runtimeWorkRunEvidence(client, detail) {
   return snapshots
 }
 
+/** Verify the public Device prerequisite errors before launching a Device. */
+export async function probeDeviceErrorTruthfulness(api) {
+  const probeSessionId = 'psn_01J00000000000000000000099'
+  const probe = {
+    probeSessionId,
+    sessionCreate: null,
+    chatSubmit: null,
+    truthfulDeviceCodes: false,
+    notWrongStateDisguise: false,
+  }
+  try {
+    const created = await api.command('session.create', 0, {
+      productSessionId: probeSessionId,
+      projectId: IDS.project,
+      repositoryId: IDS.repository,
+      title: 'Device gate truthfulness probe',
+      modelRoute: configuredModelRoute({}),
+    })
+    probe.sessionCreate = {
+      outcome: created.outcome,
+      revision: created.currentRevision,
+    }
+    try {
+      await api.command('chat.submit', 1, {
+        productSessionId: probeSessionId,
+        message: 'probe without Device prerequisites',
+      })
+      probe.chatSubmit = { accepted: true, code: null, status: 200 }
+      probe.truthfulDeviceCodes = false
+      probe.notWrongStateDisguise = true
+    } catch (error) {
+      probe.chatSubmit = {
+        accepted: false,
+        code: error.code ?? null,
+        status: error.status ?? null,
+        message: error.message,
+      }
+      probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+        || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+      probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+    }
+  } catch (error) {
+    probe.sessionCreate = {
+      outcome: 'error',
+      code: error.code ?? null,
+      message: error.message,
+    }
+    probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+      || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+    probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+  }
+  assert.equal(probe.truthfulDeviceCodes, true,
+    'Device prerequisite probe must reject with a dedicated Device error')
+  assert.equal(probe.notWrongStateDisguise, true,
+    'Device prerequisite probe must not disguise a missing Device as WRONG_STATE')
+  return probe
+}
+
+/** Stop Device resources before finalizing their observed Provider request count. */
+export async function stopDevicePath(report, devicePath) {
+  try {
+    await devicePath.stop?.()
+  } finally {
+    if (report.devicePath !== null) {
+      report.devicePath.modelServerRequestCount = devicePath.modelServer?.requests?.length ?? 0
+    }
+  }
+}
+
 /**
  * Start one standalone Server and prove the API-only Chat + StrongFlow path.
  * The returned report contains only canonical, secret-free observations.
@@ -1974,8 +2181,11 @@ export async function runApiProductionVertical({
   deviceProvider = deterministicDeviceProvider(),
   deviceAgentEnvironment = process.env,
   scenario = null,
+  retainRepository = false,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
+  assert.ok(!retainRepository || (directory !== null && scenario !== null),
+    'retaining a runtime repository requires an explicit directory and scenario')
   assertServerEnvironmentIsDeviceOnly(serverEnvironment)
   assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
   const modelRoute = configuredModelRoute(deviceRoute ?? {})
@@ -2006,17 +2216,9 @@ export async function runApiProductionVertical({
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
-    // Prefer the freshly built compact helper; oversized development builds
-    // still require release compilation to satisfy the signed helper boundary.
-    const debugHelper = resolve(serverTargetDirectory(root), 'debug/winwincode-kernel-helper')
-    let builtHelper = debugHelper
-    if (lstatSync(debugHelper).size > 64 * 1024 * 1024) {
-      const helperResult = spawnSync('cargo', [
-        'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
-      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
-      assert.equal(helperResult.status, 0, 'winwincode-kernel-helper release build failed')
-      builtHelper = resolve(serverTargetDirectory(root), 'release/winwincode-kernel-helper')
-    }
+    const builtHelper = prepareCompactKernelHelper({
+      root, targetDirectory: serverTargetDirectory(root), environment: buildEnvironment, offline: true,
+    })
     const colocatedHelper = resolve(dirname(binary), 'winwincode-kernel-helper')
     if (builtHelper !== colocatedHelper) copyFileSync(builtHelper, colocatedHelper)
     chmodSync(colocatedHelper, 0o755)
@@ -2125,7 +2327,20 @@ export async function runApiProductionVertical({
     errorCodeTruthfulness: null,
   }
 
-  const stableServerPort = remoteWorkerBinary === null ? null : await freePort()
+  const endpointPath = join(fixtureDirectory, 'server-endpoint.json')
+  const retainedEndpoint = retainRepository && existsSync(endpointPath)
+    ? JSON.parse(readFileSync(endpointPath, 'utf8')) : null
+  if (retainedEndpoint !== null) {
+    const endpoint = new URL(retainedEndpoint.controlUrl)
+    assert.equal(endpoint.protocol, 'https:')
+    assert.equal(endpoint.hostname, '127.0.0.1')
+    assert.equal(endpoint.username + endpoint.password + endpoint.search + endpoint.hash, '')
+    assert.equal(endpoint.pathname, '/')
+    assert.equal(retainedEndpoint.origin, `https://api.localhost:${endpoint.port}`)
+    assert.ok(Number(endpoint.port) > 0)
+  }
+  const stableServerPort = retainedEndpoint !== null ? Number(new URL(retainedEndpoint.controlUrl).port)
+    : remoteWorkerBinary === null ? null : await freePort()
 
   try {
     started = await startServer({
@@ -2145,61 +2360,12 @@ export async function runApiProductionVertical({
     })
     report.health.initial = started.health.status
     api = new ApiClient(started.controlUrl, started.origin)
-    await api.bootstrap(proof)
+    await api.bootstrap(proof, { login: retainedEndpoint !== null })
 
     // Live public-error truthfulness: without Device prerequisites the Server
     // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
-    if (devicePrerequisites) {
-      const probeSessionId = 'psn_01J00000000000000000000099'
-      const probe = {
-        probeSessionId,
-        sessionCreate: null,
-        chatSubmit: null,
-        truthfulDeviceCodes: false,
-        notWrongStateDisguise: false,
-      }
-      try {
-        const created = await api.command('session.create', 0, {
-          productSessionId: probeSessionId,
-          projectId: IDS.project,
-          repositoryId: IDS.repository,
-          title: 'Device gate truthfulness probe',
-          modelRoute: configuredModelRoute({}),
-        })
-        probe.sessionCreate = {
-          outcome: created.outcome,
-          revision: created.currentRevision,
-        }
-        try {
-          await api.command('chat.submit', 1, {
-            productSessionId: probeSessionId,
-            message: 'probe without Device prerequisites',
-          })
-          probe.chatSubmit = { accepted: true, code: null, status: 200 }
-          probe.truthfulDeviceCodes = false
-          probe.notWrongStateDisguise = true
-        } catch (error) {
-          probe.chatSubmit = {
-            accepted: false,
-            code: error.code ?? null,
-            status: error.status ?? null,
-            message: error.message,
-          }
-          probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-            || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-          probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-        }
-      } catch (error) {
-        probe.sessionCreate = {
-          outcome: 'error',
-          code: error.code ?? null,
-          message: error.message,
-        }
-        probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-          || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-        probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-      }
-      report.errorCodeTruthfulness = probe
+    if (devicePrerequisites && retainedEndpoint === null) {
+      report.errorCodeTruthfulness = await probeDeviceErrorTruthfulness(api)
     }
 
     if (remoteWorkerBinary !== null) {
@@ -2504,6 +2670,8 @@ export async function runApiProductionVertical({
             executionJobId: item.session.executionJobId,
             workerSessionId: item.session.workerSessionId,
             codexThreadId: item.session.codexThreadId,
+            coreToolCalls: item.session.activities.flatMap(activity => activity.coreTool?.call === null
+              || activity.coreTool?.call === undefined ? [] : [activity.coreTool.call]),
           })),
           status: delivery.detail.status,
           workItemStates: delivery.workRunAggregate.items.map(item => item.state),
@@ -2656,7 +2824,7 @@ export async function runApiProductionVertical({
     failure = error
   } finally {
     if (devicePath !== null) {
-      devicePath.stop?.()
+      try { await stopDevicePath(report, devicePath) } catch (error) { failure ??= error }
       serverOutput += ''
     }
     if (workerStarted !== null) {
@@ -2701,10 +2869,11 @@ export async function runApiProductionVertical({
         failure = new Error(`${String(failure)}\nServer output:\n${diagnostic}`)
       }
     }
-    removeControlledRepository({ repository: controlledRepository.repository })
+    if (!retainRepository) removeControlledRepository({ repository: controlledRepository.repository })
     if (ownedDirectory) rmSync(fixtureDirectory, { recursive: true, force: true })
+    // Cleanup failures also reject a scenario's early return.
+    if (failure !== null) throw failure
   }
-  if (failure !== null) throw failure
   return report
 }
 

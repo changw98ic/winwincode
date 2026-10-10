@@ -99,31 +99,56 @@ impl FusionProviderRouter for MapFusionProviderRouter {
 pub fn answer_from_frames(frames: &[String]) -> Option<serde_json::Value> {
     let mut text = String::new();
     let mut completed = false;
+    let mut final_message = false;
     for frame in frames {
         if completed {
             return None;
         }
         let value: serde_json::Value = serde_json::from_str(frame).ok()?;
         match value.get("type")?.as_str()? {
-            "error" => return None,
+            "error" | "tool_call_input_delta" => return None,
             "completed" => {
-                if value.get("endTurn").and_then(serde_json::Value::as_bool) != Some(true) {
+                // Native Responses can omit endTurn. The completed event is
+                // authoritative; explicit continuation and tool requests are
+                // still rejected rather than inferred to be final answers.
+                if !matches!(
+                    value.get("endTurn"),
+                    None | Some(serde_json::Value::Null | serde_json::Value::Bool(true))
+                ) {
                     return None;
                 }
                 completed = true;
             }
-            "output_item_done" => {
+            "output_item_added" | "output_item_done" => {
                 let item = value.get("item")?;
-                if item.get("type")?.as_str()? == "message"
-                    && item.get("role")?.as_str()? == "assistant"
-                    && item.get("phase").and_then(serde_json::Value::as_str) == Some("final_answer")
-                {
-                    for part in item.get("content")?.as_array()? {
-                        if part.get("type")?.as_str()? != "output_text" {
-                            return None;
-                        }
-                        text.push_str(part.get("text")?.as_str()?);
+                match item.get("type")?.as_str()? {
+                    "reasoning" => continue,
+                    "message" => {}
+                    // An answer-only request cannot accept a tool invocation,
+                    // even when another item contains valid final JSON.
+                    _ => return None,
+                }
+                if value.get("type")?.as_str()? != "output_item_done" {
+                    continue;
+                }
+                if item.get("role")?.as_str()? != "assistant" {
+                    return None;
+                }
+                match item.get("phase") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(phase)) if phase == "final_answer" => {}
+                    Some(serde_json::Value::String(phase)) if phase == "commentary" => continue,
+                    _ => return None,
+                }
+                if final_message {
+                    return None;
+                }
+                final_message = true;
+                for part in item.get("content")?.as_array()? {
+                    if part.get("type")?.as_str()? != "output_text" {
+                        return None;
                     }
+                    text.push_str(part.get("text")?.as_str()?);
                 }
             }
             _ => {}

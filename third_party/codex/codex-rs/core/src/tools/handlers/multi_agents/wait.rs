@@ -58,6 +58,7 @@ impl Handler {
             turn,
             payload,
             call_id,
+            source,
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
@@ -116,7 +117,21 @@ impl Handler {
 
         let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
         let mut initial_final_statuses = Vec::new();
+        let mut completion_targets = Vec::new();
         for id in &receiver_thread_ids {
+            let owner = match session
+                .services
+                .agent_control
+                .completion_wait_owner(*id)
+                .await
+            {
+                Ok(owner) => owner,
+                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    initial_final_statuses.push((*id, AgentStatus::NotFound));
+                    continue;
+                }
+                Err(err) => return Err(collab_agent_error(*id, err)),
+            };
             match session.services.agent_control.subscribe_status(*id).await {
                 Ok(rx) => {
                     let status = rx.borrow().clone();
@@ -124,6 +139,7 @@ impl Handler {
                         initial_final_statuses.push((*id, status));
                     }
                     status_rxs.push((*id, rx));
+                    completion_targets.push((*id, owner));
                 }
                 Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     initial_final_statuses.push((*id, AgentStatus::NotFound));
@@ -156,6 +172,14 @@ impl Handler {
         let statuses = if !initial_final_statuses.is_empty() {
             initial_final_statuses
         } else {
+            let durable_wait = crate::tools::ExecutionFacts::begin_agent_wait(
+                &session,
+                &turn,
+                &source,
+                completion_targets,
+                timeout_ms as u64,
+            )
+            .await?;
             let mut futures = FuturesUnordered::new();
             for (id, rx) in status_rxs.into_iter() {
                 let session = session.clone();
@@ -181,6 +205,9 @@ impl Handler {
                         Some(None) | None => break,
                     }
                 }
+            }
+            if let Some(wait) = durable_wait {
+                wait.settle().await?;
             }
             results
         };
@@ -265,6 +292,10 @@ fn wait_receiver_agents(
 }
 
 impl CoreToolRuntime for Handler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

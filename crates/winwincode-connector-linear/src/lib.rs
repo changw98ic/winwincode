@@ -892,6 +892,7 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         if let Some(state_id) = &operation.state_id {
             input.insert("stateId".to_owned(), json!(state_id));
         }
+        claim.require_new_write_authority()?;
         let response = self.graphql(
             token,
             "mutation WinWinCodeIssueCreate($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id } } }",
@@ -944,6 +945,7 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         if let Some(remote_id) = self.lookup_comment_marker(token, operation, &marker)? {
             return remote_receipt("comment", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.graphql(
             token,
             "mutation WinWinCodeCommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }",
@@ -1052,39 +1054,57 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         variables: &Value,
     ) -> Result<LinearResponse, ConnectorCallError> {
         let authorization = format!("Bearer {}", token.value());
-        let response = self
-            .agent
-            .post(&self.config.graphql_endpoint)
-            .header("Accept", "application/json")
-            .header("Authorization", &authorization)
-            .header("Content-Type", "application/json")
-            .header("User-Agent", USER_AGENT)
-            .send_json(json!({"query": query, "variables": variables}))
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "LINEAR_TRANSPORT_UNAVAILABLE",
-                )
-            })?;
+        let replay = if query.trim_start().starts_with("mutation")
+            && !query.starts_with("mutation WinWinCodeIssueUpdate(")
+        {
+            winwincode_network::Replay::ReconcileFirst
+        } else {
+            winwincode_network::Replay::ReplayExact
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| {
+                agent
+                    .post(&self.config.graphql_endpoint)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", USER_AGENT)
+                    .send_json(json!({"query": query, "variables": variables}))
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("LINEAR_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
+        })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "LINEAR_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, std::time::SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let reset_at_millis = response
             .headers()
             .get("x-ratelimit-endpoint-requests-reset")
             .or_else(|| response.headers().get("x-ratelimit-requests-reset"))
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "LINEAR_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             Some(serde_json::from_slice(&bytes).map_err(|_| response_invalid())?)
@@ -1506,7 +1526,14 @@ fn operation_marker(claim: &OutboundClaim) -> String {
 }
 
 fn response_invalid() -> ConnectorCallError {
-    connector_error(ConnectorCallErrorKind::Retryable, "LINEAR_RESPONSE_INVALID")
+    ConnectorCallError::from_network(
+        "LINEAR_RESPONSE_INVALID",
+        winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::ProtocolInvalid,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Decode,
+        ),
+    )
 }
 
 fn connector_error(kind: ConnectorCallErrorKind, code: &str) -> ConnectorCallError {

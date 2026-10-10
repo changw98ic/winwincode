@@ -23,6 +23,12 @@ const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl
 const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("restricted_read_only_platform_defaults.sbpl");
+// Process tools keep their platform scratch access. Filesystem helpers use
+// the caller's explicit filesystem roots instead of inheriting scratch grants.
+const MACOS_PROCESS_SCRATCH_POLICY: &str = r#"(allow file-read* file-test-existence file-write* (subpath "/tmp"))
+(allow file-read* file-write* (subpath "/private/tmp"))
+(allow file-read* file-write* (subpath "/var/tmp"))
+(allow file-read* file-write* (subpath "/private/var/tmp"))"#;
 const MACOS_PROCESS_APPLICATIONS_READ_POLICY: &str =
     r#"(allow file-read* (subpath "/Applications"))"#;
 
@@ -417,10 +423,17 @@ fn normalize_writable_root_for_sandbox(
     })
 }
 
+struct SeatbeltAccessPolicy {
+    allow_policy: String,
+    literal_deny_policy: String,
+    params: Vec<(String, PathBuf)>,
+}
+
 fn build_seatbelt_access_policy(
     access_kind: SeatbeltAccessKind,
     roots: Vec<SeatbeltAccessRoot>,
-) -> Result<(String, Vec<(String, PathBuf)>), SeatbeltPreparationError> {
+    unreadable_roots: &[AbsolutePathBuf],
+) -> Result<SeatbeltAccessPolicy, SeatbeltPreparationError> {
     let mut policy_components = Vec::new();
     let mut root_anchor_denies = Vec::new();
     let mut params = Vec::new();
@@ -479,16 +492,43 @@ fn build_seatbelt_access_policy(
         policy_components.push(format!("(require-all {} )", require_parts.join(" ")));
     }
 
-    if policy_components.is_empty() {
-        Ok((String::new(), Vec::new()))
+    // Platform defaults can allow paths excluded from the ordinary access rules.
+    // Deny those paths explicitly, while preserving the same more-specific allow
+    // predicates, including their read-only and protected-metadata carveouts.
+    let mut literal_denies = Vec::new();
+    for (index, root) in unreadable_roots.iter().enumerate() {
+        let root = normalize_path_for_sandbox(root.as_path()).unwrap_or_else(|| root.clone());
+        let root_param = format!("{param_prefix}_DENY_{index}");
+        params.push((root_param.clone(), root.into_path_buf()));
+        let denied_region = format!(
+            "(require-any (literal (param \"{root_param}\")) (subpath (param \"{root_param}\")))"
+        );
+        let denied_region = if policy_components.is_empty() {
+            denied_region
+        } else {
+            format!(
+                "(require-all {denied_region} (require-not (require-any {})))",
+                policy_components.join(" ")
+            )
+        };
+        literal_denies.push(format!("(deny {action} {denied_region})"));
+    }
+
+    let allow_policy = if policy_components.is_empty() {
+        String::new()
     } else {
         let mut policies = vec![format!(
             "(allow {action}\n{}\n)",
             policy_components.join(" ")
         )];
         policies.extend(root_anchor_denies);
-        Ok((policies.join("\n"), params))
-    }
+        policies.join("\n")
+    };
+    Ok(SeatbeltAccessPolicy {
+        allow_policy,
+        literal_deny_policy: literal_denies.join("\n"),
+        params,
+    })
 }
 
 fn seatbelt_protected_metadata_name_regex(root: &AbsolutePathBuf, name: &str) -> String {
@@ -779,6 +819,15 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     // Protect ancestors of read-only paths so renaming a writable directory
     // cannot move its descendants outside their policy carveouts.
     let mut protected_ancestors = BTreeSet::new();
+    // Implicit writable platform roots do not appear in `writable_roots`.
+    // Protect denied paths against moves through those roots as well.
+    for unreadable_root in &unreadable_roots {
+        let root = normalize_path_for_sandbox(unreadable_root.as_path())
+            .unwrap_or_else(|| unreadable_root.clone());
+        if let Some(parent) = root.parent() {
+            protected_ancestors.extend(parent.ancestors());
+        }
+    }
     for writable_root in &writable_roots {
         let root = normalize_path_for_sandbox(writable_root.root.as_path())
             .unwrap_or_else(|| writable_root.root.clone());
@@ -800,89 +849,87 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         .enumerate()
         .map(|(index, path)| (format!("PROTECTED_ANCESTOR_{index}"), path.into_path_buf()))
         .collect();
-    let (file_write_policy, file_write_dir_params) =
-        if file_system_sandbox_policy.has_full_disk_write_access() {
-            if unreadable_roots.is_empty() {
-                // Allegedly, this is more permissive than `(allow file-write*)`.
-                (
-                    r#"(allow file-write* (regex #"^/"))"#.to_string(),
-                    Vec::new(),
-                )
-            } else {
-                build_seatbelt_access_policy(
-                    SeatbeltAccessKind::Write,
-                    vec![SeatbeltAccessRoot {
-                        root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots.clone(),
-                        protected_metadata_names: Vec::new(),
-                    }],
-                )?
+    let file_write_policy = if file_system_sandbox_policy.has_full_disk_write_access() {
+        if unreadable_roots.is_empty() {
+            // Allegedly, this is more permissive than `(allow file-write*)`.
+            SeatbeltAccessPolicy {
+                allow_policy: r#"(allow file-write* (regex #"^/"))"#.to_string(),
+                literal_deny_policy: String::new(),
+                params: Vec::new(),
             }
         } else {
             build_seatbelt_access_policy(
                 SeatbeltAccessKind::Write,
-                writable_roots
-                    .into_iter()
-                    .map(|root| SeatbeltAccessRoot {
-                        protected_metadata_names: protected_metadata_names_for_writable_root(
-                            file_system_sandbox_policy,
-                            &root,
-                            sandbox_policy_cwd,
-                        ),
-                        root: root.root,
-                        excluded_subpaths: root.read_only_subpaths,
-                    })
-                    .collect(),
+                vec![SeatbeltAccessRoot {
+                    root: root_absolute_path(),
+                    excluded_subpaths: unreadable_roots.clone(),
+                    protected_metadata_names: Vec::new(),
+                }],
+                &unreadable_roots,
             )?
-        };
+        }
+    } else {
+        build_seatbelt_access_policy(
+            SeatbeltAccessKind::Write,
+            writable_roots
+                .into_iter()
+                .map(|root| SeatbeltAccessRoot {
+                    protected_metadata_names: protected_metadata_names_for_writable_root(
+                        file_system_sandbox_policy,
+                        &root,
+                        sandbox_policy_cwd,
+                    ),
+                    root: root.root,
+                    excluded_subpaths: root.read_only_subpaths,
+                })
+                .collect(),
+            &unreadable_roots,
+        )?
+    };
 
-    let (file_read_policy, file_read_dir_params) =
-        if file_system_sandbox_policy.has_full_disk_read_access() {
-            if unreadable_roots.is_empty() {
-                (
-                    "; allow read-only file operations\n(allow file-read*)".to_string(),
-                    Vec::new(),
-                )
-            } else {
-                let (policy, params) = build_seatbelt_access_policy(
-                    SeatbeltAccessKind::Read,
-                    vec![SeatbeltAccessRoot {
-                        root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots,
-                        protected_metadata_names: Vec::new(),
-                    }],
-                )?;
-                (
-                    format!("; allow read-only file operations\n{policy}"),
-                    params,
-                )
+    let mut file_read_policy = if file_system_sandbox_policy.has_full_disk_read_access() {
+        if unreadable_roots.is_empty() {
+            SeatbeltAccessPolicy {
+                allow_policy: "(allow file-read*)".to_string(),
+                literal_deny_policy: String::new(),
+                params: Vec::new(),
             }
         } else {
-            let (policy, params) = build_seatbelt_access_policy(
+            build_seatbelt_access_policy(
                 SeatbeltAccessKind::Read,
-                file_system_sandbox_policy
-                    .get_readable_roots_with_cwd(sandbox_policy_cwd)
-                    .into_iter()
-                    .map(|root| SeatbeltAccessRoot {
-                        excluded_subpaths: unreadable_roots
-                            .iter()
-                            .filter(|path| path.as_path().starts_with(root.as_path()))
-                            .cloned()
-                            .collect(),
-                        protected_metadata_names: Vec::new(),
-                        root,
-                    })
-                    .collect(),
-            )?;
-            if policy.is_empty() {
-                (String::new(), params)
-            } else {
-                (
-                    format!("; allow read-only file operations\n{policy}"),
-                    params,
-                )
-            }
-        };
+                vec![SeatbeltAccessRoot {
+                    root: root_absolute_path(),
+                    excluded_subpaths: unreadable_roots.clone(),
+                    protected_metadata_names: Vec::new(),
+                }],
+                &unreadable_roots,
+            )?
+        }
+    } else {
+        build_seatbelt_access_policy(
+            SeatbeltAccessKind::Read,
+            file_system_sandbox_policy
+                .get_readable_roots_with_cwd(sandbox_policy_cwd)
+                .into_iter()
+                .map(|root| SeatbeltAccessRoot {
+                    excluded_subpaths: unreadable_roots
+                        .iter()
+                        .filter(|path| path.as_path().starts_with(root.as_path()))
+                        .cloned()
+                        .collect(),
+                    protected_metadata_names: Vec::new(),
+                    root,
+                })
+                .collect(),
+            &unreadable_roots,
+        )?
+    };
+    if !file_read_policy.allow_policy.is_empty() {
+        file_read_policy.allow_policy = format!(
+            "; allow read-only file operations\n{}",
+            file_read_policy.allow_policy
+        );
+    }
 
     let proxy = proxy_policy_inputs(
         managed_network,
@@ -899,16 +946,19 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         build_seatbelt_unreadable_glob_policy(file_system_sandbox_policy, sandbox_policy_cwd);
     let mut policy_sections = vec![
         MACOS_SEATBELT_BASE_POLICY.to_string(),
-        file_read_policy,
-        file_write_policy,
+        file_read_policy.allow_policy,
+        file_write_policy.allow_policy,
         network_policy,
     ];
     if include_platform_defaults {
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
         if profile == MacosSeatbeltProfile::Process {
+            policy_sections.push(MACOS_PROCESS_SCRATCH_POLICY.to_string());
             policy_sections.push(MACOS_PROCESS_APPLICATIONS_READ_POLICY.to_string());
         }
     }
+    policy_sections.push(file_read_policy.literal_deny_policy);
+    policy_sections.push(file_write_policy.literal_deny_policy);
     policy_sections.push(deny_read_policy);
     // Renaming an allowed ancestor relocates its protected descendants past
     // their pathname carveouts. Keep these denies last so no broader allowance
@@ -924,8 +974,8 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     let full_policy = policy_sections.join("\n");
 
     let dir_params = [
-        file_read_dir_params,
-        file_write_dir_params,
+        file_read_policy.params,
+        file_write_policy.params,
         protected_ancestor_params,
         unix_socket_dir_params(&proxy),
     ]

@@ -15,11 +15,13 @@ include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 test-support = ["winwincode-publication/test-support"]
 
 [dependencies]
+winwincode-network = { workspace = true, features = ["journal"] }
 aes-gcm = "=0.10.3"
 base64.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 jiff.workspace = true
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

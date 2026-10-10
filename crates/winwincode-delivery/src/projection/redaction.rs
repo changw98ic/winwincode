@@ -634,6 +634,7 @@ mod tests {
         )
         .expect("accepted fixture binding");
         let activity = RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-safe".into(),
             activity_type: RuntimeActivityType::Command,
             command: Some("cargo check -p winwincode-delivery".into()),
@@ -669,6 +670,7 @@ mod tests {
         }
 
         let secret_bearing = RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-secret".into(),
             activity_type: RuntimeActivityType::Command,
             command: Some("curl --token TOP_SECRET https://example.invalid".into()),

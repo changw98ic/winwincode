@@ -13,6 +13,8 @@ configures the startup reminder; task progress and project memory belong in bd.
   instructions for ownership, status, and execution permissions.
 - Store lasting decisions with `bd remember --key <key> "decision"`; update the
   same key when that decision changes. Keep task progress in issue notes.
+- Use the seven-field task-state note format in AGENTS.md for current progress;
+  include observed paths/results and explicitly separate validation state.
 - Run the checks relevant to the change. Close an issue only after its acceptance
   criteria pass; report changed files, validation, and remaining work at handoff.
 - Follow current user and repository authority for commits, pushes, and remote

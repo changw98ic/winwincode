@@ -1,0 +1,438 @@
+diff --git a/codex-rs/core/src/tools/execution_facts.rs b/codex-rs/core/src/tools/execution_facts.rs
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -1,4 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
++
++#[path = "cell_facts.rs"]
++mod cell_facts;
+ 
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+@@ -26,7 +29,7 @@
+ 
+ /// Core-owned process incarnation and durable receipts, shared by all tool families.
+ #[derive(Default)]
+-pub(super) struct ExecutionFacts {
++pub(crate) struct ExecutionFacts {
+     store: OnceCell<Arc<StateRuntime>>,
+     owner_id: OnceCell<String>,
+     cells: Mutex<HashMap<String, (String, String)>>,
+@@ -39,6 +42,23 @@
+             .services
+             .thread_extension_data
+             .get_or_init(Self::default)
++    }
++
++    pub(crate) async fn read_events(
++        session: &Session,
++        after: i64,
++        limit: u32,
++    ) -> anyhow::Result<Vec<codex_state::ToolRuntimeEvent>> {
++        let facts = Self::for_session(session);
++        let store = facts.store.get().or(session.services.state_db.as_ref());
++        match store {
++            Some(store) => {
++                store
++                    .list_tool_runtime_events(&session.thread_id.to_string(), after, limit)
++                    .await
++            }
++            None => Ok(Vec::new()),
++        }
+     }
+ 
+     pub(super) fn register_cell(&self, cell_id: String, parent_call_id: String, turn_id: &str) {
+@@ -72,8 +92,34 @@
+     attempt_id: String,
+ }
+ 
++pub(super) enum ToolFactAdmission {
++    New(ToolFactRecord),
++    Replay(ToolFactReplay),
++}
++
++pub(super) struct ToolFactReplay {
++    pub(super) service: Arc<ExecutionFacts>,
++    pub(super) store: Arc<StateRuntime>,
++    pub(super) fact: Box<ToolExecutionFact>,
++    pub(super) owner_id: String,
++}
++
++impl ToolFactReplay {
++    pub(super) fn response(&self) -> FunctionCallError {
++        let active = self
++            .service
++            .active_requests
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .contains(&self.fact.request_sequence);
++        recovery_response(&self.fact, active, &self.owner_id)
++    }
++}
++
+ impl ToolFactRecord {
+-    pub(super) async fn begin(invocation: &ToolInvocation) -> Result<Self, FunctionCallError> {
++    pub(super) async fn begin(
++        invocation: &ToolInvocation,
++    ) -> Result<ToolFactAdmission, FunctionCallError> {
+         let service = ExecutionFacts::for_session(&invocation.session);
+         let owner_id = service
+             .owner_id
+@@ -141,18 +187,15 @@
+             binding: digest(payload_value(&invocation.payload)),
+         };
+         match store.observe_tool_request(&request).await.map_err(storage_error)? {
+-            ToolRequestObservation::New(fact) => Ok(Self {
++            ToolRequestObservation::New(fact) => Ok(ToolFactAdmission::New(Self {
+                 service: service.clone(),
+                 store,
+                 sequence: fact.request_sequence,
+                 owner_id,
+                 attempt_id: uuid::Uuid::new_v4().to_string(),
+-            }),
++            })),
+             ToolRequestObservation::Replay(fact) => {
+-                let active = service.active_requests.lock()
+-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+-                    .contains(&fact.request_sequence);
+-                Err(recovery_response(&fact, active, &owner_id))
++                Ok(ToolFactAdmission::Replay(ToolFactReplay { service, store, fact: Box::new(fact), owner_id }))
+             }
+             ToolRequestObservation::IdentityConflict => {
+                 Err(FunctionCallError::RespondToModel(
+@@ -268,9 +311,20 @@
+ pub(super) fn snapshot(result: &AnyToolResult) -> Result<String, FunctionCallError> {
+     // Preserve both projections: PostToolUse feedback can replace the direct output
+     // while Code Mode still receives the original structured value.
++    let response = result
++        .result
++        .to_response_item(&result.call_id, &result.payload);
++    let response_success = match &response {
++        codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. }
++        | codex_protocol::models::ResponseInputItem::CustomToolCallOutput { output, .. } => {
++            output.success
++        }
++        _ => None,
++    };
+     serde_json::to_string(&serde_json::json!({
+         "schema_version": 1,
+-        "response": result.result.to_response_item(&result.call_id, &result.payload),
++        "response": response,
++        "response_success": response_success,
+         "code_mode_result": result.result.code_mode_result(&result.payload),
+         "success": result.result.success_for_logging(),
+         "effective_input": payload_value(&result.payload),
+@@ -311,7 +365,7 @@
+     Ok(nested_identity(cell_id, runtime_call_id, &scope))
+ }
+ 
+-fn payload_value(payload: &ToolPayload) -> serde_json::Value {
++pub(super) fn payload_value(payload: &ToolPayload) -> serde_json::Value {
+     match payload {
+         // Keep exact bytes for transport identity, including whitespace.
+         ToolPayload::Function { arguments } => {
+@@ -324,7 +378,7 @@
+     }
+ }
+ 
+-fn semantic_input(payload: &ToolPayload) -> serde_json::Value {
++pub(super) fn semantic_input(payload: &ToolPayload) -> serde_json::Value {
+     let mut value = payload_value(payload);
+     if let ToolPayload::Function { arguments } = payload {
+         value["input"] =
+@@ -333,19 +387,19 @@
+     value
+ }
+ 
+-fn digest(mut value: serde_json::Value) -> String {
++pub(super) fn digest(mut value: serde_json::Value) -> String {
+     value.sort_all_objects();
+     format!("{:x}", sha2::Sha256::digest(value.to_string().as_bytes()))
+ }
+ 
+-fn storage_error(error: impl std::fmt::Display) -> FunctionCallError {
++pub(super) fn storage_error(error: impl std::fmt::Display) -> FunctionCallError {
+     tracing::warn!(%error, "tool execution fact storage failed");
+     FunctionCallError::RespondToModel(
+         "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
+     )
+ }
+ 
+-fn recovery_response(
++pub(super) fn recovery_response(
+     fact: &ToolExecutionFact,
+     active: bool,
+     current_owner: &str,
+diff --git a/codex-rs/core/src/tools/handlers/current_time.rs b/codex-rs/core/src/tools/handlers/current_time.rs
+--- a/codex-rs/core/src/tools/handlers/current_time.rs
++++ b/codex-rs/core/src/tools/handlers/current_time.rs
+@@ -105,6 +105,10 @@
+ }
+ 
+ impl CoreToolRuntime for CurrentTimeHandler {
++    fn supports_result_replay(&self) -> bool {
++        true
++    }
++
+     fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+         crate::tools::authorization::AuthorizationPolicy::CoreControl
+     }
+diff --git a/codex-rs/core/src/tools/handlers/shell/shell_command.rs b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
+--- a/codex-rs/core/src/tools/handlers/shell/shell_command.rs
++++ b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
+@@ -252,6 +252,10 @@
+ }
+ 
+ impl CoreToolRuntime for ShellCommandHandler {
++    fn supports_result_replay(&self) -> bool {
++        true
++    }
++
+     fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+         crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+     }
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -1,6 +1,8 @@
+ mod approvals;
+ mod authorization;
+ mod execution_facts;
++pub(crate) use execution_facts::ExecutionFacts;
++mod result_recovery;
+ pub(crate) use authorization::authorize_request;
+ pub(crate) mod code_mode;
+ pub(crate) mod context;
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -58,6 +58,12 @@
+         super::authorization::AuthorizationPolicy::HostOperation
+     }
+ 
++    /// Only runtimes with historical, self-contained output may opt in. Live
++    /// process/cell/account handles need an adapter-specific validity check.
++    fn supports_result_replay(&self) -> bool {
++        false
++    }
++
+     /// Core continuations remain typed until hooks accept the tool result.
+     fn handle_core(
+         &self,
+@@ -542,8 +548,7 @@
+         mut invocation: ToolInvocation,
+         terminal_outcome_reached: Option<Arc<AtomicBool>>,
+     ) -> Result<AnyToolResult, FunctionCallError> {
+-        let facts = super::execution_facts::ToolFactRecord::begin(&invocation).await?;
+-        if super::effective_tool_mode(&invocation.turn)
++        let direct_surface_rejected = super::effective_tool_mode(&invocation.turn)
+             == codex_protocol::openai_models::ToolMode::CodeModeOnly
+             && !matches!(
+                 invocation.source,
+@@ -553,8 +558,25 @@
+                 && matches!(
+                     invocation.tool_name.name.as_str(),
+                     codex_code_mode::PUBLIC_TOOL_NAME | codex_code_mode::WAIT_TOOL_NAME
+-                ))
+-        {
++                ));
++        let facts = match super::execution_facts::ToolFactRecord::begin(&invocation).await? {
++            super::execution_facts::ToolFactAdmission::New(facts) => facts,
++            super::execution_facts::ToolFactAdmission::Replay(replay) => {
++                if direct_surface_rejected {
++                    return Err(FunctionCallError::RespondToModel(format!(
++                        "tool {} must be invoked through Code Mode exec",
++                        invocation.tool_name
++                    )));
++                }
++                return super::result_recovery::recover(
++                    replay,
++                    &invocation,
++                    self.tool(&invocation.tool_name),
++                )
++                .await;
++            }
++        };
++        if direct_surface_rejected {
+             facts.deny().await?;
+             return Err(FunctionCallError::RespondToModel(format!(
+                 "tool {} must be invoked through Code Mode exec",
+diff --git a/codex-rs/core/src/tools/result_recovery.rs b/codex-rs/core/src/tools/result_recovery.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/result_recovery.rs
+@@ -0,0 +1,174 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use std::sync::Arc;
++
++use codex_protocol::models::ResponseInputItem;
++use codex_state::ToolExecutionStatus;
++use codex_state::ToolOutputDisposition;
++use serde::Deserialize;
++use serde_json::Value;
++
++use super::context::ToolInvocation;
++use super::context::ToolOutput;
++use super::context::ToolPayload;
++use super::execution_facts::ToolFactReplay;
++use super::execution_facts::digest;
++use super::execution_facts::semantic_input;
++use super::execution_facts::storage_error;
++use super::registry::AnyToolResult;
++use super::registry::CoreToolRuntime;
++use crate::ToolCallGateAttachment;
++use crate::ToolResultReadRequest;
++use crate::function_tool::FunctionCallError;
++
++/// Historical values do not recreate callbacks, continuations or external handles.
++#[derive(Deserialize)]
++struct StoredOutput {
++    schema_version: u32,
++    response: ResponseInputItem,
++    #[serde(default)]
++    response_success: Option<bool>,
++    code_mode_result: Value,
++    success: bool,
++    effective_input: Value,
++    continuation: Option<Value>,
++}
++
++impl ToolOutput for StoredOutput {
++    fn log_preview(&self) -> String {
++        "recovered accepted tool output".into()
++    }
++    fn success_for_logging(&self) -> bool {
++        self.success
++    }
++    fn to_response_item(&self, _call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
++        let mut response = self.response.clone();
++        match &mut response {
++            ResponseInputItem::FunctionCallOutput { output, .. }
++            | ResponseInputItem::CustomToolCallOutput { output, .. } => {
++                output.success = self.response_success
++            }
++            _ => {}
++        }
++        response
++    }
++    fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
++        self.code_mode_result.clone()
++    }
++}
++
++pub(super) async fn recover(
++    replay: ToolFactReplay,
++    invocation: &ToolInvocation,
++    runtime: Option<Arc<dyn CoreToolRuntime>>,
++) -> Result<AnyToolResult, FunctionCallError> {
++    let attempt = replay.fact.attempt.as_ref();
++    let Some(attempt) = attempt.filter(|attempt| {
++        attempt.execution == ToolExecutionStatus::Completed
++            && attempt.disposition == ToolOutputDisposition::Accepted
++            && attempt.accepted_result_retained
++    }) else {
++        return Err(replay.response());
++    };
++    let Some(runtime) = runtime.filter(|runtime| runtime.supports_result_replay()) else {
++        return Err(replay.response());
++    };
++    let Some(attachment) = invocation
++        .session
++        .services
++        .thread_extension_data
++        .get::<ToolCallGateAttachment>()
++    else {
++        return Err(recovery_error("result_read_authority_unavailable"));
++    };
++    let gate = attachment.gate();
++    let request = ToolResultReadRequest {
++        thread_id: invocation.session.thread_id.to_string(),
++        turn_id: invocation.turn.sub_id.clone(),
++        call_id: invocation.call_id.clone(),
++        request_sequence: replay.fact.request_sequence,
++        logical_id: replay.fact.request.logical_id.clone(),
++        attempt_id: attempt.attempt_id.clone(),
++        operation_digest: attempt.operation_digest.clone(),
++        revision: attempt.revision,
++    };
++    let authorization = gate
++        .authorize_result_read(request.clone())
++        .await
++        .map_err(|_| recovery_error("result_read_denied"))?;
++    let stored = replay
++        .store
++        .read_accepted_tool_output(
++            replay.fact.request_sequence,
++            &attempt.attempt_id,
++            attempt.revision,
++        )
++        .await
++        .map_err(storage_error)?
++        .ok_or_else(|| recovery_error("stored_result_unavailable"))?;
++    let output: StoredOutput = serde_json::from_str(&stored.accepted.unwrap_or_default())
++        .map_err(|_| recovery_error("stored_result_invalid"))?;
++    let effective: Value = serde_json::from_str(&stored.effective_input)
++        .map_err(|_| recovery_error("stored_result_invalid"))?;
++    let payload = decode_payload(&effective)?;
++    let operation = digest(serde_json::json!({
++        "tool": invocation.tool_name.to_string(), "definition": runtime.spec(),
++        "input": semantic_input(&payload),
++    }));
++    if output.schema_version != 1
++        || output.continuation.is_some()
++        || output.effective_input != effective
++        || operation != attempt.operation_digest
++    {
++        return Err(recovery_error("stored_result_scope_expired"));
++    }
++    gate.revalidate_result_read(request, authorization)
++        .await
++        .map_err(|_| recovery_error("result_read_denied"))?;
++    replay
++        .store
++        .offer_tool_output(
++            replay.fact.request_sequence,
++            &attempt.attempt_id,
++            &attempt.owner_id,
++        )
++        .await
++        .map_err(storage_error)?;
++    Ok(AnyToolResult {
++        call_id: invocation.call_id.clone(),
++        payload,
++        result: Box::new(output),
++        post_tool_use_payload: None,
++        continuation: None,
++    })
++}
++
++fn decode_payload(value: &Value) -> Result<ToolPayload, FunctionCallError> {
++    let input = &value["input"];
++    match value["kind"].as_str() {
++        Some("function") => input.as_str().map(|arguments| ToolPayload::Function {
++            arguments: arguments.into(),
++        }),
++        Some("custom") => input.as_str().map(|input| ToolPayload::Custom {
++            input: input.into(),
++        }),
++        Some("tool_search") => serde_json::from_value(input.clone())
++            .ok()
++            .map(|arguments| ToolPayload::ToolSearch { arguments }),
++        _ => None,
++    }
++    .ok_or_else(|| recovery_error("stored_result_invalid"))
++}
++
++fn recovery_error(state: &str) -> FunctionCallError {
++    FunctionCallError::RespondToModel(
++        serde_json::json!({
++            "type": "tool_recovery", "schema_version": 1, "state": state,
++        })
++        .to_string(),
++    )
++}
++
++#[cfg(test)]
++#[path = "result_recovery_tests.rs"]
++mod tests;

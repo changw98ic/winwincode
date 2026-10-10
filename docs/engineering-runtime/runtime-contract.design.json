@@ -93,7 +93,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "a73c17fae84b24464c5cf3ca3eb4271e70a621c711400f992b8855a471e8ef39",
+      "sha256": "132acd0624f11b3741ac6ff84f32b9838107ecaa0fe16d765f1a018c74c3ae57",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -120,7 +120,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "999b23be78ef1f00bd1a73586c24c9c171fa00bf80f2b708dec599ed8961ba0e",
+      "sha256": "8500171b196e64783be8e72607561086e669432446f3062d323e737a373df118",
       "facts": [
         "Worker execution transport and fenced identity",
         "Snapshot freeze request, freeze receipt and verification dispatch"
@@ -128,7 +128,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/verification.rs",
-      "sha256": "21412f4a3cab76c9cb2a2564bd04ddbde5006d6ac4710a6479c17c7136fdf209",
+      "sha256": "d59768c359323b9c0bf3ca3b19e08b01605dfedf17f5c43d3d56a7259be39250",
       "facts": [
         "sealed verification facts",
         "fenced execution identity",
@@ -146,7 +146,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/candidate.rs",
-      "sha256": "d893c9e0be894089bf560a94c8f223f425855fc5fab64df4fd4711afe86459cc",
+      "sha256": "a1ed74d0d5b32c479f0130346e23be19792429ff7e4998e46f23708e9d5f663b",
       "facts": [
         "FrozenDeliveryCandidate",
         "SealedCandidateSource producer proof",
@@ -155,14 +155,14 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "be59a994716c39c8eeaf8e69d33c0e3c78ac4fa935c483d79cabea93cf987c13",
+      "sha256": "8049dad69c17f0f7f74707362b1f59f44ef053afd2faef3a1ce116f087512c59",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]
     },
     {
       "path": "crates/winwincode-storage/src/execution_registry.rs",
-      "sha256": "77f1ff364cc6bab4ef73993d16c59c52a74450a2f2c5c907828b7c7eeea4f30e",
+      "sha256": "be7a7c2c9dd146be310016fc2955c3b8318d6f0ca824180d004cbd2124377051",
       "facts": [
         "attempt replacement",
         "lease/fencing/worker-instance authority",

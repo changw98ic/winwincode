@@ -5,6 +5,7 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::world_state::WorldState;
+use crate::context_manager::estimate_item_token_count;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -50,6 +51,7 @@ use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::prelude::*;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -351,7 +353,48 @@ async fn run_compact_task_inner_impl(
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
 
-    let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    let prepared_initial_context = if turn_context.config.compact_context_max_tokens.is_some() {
+        Some(build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await)
+    } else {
+        None
+    };
+    let prepared_history = if let Some(max_tokens) = turn_context.config.compact_context_max_tokens
+    {
+        match compaction_context_overhead_tokens(
+            &sess,
+            &turn_context,
+            &initial_context_injection,
+            &prepared_initial_context
+                .as_ref()
+                .expect("budgeted context")
+                .0,
+        )
+        .await
+        {
+            Ok(overhead) => build_total_budget_compacted_history(
+                &user_messages,
+                &summary_text,
+                overhead,
+                max_tokens,
+            ),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(build_compacted_history(
+            Vec::new(),
+            &user_messages,
+            &summary_text,
+        ))
+    };
+    let mut new_history = match prepared_history {
+        Ok(history) => history,
+        Err(error) => {
+            sess.track_turn_codex_error(turn_context.as_ref(), &error);
+            sess.send_event(&turn_context, EventMsg::Error(error.to_error_event(None)))
+                .await;
+            return Err(error);
+        }
+    };
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
@@ -359,8 +402,10 @@ async fn run_compact_task_inner_impl(
     }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
-    let (initial_context, world_state_baseline) =
-        build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
+    let (initial_context, world_state_baseline) = match prepared_initial_context {
+        Some(context) => context,
+        None => build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await,
+    };
     if !initial_context.is_empty() {
         new_history =
             insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
@@ -391,6 +436,120 @@ async fn run_compact_task_inner_impl(
     });
     sess.send_event(&turn_context, warning).await;
     Ok(summary_suffix)
+}
+
+async fn compaction_context_overhead_tokens(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    injection: &InitialContextInjection,
+    initial_context: &[ResponseItemEnvelope],
+) -> CodexResult<usize> {
+    // Manual compaction reinjects current instructions on the following turn.
+    // Count that restored state even though it is not stored in this checkpoint.
+    let (step_context, restored_tokens) = match injection {
+        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => (
+            Arc::clone(step_context),
+            compacted_history_tokens(initial_context),
+        ),
+        InitialContextInjection::DoNotInject => {
+            let step_context = sess
+                .capture_step_context(Arc::clone(turn_context), &CancellationToken::new())
+                .await?;
+            let world_state = sess.build_world_state_for_step(&step_context).await?;
+            let context = sess
+                .build_initial_context_with_world_state(turn_context, &world_state)
+                .await;
+            let tokens = context
+                .iter()
+                .map(|item| usize::try_from(estimate_item_token_count(item)).unwrap_or(usize::MAX))
+                .fold(0usize, usize::saturating_add);
+            (step_context, tokens)
+        }
+    };
+    let base = approx_token_count(&sess.get_base_instructions().await.text);
+    let host_bytes = sess
+        .services
+        .model_client
+        .compaction_context_overhead_bytes()
+        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+    let host = host_bytes.saturating_add(3) / 4;
+    let tools = serde_json::to_string(step_context.tool_router.model_visible_specs().as_ref())
+        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+    Ok(base
+        .saturating_add(host)
+        .saturating_add(restored_tokens)
+        .saturating_add(approx_token_count(&tools)))
+}
+
+fn compacted_history_tokens(history: &[ResponseItemEnvelope]) -> usize {
+    history
+        .iter()
+        .map(|item| usize::try_from(estimate_item_token_count(&item.item)).unwrap_or(usize::MAX))
+        .fold(0usize, usize::saturating_add)
+}
+
+fn compacted_user_item(message: &CompactedUserMessage, text: String) -> ResponseItemEnvelope {
+    ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: message
+                .internal_chat_message_metadata_passthrough
+                .clone(),
+        },
+        metadata: message.harness_metadata.clone(),
+    }
+}
+
+// Summary and restored instructions are mandatory. Only the original-message
+// tail uses the remaining capacity, measured including wrappers and markers.
+fn build_total_budget_compacted_history(
+    user_messages: &[CompactedUserMessage],
+    summary_text: &str,
+    overhead_tokens: usize,
+    max_tokens: usize,
+) -> CodexResult<Vec<ResponseItemEnvelope>> {
+    let mut summary = build_compacted_history_with_limit(Vec::new(), &[], summary_text, 0);
+    let mandatory = overhead_tokens.saturating_add(compacted_history_tokens(&summary));
+    let Some(mut remaining) = max_tokens.checked_sub(mandatory) else {
+        return Err(CodexErr::InvalidRequest(
+            "Compacted task state and restored instructions exceed the internal context budget; no compaction checkpoint was installed.".to_string(),
+        ));
+    };
+    let mut selected = Vec::new();
+    for message in user_messages.iter().rev() {
+        let full = compacted_user_item(message, message.message.clone());
+        let full_cost = compacted_history_tokens(std::slice::from_ref(&full));
+        if full_cost <= remaining {
+            selected.push(full);
+            remaining -= full_cost;
+            continue;
+        }
+        let wrapper = compacted_user_item(message, String::new());
+        let wrapper_cost = compacted_history_tokens(std::slice::from_ref(&wrapper));
+        let mut text_budget = remaining.saturating_sub(wrapper_cost);
+        while text_budget > 0 {
+            let text = truncate_text(&message.message, TruncationPolicy::Tokens(text_budget));
+            let item = compacted_user_item(message, text);
+            let cost = compacted_history_tokens(std::slice::from_ref(&item));
+            if cost <= remaining {
+                selected.push(item);
+                break;
+            }
+            text_budget = text_budget.saturating_sub(cost - remaining);
+        }
+        break;
+    }
+    selected.reverse();
+    selected.append(&mut summary);
+    if overhead_tokens.saturating_add(compacted_history_tokens(&selected)) > max_tokens {
+        return Err(CodexErr::InvalidRequest(
+            "Compacted context failed internal budget validation; no compaction checkpoint was installed.".to_string(),
+        ));
+    }
+    Ok(selected)
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {

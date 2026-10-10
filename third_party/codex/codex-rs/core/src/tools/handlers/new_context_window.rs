@@ -42,4 +42,8 @@ impl ToolExecutor<ToolInvocation> for NewContextWindowHandler {
     }
 }
 
-impl CoreToolRuntime for NewContextWindowHandler {}
+impl CoreToolRuntime for NewContextWindowHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+}

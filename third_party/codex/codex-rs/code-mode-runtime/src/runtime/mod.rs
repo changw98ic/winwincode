@@ -512,3 +512,7 @@ await new Promise(() => {});
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "mechanism_regression_tests.rs"]
+mod mechanism_regression_tests;

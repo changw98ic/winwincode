@@ -1,0 +1,194 @@
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -73,6 +73,11 @@
+             .await
+             .map_err(FunctionCallError::RespondToModel)?;
+         let cell_id = started_cell.cell_id.clone();
++        crate::tools::execution_facts::ExecutionFacts::for_session(&exec.session).register_cell(
++            cell_id.to_string(),
++            call_id.clone(),
++            &exec.turn.sub_id,
++        );
+         telemetry.cell_id = Some(cell_id.to_string());
+         exec.session
+             .services
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -364,7 +364,11 @@
+ 
+     let call = ToolCall {
+         tool_name: tool_name.with_default_namespace(),
+-        call_id: format!("{PUBLIC_TOOL_NAME}-{}", uuid::Uuid::new_v4()),
++        call_id: super::execution_facts::nested_call_id(
++            &exec.session,
++            cell_id.as_ref(),
++            &runtime_tool_call_id,
++        )?,
+         payload,
+         encrypted_function_args: None,
+     };
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -30,7 +30,7 @@
+ use codex_protocol::models::ResponseInputItem;
+ 
+ /// Host-owned terminal handoff produced by the delegated submit tool.
+-#[derive(Clone, Debug, Eq, PartialEq)]
++#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct ChangeBatchHandoff {
+     pub(crate) call_id: String,
+     pub(crate) proposal: String,
+@@ -46,7 +46,7 @@
+     },
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) enum ToolContinuation {
+     YieldToHost(ChangeBatchHandoff),
+ }
+@@ -176,20 +176,6 @@
+ 
+         let mut dispatch_handle: AbortOnDropHandle<Result<AnyToolResult, FunctionCallError>> =
+             AbortOnDropHandle::new(tokio::spawn(async move {
+-                if super::effective_tool_mode(&turn)
+-                    == codex_protocol::openai_models::ToolMode::CodeModeOnly
+-                    && !matches!(source, ToolCallSource::CodeMode { .. })
+-                    && !(dispatch_call.tool_name.is_default_namespace()
+-                        && matches!(
+-                            dispatch_call.tool_name.name.as_str(),
+-                            codex_code_mode::PUBLIC_TOOL_NAME | codex_code_mode::WAIT_TOOL_NAME
+-                        ))
+-                {
+-                    return Err(FunctionCallError::RespondToModel(format!(
+-                        "tool {} must be invoked through Code Mode exec",
+-                        dispatch_call.tool_name
+-                    )));
+-                }
+                 if let Some(tool_runtime) = tool_runtime
+                     && let Some(readiness) = tool_runtime.wait_until_ready(&session)
+                 {
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -542,6 +542,25 @@
+         mut invocation: ToolInvocation,
+         terminal_outcome_reached: Option<Arc<AtomicBool>>,
+     ) -> Result<AnyToolResult, FunctionCallError> {
++        let facts = super::execution_facts::ToolFactRecord::begin(&invocation).await?;
++        if super::effective_tool_mode(&invocation.turn)
++            == codex_protocol::openai_models::ToolMode::CodeModeOnly
++            && !matches!(
++                invocation.source,
++                super::context::ToolCallSource::CodeMode { .. }
++            )
++            && !(invocation.tool_name.is_default_namespace()
++                && matches!(
++                    invocation.tool_name.name.as_str(),
++                    codex_code_mode::PUBLIC_TOOL_NAME | codex_code_mode::WAIT_TOOL_NAME
++                ))
++        {
++            facts.deny().await?;
++            return Err(FunctionCallError::RespondToModel(format!(
++                "tool {} must be invoked through Code Mode exec",
++                invocation.tool_name
++            )));
++        }
+         let tool_name = invocation.tool_name.clone();
+         let tool_name_flat = flat_tool_name(&tool_name);
+         let call_id_owned = invocation.call_id.clone();
+@@ -592,6 +611,7 @@
+                 );
+                 let err = FunctionCallError::RespondToModel(message);
+                 dispatch_trace.record_failed(&err);
++                facts.deny().await?;
+                 return Err(err);
+             }
+         };
+@@ -622,6 +642,7 @@
+             );
+             let err = FunctionCallError::Fatal(message);
+             dispatch_trace.record_failed(&err);
++            facts.deny().await?;
+             return Err(err);
+         }
+ 
+@@ -648,6 +669,7 @@
+                         ToolCallOutcome::Blocked,
+                     )
+                     .await;
++                    facts.deny().await?;
+                     return Err(err);
+                 }
+                 PreToolUseHookResult::Continue {
+@@ -670,6 +692,7 @@
+                             },
+                         )
+                         .await;
++                        facts.deny().await?;
+                         return Err(err);
+                     }
+                 },
+@@ -691,9 +714,11 @@
+                 ToolCallOutcome::Blocked,
+             )
+             .await;
++            facts.deny().await?;
+             return Err(err);
+         }
+ 
++        facts.claim(&invocation, tool.as_ref()).await?;
+         notify_tool_start(&invocation).await;
+         let mut control_tool_analytics = tool
+             .is_builtin_control_tool()
+@@ -744,6 +769,14 @@
+                 },
+             )
+             .await;
++        {
++            let guard = response_cell.lock().await;
++            let snapshot = guard
++                .as_ref()
++                .map(super::execution_facts::snapshot)
++                .transpose()?;
++            facts.completed(snapshot).await?;
++        }
+         let success = match &result {
+             Ok((_, success)) => *success,
+             Err(_) => false,
+@@ -824,8 +857,9 @@
+                         let message = outcome.feedback_message.unwrap_or_else(|| {
+                             "PostToolUse hook blocked the tool result".to_string()
+                         });
+-                        let err = FunctionCallError::RespondToModel(message);
++                        let err = FunctionCallError::RespondToModel(message.clone());
+                         dispatch_trace.record_failed(&err);
++                        facts.rejected(&message).await?;
+                         return Err(err);
+                     }
+                     if let Some(feedback_message) = outcome.feedback_message {
+@@ -838,6 +872,9 @@
+                         });
+                     }
+                 }
++                facts
++                    .accepted(super::execution_facts::snapshot(&result)?)
++                    .await?;
+                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+                 if let Some(continuation) = &result.continuation
+                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
+@@ -859,9 +896,11 @@
+                     &result.payload,
+                     result.result.as_ref(),
+                 );
++                facts.offered().await?;
+                 Ok(result)
+             }
+             Err(err) => {
++                facts.rejected("handler_result_unknown").await?;
+                 dispatch_trace.record_failed(&err);
+                 Err(err)
+             }

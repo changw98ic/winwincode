@@ -2,7 +2,9 @@
 
 //! Extracts independent model claims without granting them verification authority.
 
-use crate::analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence};
+use crate::analysis::{
+    FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence, validate_candidates,
+};
 use serde_json::Value;
 use winwincode_delivery::domain::EvidenceRefType;
 
@@ -61,7 +63,8 @@ pub fn default_claim_output_schema() -> Value {
 /// # Errors
 ///
 /// Returns [`ClaimExtractionError`] when the answer is not an
-/// object, has no parseable `claims` array, or a claim row is invalid.
+/// object, has no parseable `claims` array, or fails the analyzer's claim
+/// constraints. A member must pass the same constraints before panel admission.
 pub fn extract_claims_from_answer(
     candidate_id: &str,
     answer: &Value,
@@ -84,10 +87,13 @@ pub fn extract_claims_from_answer(
     for row in claim_rows {
         claims.push(parse_claim(row).map_err(|message| fail(&message))?);
     }
-    Ok(FusionCandidateClaims {
+    let candidate = FusionCandidateClaims {
         candidate_id: candidate_id.to_owned(),
         claims,
-    })
+    };
+    validate_candidates(std::slice::from_ref(&candidate))
+        .map_err(|_| fail("claims do not satisfy analysis constraints"))?;
+    Ok(candidate)
 }
 
 fn parse_claim(row: &Value) -> Result<FusionClaim, String> {

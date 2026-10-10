@@ -194,6 +194,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
   const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
   const contractsRoot = resolve(root, 'packages/contracts/dist')
   const controlPlaneClientRoot = resolve(root, 'packages/control-plane-client/dist')
+  const networkRequestRoot = resolve(root, 'packages/network-request/src')
   const publicRoot = resolve(root, 'apps/client/dist/public')
   const fixture = resolve(root, fixturePath)
   const productionIndex = readSharedClientFile(resolve(publicRoot, 'index.html'))
@@ -235,6 +236,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
     const browserUiRequest = path.startsWith('/browser-ui/')
     const contractsRequest = path.startsWith('/contracts/')
     const controlPlaneClientRequest = path.startsWith('/control-plane-client/')
+    const networkRequest = path.startsWith('/network-request/')
     const publicRequest = path.startsWith('/assets/')
     const source = sharedLoginBootstrapRequest
       ? resolve(root, 'tests/fixtures/login-bootstrap.mjs')
@@ -253,6 +255,8 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
                   controlPlaneClientRoot,
                   path.replace(/^\/control-plane-client\//u, ''),
                 ))
+              : networkRequest
+                ? normalize(resolve(networkRequestRoot, path.replace(/^\/network-request\//u, '')))
           : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
@@ -260,6 +264,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       || (browserUiRequest && source.startsWith(`${browserUiRoot}/`))
       || (contractsRequest && source.startsWith(`${contractsRoot}/`))
       || (controlPlaneClientRequest && source.startsWith(`${controlPlaneClientRoot}/`))
+      || (networkRequest && source.startsWith(`${networkRequestRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
       || fixtureRequest
       || sharedLoginBootstrapRequest
@@ -288,6 +293,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
           /from ['"]@winwincode\/control-plane-client['"]/gu,
           "from '/control-plane-client/index.js'",
         )
+        .replace(/from ['"]@winwincode\/network-request['"]/gu, "from '/network-request/index.mjs'")
         .replace(
           /from ['"]@winwincode\/contracts\/browser-control['"]/gu,
           "from '/contracts/browser-control.js'",

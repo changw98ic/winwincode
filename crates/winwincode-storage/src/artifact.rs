@@ -787,7 +787,10 @@ pub trait ArtifactObjectStore: Send {
 /// Deep Artifact module: `SQLite` authority metadata plus swappable large-object bytes.
 pub struct ArtifactStore {
     catalog: Option<Connection>,
+    catalog_path: PathBuf,
     objects: Option<Box<dyn ArtifactObjectStore>>,
+    shared_objects: SharedArtifactObjectStore,
+    read_only: bool,
 }
 
 impl ArtifactStore {
@@ -831,9 +834,48 @@ impl ArtifactStore {
             .map_err(sql_error)?;
         migrate_catalog(&mut catalog)?;
         startup_lock.unlock().map_err(io_error)?;
+        let shared_objects = SharedArtifactObjectStore(Arc::new(Mutex::new(Some(objects))));
         Ok(Self {
             catalog: Some(catalog),
-            objects: Some(objects),
+            catalog_path: fs::canonicalize(data_directory.join(CATALOG_FILE_NAME))
+                .map_err(io_error)?,
+            objects: Some(Box::new(shared_objects.clone())),
+            shared_objects,
+            read_only: false,
+        })
+    }
+
+    /// Pins existing immutable metadata and retains the same object adapter.
+    /// The caller pins product-state first under its mutation lock. Object
+    /// bytes are still read and re-hashed by every `read_exact` invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the existing catalog cannot be read.
+    pub fn read_snapshot(&self) -> Result<Self, ArtifactError> {
+        self.catalog_ref()?;
+        let catalog = Connection::open_with_flags(
+            &self.catalog_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(sql_error)?;
+        catalog
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql_error)?;
+        catalog
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(sql_error)?;
+        catalog
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(sql_error)?;
+        Ok(Self {
+            catalog: Some(catalog),
+            catalog_path: self.catalog_path.clone(),
+            objects: Some(Box::new(self.shared_objects.clone())),
+            shared_objects: self.shared_objects.clone(),
+            read_only: true,
         })
     }
 
@@ -1442,14 +1484,20 @@ impl ArtifactStore {
     pub fn close(mut self) -> Result<(), ArtifactError> {
         let mut failures = Vec::new();
         if let Some(objects) = self.objects.take()
+            && !self.read_only
             && let Err(error) = objects.close()
         {
             failures.push(format!("object adapter close failed: {error}"));
         }
-        if let Some(catalog) = self.catalog.take()
-            && let Err((_, error)) = catalog.close()
-        {
-            failures.push(format!("Artifact catalog close failed: {error}"));
+        if let Some(catalog) = self.catalog.take() {
+            if self.read_only
+                && let Err(error) = catalog.execute_batch("ROLLBACK")
+            {
+                failures.push(format!("Artifact snapshot rollback failed: {error}"));
+            }
+            if let Err((_, error)) = catalog.close() {
+                failures.push(format!("Artifact catalog close failed: {error}"));
+            }
         }
         if failures.is_empty() {
             Ok(())
@@ -1458,11 +1506,20 @@ impl ArtifactStore {
         }
     }
 
+    fn ensure_writable(&self) -> Result<(), ArtifactError> {
+        if self.read_only {
+            Err(ArtifactError::adapter("Artifact snapshot is read-only"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn catalog_ref(&self) -> Result<&Connection, ArtifactError> {
         self.catalog.as_ref().ok_or_else(ArtifactError::closed)
     }
 
     fn catalog_mut(&mut self) -> Result<&mut Connection, ArtifactError> {
+        self.ensure_writable()?;
         self.catalog.as_mut().ok_or_else(ArtifactError::closed)
     }
 
@@ -1471,6 +1528,7 @@ impl ArtifactStore {
     }
 
     fn objects_mut(&mut self) -> Result<&mut (dyn ArtifactObjectStore + 'static), ArtifactError> {
+        self.ensure_writable()?;
         self.objects
             .as_deref_mut()
             .ok_or_else(ArtifactError::closed)
@@ -1581,6 +1639,7 @@ impl ArtifactStore {
         &mut self,
         digest: &Sha256Digest,
     ) -> Result<(), ArtifactError> {
+        self.ensure_writable()?;
         let (catalog, objects) = (&mut self.catalog, &mut self.objects);
         let catalog = catalog.as_mut().ok_or_else(ArtifactError::closed)?;
         let transaction = catalog
@@ -1600,6 +1659,68 @@ impl ArtifactStore {
                 .delete(digest)?;
         }
         transaction.commit().map_err(sql_error)
+    }
+}
+
+/// Shares the installed adapter without changing its authority or read checks.
+/// A snapshot never invokes `close`; only the owning Artifact store does.
+#[derive(Clone)]
+struct SharedArtifactObjectStore(Arc<Mutex<Option<Box<dyn ArtifactObjectStore>>>>);
+
+impl SharedArtifactObjectStore {
+    fn with_object<T>(
+        &self,
+        operation: impl FnOnce(&mut dyn ArtifactObjectStore) -> Result<T, ArtifactError>,
+    ) -> Result<T, ArtifactError> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| ArtifactError::adapter("Artifact object adapter lock is poisoned"))?;
+        operation(guard.as_deref_mut().ok_or_else(ArtifactError::closed)?)
+    }
+}
+
+impl ArtifactObjectStore for SharedArtifactObjectStore {
+    fn put_chunk(
+        &mut self,
+        artifact_id: &ArtifactId,
+        sequence: u64,
+        digest: &Sha256Digest,
+        bytes: &[u8],
+    ) -> Result<(), ArtifactError> {
+        self.with_object(|objects| objects.put_chunk(artifact_id, sequence, digest, bytes))
+    }
+    fn finalize(
+        &mut self,
+        artifact_id: &ArtifactId,
+        last_sequence: u64,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+    ) -> Result<(), ArtifactError> {
+        self.with_object(|objects| objects.finalize(artifact_id, last_sequence, digest, size_bytes))
+    }
+    fn read(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, ArtifactError> {
+        self.with_object(|objects| objects.read(digest))
+    }
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        self.with_object(|objects| objects.read_range(digest, size_bytes, offset, length))
+    }
+    fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
+        self.with_object(|objects| objects.delete(digest))
+    }
+    fn close(self: Box<Self>) -> Result<(), ArtifactError> {
+        let objects = self
+            .0
+            .lock()
+            .map_err(|_| ArtifactError::adapter("Artifact object adapter lock is poisoned"))?
+            .take();
+        objects.map_or(Ok(()), ArtifactObjectStore::close)
     }
 }
 

@@ -1,0 +1,11 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -8,6 +8,7 @@
+ pub use codex_arg0::Arg0DispatchPaths;
+ pub use codex_arg0::arg0_dispatch_or_else;
+ pub use codex_config::ConfigLayerStack;
++pub use codex_config::McpServerTransportConfig;
+ pub use codex_config::config_toml::ProjectConfig;
+ pub use codex_config::config_toml::RealtimeAudioConfig;
+ pub use codex_config::config_toml::RealtimeConfig;

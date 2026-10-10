@@ -1011,7 +1011,7 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
     let root = temporary_directory("credential-renewal");
     let mut storage = SqliteStorage::open(&root).unwrap();
     storage.execution_registry().unwrap();
-    for seed in [20000, 22000] {
+    for (seed, occupancy_state) in [(20000, "draining"), (22000, "recovery_pending")] {
         let (fixture, grant, job) = seed_bound_job(&mut storage, seed);
         storage
             .worker_launch_grant_ledger()
@@ -1058,8 +1058,8 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
         }))
         .unwrap();
         let db = rusqlite::Connection::open(storage.database_path()).unwrap();
-        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state='draining' WHERE occupancy_lease_id=?2",
-            params![T1,fixture.lease_id]).unwrap();
+        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state=?3 WHERE occupancy_lease_id=?2",
+            params![T1,fixture.lease_id,occupancy_state]).unwrap();
         db.execute("INSERT INTO execution_workers VALUES (?1,?2,?3,'auth','v1','{}','{}','digest','local','healthy',?3,7,1,1,0)",
             params![grant.worker_id,grant.worker_instance_id,T0]).unwrap();
         db.execute(
@@ -1123,6 +1123,38 @@ fn credential_renewal_preserves_current_launch_authority_and_audit_across_worker
                 .unwrap()
                 .is_none()
         );
+        for forbidden_state in ["recovery_pending_issued", "released"] {
+            if forbidden_state == "released" {
+                db.execute("UPDATE client_occupancy_leases SET state='released' WHERE occupancy_lease_id=?1", [&fixture.lease_id]).unwrap();
+            } else {
+                db.execute("UPDATE worker_launch_grants SET state='issued' WHERE worker_launch_grant_id=?1", [&grant.worker_launch_grant_id]).unwrap();
+            }
+            assert!(
+                storage
+                    .worker_session_credential_ledger()
+                    .unwrap()
+                    .renew_after_accepted_heartbeat(
+                        &record,
+                        &heartbeat,
+                        lease,
+                        &expiry,
+                        &renewal_time
+                    )
+                    .unwrap()
+                    .is_none(),
+                "{forbidden_state} must not renew credentials"
+            );
+            db.execute(
+                "UPDATE client_occupancy_leases SET state=?2 WHERE occupancy_lease_id=?1",
+                params![fixture.lease_id, occupancy_state],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE worker_launch_grants SET state='consumed' WHERE worker_launch_grant_id=?1",
+                [&grant.worker_launch_grant_id],
+            )
+            .unwrap();
+        }
         let renewed = storage
             .worker_session_credential_ledger()
             .unwrap()
@@ -1666,6 +1698,109 @@ fn exercise_trusted_recovery(replace_queued: bool, chat: bool) {
 }
 
 #[test]
+fn independent_launch_bundles_reserve_distinct_downlink_positions() {
+    let directory = temporary_directory("parallel-launch-bundles");
+    let mut storage = SqliteStorage::open(&directory).unwrap();
+    let f = seed_fixture(&mut storage, 32000);
+    // Compose both launches before either publication reserves a stream position.
+    let launches = [32000, 32001].map(|seed| {
+        let digest = format!("sha256:{seed:064x}");
+        let issuance = LaunchGrantIssuance::try_new(
+            id("wlg", seed), &f.node, &f.instance, &f.holder, &f.lease_id,
+            f.fencing_token, &f.binding_id, id("wsn", seed), id("wrk", seed),
+            id("wki", seed), &digest, Some(id("psn", seed)), None,
+            instant(GRANT_EXPIRES),
+        ).unwrap();
+        let credential = winwincode_storage::CredentialIssuance::try_new(
+            id("wcred", seed * 100), id("wsn", seed), id("wrk", seed), id("wki", seed),
+            id("wlg", seed), &digest, instant(GRANT_EXPIRES),
+        ).unwrap();
+        let frame = serde_json::json!({"schemaVersion":"winwincode/v1","kind":"client.worker.launch",
+            "messageId":id("msg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occurredAt":T1,
+            "payload":{"expectedRevision":1,"idempotencyKey":format!("launch-{seed}"),"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),"launchGrant":{
+            "workerLaunchGrantId":id("wlg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),
+            "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"credentialDigest":&digest,"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
+        (issuance, credential, frame)
+    });
+    for (issuance, credential, frame) in &launches {
+        winwincode_storage::issue_worker_launch_bundle(
+            &mut storage,
+            issuance,
+            None,
+            credential,
+            |sequence| {
+                let mut frame = frame.clone();
+                frame["sequence"] = sequence.into();
+                winwincode_storage::ClientDownlinkAppend::try_new(
+                    &f.node,
+                    frame["messageId"].as_str().unwrap(),
+                    sequence,
+                    frame.to_string(),
+                )
+                .map_err(|_| {
+                    winwincode_storage::StorageError::invalid_input("launch frame invalid")
+                })
+            },
+            &instant(T1),
+        )
+        .expect("independent Session launch must not lose its publication");
+    }
+    let frames = storage
+        .client_downlink_outbox()
+        .unwrap()
+        .deliverable(&f.node, 0, 4)
+        .unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame.sequence)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    for (frame, seed) in frames.iter().zip([32000, 32001]) {
+        let envelope: serde_json::Value = serde_json::from_str(&frame.frame).unwrap();
+        assert_eq!(envelope["sequence"], frame.sequence);
+        let grant_id = envelope["payload"]["launchGrant"]["workerLaunchGrantId"]
+            .as_str()
+            .unwrap();
+        assert_eq!(grant_id, id("wlg", seed));
+        let grant = storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .snapshot(grant_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            grant.product_session_id,
+            envelope["payload"]["launchGrant"]["productSessionId"]
+                .as_str()
+                .map(str::to_owned)
+        );
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .active_for_session(&grant.worker_session_id)
+                .unwrap()
+                .is_some()
+        );
+    }
+    let db = rusqlite::Connection::open(storage.database_path()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM worker_launch_publications",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    drop(db);
+    drop(storage);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack() {
     let directory = temporary_directory("launch-bundle");
@@ -1722,7 +1857,7 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
                 &issuance,
                 None,
                 &credential,
-                &numeric,
+                |_| Ok(numeric.clone()),
                 &instant(T1),
             )
             .is_err(),
@@ -1744,7 +1879,7 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
             &issuance,
             None,
             &credential,
-            &invalid,
+            |_| Ok(invalid.clone()),
             &instant(T1)
         )
         .is_err()
@@ -1800,7 +1935,7 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
                 &issuance,
                 None,
                 &credential,
-                &stale,
+                |_| Ok(stale.clone()),
                 &instant(T1)
             ),
             Err(winwincode_storage::WorkerLaunchBundleError::Launch(_))
@@ -1834,7 +1969,7 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
         &issuance,
         None,
         &credential,
-        &valid,
+        |_| Ok(valid.clone()),
         &instant(T1),
     )
     .unwrap();
@@ -1902,6 +2037,23 @@ fn process_closure_is_exact_and_survives_multiple_device_reboots() {
         .worker_launch_grant_ledger()
         .unwrap()
         .settle_device_launch_ack(&f.node, &ack, &instant(T2))
+        .unwrap();
+    let revision = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(&f.node)
+        .unwrap()
+        .unwrap()
+        .revision;
+    storage
+        .client_node_registry()
+        .unwrap()
+        .update_presence(&f.node, ClientPresenceState::Offline, revision)
+        .unwrap();
+    storage
+        .client_occupancy_ledger()
+        .unwrap()
+        .mark_recovery_pending(&f.lease_id, &instant(GRANT_EXPIRES), &instant(T2))
         .unwrap();
     let mut closure = DeviceLaunchProcessClosure {
         worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
@@ -2011,6 +2163,28 @@ fn process_closure_is_exact_and_survives_multiple_device_reboots() {
             )
             .is_err()
     );
+    let revision = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(&f.node)
+        .unwrap()
+        .unwrap()
+        .revision;
+    storage
+        .client_node_registry()
+        .unwrap()
+        .update_presence(&f.node, ClientPresenceState::Online, revision)
+        .unwrap();
+    storage
+        .client_occupancy_ledger()
+        .unwrap()
+        .reconcile_resume(
+            &f.lease_id,
+            winwincode_storage::OccupancyReconcileTarget::ResumeOccupied,
+            None,
+            &instant(T3),
+        )
+        .unwrap();
     f.instance = closure.reporting_client_instance_id;
     let successor = LaunchGrantIssuance::try_new(
         id("wlg", seed + 1),

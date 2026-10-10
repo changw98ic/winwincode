@@ -20,6 +20,7 @@ use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientPlatformTarget,
 };
 
+use crate::supervisor::PROTOCOL_WORKER_SESSION_CAPACITY;
 use crate::{
     AuthorizedPreviewSourceRegistry, DaemonConfig, DaemonError, DeviceDaemon, DeviceIdentitySeed,
     DeviceStore, DeviceStoreError, HttpExchangeTransport, IdentityRecord, LeaseWorkerController,
@@ -35,12 +36,6 @@ const LOG_FILE: &str = "device-client.log";
 const OLD_LOG_FILE: &str = "device-client.log.1";
 const LOG_LIMIT_BYTES: u64 = 1024 * 1024;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
-// Keep the conversation available while one delegated role runs. Roles release their slot on completion.
-/// Device concurrent WorkerSession slots. Production StrongFlow dispatches
-/// executor→reviewer→verifier as distinct WorkRun sessions while chat/cancel
-/// ProductSessions may still hold launch anchors; capacity 2 exhausted that
-/// chain. Server acceptance fixtures already assume 4.
-const MAX_WORKER_SESSIONS: u32 = 4;
 const EXCHANGE_PATH: &str = "/internal/v1/client/exchange";
 const PREVIEW_TUNNEL_PATH: &str = "/internal/v1/preview/tunnel";
 const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
@@ -241,12 +236,7 @@ fn run_device_service_until(
                 max_frames_per_exchange: 16,
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(30),
-                capacity: ClientCapacityReport {
-                    max_concurrent_worker_sessions: MAX_WORKER_SESSIONS,
-                    running_worker_sessions: 0,
-                    reserved_worker_sessions: 0,
-                    draining_worker_sessions: 0,
-                },
+                capacity: service_worker_capacity(),
             },
             store,
             Arc::new(transport),
@@ -373,15 +363,7 @@ fn wire_worker_lane(
     preview_sources: AuthorizedPreviewSourceRegistry,
 ) -> Result<(), DeviceServiceError> {
     let supervisor = SessionSupervisor::new(
-        SupervisorConfig {
-            client_node_id: client_node_id.to_owned(),
-            client_instance_id: client_instance_id.to_owned(),
-            server_origin: server_origin.to_owned(),
-            model_route: None,
-            worker_binary_path: None,
-            max_concurrent_worker_sessions: MAX_WORKER_SESSIONS,
-            stop_grace_period: Duration::from_secs(10),
-        },
+        service_worker_supervisor_config(server_origin, client_node_id, client_instance_id),
         DeviceStore::open(data_directory)?,
     )?;
     daemon.set_worker_supervisor(supervisor.clone());
@@ -405,6 +387,33 @@ fn wire_worker_lane(
         }),
     );
     Ok(())
+}
+
+const fn service_worker_capacity() -> ClientCapacityReport {
+    ClientCapacityReport {
+        max_concurrent_worker_sessions: PROTOCOL_WORKER_SESSION_CAPACITY,
+        running_worker_sessions: 0,
+        reserved_worker_sessions: 0,
+        draining_worker_sessions: 0,
+    }
+}
+
+fn service_worker_supervisor_config(
+    server_origin: &str,
+    client_node_id: &str,
+    client_instance_id: &str,
+) -> SupervisorConfig {
+    SupervisorConfig {
+        client_node_id: client_node_id.to_owned(),
+        client_instance_id: client_instance_id.to_owned(),
+        server_origin: server_origin.to_owned(),
+        model_route: None,
+        worker_binary_path: None,
+        // Zero disables only the Supervisor's additional local cap. The
+        // capacity report still uses the contract's positive technical bound.
+        max_concurrent_worker_sessions: 0,
+        stop_grace_period: Duration::from_secs(10),
+    }
 }
 
 fn managed_app_executable_allowlist() -> Result<BTreeSet<String>, DeviceServiceError> {
@@ -721,6 +730,17 @@ const fn architecture_label(architecture: ClientArchitecture) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{OccupancyMirrorUpdate, SpawnOutcome, SpawnRequest};
+
+    struct StopWorkersOnDrop(SessionSupervisor);
+
+    impl Drop for StopWorkersOnDrop {
+        fn drop(&mut self) {
+            for worker in self.0.worker_processes().unwrap_or_default() {
+                let _ = self.0.stop(&worker.worker_session_id, false);
+            }
+        }
+    }
 
     fn temporary_directory(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -747,6 +767,82 @@ mod tests {
                 .expect("logs")
                 .contains("service started")
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn production_worker_configuration_accepts_a_fifth_live_session() {
+        let root = temporary_directory("fifth-worker");
+        let _ = fs::remove_dir_all(&root);
+        prepare_data_directory(&root).expect("data directory");
+        let binary = root.join("worker-bin");
+        fs::write(&binary, "#!/bin/sh\nexec sleep 60\n").expect("worker fixture");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("worker executable");
+        let mut store = DeviceStore::open(&root).expect("device store");
+        let lease_id = "ocl_SERVICE_WORKERS";
+        store
+            .advance_occupancy_mirror(&OccupancyMirrorUpdate {
+                occupancy_lease_id: lease_id.to_owned(),
+                fencing_token: 7,
+                holder_user_id: Some("usr_SERVICE_HOLDER".to_owned()),
+                claim_request_id: Some("ocq_SERVICE_CLAIM".to_owned()),
+                idle_expires_at: None,
+                acknowledged_at: "2026-01-01T00:00:00.000Z".to_owned(),
+            })
+            .expect("authorized occupancy");
+        let mut config = service_worker_supervisor_config(
+            "https://server.example:8443",
+            "cnd_SERVICE_DEVICE",
+            "cix_SERVICE_INSTANCE",
+        );
+        assert_eq!(
+            service_worker_capacity().max_concurrent_worker_sessions,
+            1024
+        );
+        assert_eq!(config.max_concurrent_worker_sessions, 0);
+        config.worker_binary_path = Some(binary);
+        let supervisor = SessionSupervisor::new(config, store).expect("production supervisor");
+        let workers = StopWorkersOnDrop(supervisor.clone());
+        let source = root.join("source");
+        fs::create_dir_all(&source).expect("source directory");
+        for index in 0..5 {
+            let session_id = format!("wsn_SERVICE_{index}");
+            let worker_id = format!("wrk_SERVICE_{index}");
+            let instance_id = format!("wki_SERVICE_{index}");
+            let data_directory = root.join(format!("worker-data-{index}"));
+            let worker_root = root.join(format!("worker-root-{index}"));
+            let outcome = supervisor
+                .spawn(SpawnRequest {
+                    worker_session_id: &session_id,
+                    worker_id: &worker_id,
+                    worker_instance_id: &instance_id,
+                    occupancy_lease_id: lease_id,
+                    occupancy_fencing_token: 7,
+                    worker_credential_token: "fixture-only-worker-credential",
+                    repository_binding_id: "rbd_SERVICE_SOURCE",
+                    launch_grant_id: "wlg_SERVICE_LAUNCH",
+                    product_session_id: None,
+                    work_run_id: None,
+                    source_directory: &source,
+                    data_directory: &data_directory,
+                    worker_root: &worker_root,
+                })
+                .expect("every authorized session starts, including the fifth");
+            assert!(matches!(outcome, SpawnOutcome::Started(_)));
+        }
+        assert_eq!(
+            supervisor.running_worker_sessions().expect("live workers"),
+            5
+        );
+        assert_eq!(supervisor.worker_capacity().running_worker_sessions, 5);
+        drop(workers);
+        assert_eq!(
+            supervisor
+                .running_worker_sessions()
+                .expect("stopped workers"),
+            0
+        );
+        drop(supervisor);
         fs::remove_dir_all(root).expect("cleanup");
     }
 

@@ -1,8 +1,10 @@
+mod cell_scope;
 mod delegate;
 mod execute_handler;
 pub(crate) mod execute_spec;
 mod response_adapter;
 mod telemetry;
+mod terminal;
 mod wait_handler;
 pub(crate) mod wait_spec;
 
@@ -74,6 +76,7 @@ pub(crate) struct CodeModeService {
     default_exec_yield_time_ms: u64,
     shutting_down: AtomicBool,
     unavailable_warning_emitted: AtomicBool,
+    pub(crate) terminal_handoffs: Arc<terminal::TerminalHandoffs>,
 }
 
 impl CodeModeService {
@@ -81,7 +84,8 @@ impl CodeModeService {
         session_provider: Arc<dyn CodeModeSessionProvider>,
         config: &CodeModeConfig,
     ) -> Self {
-        let dispatch_broker = Arc::new(CodeModeDispatchBroker::new());
+        let terminal_handoffs = Arc::new(terminal::TerminalHandoffs::default());
+        let dispatch_broker = Arc::new(CodeModeDispatchBroker::new(Arc::clone(&terminal_handoffs)));
         let availability = session_provider.availability();
         Self {
             session: OnceCell::new(),
@@ -91,6 +95,7 @@ impl CodeModeService {
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutting_down: AtomicBool::new(false),
             unavailable_warning_emitted: AtomicBool::new(false),
+            terminal_handoffs,
         }
     }
 
@@ -142,7 +147,7 @@ impl CodeModeService {
         self.session().await?.terminate(cell_id).await
     }
 
-    pub(crate) async fn interrupt_active_cells(&self) {
+    pub(crate) async fn interrupt_active_cells(&self, owner: &Session) {
         let Some(session) = self.session.get() else {
             return;
         };
@@ -151,18 +156,25 @@ impl CodeModeService {
                 .active_cell_ids()
                 .into_iter()
                 .map(|cell_id| async move {
-                    if let Err(error) = session.terminate(cell_id.clone()).await {
-                        tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell");
+                    match session.terminate(cell_id.clone()).await {
+                        Ok(_) => {
+                            if let Err(error) = crate::tools::ExecutionFacts::close_cell(owner, cell_id.as_str()).await {
+                                tracing::warn!(%cell_id, %error, "failed to retain interrupted code-mode cell fact");
+                            }
+                            self.finish_cell_dispatch(&cell_id);
+                        }
+                        Err(error) => tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell"),
                     }
                 }),
         )
         .await;
+        self.terminal_handoffs.discard_all();
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.shutting_down.store(true, Ordering::Release);
         // Join any initialization already in progress without initializing an unused service.
-        match self
+        let result = match self
             .session
             .get_or_try_init(|| async {
                 Err::<Arc<dyn CodeModeSession>, String>(
@@ -173,11 +185,19 @@ impl CodeModeService {
         {
             Ok(session) => session.shutdown().await,
             Err(_) => Ok(()),
-        }
+        };
+        self.terminal_handoffs.discard_all();
+        result
     }
 
-    pub(crate) fn mark_cell_ready_for_dispatch(&self, cell_id: &codex_code_mode::CellId) {
-        self.dispatch_broker.mark_cell_ready_for_dispatch(cell_id);
+    pub(crate) fn mark_cell_ready_for_dispatch(
+        &self,
+        cell_id: &codex_code_mode::CellId,
+        step_context: Arc<StepContext>,
+    ) {
+        self.terminal_handoffs.register(cell_id);
+        self.dispatch_broker
+            .mark_cell_ready_for_dispatch(cell_id, step_context);
     }
 
     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
@@ -233,10 +253,30 @@ impl CodeModeService {
 pub(super) async fn handle_runtime_response(
     exec: &ExecContext,
     response: RuntimeResponse,
+    call_id: &str,
     max_output_tokens: Option<usize>,
     started_at: std::time::Instant,
 ) -> Result<FunctionToolOutput, String> {
     let script_status = format_script_status(&response);
+    let mut feedback: Vec<_> = crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
+        &exec.session,
+        &exec.turn,
+        call_id,
+    )
+    .await
+    .into_iter()
+    .collect();
+
+    let cell_id = match &response {
+        RuntimeResponse::Yielded { cell_id, .. }
+        | RuntimeResponse::Terminated { cell_id, .. }
+        | RuntimeResponse::Result { cell_id, .. } => cell_id,
+    };
+    if let Some(receipts) =
+        crate::tools::tool_receipts::feedback(&exec.session, cell_id.as_str()).await
+    {
+        feedback.push(receipts);
+    }
 
     match response {
         RuntimeResponse::Yielded { content_items, .. } => {
@@ -244,6 +284,7 @@ pub(super) async fn handle_runtime_response(
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
             content_items = truncate_code_mode_result(content_items, max_output_tokens);
             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+            content_items.extend(feedback);
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
         RuntimeResponse::Terminated { content_items, .. } => {
@@ -251,6 +292,7 @@ pub(super) async fn handle_runtime_response(
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
             content_items = truncate_code_mode_result(content_items, max_output_tokens);
             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+            content_items.extend(feedback);
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
         RuntimeResponse::Result {
@@ -268,6 +310,7 @@ pub(super) async fn handle_runtime_response(
             }
             content_items = truncate_code_mode_result(content_items, max_output_tokens);
             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+            content_items.extend(feedback);
             Ok(FunctionToolOutput::from_content(
                 content_items,
                 Some(success),
@@ -350,7 +393,11 @@ async fn call_nested_tool(
 
     let call = ToolCall {
         tool_name: tool_name.with_default_namespace(),
-        call_id: format!("{PUBLIC_TOOL_NAME}-{}", uuid::Uuid::new_v4()),
+        call_id: super::execution_facts::nested_call_id(
+            &exec.session,
+            cell_id.as_ref(),
+            &runtime_tool_call_id,
+        )?,
         payload,
         encrypted_function_args: None,
     };

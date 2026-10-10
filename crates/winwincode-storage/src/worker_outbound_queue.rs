@@ -10,15 +10,17 @@
 use std::{collections::BTreeMap, fmt, fs};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest};
+use winwincode_domain::{
+    ExecutionMessageId, Instant, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId,
+};
 
 use crate::execution_registry::{
     accepted_lease_history, load_lease_in_transaction, renew_execution_lease_in_transaction,
 };
 use crate::worker_session_slots::{
-    require_running_slot_authority, require_terminal_slot_authority,
+    load_slot_in_transaction, require_retained_slot_authority, require_terminal_slot_authority,
 };
 use crate::{
     ExecutionLeaseReceipt, ExecutionLeaseRenewal, LeaseWriteStatus, SqliteStorage,
@@ -55,6 +57,17 @@ CREATE TABLE IF NOT EXISTS internal_worker_outbound_settlements (
     settlement TEXT NOT NULL CHECK (settlement IN ('acknowledged', 'terminal')),
     settled_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS internal_worker_outbound_confirmations (
+    message_id TEXT PRIMARY KEY NOT NULL,
+    worker_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    authority_digest TEXT NOT NULL,
+    authority_json BLOB NOT NULL,
+    payload_digest TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS internal_worker_outbound_confirmation_route
+    ON internal_worker_outbound_confirmations (worker_id, worker_instance_id, message_id);
 CREATE INDEX IF NOT EXISTS internal_worker_outbound_route
     ON internal_worker_outbound_messages (
         authority_digest, sequence, message_id
@@ -87,7 +100,7 @@ impl Default for WorkerOutboundQueueConfig {
 }
 
 /// Exact current Worker slot and complete lease time authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerOutboundAuthority {
     pub slot: WorkerSlotAuthority,
@@ -292,6 +305,13 @@ pub struct WorkerOutboundAcknowledgement {
     pub message_id: ExecutionMessageId,
     pub settlement: WorkerOutboundSettlement,
     pub replayed: bool,
+}
+
+/// Completed cleanups plus a retained, independently retryable cleanup failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerOutboundConfirmationProgress {
+    pub acknowledgements: Vec<WorkerOutboundAcknowledgement>,
+    pub retry_error: Option<WorkerOutboundQueueErrorCode>,
 }
 
 /// Stable queue failure categories.
@@ -516,12 +536,12 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Claims a stable authority-bound page for one healthy reconnected Worker.
+    /// Claims a stable authority-bound page for one reconnected Worker.
     /// Claimed-but-unacknowledged rows are returned again with the same bytes.
     ///
     /// # Errors
     ///
-    /// Rejects stale/unhealthy authority, an invalid cursor/page size, corrupt
+    /// Rejects mismatched authority, an invalid cursor/page size, corrupt
     /// retained bytes, and storage failures.
     pub fn claim_page(
         &mut self,
@@ -542,14 +562,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             .map_err(|_| WorkerOutboundQueueError::storage())?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkerOutboundQueueError::storage())?;
-        require_running_slot_authority(
-            &transaction,
-            &authority.slot,
-            &authority.lease_issued_at,
-            &authority.lease_expires_at,
-            observed_at,
-            true,
-        )?;
+        require_retained_slot_authority(&transaction, &authority.slot)?;
         let history = authority_history(&transaction, authority)?;
         let digests = history_digests(&history)?;
         let (after_sequence, snapshot_sequence) =
@@ -624,6 +637,191 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         })
     }
 
+    /// Persists an authenticated remote confirmation before attempting cleanup.
+    /// Non-interaction transport IDs return `false`; known foreign or unclaimed
+    /// interaction IDs are rejected. No raw interaction content is copied.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identity, authority or a failure to persist the proof.
+    pub fn confirm_remote(
+        &mut self,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+        message_id: &ExecutionMessageId,
+        confirmed_at: &Instant,
+    ) -> Result<bool, WorkerOutboundQueueError> {
+        validate_message_id(message_id)?;
+        validate_instant(confirmed_at)?;
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(|_| WorkerOutboundQueueError::storage())?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        if let Some(proof) = load_confirmation(&transaction, message_id)? {
+            validate_confirmation(&transaction, &proof, worker_id, worker_instance_id)?;
+            transaction
+                .commit()
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+            return Ok(true);
+        }
+        let retained: Option<(String, String, String, String, String, String)> = transaction.query_row(
+            "SELECT worker_id, worker_instance_id, worker_session_id, authority_digest, payload_digest, state
+             FROM internal_worker_outbound_messages WHERE message_id=?1",
+            [&message_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
+            .optional().map_err(|_| WorkerOutboundQueueError::storage())?;
+        let Some((worker, instance, session, stored_authority, payload, state)) = retained else {
+            return Ok(false);
+        };
+        if worker != worker_id.0 || instance != worker_instance_id.0 {
+            return Err(WorkerOutboundQueueError::authority());
+        }
+        if WorkerOutboundMessageState::parse(&state)? != WorkerOutboundMessageState::Claimed {
+            return Err(WorkerOutboundQueueError::state());
+        }
+        let slot = load_slot_in_transaction(&transaction, &WorkerSessionId(session))?
+            .ok_or_else(WorkerOutboundQueueError::authority)?
+            .authority;
+        let lease = load_lease_in_transaction(&transaction, &slot.job_id)
+            .map_err(|_| WorkerOutboundQueueError::storage())?
+            .ok_or_else(WorkerOutboundQueueError::authority)?;
+        let authority = WorkerOutboundAuthority {
+            slot,
+            lease_issued_at: lease.issued_at,
+            lease_expires_at: lease.expires_at,
+        };
+        validate_authority(&authority)?;
+        if authority.slot.worker_id != *worker_id
+            || authority.slot.worker_instance_id != *worker_instance_id
+            || !authority_history(&transaction, &authority)?.contains_key(&stored_authority)
+        {
+            return Err(WorkerOutboundQueueError::authority());
+        }
+        require_retained_slot_authority(&transaction, &authority.slot)?;
+        transaction.execute(
+            "INSERT INTO internal_worker_outbound_confirmations
+             (message_id,worker_id,worker_instance_id,authority_digest,authority_json,payload_digest,confirmed_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![message_id.0,worker_id.0,worker_instance_id.0,authority_digest(&authority)?,
+                serde_json::to_vec(&authority).map_err(|_| WorkerOutboundQueueError::storage())?,payload,confirmed_at.0])
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        transaction
+            .commit()
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        Ok(true)
+    }
+
+    /// Retries only proven remote confirmations, including after restart.
+    /// Stops at the first cleanup failure; the proof remains until deletion and
+    /// secure WAL checkpoint both complete. This performs no new execution.
+    ///
+    /// # Errors
+    ///
+    /// Rejects corrupt proof records or failure to load the bounded batch.
+    pub fn retry_confirmed(
+        &mut self,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+    ) -> Result<WorkerOutboundConfirmationProgress, WorkerOutboundQueueError> {
+        let proofs = {
+            let connection = self
+                .storage
+                .connection()
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT message_id FROM internal_worker_outbound_confirmations
+                 WHERE worker_id=?1 AND worker_instance_id=?2 ORDER BY message_id LIMIT ?3",
+                )
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+            let ids = statement
+                .query_map(
+                    params![
+                        worker_id.0,
+                        worker_instance_id.0,
+                        i64::try_from(self.config.max_claim_page_size)
+                            .map_err(|_| WorkerOutboundQueueError::invalid())?
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| WorkerOutboundQueueError::storage())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+            let mut proofs = Vec::new();
+            for id in ids {
+                let mut proof = load_confirmation(connection, &ExecutionMessageId(id))?
+                    .ok_or_else(WorkerOutboundQueueError::storage)?;
+                validate_confirmation(connection, &proof, worker_id, worker_instance_id)?;
+                // A later accepted renewal may extend the cleanup authority.
+                // Preserve the original confirmation clock and immutable slot.
+                if let Some(lease) =
+                    load_lease_in_transaction(connection, &proof.authority.slot.job_id)
+                        .map_err(|_| WorkerOutboundQueueError::storage())?
+                    && lease.lease_id == proof.authority.slot.lease_id
+                    && lease.issued_at == proof.authority.lease_issued_at
+                    && lease.worker_id == proof.authority.slot.worker_id
+                    && lease.worker_instance_id == proof.authority.slot.worker_instance_id
+                    && lease.attempt == proof.authority.slot.attempt
+                    && lease.fencing_token == proof.authority.slot.fencing_token
+                {
+                    let mut renewed = proof.authority.clone();
+                    renewed.lease_expires_at = lease.expires_at;
+                    authority_history(connection, &renewed)?;
+                    proof.authority = renewed;
+                }
+                proofs.push(proof);
+            }
+            proofs
+        };
+        let mut progress = WorkerOutboundConfirmationProgress {
+            acknowledgements: Vec::new(),
+            retry_error: None,
+        };
+        for proof in proofs {
+            let result = (|| {
+                let slot = load_slot_in_transaction(
+                    self.storage
+                        .connection()
+                        .map_err(|_| WorkerOutboundQueueError::storage())?,
+                    &proof.authority.slot.worker_session_id,
+                )?;
+                if slot.is_some_and(|slot| {
+                    slot.authority == proof.authority.slot
+                        && matches!(
+                            slot.state,
+                            crate::WorkerSlotState::Completed
+                                | crate::WorkerSlotState::Cancelled
+                                | crate::WorkerSlotState::Failed
+                                | crate::WorkerSlotState::RecoveryFailed
+                        )
+                }) {
+                    self.settle_terminal(&proof.authority, &proof.confirmed_at)?;
+                }
+                self.acknowledge(&proof.authority, &proof.message_id, &proof.confirmed_at)
+            })()
+            .and_then(|receipt| {
+                self.storage
+                    .connection_mut()
+                    .map_err(|_| WorkerOutboundQueueError::storage())?
+                    .execute(
+                        "DELETE FROM internal_worker_outbound_confirmations WHERE message_id=?1",
+                        [&proof.message_id.0],
+                    )
+                    .map_err(|_| WorkerOutboundQueueError::storage())?;
+                Ok(receipt)
+            });
+            match result {
+                Ok(receipt) => progress.acknowledgements.push(receipt),
+                Err(error) => {
+                    progress.retry_error = Some(error.code());
+                    break;
+                }
+            }
+        }
+        Ok(progress)
+    }
+
     /// Acknowledges one claimed frame and atomically deletes its raw bytes.
     ///
     /// # Errors
@@ -653,14 +851,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             secure_checkpoint(self.storage)?;
             return Ok(acknowledgement);
         }
-        require_running_slot_authority(
-            &transaction,
-            &authority.slot,
-            &authority.lease_issued_at,
-            &authority.lease_expires_at,
-            acknowledged_at,
-            true,
-        )?;
+        require_retained_slot_authority(&transaction, &authority.slot)?;
         let Some((stored_authority, payload_digest, state)) = transaction
             .query_row(
                 "SELECT authority_digest, payload_digest, state
@@ -749,6 +940,73 @@ impl<'storage> WorkerOutboundQueue<'storage> {
     }
 }
 
+struct RemoteConfirmation {
+    message_id: ExecutionMessageId,
+    worker_id: WorkerId,
+    instance_id: WorkerInstanceId,
+    authority: WorkerOutboundAuthority,
+    authority_digest: String,
+    payload_digest: String,
+    confirmed_at: Instant,
+}
+
+fn load_confirmation(
+    connection: &Connection,
+    id: &ExecutionMessageId,
+) -> Result<Option<RemoteConfirmation>, WorkerOutboundQueueError> {
+    let stored = connection.query_row(
+        "SELECT worker_id,worker_instance_id,authority_digest,authority_json,payload_digest,confirmed_at
+         FROM internal_worker_outbound_confirmations WHERE message_id=?1", [&id.0],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Vec<u8>>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))
+        .optional().map_err(|_| WorkerOutboundQueueError::storage())?;
+    stored
+        .map(|(worker, instance, digest, json, payload, at)| {
+            Ok(RemoteConfirmation {
+                message_id: id.clone(),
+                worker_id: WorkerId(worker),
+                instance_id: WorkerInstanceId(instance),
+                authority: serde_json::from_slice(&json)
+                    .map_err(|_| WorkerOutboundQueueError::storage())?,
+                authority_digest: digest,
+                payload_digest: payload,
+                confirmed_at: Instant(at),
+            })
+        })
+        .transpose()
+}
+
+fn validate_confirmation(
+    connection: &Connection,
+    proof: &RemoteConfirmation,
+    worker: &WorkerId,
+    instance: &WorkerInstanceId,
+) -> Result<(), WorkerOutboundQueueError> {
+    validate_message_id(&proof.message_id)?;
+    validate_authority(&proof.authority)?;
+    validate_instant(&proof.confirmed_at)?;
+    if &proof.worker_id != worker
+        || &proof.instance_id != instance
+        || proof.authority.slot.worker_id != *worker
+        || proof.authority.slot.worker_instance_id != *instance
+        || authority_digest(&proof.authority)? != proof.authority_digest
+    {
+        return Err(WorkerOutboundQueueError::authority());
+    }
+    let history = authority_history(connection, &proof.authority)?;
+    let stored: Option<(String,String)> = connection.query_row(
+        "SELECT authority_digest,payload_digest FROM internal_worker_outbound_messages WHERE message_id=?1
+         UNION ALL SELECT authority_digest,payload_digest FROM internal_worker_outbound_settlements WHERE message_id=?1 LIMIT 1",
+        [&proof.message_id.0], |row| Ok((row.get(0)?,row.get(1)?)))
+        .optional().map_err(|_| WorkerOutboundQueueError::storage())?;
+    if !stored.is_some_and(|(authority, payload)| {
+        history.contains_key(&authority) && payload == proof.payload_digest
+    }) || proof.confirmed_at.0 < proof.authority.lease_issued_at.0
+    {
+        return Err(WorkerOutboundQueueError::conflict());
+    }
+    Ok(())
+}
+
 struct StoredClaimRow {
     authority_digest: String,
     sequence: u64,
@@ -783,7 +1041,6 @@ fn validate_enqueue(
         || request.frame_bytes.len() > config.max_frame_bytes
         || digest_bytes(&request.frame_bytes) != request.payload_digest
         || request.sent_at.0 < request.authority.lease_issued_at.0
-        || request.sent_at.0 >= request.authority.lease_expires_at.0
     {
         return Err(WorkerOutboundQueueError::invalid());
     }
@@ -967,6 +1224,8 @@ fn load_claim_rows(
             "SELECT sequence, message_id, payload_digest, payload, state, delivery_attempts, authority_digest
              FROM internal_worker_outbound_messages
              WHERE authority_digest IN (SELECT value FROM json_each(?1)) AND sequence > ?2 AND sequence <= ?3
+             AND NOT EXISTS (SELECT 1 FROM internal_worker_outbound_confirmations AS confirmation
+                             WHERE confirmation.message_id=internal_worker_outbound_messages.message_id)
              ORDER BY sequence, message_id LIMIT ?4",
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
@@ -1186,25 +1445,25 @@ fn enqueue_in_transaction(
     {
         return Err(WorkerOutboundQueueError::authority());
     }
-    require_running_slot_authority(
-        connection,
-        &current_authority.slot,
-        &current_authority.lease_issued_at,
-        &current_authority.lease_expires_at,
-        &request.sent_at,
-        false,
-    )?;
+    require_retained_slot_authority(connection, &current_authority.slot)?;
     let digests = history_digests(&history)?;
-    let (authority_pending, retained_bytes) = connection
-        .query_row(
+    let mut capacity_statement = connection
+        .prepare(
             "SELECT
-                COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
-                COALESCE(SUM(length(payload)), 0)
-             FROM internal_worker_outbound_messages",
-            [&digests],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
+            COALESCE(SUM(length(payload)), 0)
+         FROM internal_worker_outbound_messages",
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let (authority_pending, retained_bytes) = capacity_statement
+        .query_row([&digests], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_query(
+        capacity_statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
     let authority_pending =
         usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?;
     let retained_bytes =

@@ -47,8 +47,8 @@ pub struct RecoverTurnRequest {
     pub turn_id: String,
     pub thread_settings: ThreadSettingsOverrides,
     pub trace: Option<W3cTraceContext>,
-    /// Re-advertise the host-owned terminal handoff when recovering a delegated turn.
-    pub submit_change_batch: bool,
+    /// Restore the original turn-start contract without appending new input.
+    pub start: TurnStartOptions,
 }
 
 impl TurnInputRequest {

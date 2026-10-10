@@ -134,6 +134,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                      CHECK(provider_final IN (0, 1)),
                    core_committed INTEGER NOT NULL DEFAULT 0
                      CHECK(core_committed IN (0, 1)),
+                   jev_accounting_complete INTEGER NOT NULL DEFAULT 0
+                     CHECK(jev_accounting_complete IN (0, 1)),
                    PRIMARY KEY (run_key, model_call_id),
                    UNIQUE (run_key, ordinal)
                  );
@@ -145,19 +147,14 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    PRIMARY KEY (run_key, model_call_id, sequence)
                  );
-                 CREATE TABLE IF NOT EXISTS tool_repeat_run (
-                   run_key TEXT PRIMARY KEY NOT NULL,
-                   stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
-                 );
-                 CREATE TABLE IF NOT EXISTS tool_repeat_admission (
-                   run_key TEXT NOT NULL REFERENCES tool_repeat_run(run_key),
+                 CREATE TABLE IF NOT EXISTS model_call_task_context (
+                   run_key TEXT NOT NULL,
                    model_call_id TEXT NOT NULL,
-                   call_id TEXT NOT NULL,
                    request_digest TEXT NOT NULL,
-                   PRIMARY KEY(run_key, model_call_id, call_id)
+                   context_digest TEXT NOT NULL,
+                   context_text BLOB NOT NULL,
+                   PRIMARY KEY (run_key, model_call_id)
                  );
-                 CREATE INDEX IF NOT EXISTS tool_repeat_identity_idx
-                   ON tool_repeat_admission(run_key, request_digest);
                  CREATE TABLE IF NOT EXISTS model_thread_lineage (
                    thread_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
@@ -336,6 +333,12 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
                    output_tokens INTEGER NOT NULL CHECK(output_tokens>=0),
                    PRIMARY KEY(run_key,operation_id)
                  );
+                 CREATE TABLE IF NOT EXISTS observer_settlement (
+                   run_key TEXT NOT NULL,
+                   batch_id TEXT NOT NULL,
+                   settlement_json TEXT NOT NULL,
+                   PRIMARY KEY(run_key,batch_id)
+                 );
                  CREATE TABLE IF NOT EXISTS performance_changed_file (
                    run_key TEXT NOT NULL,
                    path_digest TEXT NOT NULL,
@@ -405,8 +408,10 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
         FROM performance_operation p LEFT JOIN performance_usage_settlement s
           ON s.run_key=p.run_key AND s.operation_kind=p.operation_kind AND s.operation_id=p.operation_id
           AND s.revision=(SELECT MAX(q.revision) FROM performance_usage_settlement q
-            WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);
-        UPDATE performance_jev_receipt SET completed=1,
+            WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);").map_err(|_| AdapterStoreError::Unavailable)?;
+    // This backfill observes durable completion; it does not own completion.
+    // An optional projection write must not block opening the execution ledger.
+    let _ = connection.execute_batch("UPDATE performance_jev_receipt SET completed=1,
           usage_known=CASE WHEN json_extract(receipt_json,'$.run.observation.outputTokens') IS NOT NULL
             AND json_array_length(receipt_json,'$.run.failures')=0 THEN 1 ELSE 0 END
           WHERE json_type(receipt_json,'$.run')='object';
@@ -416,7 +421,7 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
             ORDER BY f.sequence DESC LIMIT 1),started_at), usage_known=0
         WHERE operation_kind='primary_model' AND completed=0 AND EXISTS (
           SELECT 1 FROM model_call_ledger m WHERE m.run_key=performance_operation.run_key
-          AND m.model_call_id=performance_operation.operation_id AND m.completed=1);").map_err(|_| AdapterStoreError::Unavailable)?;
+          AND m.model_call_id=performance_operation.operation_id AND m.completed=1);");
     Ok(())
 }
 impl AdapterStore {
@@ -466,6 +471,8 @@ impl AdapterStore {
         record: &T,
     ) -> Result<(), AdapterStoreError> {
         let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::run_write(bytes.len());
         self.lock()?
             .execute(
                 "INSERT INTO codex_run(run_key, record_json) VALUES (?1, ?2)
@@ -976,6 +983,7 @@ impl AdapterStore {
     }
 
     /// A durable parent terminal closes pending preprocessors without inventing usage.
+    #[cfg(test)]
     pub(crate) fn close_pending_jev_parent(
         &self,
         run: &str,
@@ -1019,32 +1027,142 @@ impl AdapterStore {
                      AND completed = 0 THEN 1 ELSE 0 END), 0)
                    , COALESCE(SUM(operation_kind = 'observer'), 0)
                    , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model','observer','jev') AND usage_known=0 THEN 1 ELSE 0 END),0)
+                   , (SELECT COUNT(*) FROM model_call_ledger WHERE run_key=?1
+                       AND provider_final=1 AND jev_accounting_complete=0)
                  FROM (
-                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,completed,usage_known
-                   FROM performance_operation_accounted WHERE run_key=?1
+                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,
+                     CASE WHEN operation_kind='primary_model' AND EXISTS (
+                       SELECT 1 FROM model_call_ledger m WHERE m.run_key=p.run_key
+                         AND m.model_call_id=p.operation_id AND m.provider_final=1)
+                       THEN 1 ELSE completed END AS completed,
+                     CASE WHEN completed=0 THEN 0 ELSE usage_known END AS usage_known
+                   FROM performance_operation_accounted p WHERE run_key=?1
+                     AND NOT (operation_kind='observer' AND EXISTS (
+                       SELECT 1 FROM observer_settlement s WHERE s.run_key=p.run_key
+                         AND s.batch_id=p.operation_id))
+                   UNION ALL
+                   -- Observer settlement is a durable receipt, independent of
+                   -- the optional operation timing/count projection.
+                   SELECT 'observer',COALESCE(json_extract(settlement_json,'$.usage.knownTokens'),0),0,0,
+                     json_extract(settlement_json,'$.usage.costMicrounits'),0,1,
+                     COALESCE(json_type(settlement_json,'$.usage.tokens')='integer'
+                       AND json_extract(settlement_json,'$.usage.accountingStatus')='known',0)
+                   FROM observer_settlement WHERE run_key=?1
+                   UNION ALL
+                   -- Missing telemetry never erases an admitted model identity or
+                   -- turns its unknown usage/cost into an available hard budget.
+                   SELECT 'primary_model',0,0,0,NULL,0,provider_final,0
+                   FROM model_call_ledger m WHERE run_key=?1 AND NOT EXISTS (
+                     SELECT 1 FROM performance_operation p WHERE p.run_key=m.run_key
+                       AND p.operation_kind='primary_model' AND p.operation_id=m.model_call_id)
                    UNION ALL
                    SELECT 'jev',input_tokens,0,output_tokens,NULL,0,
-                     CASE WHEN completed=1 OR EXISTS(SELECT 1 FROM performance_jev_parent_terminal p WHERE p.run_key=j.run_key AND (instr(j.operation_id,'jev:'||p.exchange_id||':')=1 OR instr(j.operation_id,'judge:'||p.exchange_id||':')=1)) THEN 1 ELSE 0 END,
-                     usage_known
+                     CASE WHEN completed=1 OR EXISTS(SELECT 1 FROM model_call_ledger m
+                       WHERE m.run_key=j.run_key AND m.provider_final=1
+                       AND (instr(j.operation_id,'jev:'||m.model_exchange_id||':')=1
+                         OR instr(j.operation_id,'judge:'||m.model_exchange_id||':')=1))
+                       OR EXISTS(SELECT 1 FROM performance_jev_parent_terminal p WHERE p.run_key=j.run_key AND (instr(j.operation_id,'jev:'||p.exchange_id||':')=1 OR instr(j.operation_id,'judge:'||p.exchange_id||':')=1)) THEN 1 ELSE 0 END,
+                     -- Recheck the receipt when a legacy statistics backfill could
+                     -- not replace its optimistic default. Missing output stays unknown.
+                     COALESCE(usage_known
+                       AND json_type(receipt_json,'$.run.observation.outputTokens')='integer'
+                       AND json_array_length(receipt_json,'$.run.failures')=0,0)
                    FROM performance_jev_receipt j WHERE run_key=?1
                  )",
                 params![run_key],
                 |row| {
                     let missing_costs = row.get::<_, i64>(4)?;
                     let pending_model_calls = row.get::<_, i64>(5)?;
+                    let missing_jev_accounting = row.get::<_, i64>(8)? > 0;
                     Ok(DelegatedPerformanceTotals {
                         primary_model_calls: row.get(0)?,
                         total_tokens: row.get(1)?,
                         total_cost_microunits: row.get(2)?,
                         elapsed_millis: row.get(3)?,
-                        cost_complete: missing_costs == 0 && pending_model_calls == 0,
-                        usage_complete: row.get::<_,i64>(7)? == 0 && pending_model_calls == 0,
+                        cost_complete: missing_costs == 0 && pending_model_calls == 0 && !missing_jev_accounting,
+                        usage_complete: row.get::<_,i64>(7)? == 0 && pending_model_calls == 0 && !missing_jev_accounting,
                         pending_model_calls,
                         observer_calls: row.get(6)?,
                     })
                 },
             )
             .map_err(|_| AdapterStoreError::Unavailable)
+    }
+
+    pub(crate) fn observer_settlement(
+        &self,
+        run_key: &str,
+        batch_id: &str,
+    ) -> Result<Option<crate::contract::DelegatedObserverSettlement>, AdapterStoreError> {
+        self.lock()?
+            .query_row(
+                "SELECT settlement_json FROM observer_settlement WHERE run_key=?1 AND batch_id=?2",
+                params![run_key, batch_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?
+            .map(|json| serde_json::from_str(&json).map_err(|_| AdapterStoreError::Corrupt))
+            .transpose()
+    }
+
+    /// Upgrade the prior required Observer completion projection into an exact
+    /// receipt. Missing or changed legacy evidence cannot authorize a settlement.
+    pub(crate) fn restore_legacy_observer_settlement(
+        &self,
+        run_key: &str,
+        settlement: &crate::contract::DelegatedObserverSettlement,
+    ) -> Result<bool, AdapterStoreError> {
+        validate_performance_identity(run_key, &settlement.batch_id.0, &settlement.completed_at)?;
+        if settlement
+            .usage
+            .as_ref()
+            .is_some_and(|usage| !winwincode_execution_port::usage::valid_usage(usage))
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let json = serde_json::to_string(settlement).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.transaction(|tx| {
+            let matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM performance_operation_accounted WHERE run_key=?1 AND operation_kind='observer' AND operation_id=?2 AND completed=1 AND input_tokens=?3 AND cached_tokens=0 AND output_tokens=0 AND actual_cost_microunits IS ?4 AND usage_known=?5)",
+                params![run_key,settlement.batch_id.0,settlement.usage.as_ref().map_or(0,|usage|usage.known_tokens),settlement.usage.as_ref().and_then(|usage|usage.cost_microunits),settlement.usage.as_ref().is_some_and(|usage|usage.tokens.is_some())],
+                |row| row.get(0)
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            if !matches { return Ok(false); }
+            tx.execute("INSERT OR IGNORE INTO observer_settlement(run_key,batch_id,settlement_json) VALUES(?1,?2,?3)",params![run_key,settlement.batch_id.0,json]).map_err(|_|AdapterStoreError::Unavailable)?;
+            let saved: String = tx.query_row("SELECT settlement_json FROM observer_settlement WHERE run_key=?1 AND batch_id=?2",params![run_key,settlement.batch_id.0],|row|row.get(0)).map_err(|_|AdapterStoreError::Unavailable)?;
+            let saved: crate::contract::DelegatedObserverSettlement = serde_json::from_str(&saved).map_err(|_|AdapterStoreError::Corrupt)?;
+            if saved.usage != settlement.usage || saved.batch_id != settlement.batch_id { return Err(AdapterStoreError::Conflict); }
+            Ok(true)
+        })
+    }
+
+    pub(crate) fn retain_observer_settlement(
+        &self,
+        run_key: &str,
+        settlement: &crate::contract::DelegatedObserverSettlement,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run_key, &settlement.batch_id.0, &settlement.completed_at)?;
+        if settlement
+            .usage
+            .as_ref()
+            .is_some_and(|usage| !winwincode_execution_port::usage::valid_usage(usage))
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let json = serde_json::to_string(settlement).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.transaction(|tx| {
+            let previous:Option<String> = tx.query_row("SELECT settlement_json FROM observer_settlement WHERE run_key=?1 AND batch_id=?2",
+                params![run_key,settlement.batch_id.0], |row| row.get(0)).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+            if let Some(previous) = previous {
+                let previous:crate::contract::DelegatedObserverSettlement = serde_json::from_str(&previous).map_err(|_| AdapterStoreError::Corrupt)?;
+                if previous.batch_id != settlement.batch_id || previous.usage != settlement.usage { return Err(AdapterStoreError::Conflict); }
+                return Ok(());
+            }
+            tx.execute("INSERT INTO observer_settlement(run_key,batch_id,settlement_json) VALUES(?1,?2,?3)",
+                params![run_key,settlement.batch_id.0,json]).map_err(|_| AdapterStoreError::Unavailable)?;
+            Ok(())
+        })
     }
 
     /// Counts changed files by a private path digest. Raw paths never enter
@@ -1398,6 +1516,44 @@ execution_mode,
         u64::try_from(next).map_err(|_| AdapterStoreError::Conflict)
     }
 
+    /// Freezes host task context once per semantic Core request. A later task
+    /// observation must not alter replayed task text. The caller supplies the
+    /// existing model-call identity, which excludes transport metadata.
+    pub(crate) fn retain_model_task_context(
+        &self,
+        run_key: &str,
+        call_id: &str,
+        request_digest: &Sha256Digest,
+        context: &[u8],
+    ) -> Result<Vec<u8>, AdapterStoreError> {
+        if run_key.trim().is_empty()
+            || call_id.trim().is_empty()
+            || context.len() > MAX_MODEL_CALL_FRAME_BYTES
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let context_digest = format!("sha256:{:x}", Sha256::digest(context));
+        self.transaction(|transaction| {
+            transaction.execute(
+                "INSERT OR IGNORE INTO model_call_task_context VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![run_key, call_id, request_digest.0, context_digest, context],
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            let (saved_request, saved_digest, saved): (String, String, Vec<u8>) = transaction.query_row(
+                "SELECT request_digest, context_digest, context_text FROM model_call_task_context
+                 WHERE run_key=?1 AND model_call_id=?2",
+                params![run_key, call_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            if saved_request != request_digest.0 {
+                return Err(AdapterStoreError::Conflict);
+            }
+            if saved_digest != format!("sha256:{:x}", Sha256::digest(&saved)) {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            Ok(saved)
+        })
+    }
+
     /// Returns the durable phase of one stable Core model call.
     pub(crate) fn model_call_phase(
         &self,
@@ -1537,6 +1693,8 @@ execution_mode,
         for row in rows {
             let (sequence, expected_digest, frame) =
                 row.map_err(|_| AdapterStoreError::Unavailable)?;
+            #[cfg(test)]
+            crate::audit_model_metrics::record_frame_read(frame.len());
             if sequence <= 0 || frame.len() > MAX_MODEL_CALL_FRAME_BYTES {
                 return Err(AdapterStoreError::Corrupt);
             }
@@ -1631,7 +1789,18 @@ execution_mode,
         run_key: &str,
         model_call_id: &str,
     ) -> Result<(), AdapterStoreError> {
-        self.update_model_call_phase(run_key, model_call_id, false)
+        self.update_model_call_phase(run_key, model_call_id, false, None)
+    }
+
+    /// Commit completion and receipt-import completeness together. A missing
+    /// Device source or partial projection is unknown, never an unused budget.
+    pub(crate) fn mark_model_call_provider_final_with_accounting(
+        &self,
+        run_key: &str,
+        model_call_id: &str,
+        jev_accounting_complete: bool,
+    ) -> Result<(), AdapterStoreError> {
+        self.update_model_call_phase(run_key, model_call_id, false, Some(jev_accounting_complete))
     }
 
     /// Records the Core-side terminal commit after the exact `ProviderFinal`
@@ -1643,7 +1812,7 @@ execution_mode,
         run_key: &str,
         model_call_id: &str,
     ) -> Result<(), AdapterStoreError> {
-        self.update_model_call_phase(run_key, model_call_id, true)
+        self.update_model_call_phase(run_key, model_call_id, true, None)
     }
 
     /// Commits every `ProviderFinal` call for one run in one transaction at the
@@ -1672,6 +1841,7 @@ execution_mode,
         run_key: &str,
         model_call_id: &str,
         commit_core: bool,
+        jev_accounting_complete: Option<bool>,
     ) -> Result<(), AdapterStoreError> {
         if run_key.trim().is_empty() || model_call_id.trim().is_empty() {
             return Err(AdapterStoreError::Conflict);
@@ -1703,13 +1873,15 @@ execution_mode,
         connection
             .execute(
                 "UPDATE model_call_ledger
-                 SET completed = 1, provider_final = ?3, core_committed = ?4
+                 SET completed = 1, provider_final = ?3, core_committed = ?4,
+                   jev_accounting_complete = COALESCE(?5,jev_accounting_complete)
                  WHERE run_key = ?1 AND model_call_id = ?2",
                 params![
                     run_key,
                     model_call_id,
                     new_provider_final,
-                    new_core_committed
+                    new_core_committed,
+                    jev_accounting_complete
                 ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
@@ -2370,15 +2542,23 @@ fn ensure_model_call_phase_columns(connection: &Connection) -> Result<(), Adapte
     let mut has_provider_final = false;
     let mut has_core_committed = false;
     let mut has_model_exchange_id = false;
+    let mut has_jev_accounting_complete = false;
     for column in columns {
         match column.map_err(|_| AdapterStoreError::Unavailable)?.as_str() {
             "provider_final" => has_provider_final = true,
             "core_committed" => has_core_committed = true,
             "model_exchange_id" => has_model_exchange_id = true,
+            "jev_accounting_complete" => has_jev_accounting_complete = true,
             _ => {}
         }
     }
     drop(statement);
+    if !has_jev_accounting_complete {
+        // Old rows carry no proof that every Device receipt was imported.
+        // Upgrade conservatively; exact receipt reconciliation can promote them.
+        connection.execute("ALTER TABLE model_call_ledger ADD COLUMN jev_accounting_complete INTEGER NOT NULL DEFAULT 0 CHECK(jev_accounting_complete IN (0,1))", [])
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
     if !has_provider_final {
         connection
             .execute(
@@ -3265,6 +3445,14 @@ fn load_snapshot<T: DeserializeOwned>(
         .query_row(&query, params![key], |row| row.get::<_, Vec<u8>>(0))
         .optional()
         .map_err(|_| AdapterStoreError::Unavailable)?;
+    #[cfg(test)]
+    if table == "model_cursor"
+        && let Some(bytes) = &bytes
+    {
+        crate::audit_model_metrics::record_cursor_read(bytes.len());
+    }
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_read(table, bytes.as_ref().map_or(0, Vec::len));
     bytes
         .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
         .transpose()
@@ -3281,9 +3469,17 @@ fn write_snapshot<T: Serialize>(
         "INSERT INTO {table}(stream_key, snapshot_json) VALUES (?1, ?2)
          ON CONFLICT(stream_key) DO UPDATE SET snapshot_json = excluded.snapshot_json"
     );
+    #[cfg(test)]
+    let serialized_len = bytes.len();
     transaction
         .execute(&statement, params![key, bytes])
         .map_err(|_| AdapterStoreError::Unavailable)?;
+    #[cfg(test)]
+    if table == "model_cursor" {
+        crate::audit_model_metrics::record_cursor_write(serialized_len);
+    }
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_write(table, serialized_len);
     Ok(())
 }
 
@@ -3312,6 +3508,48 @@ mod tests {
             "winwincode-codex-store-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn task_handoff_context_upgrade_preserves_runs_and_detects_corrupt_text() {
+        let root = test_root("task-handoff-context-upgrade");
+        let request_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let store = AdapterStore::open(&root).unwrap();
+        store
+            .save_run("existing-run", &serde_json::json!({"existing":"state"}))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE model_call_task_context")
+            .unwrap();
+        drop(store);
+        let upgraded = AdapterStore::open(&root).unwrap();
+        let run: serde_json::Value = upgraded.load_run("existing-run").unwrap().unwrap();
+        assert_eq!(run["existing"], "state");
+        upgraded
+            .retain_model_task_context(
+                "existing-run",
+                "request-1",
+                &request_digest,
+                b"Task: fixture",
+            )
+            .unwrap();
+        upgraded.lock().unwrap().execute(
+            "UPDATE model_call_task_context SET context_text=?1 WHERE run_key=?2 AND model_call_id=?3",
+            rusqlite::params![b"changed text".as_slice(), "existing-run", "request-1"],
+        ).unwrap();
+        assert_eq!(
+            upgraded.retain_model_task_context(
+                "existing-run",
+                "request-1",
+                &request_digest,
+                b"Task: fixture"
+            ),
+            Err(AdapterStoreError::Corrupt)
+        );
+        drop(upgraded);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3646,7 +3884,7 @@ mod tests {
             )
             .expect_err("changed duplicate completion conflicts");
         store
-            .mark_model_call_provider_final("run", "model-call")
+            .mark_model_call_provider_final_with_accounting("run", "model-call", true)
             .expect("retain primary Provider final");
     }
 
@@ -4403,6 +4641,39 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
+    #[test]
+    fn failed_legacy_statistics_backfill_keeps_jev_usage_unknown_after_restart() {
+        let root = test_root("legacy-jev-stats-backfill");
+        let store = AdapterStore::open(&root).unwrap();
+        let receipt = serde_json::json!({"operationId":"jev:exchange:0", "inputDigest":"old",
+            "run":{"observation":{"inputTokens":5,"outputTokens":null},"failures":[]}})
+        .to_string();
+        store.lock().unwrap().execute(
+            "INSERT INTO performance_jev_receipt(run_key,operation_id,receipt_json,completed,input_tokens,output_tokens,usage_known)
+             VALUES('run','jev:exchange:0',?1,1,5,0,1)", [receipt]).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_optional_jev_backfill BEFORE UPDATE ON performance_jev_receipt
+             BEGIN SELECT RAISE(FAIL,'optional backfill unavailable'); END;",
+            )
+            .unwrap();
+        drop(store);
+        let restored = AdapterStore::open(&root)
+            .expect("auxiliary backfill failure does not block execution recovery");
+        let totals = restored.delegated_performance_totals("run").unwrap();
+        assert!(
+            !totals.usage_complete,
+            "an old optimistic flag cannot make missing tokens known"
+        );
+        let usage = restored.execution_outcome_usage("run", 0).unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.known_tokens, 5);
+        drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unknown_cache_split_keeps_total_tokens_and_can_be_settled_after_restart() {
         let root = test_root("cache-split-restart");

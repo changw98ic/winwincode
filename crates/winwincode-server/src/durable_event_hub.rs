@@ -462,15 +462,16 @@ impl DurableEventHub {
         fs::create_dir_all(directory.as_ref())
             .map_err(|error| DurableEventHubError::storage("event-hub directory", error))?;
         let database_path = directory.as_ref().join(DATABASE_FILE);
-        let connection = Connection::open(&database_path)
-            .map_err(|error| DurableEventHubError::storage("event-hub database", error))?;
-        connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|error| DurableEventHubError::storage("event-hub pragmas", error))?;
-        connection
-            .execute_batch(SCHEMA)
-            .map_err(|error| DurableEventHubError::storage("event-hub schema", error))?;
-        initialize_schema_version(&connection)?;
+        let connection =
+            winwincode_storage::SqliteStorage::open_sidecar(&database_path, |connection| {
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+                    .map_err(|error| DurableEventHubError::storage("event-hub pragmas", error))?;
+                connection
+                    .execute_batch(SCHEMA)
+                    .map_err(|error| DurableEventHubError::storage("event-hub schema", error))?;
+                initialize_schema_version(connection)
+            })?;
         Ok(Self {
             database_path,
             connection: Mutex::new(Some(connection)),

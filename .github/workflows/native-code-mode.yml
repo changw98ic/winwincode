@@ -1,0 +1,181 @@
+name: Native Code Mode acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/helper/**'
+      - 'crates/kernel/**'
+      - 'third_party/codex/codex-rs/**'
+      - 'third_party/codex/justfile'
+      - 'third_party/codex/scripts/just-shell.py'
+      - 'tests/code_mode_kernel.rs'
+      - 'tests/code_mode_sharing.rs'
+      - 'tests/code_mode_recovery.rs'
+      - 'tests/code_mode_agent_wait.rs'
+      - 'tests/fixtures/code-mode-mcp.mjs'
+      - 'tests/workspace-smoke.test.mjs'
+      - 'scripts/code-mode-ninja.mjs'
+      - 'scripts/run-native-kernel-acceptance.mjs'
+      - 'tests/native-kernel-acceptance-runner.test.mjs'
+      - 'scripts/install-code-mode-linux-build-deps.sh'
+      - '.github/workflows/native-code-mode.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-code-mode-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-code-mode:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            timeout_minutes: 120
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            timeout_minutes: 300
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            timeout_minutes: 300
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            timeout_minutes: 300
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo bash scripts/install-code-mode-linux-build-deps.sh
+          printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\nCLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+
+      - name: Install macOS bindgen dependencies
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install llvm@19
+          printf 'LIBCLANG_PATH=%s/lib\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=%s/bin/clang\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
+          rustup override set 1.95.0
+
+      - name: Install Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Build product host and exercise the real Kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p winwincode-kernel-helper --target "${{ matrix.target }}"
+          helper="${GITHUB_WORKSPACE}/target/${{ matrix.target }}/release/winwincode-kernel-helper"
+          node --input-type=module - "${helper}" <<'NODE'
+          import assert from 'node:assert/strict'
+          import { execFileSync } from 'node:child_process'
+          import { createHash } from 'node:crypto'
+          import { readFileSync, statSync } from 'node:fs'
+          const helper = process.argv[2]
+          assert.ok(statSync(helper).size <= 64 * 1024 * 1024, 'helper exceeds the production image limit')
+          const expected = {
+            protocol: 'winwincode-kernel-helper',
+            version: 1,
+            packageVersion: JSON.parse(readFileSync('package.json', 'utf8')).version,
+          }
+          const query = flag => JSON.parse(execFileSync(helper, [flag], { encoding: 'utf8' }))
+          assert.deepEqual(query('--winwincode-helper-handshake'), expected)
+          const source = readFileSync('crates/helper/src/main.rs')
+          assert.deepEqual(query('--winwincode-helper-identity'), {
+            ...expected,
+            sourceSha256: `sha256:${createHash('sha256').update(source).digest('hex')}`,
+          })
+          NODE
+          WINWINCODE_CODE_MODE_TEST_HELPER="${helper}" node scripts/run-native-kernel-acceptance.mjs cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
+
+      - name: Retain failed macOS Kernel startup evidence
+        if: ${{ failure() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-kernel-startup-${{ matrix.target }}
+          path: .cache/native-kernel-startup/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Install pinned vendor test tools
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/codex-test-tools"
+          mkdir -p "${tools}/bin"
+          install_tool() {
+            local binary="$1" url="$2" checksum="$3"
+            local archive="${tools}/${binary}.tar.gz"
+            curl --fail --location --silent --show-error --output "${archive}" "${url}"
+            printf '%s  %s\n' "${checksum}" "${archive}" | shasum -a 256 -c -
+            tar -xzf "${archive}" -C "${tools}/bin" "${binary}"
+          }
+          install_tool just \
+            https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-aarch64-apple-darwin.tar.gz \
+            50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48
+          install_tool cargo-nextest \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz \
+            4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07
+          install_tool dotslash \
+            https://github.com/facebook/dotslash/releases/download/v0.5.9/dotslash-macos-arm64.v0.5.9.tar.gz \
+            eef15be1b554de7b1409cb0c69c24f2cd04f19c0f101ad69fcdf9d66d4d51639
+          sudo cp -f "${tools}/bin/dotslash" /usr/local/bin/dotslash
+          printf '%s\n' "${tools}/bin" >> "${GITHUB_PATH}"
+
+      - name: Test complete vendored workspace
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        working-directory: third_party/codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3 git dotslash
+          just --version
+          cargo nextest --version
+          dotslash --version
+          dotslash -- fetch codex-rs/app-server/tests/suite/zsh
+          just test --workspace --locked --target "${{ matrix.target }}" --test-threads 2 --retries 0

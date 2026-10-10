@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { isAbsolute, resolve } from 'node:path'
 
@@ -68,6 +69,40 @@ export function openBenchmarkLedger(path, identity, cells) {
     throw error
   }
   return {
+    // Import only completed denominator rows into a new experiment. Old calls,
+    // claims, and failed rows never acquire authority in the new ledger.
+    retainCompleted(entries = []) {
+      transaction(() => {
+        for (const entry of entries) {
+          const { index, record, provenance } = entry
+          if (!Number.isInteger(index) || cells[index]?.runId !== record?.runId
+            || record.status !== 'completed' || !provenance
+            || typeof provenance.sourceLedger !== 'string' || !isAbsolute(provenance.sourceLedger)
+            || !/^[0-9a-f]{64}$/u.test(provenance.sourceLedgerSha256 ?? '')
+            || createHash('sha256').update(JSON.stringify(record)).digest('hex') !== provenance.recordSha256) {
+            reject('LEDGER_RETAINED_COMPLETION_INVALID')
+          }
+          for (const key of ['taskId', 'configurationId', 'comparison', 'fusionKind']) {
+            if (record[key] !== cells[index][key]) reject('LEDGER_RETAINED_COMPLETION_INVALID')
+          }
+          const retained = JSON.stringify({ ...record, retainedCompletion: provenance })
+          const row = database.prepare('SELECT token, record FROM benchmark_cell WHERE ordinal = ?').get(index)
+          if (row.record === retained) continue
+          if (row.token !== null || row.record !== null) reject('LEDGER_RETAINED_COMPLETION_CONFLICT')
+          database.prepare('UPDATE benchmark_cell SET token = ?, record = ? WHERE ordinal = ?')
+            .run(randomUUID(), retained, index)
+        }
+      })
+    },
+    // Read retained results without claiming or recovering any pending cell.
+    records() {
+      const rows = database.prepare('SELECT ordinal, record FROM benchmark_cell ORDER BY ordinal').all()
+      if (rows.length !== cells.length) reject('LEDGER_CELL_MISSING')
+      return rows.map((row, index) => {
+        if (row.ordinal !== index) reject('LEDGER_CELL_MISSING')
+        return row.record === null ? null : JSON.parse(row.record)
+      })
+    },
     claim(index) {
       return transaction(() => {
         const row = database.prepare('SELECT token, record FROM benchmark_cell WHERE ordinal = ?').get(index)
@@ -138,9 +173,26 @@ export function openBenchmarkLedger(path, identity, cells) {
           || JSON.stringify(launches(index)) !== JSON.stringify(observed.launches)
           || JSON.stringify(calls(index)) !== JSON.stringify(observed.calls)) reject('LEDGER_RECOVERY_CONFLICT')
         if (record.calls !== undefined) {
-          if (!Array.isArray(record.calls) || record.calls.length < observed.calls.length
-            || JSON.stringify(record.calls.slice(0, observed.calls.length)) !== JSON.stringify(observed.calls)) {
+          if (!Array.isArray(record.calls) || record.calls.length < observed.calls.length) {
             reject('LEDGER_RECOVERY_CONFLICT')
+          }
+          for (const [position, prior] of observed.calls.entries()) {
+            const resolved = record.calls[position]
+            if (JSON.stringify(resolved) === JSON.stringify(prior)) continue
+            const launch = observed.launches.find(target => target.callId === prior.callId)
+            // An export or unresolved observation error is not a Provider outcome. Resolve only that
+            // exact registered call from retained product evidence, and keep
+            // its original failure in the same atomic recovery record.
+            if (prior.status !== 'failed' || (prior.failure?.code !== 'BENCHMARK_EVIDENCE_FAILED'
+                && prior.unresolvedDeviceExecution !== true && prior.failure?.executionUnresolved !== true)
+              || resolved?.status !== 'returned' || resolved.callId !== prior.callId
+              || !launch || resolved.result?.directory !== launch.directory || !resolved.result.recovery
+              || record.recovery?.kind !== 'retained-product-result'
+              || JSON.stringify(record.recovery.originalCalls) !== JSON.stringify(observed.calls)) {
+              reject('LEDGER_RECOVERY_CONFLICT')
+            }
+            database.prepare('UPDATE benchmark_call SET record = ? WHERE ordinal = ? AND call_id = ?')
+              .run(JSON.stringify(resolved), index, prior.callId)
           }
           const insert = database.prepare('INSERT INTO benchmark_call VALUES (?, ?, ?)')
           for (const call of record.calls.slice(observed.calls.length)) {

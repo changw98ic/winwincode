@@ -59,6 +59,70 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
 }
 
 #[tokio::test]
+async fn delegated_handoff_records_the_outer_response_before_continuation() {
+    for (outer_name, outer_call_id) in [
+        ("submit_change_batch", "batch-original"),
+        ("exec", "exec-original"),
+    ] {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let handoff = ChangeBatchHandoff {
+            call_id: "batch-original".to_string(),
+            proposal: "{\"schemaVersion\":1}".to_string(),
+        };
+        let call = ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: outer_call_id.to_string(),
+            name: outer_name.to_string(),
+            namespace: None,
+            input: handoff.proposal.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        session
+            .record_conversation_items(&turn_context, std::slice::from_ref(&call))
+            .await;
+        let completion = handoff.clone();
+        let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
+            FuturesOrdered::new();
+        in_flight.push_back(Box::pin(async move {
+            Ok(ToolCallCompletion::Continuation {
+                response: ResponseInputItem::CustomToolCallOutput {
+                    call_id: outer_call_id.to_string(),
+                    name: Some(outer_name.to_string()),
+                    output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                        "ChangeBatch proposal handed to host for application and validation."
+                            .to_string(),
+                    ),
+                },
+                continuation: ToolContinuation::YieldToHost(completion),
+            })
+        }));
+        assert_eq!(
+            drain_in_flight(&mut in_flight, session.clone(), turn_context)
+                .await
+                .unwrap(),
+            Some(handoff.clone())
+        );
+        let output = ResponseInputItem::CustomToolCallOutput {
+            call_id: outer_call_id.to_string(),
+            name: Some(outer_name.to_string()),
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "ChangeBatch proposal handed to host for application and validation.".to_string(),
+            ),
+        }
+        .into();
+        let mut items = crate::session::tests::raw_history_items(&session.clone_history().await);
+        for item in &mut items {
+            item.set_id(None);
+            item.clear_internal_chat_message_metadata_passthrough();
+        }
+        assert_eq!(items, vec![call, output]);
+    }
+}
+
+#[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();

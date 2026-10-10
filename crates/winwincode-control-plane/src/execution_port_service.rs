@@ -519,12 +519,10 @@ impl<'storage> ExecutionPortService<'storage> {
     ) -> Result<TypedFrame, ExecutionPortServiceError> {
         validate_runtime_replay_command(&command)?;
         let (durable_job_event, job) = load_durable_execution_job(self.storage, &command.job_id)?;
-        let authority = load_runtime_replay_authority(self.storage, &job, &self.server_time)?;
-        if command.sent_at.0 < authority.lease.issued_at.0
-            || command.sent_at.0 > authority.lease.expires_at.0
-        {
+        let authority = load_runtime_replay_authority(self.storage, &job)?;
+        if command.sent_at.0 < authority.lease.issued_at.0 {
             return Err(ExecutionPortServiceError::AuthorityRejected(
-                "replay command time is outside the current lease",
+                "replay command time precedes the original execution",
             ));
         }
         let after_sequence = runtime_ack_sequence_for_replay(
@@ -793,14 +791,35 @@ fn validate_runtime_replay_command(
     Ok(())
 }
 
+pub(crate) fn load_running_runtime_authority(
+    storage: &mut SqliteStorage,
+    job: &ExecutionJob,
+    now: &Instant,
+) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
+    let authority = load_runtime_authority(storage, job, true)?;
+    if now.0 < authority.lease.issued_at.0 || now.0 >= authority.lease.expires_at.0 {
+        return Err(ExecutionPortServiceError::AuthorityRejected(
+            "current execution lease is expired",
+        ));
+    }
+    Ok(authority)
+}
+
+pub(crate) fn load_runtime_replay_authority(
+    storage: &mut SqliteStorage,
+    job: &ExecutionJob,
+) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
+    load_runtime_authority(storage, job, false)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the durable identity join stays one fail-closed seam"
 )]
-pub(crate) fn load_runtime_replay_authority(
+fn load_runtime_authority(
     storage: &mut SqliteStorage,
     job: &ExecutionJob,
-    now: &Instant,
+    require_running: bool,
 ) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
     let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(ExecutionPortServiceError::AuthorityRejected(
@@ -902,7 +921,7 @@ pub(crate) fn load_runtime_replay_authority(
             .ok_or(ExecutionPortServiceError::AuthorityRejected(
                 "SessionBinding CodexThread is pending",
             ))?;
-    if !matches!(run.state, winwincode_domain::WorkRunState::Running) {
+    if require_running && !matches!(run.state, winwincode_domain::WorkRunState::Running) {
         return Err(ExecutionPortServiceError::AuthorityRejected(
             "current WorkRun is stale or foreign",
         ));
@@ -951,11 +970,6 @@ pub(crate) fn load_runtime_replay_authority(
                 ExecutionPortServiceError::AuthorityRejected("current execution lease is missing"),
             )?
         };
-    if now.0 >= lease.expires_at.0 {
-        return Err(ExecutionPortServiceError::AuthorityRejected(
-            "current execution lease is expired",
-        ));
-    }
     if lease.job_id != job.job_id
         || lease.payload_digest != job.payload_digest
         || lease.attempt != attempt

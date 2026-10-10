@@ -31,10 +31,10 @@ use winwincode_execution_port::{
     },
 };
 use winwincode_storage::{
-    ExecutionJobSubmission, ExecutionLeaseClaim, ExecutionLeaseTerminalOutcome,
-    ExecutionLeaseTerminalRequest, ExecutionQueueScope, LeaseWriteStatus, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, WorkerPoolId, WorkerRegistryScope,
+    ExecutionJobState, ExecutionJobSubmission, ExecutionJobTransitionRequest, ExecutionLeaseClaim,
+    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionQueueScope,
+    LeaseWriteStatus, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
+    ReceiptScopeKey, SqliteStorage, StateCommit, WorkerPoolId, WorkerRegistryScope,
 };
 
 const REMOTE_PROOF: &[u8] = b"REMOTE_WORKER_FIXTURE_PROOF";
@@ -157,7 +157,7 @@ fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDis
             )],
         ))
         .expect("durable dispatch intent");
-    storage
+    let submitted = storage
         .execution_queue()
         .expect("execution queue")
         .submit(&ExecutionJobSubmission {
@@ -179,6 +179,19 @@ fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDis
             submitted_at: dispatch.sent_at.clone(),
         })
         .expect("durable scheduler Job");
+    storage
+        .execution_queue()
+        .expect("execution queue")
+        .transition(&ExecutionJobTransitionRequest {
+            scope: submitted.job.scope,
+            job_id: job.job_id.clone(),
+            request_id: RequestId("req_00000000000000000000000903".to_owned()),
+            expected_revision: submitted.job.revision,
+            from: ExecutionJobState::Queued,
+            to: ExecutionJobState::Leased,
+            occurred_at: dispatch.lease.issued_at.clone(),
+        })
+        .expect("durable queue lease receipt");
 }
 
 fn accept_local(
@@ -263,7 +276,7 @@ fn exercise_faults_after_restart(
     remote_transport: bool,
 ) -> Vec<ExecutionPortMessage> {
     let mut service =
-        ExecutionPortService::new(storage, Instant("2026-08-24T12:00:03.000Z".to_owned()));
+        ExecutionPortService::new(storage, Instant("2026-08-24T12:10:00.000Z".to_owned()));
     let accept = |service: &mut ExecutionPortService<'_>, message| {
         if remote_transport {
             accept_remote_transport(service, message)
@@ -279,12 +292,12 @@ fn exercise_faults_after_restart(
         ExecutionPortMessage::JobDispatchResultMessage(stale),
     );
 
-    let mut expired: JobDispatchResultMessage = fixture_message("job.dispatch_result");
-    expired.request_id = RequestId("req_00000000000000000000000922".to_owned());
-    expired.sent_at = expired.lease.expires_at.clone();
-    let expired = accept(
+    let mut late: JobDispatchResultMessage = fixture_message("job.dispatch_result");
+    late.request_id = RequestId("req_00000000000000000000000922".to_owned());
+    late.sent_at = late.lease.expires_at.clone();
+    let late = accept(
         &mut service,
-        ExecutionPortMessage::JobDispatchResultMessage(expired),
+        ExecutionPortMessage::JobDispatchResultMessage(late),
     );
     let replacement = accept(
         &mut service,
@@ -296,12 +309,12 @@ fn exercise_faults_after_restart(
         &mut service,
         ExecutionPortMessage::JobDispatchResultMessage(old_instance),
     );
-    vec![stale, expired, replacement, old_instance]
+    vec![stale, late, replacement, old_instance]
 }
 
-fn assert_zero_fault_receipts(storage: &mut SqliteStorage, dispatch: &JobDispatchMessage) {
+fn assert_dispatch_receipts(storage: &mut SqliteStorage, dispatch: &JobDispatchMessage) {
     let registry = storage.execution_registry().expect("execution Registry");
-    for request in [921_u64, 922, 923] {
+    for request in [921_u64, 923] {
         assert!(
             !registry
                 .has_request(
@@ -320,10 +333,20 @@ fn assert_zero_fault_receipts(storage: &mut SqliteStorage, dispatch: &JobDispatc
     assert_eq!(lease.lease_id, dispatch.lease.lease_id);
     assert_eq!(lease.fencing_token, dispatch.lease.fencing_token);
     assert_eq!(lease.worker_instance_id, dispatch.lease.worker_instance_id);
+    assert_eq!(lease.expires_at, dispatch.lease.expires_at);
+    assert!(
+        registry
+            .has_request(
+                "dispatch_result",
+                &dispatch.job.job_id,
+                &RequestId("req_00000000000000000000000922".to_owned()),
+            )
+            .expect("late receipt is durable")
+    );
 }
 
 #[test]
-fn local_and_remote_transports_replay_faults_after_restart_without_double_writes() {
+fn local_and_remote_transports_accept_late_receipts_and_reject_foreign_facts_after_restart() {
     let local_root = TestDirectory::new("transport-local");
     let remote_root = TestDirectory::new("transport-remote");
     let expected: JobDispatchMessage = fixture_message("job.dispatch");
@@ -340,7 +363,7 @@ fn local_and_remote_transports_replay_faults_after_restart_without_double_writes
     let remote = exercise_faults_after_restart(&mut remote_storage, true);
     assert_eq!(
         local, remote,
-        "generated fault DTOs must be adapter-identical"
+        "generated acceptance and rejection DTOs must be adapter-identical"
     );
 
     assert_eq!(
@@ -361,16 +384,15 @@ fn local_and_remote_transports_replay_faults_after_restart_without_double_writes
     );
     assert_eq!(
         result_status(&local[1]).status,
-        JobDispatchResultMessageStatus::RejectedExpiredLease
+        JobDispatchResultMessageStatus::Accepted
     );
     assert_eq!(
         result_status(&local[1])
             .error
             .as_ref()
             .map(|error| &error.code),
-        Some(&ExecutionPortErrorCode::LeaseExpired)
+        None
     );
-    assert_public_fault(&local[1], "rejected_expired_lease", "LEASE_EXPIRED");
     let ExecutionPortMessage::WorkerRegistrationResultMessage(replacement) = &local[2] else {
         panic!("replacement registration result")
     };
@@ -398,8 +420,8 @@ fn local_and_remote_transports_replay_faults_after_restart_without_double_writes
         "rejected_worker_instance",
         "WORKER_INSTANCE_CHANGED",
     );
-    assert_zero_fault_receipts(&mut local_storage, &expected);
-    assert_zero_fault_receipts(&mut remote_storage, &expected);
+    assert_dispatch_receipts(&mut local_storage, &expected);
+    assert_dispatch_receipts(&mut remote_storage, &expected);
 }
 
 fn repository_scope() -> RepositoryScope {
@@ -535,17 +557,17 @@ fn activate_remote_worker(
         "rejected_stale_fencing_token",
         "STALE_FENCING_TOKEN",
     );
-    let mut expired: JobDispatchResultMessage = fixture_message("job.dispatch_result");
-    expired.request_id = RequestId("req_00000000000000000000000974".to_owned());
-    expired.sent_at = expired.lease.expires_at.clone();
-    let expired = remote_accept(
+    let mut unissued: JobDispatchResultMessage = fixture_message("job.dispatch_result");
+    unissued.request_id = RequestId("req_00000000000000000000000974".to_owned());
+    unissued.lease.expires_at = Instant("2026-08-24T12:09:00.000Z".to_owned());
+    let unissued = remote_accept(
         storage,
         authenticator,
         &mut connection,
-        &ExecutionPortMessage::JobDispatchResultMessage(expired),
+        &ExecutionPortMessage::JobDispatchResultMessage(unissued),
         &Instant("2026-08-24T12:00:02.000Z".to_owned()),
     );
-    assert_public_fault(&expired, "rejected_expired_lease", "LEASE_EXPIRED");
+    assert_public_fault(&unissued, "conflict", "JOB_DISPATCH_CONFLICT");
     let registry = storage.execution_registry().expect("execution Registry");
     for request in [973_u64, 974] {
         assert!(

@@ -554,3 +554,58 @@ fn rejects_invalid_instant_and_unknown_snapshots() {
             .is_none()
     );
 }
+
+#[test]
+fn exchange_deduplication_survives_restart_and_detects_changed_payloads() {
+    let root = temporary_directory("durable-receipts");
+    let node = node_id(31);
+    {
+        let mut storage = open(root.clone());
+        let mut registry = storage.client_node_registry().expect("registry");
+        registry
+            .register(&registration(31), 0, &instant(T0))
+            .expect("register");
+        assert!(
+            !registry
+                .reserve_exchange_frame(&node, 1, "message-1", "digest-a", Some("command-1"))
+                .expect("reserve")
+        );
+        assert!(
+            !registry
+                .reserve_exchange_frame(&node, 1, "message-1", "digest-a", Some("command-1"))
+                .expect("unfinished command must replay")
+        );
+        registry
+            .complete_exchange_frame(&node, 1, Some("command-1"))
+            .expect("complete");
+    }
+    let mut storage = open(root);
+    let mut registry = storage.client_node_registry().expect("registry");
+    assert!(
+        registry
+            .reserve_exchange_frame(&node, 2, "message-2", "digest-a", Some("command-1"))
+            .expect("same command in another exchange")
+    );
+    assert_eq!(
+        registry
+            .reserve_exchange_frame(&node, 3, "message-3", "digest-b", Some("command-1"))
+            .expect_err("changed command bytes")
+            .kind(),
+        ClientRegistryErrorKind::IdentityConflict
+    );
+    assert_eq!(
+        registry
+            .reserve_exchange_frame(&node, 1, "message-1", "digest-b", None)
+            .expect_err("changed old frame bytes")
+            .kind(),
+        ClientRegistryErrorKind::IdentityConflict
+    );
+    assert_eq!(
+        registry
+            .exchange_cursors(&node)
+            .expect("cursor")
+            .expect("node")
+            .client_to_server_ack_sequence,
+        1
+    );
+}

@@ -312,6 +312,24 @@ impl ResponsesRequest {
         self.call_output(call_id, "custom_tool_call_output")
     }
 
+    pub fn custom_tool_call_output_text(&self, call_id: &str) -> Option<String> {
+        let input = self.input();
+        let item = input
+            .iter()
+            .find(|item| item["type"] == "custom_tool_call_output" && item["call_id"] == call_id)?;
+        match item.get("output")? {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .filter_map(|item| item["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        }
+    }
+
     pub fn tool_search_output(&self, call_id: &str) -> Value {
         self.call_output(call_id, "tool_search_output")
     }
@@ -343,9 +361,7 @@ impl ResponsesRequest {
             item.get("type").and_then(Value::as_str) == Some("function_call_output")
                 && item.get("call_id").and_then(Value::as_str) == Some(call_id)
         })?;
-        item.get("output")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        output_value_to_text(item.get("output")?)
     }
 
     pub fn function_call_output_content_and_success(
@@ -408,12 +424,35 @@ impl ResponsesRequest {
 pub(crate) fn output_value_to_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
-        Value::Array(items) => match items.as_slice() {
-            [item] if item.get("type").and_then(Value::as_str) == Some("input_text") => {
-                item.get("text").and_then(Value::as_str).map(str::to_string)
+        Value::Array(items) => {
+            let mut end = items.len();
+            while let Some(text) = end
+                .checked_sub(1)
+                .and_then(|index| items[index]["text"].as_str())
+            {
+                let kind = if text.starts_with("<core_tool_receipts>") {
+                    "core_tool_receipts"
+                } else if text.starts_with("<model_behavior_diagnosis>") {
+                    "model_behavior_diagnosis"
+                } else {
+                    break;
+                };
+                let payload = text
+                    .strip_prefix(&format!("<{kind}>"))
+                    .and_then(|text| text.strip_suffix(&format!("</{kind}>")))
+                    .expect("complete Core feedback fragment");
+                let feedback: Value = serde_json::from_str(payload).expect("Core feedback JSON");
+                assert_eq!(feedback["type"], kind);
+                assert_eq!(feedback["schema_version"], 1);
+                end -= 1;
             }
-            [_] | [] | [_, _, ..] => None,
-        },
+            match &items[..end] {
+                [item] if item.get("type").and_then(Value::as_str) == Some("input_text") => {
+                    item.get("text").and_then(Value::as_str).map(str::to_string)
+                }
+                [_] | [] | [_, _, ..] => None,
+            }
+        }
         Value::Object(_) | Value::Number(_) | Value::Bool(_) | Value::Null => None,
     }
 }
@@ -460,6 +499,27 @@ mod tests {
             body: serde_json::to_vec(&serde_json::json!({ "input": input }))
                 .expect("serialize request body"),
         })
+    }
+
+    #[test]
+    fn core_feedback_preserves_text_and_mixed_runtime_payloads() {
+        let feedback = format!(
+            "<core_tool_receipts>{}</core_tool_receipts>",
+            serde_json::json!({ "type": "core_tool_receipts", "schema_version": 1, "receipts": [{"source_id": "fact-1", "request_sequence": 1, "tool": "exec_command", "execution": "completed"}] })
+        );
+        let request = request_with_input(serde_json::json!([
+            { "type": "function_call_output", "call_id": "text", "output": [{ "type": "input_text", "text": "original payload" }, { "type": "input_text", "text": feedback }] },
+            { "type": "function_call_output", "call_id": "image", "output": [{ "type": "input_text", "text": "caption" }, { "type": "input_image", "image_url": "data:image/png;base64,abc" }, { "type": "input_text", "text": feedback }] }
+        ]));
+        assert_eq!(
+            request.function_call_output_text("text"),
+            Some("original payload".into())
+        );
+        assert_eq!(request.function_call_output_text("image"), None);
+        assert_eq!(
+            request.function_call_output_content_and_success("image"),
+            Some((None, None))
+        );
     }
 
     #[test]
@@ -942,6 +1002,21 @@ pub fn ev_function_call_with_namespace(
             "arguments": arguments
         }
     })
+}
+
+pub fn ev_code_mode_call(call_id: &str, namespace: &str, name: &str, arguments: &str) -> Value {
+    let name = match namespace {
+        "" | "functions" => name.to_string(),
+        namespace if namespace.ends_with('_') || name.starts_with('_') => {
+            format!("{namespace}{name}")
+        }
+        namespace => format!("{namespace}__{name}"),
+    };
+    ev_custom_tool_call(
+        call_id,
+        "exec",
+        &format!("text(await tools.{name}({arguments}));"),
+    )
 }
 
 pub fn ev_tool_search_call(call_id: &str, arguments: &serde_json::Value) -> Value {

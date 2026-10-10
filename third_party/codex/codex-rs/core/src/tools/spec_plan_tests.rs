@@ -201,6 +201,8 @@ async fn probe_with(
     inputs: ToolPlanInputs,
 ) -> ToolPlanProbe {
     let (_session, mut turn) = make_session_and_context().await;
+    // Registry fixtures use Core executors. Hosted-search scenarios opt in below.
+    set_web_search_mode(&mut turn, WebSearchMode::Disabled);
     configure_turn(&mut turn);
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
@@ -604,10 +606,7 @@ async fn request_user_input_tool_respects_experimental_config_gate() {
     let enabled = probe(|_| {}).await;
     enabled.assert_visible_contains(&["request_user_input"]);
     enabled.assert_registered_contains(&["request_user_input"]);
-    assert_eq!(
-        enabled.exposure("request_user_input"),
-        ToolExposure::DirectModelOnly
-    );
+    assert_eq!(enabled.exposure("request_user_input"), ToolExposure::Direct);
 
     let disabled = probe(|turn| {
         update_config(turn, |config| {
@@ -636,27 +635,24 @@ async fn update_plan_tool_respects_config_gate() {
 }
 
 #[tokio::test]
-async fn request_user_input_stays_direct_in_code_mode_only() {
+async fn request_user_input_is_available_inside_code_mode_only() {
     let plan = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
     })
     .await;
 
     plan.assert_visible_contains(&[
-        "request_user_input",
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
+    assert_eq!(plan.visible_names, ["exec", "wait"]);
     plan.assert_registered_contains(&["request_user_input"]);
-    assert_eq!(
-        plan.exposure("request_user_input"),
-        ToolExposure::DirectModelOnly
-    );
+    assert_eq!(plan.exposure("request_user_input"), ToolExposure::Direct);
 
     let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
         panic!("expected code mode exec tool");
     };
-    assert!(!exec.description.contains("request_user_input"));
+    assert!(exec.description.contains("request_user_input"));
 }
 
 #[tokio::test]
@@ -1056,7 +1052,7 @@ async fn sleep_tool_follows_current_time_config() {
 }
 
 #[tokio::test]
-async fn sleep_tool_stays_direct_and_outside_code_mode() {
+async fn sleep_tool_is_available_inside_code_mode() {
     for code_mode_only in [false, true] {
         let plan = probe(|turn| {
             set_features(
@@ -1080,18 +1076,16 @@ async fn sleep_tool_stays_direct_and_outside_code_mode() {
         })
         .await;
 
-        assert!(
+        assert_eq!(
             plan.namespace_function_names("clock")
                 .iter()
-                .any(|name| name == "sleep")
+                .any(|name| name == "sleep"),
+            !code_mode_only,
         );
         let sleep_tool_name = ToolName::namespaced("clock", "sleep").to_string();
         let wait_agent_tool_name =
             ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "wait_agent").to_string();
-        assert_eq!(
-            plan.exposure(&sleep_tool_name),
-            ToolExposure::DirectModelOnly
-        );
+        assert_eq!(plan.exposure(&sleep_tool_name), ToolExposure::Direct);
         plan.assert_registered_lacks(&[wait_agent_tool_name.as_str()]);
 
         let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
@@ -1100,7 +1094,7 @@ async fn sleep_tool_stays_direct_and_outside_code_mode() {
         if code_mode_only {
             assert!(exec.description.contains("clock__curr_time"));
         }
-        assert!(!exec.description.contains("clock__sleep"));
+        assert_eq!(exec.description.contains("clock__sleep"), code_mode_only);
     }
 }
 
@@ -1700,99 +1694,37 @@ async fn strict_tool_collisions_allow_identical_names_in_different_namespaces() 
 }
 
 #[tokio::test]
-async fn code_mode_uses_the_first_normalized_tool_identity() {
-    for (code_mode_only, winner_exposure, shadow_is_deferred) in [
-        (false, ToolExposure::Direct, true),
-        (false, ToolExposure::Deferred, false),
-        (true, ToolExposure::Direct, true),
-        (true, ToolExposure::Deferred, false),
-    ] {
-        let mut metadata_state = None;
-        let plan = probe_with(
-            |turn| {
-                update_config(turn, |config| {
-                    config.tool_registry.turn_metadata_includes_tool_info = true;
-                });
-                set_feature(turn, Feature::CodeMode, /*enabled*/ true);
-                if code_mode_only {
-                    set_feature(turn, Feature::CodeModeOnly, /*enabled*/ true);
-                }
-                Arc::make_mut(&mut turn.model_info).supports_search_tool = true;
-                Arc::make_mut(&mut turn.model_info).use_responses_lite = true;
-                metadata_state = Some(Arc::clone(&turn.turn_metadata_state));
-            },
-            ToolPlanInputs {
-                tool_runtimes: vec![mcp_runtime(
-                    "winner",
-                    "normalized-alias",
-                    "lookup",
-                    winner_exposure,
-                )],
-                dynamic_tools: vec![dynamic_tool(
-                    Some("normalized_alias"),
-                    "lookup",
-                    shadow_is_deferred,
-                )],
-                ..ToolPlanInputs::default()
-            },
-        )
-        .await;
-
-        let winner_name = ToolName::namespaced("normalized-alias", "lookup");
-        let shadow_name = ToolName::namespaced("normalized_alias", "lookup");
-        plan.assert_registered_contains(&[&winner_name.to_string(), &shadow_name.to_string()]);
-        assert_eq!(plan.exposure(&winner_name.to_string()), winner_exposure);
-        assert_eq!(
-            plan.exposure(&shadow_name.to_string()),
-            if shadow_is_deferred {
-                ToolExposure::Deferred
-            } else {
-                ToolExposure::Direct
-            },
+async fn code_mode_reports_conflicting_normalized_tool_identities() {
+    for code_mode_only in [false, true] {
+        let (_session, mut turn) = make_session_and_context().await;
+        set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
+        set_feature(&mut turn, Feature::CodeModeOnly, code_mode_only);
+        let turn = Arc::new(turn);
+        let step = StepContext::for_test(Arc::clone(&turn));
+        let mut registry =
+            build_core_tool_registry(&turn, &step.environments, step.mcp.as_ref(), None, None);
+        let hosted_specs = append_source_tools(
+            &turn,
+            &mut registry,
+            vec![mcp_runtime(
+                "first",
+                "normalized-alias",
+                "lookup",
+                ToolExposure::Direct,
+            )],
+            Vec::new(),
+            &[dynamic_tool(
+                Some("normalized_alias"),
+                "lookup",
+                /*defer_loading*/ false,
+            )],
         );
-
-        let metadata = metadata_state
-            .expect("tool planning should capture the turn metadata")
-            .to_responses_metadata(
-                "installation".to_string(),
-                "window".to_string(),
-                CodexResponsesRequestKind::Turn,
-            );
-        let tool_namespaces = metadata
-            .tool_namespaces_info
-            .as_ref()
-            .expect("opted-in Responses Lite should receive the supported tools");
+        let error = super::finalize_tool_router(&turn, registry, hosted_specs, &Default::default())
+            .err()
+            .expect("ambiguous Code Mode identities must fail tool planning");
         assert_eq!(
-            tool_namespaces["normalized-alias"].functions["lookup"]
-                .code_mode_name
-                .as_deref(),
-            Some("normalized_alias__lookup"),
-        );
-        assert!(
-            tool_namespaces
-                .get("normalized_alias")
-                .and_then(|namespace| namespace.functions.get("lookup"))
-                .and_then(|function| function.code_mode_name.as_ref())
-                .is_none()
-        );
-
-        if !code_mode_only && !shadow_is_deferred {
-            let ToolSpec::Namespace(namespace) = plan.visible_spec("normalized_alias") else {
-                panic!("expected the shadowed dynamic tool to remain directly visible");
-            };
-            let [ResponsesApiNamespaceTool::Function(shadow)] = namespace.tools.as_slice() else {
-                panic!("expected exactly one shadowed dynamic tool");
-            };
-            assert_eq!(shadow.description, "lookup dynamic tool");
-        }
-
-        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
-            panic!("expected code mode exec tool");
-        };
-        assert!(!exec.description.contains("lookup dynamic tool"));
-        assert_eq!(
-            exec.description.contains("lookup test tool"),
-            code_mode_only && winner_exposure == ToolExposure::Direct,
+            error.to_string(),
+            "duplicate tool: Code Mode normalized_alias__lookup: normalized-alias.lookup and normalized_alias.lookup",
         );
     }
 }
@@ -2134,7 +2066,7 @@ async fn code_mode_config_updates_exec_description() {
 }
 
 #[tokio::test]
-async fn code_mode_only_exposes_configured_dynamic_namespace_directly() {
+async fn code_mode_only_uses_configured_dynamic_namespace_internally() {
     let plan = probe_with(
         |turn| {
             set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
@@ -2154,31 +2086,19 @@ async fn code_mode_only_exposes_configured_dynamic_namespace_directly() {
     )
     .await;
 
-    plan.assert_visible_contains(&[
-        codex_code_mode::PUBLIC_TOOL_NAME,
-        codex_code_mode::WAIT_TOOL_NAME,
-        "direct_only",
-    ]);
-    plan.assert_visible_lacks(&["tool_search"]);
+    assert_eq!(plan.visible_names, ["exec", "wait"]);
     assert_eq!(
         plan.exposure(&ToolName::namespaced("direct_only", "lookup").to_string()),
-        ToolExposure::DirectModelOnly
+        ToolExposure::Deferred,
     );
-    let ToolSpec::Namespace(namespace) = plan.visible_spec("direct_only") else {
-        panic!("expected direct-only namespace spec");
-    };
-    let ResponsesApiNamespaceTool::Function(tool) = &namespace.tools[0] else {
-        panic!("expected direct-only namespace function tool");
-    };
-    assert_eq!(tool.defer_loading, None);
     let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
         panic!("expected code mode exec tool");
     };
-    assert!(!exec.description.contains("direct_only_lookup(args:"));
+    assert!(exec.description.contains("ALL_TOOLS"));
 }
 
 #[tokio::test]
-async fn code_mode_only_exposes_default_namespace_tools_directly() {
+async fn code_mode_only_uses_default_namespace_tools_internally() {
     let plan = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
         update_config(turn, |config| {
@@ -2187,13 +2107,13 @@ async fn code_mode_only_exposes_default_namespace_tools_directly() {
     })
     .await;
 
-    plan.assert_visible_contains(&["update_plan"]);
-    assert_eq!(plan.exposure("update_plan"), ToolExposure::DirectModelOnly);
+    assert_eq!(plan.visible_names, ["exec", "wait"]);
+    assert_eq!(plan.exposure("update_plan"), ToolExposure::Direct);
 
     let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
         panic!("expected code mode exec tool");
     };
-    assert!(!exec.description.contains("update_plan(args:"));
+    assert!(exec.description.contains("update_plan(args:"));
 }
 
 #[tokio::test]
@@ -2387,12 +2307,12 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(direct_model_only.visible_names, ["exec", "wait"]);
     direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
     assert_eq!(
         direct_model_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
-        ToolExposure::DirectModelOnly
+        ToolExposure::Direct
     );
 }
 
@@ -2636,7 +2556,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
-async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
+async fn code_mode_only_routes_namespaced_multi_agent_v2_internally() {
     let plan = probe(|turn| {
         set_features(
             turn,
@@ -2653,25 +2573,11 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
     })
     .await;
 
-    assert_eq!(
-        plan.visible_names,
-        vec![
-            "exec",
-            "wait",
-            "request_user_input",
-            "agents",
-            // Hosted Responses tool.
-            "web_search",
-        ]
-    );
-    assert!(
-        !plan
-            .namespace_function_names("agents")
-            .iter()
-            .any(|name| name == "assign_task"),
-        "expected assign_task to be absent from agents namespace"
-    );
-    for tool_name in [
+    assert_eq!(plan.visible_names, ["exec", "wait"]);
+    let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+        panic!("expected code mode exec tool");
+    };
+    for tool in [
         "spawn_agent",
         "send_message",
         "followup_task",
@@ -2679,13 +2585,32 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "interrupt_agent",
         "list_agents",
     ] {
-        assert!(
-            plan.namespace_function_names("agents")
-                .iter()
-                .any(|name| name == tool_name),
-            "expected {tool_name} in agents namespace"
-        );
+        assert!(exec.description.contains(&format!("agents__{tool}")));
     }
+}
+
+#[tokio::test]
+async fn code_mode_only_requires_an_executor_for_hosted_tools() {
+    let (_session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let registry =
+        build_core_tool_registry(&turn, &step.environments, step.mcp.as_ref(), None, None);
+    let hosted_spec = super::create_web_search_tool(super::WebSearchToolOptions {
+        web_search_mode: Some(WebSearchMode::Live),
+        web_search_config: None,
+        web_search_tool_type: WebSearchToolType::Text,
+    })
+    .expect("configured hosted search");
+    let error =
+        super::finalize_tool_router(&turn, registry, vec![hosted_spec], &Default::default())
+            .err()
+            .expect("hosted tools need a Core execution endpoint");
+    assert_eq!(
+        error.to_string(),
+        "unsupported operation: Code Mode requires a registered executor for hosted tool `web_search`; register a host or MCP tool adapter",
+    );
 }
 
 #[tokio::test]
@@ -2794,27 +2719,6 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         }
     );
 
-    let code_mode_only = probe(|turn| {
-        use_chatgpt_auth(turn);
-        set_features(turn, &[Feature::CodeModeOnly, Feature::MultiAgentV2]);
-        set_web_search_mode(turn, WebSearchMode::Live);
-        Arc::make_mut(&mut turn.model_info).input_modalities = vec![InputModality::Image];
-    })
-    .await;
-    assert_eq!(
-        code_mode_only.visible_names,
-        vec![
-            // Code-mode entrypoints.
-            codex_code_mode::PUBLIC_TOOL_NAME,
-            codex_code_mode::WAIT_TOOL_NAME,
-            "request_user_input",
-            // Multi-agent v2 tools.
-            MULTI_AGENT_V2_NAMESPACE,
-            // Hosted Responses tools.
-            "web_search",
-        ]
-    );
-
     let standalone_web_search_without_web_run = probe(|turn| {
         set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
         set_web_search_mode(turn, WebSearchMode::Live);
@@ -2874,6 +2778,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     standalone_web_search.assert_visible_lacks(&["web_search"]);
 
     let bedrock_cached_web_search = probe(|turn| {
+        set_web_search_mode(turn, WebSearchMode::Cached);
         use_bedrock_provider(turn);
         Arc::make_mut(&mut turn.model_info).web_search_tool_type = WebSearchToolType::Text;
     })

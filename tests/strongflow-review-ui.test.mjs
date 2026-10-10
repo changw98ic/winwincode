@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import test from 'node:test'
+import { sharedCoreActivity, diagnosticCoreActivity, agentWaitCoreActivity } from './fixtures/core-tool-activity.mjs'
 import { JSDOM } from 'jsdom'
 
 const root = resolve(import.meta.dirname, '..')
@@ -221,12 +222,12 @@ function fixtureClient(pendingSolution = null) {
                 ],
               } : null,
               activities: Array.from({ length: sessionIndex === 0 ? 101 : 1 }, (_, activityIndex) => ({
-                callId: sessionIndex === 0 && activityIndex === 0 ? 'call-42' : `call-${sessionIndex}-${activityIndex}`,
+                callId: sessionIndex === 0 && activityIndex === 100 ? 'call-42' : `call-${sessionIndex}-${activityIndex}`,
                 activityType: 'command', command: 'node --test',
                 status: sessionIndex === 0 ? 'failed' : 'completed',
                 outcome: sessionIndex === 0 ? 'task-failed' : 'succeeded',
                 exitCode: sessionIndex === 0 ? 1 : 0,
-                sourceRef: sessionIndex === 0 && activityIndex === 0
+                sourceRef: sessionIndex === 0 && activityIndex === 100
                   ? 'runtime:command:42'
                   : `runtime:command:${sessionIndex}:${activityIndex}`,
               })),
@@ -457,7 +458,7 @@ test('review reads bounded current facts, continues ranges, and preserves histor
     workingPlan: { completed: 1, inProgress: 1, pending: 1, total: 3, sourceRef: 'runtime:plan:42' },
     acceptedCriteria: { accepted: 1, failed: 1, inconclusive: 0, infraError: 0, pending: 1, total: 3 },
   })
-  assert.equal(model.state.segments[0].activities[0].sourceRef, 'runtime:command:42')
+  assert.equal(model.state.segments[0].activities.at(-1).sourceRef, 'runtime:command:42')
   assert.equal(model.snippetFor(model.state.segments[0].key, 'call-42').workRunId, workRunId)
 
   await model.openPreview('src/main.ts')
@@ -622,4 +623,40 @@ test('rendered diff marks line changes while keeping code text inert', () => {
   assert.deepEqual([...standalone.querySelectorAll('.wwc-diff-content')].map(row => row.textContent), [
     ' @@ -1 +1 @@\n', '−remove\n', ' keep\n', '+add\n',
   ])
+})
+
+test('StrongFlow retains and renders canonical Core facts through the view model', async () => {
+  const base = fixtureClient()
+  const activities = [sharedCoreActivity(), diagnosticCoreActivity(), agentWaitCoreActivity()]
+  const client = {
+    ...base,
+    async query(request) {
+      const result = await base.query(request)
+      if (request.query === 'runtime.projection.get') {
+        result.result.sessions[0].activities = activities
+      }
+      return result
+    },
+  }
+  let request = 0
+  const model = createStrongFlowReviewViewModel({ client, scope, deliveryId,
+    actor: { kind: 'human', id: 'hum_00000000000000000000000001' },
+    nextRequestId: () => `req_${String(++request).padStart(26, '0')}` })
+  await model.start()
+  assert.deepEqual(model.state.segments[0].activities, activities)
+  const document = new JSDOM('<!doctype html><body><main></main></body>').window.document
+  const annotations = createStrongFlowReviewAnnotations()
+  const mounted = detailModule.mountStrongFlowReviewDetail({ root: document.querySelector('main'), model, annotations })
+  const rows = [...document.querySelectorAll('.wwc-runtime-activity')]
+  const sharing = rows.find(row => row.dataset.runtimeCallId === activities[0].callId)
+  const diagnosis = rows.find(row => row.dataset.runtimeCallId === activities[1].callId)
+  assert.match(sharing.textContent, /public_smoke · 已取消.*父请求 #1.*合并等待请求 #7.*输入来源已验证/su)
+  assert.match(diagnosis.textContent, /疑似等待成环 · 已提示模型.*public_smoke · 调用 logical-8/su)
+  assert.match(diagnosis.textContent, /代码运行 cell-1 → Agent agent-2 · 期限 2030-01-01T00:00:00.000Z/u)
+  const waiting = rows.find(row => row.dataset.runtimeCallId === activities[2].callId)
+  assert.match(waiting.textContent, /代码运行 cell-1.*等待 Agent agent-2.*等待状态待核对.*等待期限 2030-01-01T00:00:00.000Z/su)
+  assert.equal(diagnosis.querySelector('script'), null)
+  mounted.close()
+  annotations.close()
+  model.close()
 })

@@ -14,8 +14,9 @@ use std::fmt;
 
 use winwincode_domain::Instant;
 use winwincode_storage::{
-    ClientExchangeCursors, ClientNodeRecord, ClientNodeRegistration, ClientNodeRegistrationReceipt,
-    ClientPresenceState, ClientRegistryError, ClientRegistryErrorKind, SqliteStorage,
+    ClientExchangeCursors, ClientLockState, ClientNodeRecord, ClientNodeRegistration,
+    ClientNodeRegistrationReceipt, ClientPresenceState, ClientRegistryError,
+    ClientRegistryErrorKind, SqliteStorage,
 };
 
 /// Stable service failure categories.
@@ -174,6 +175,31 @@ impl<'storage> ClientRegistryService<'storage> {
             target,
             expected_revision,
         )?)
+    }
+
+    /// Persists a device-reported connection policy under `expectedRevision`
+    /// CAS without changing presence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown client node, a stale `expectedRevision`, or storage
+    /// failure.
+    pub fn update_connection_policy(
+        &mut self,
+        client_node_id: &str,
+        accepting_connections: bool,
+        lock_state: ClientLockState,
+        expected_revision: u64,
+    ) -> Result<ClientNodeRecord, ClientRegistryServiceError> {
+        Ok(self
+            .storage
+            .client_node_registry()?
+            .update_connection_policy(
+                client_node_id,
+                accepting_connections,
+                lock_state,
+                expected_revision,
+            )?)
     }
 
     /// Records one accepted Device Client heartbeat under `expectedRevision`

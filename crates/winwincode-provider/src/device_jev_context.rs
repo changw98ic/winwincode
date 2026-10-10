@@ -2,7 +2,7 @@
 
 //! Device-owned JEV inference receipts, claimed durably before paid work.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use winwincode_execution_port::jev_decision::{JevPolicy, validate_policy};
 
@@ -158,12 +158,10 @@ impl DeviceProviderStore {
         &self,
         settings: &crate::OpenJevRemoteSettings,
     ) -> Result<(), DeviceProviderError> {
-        settings
-            .to_config_and_runtime()
-            .map_err(|_| DeviceProviderError)?;
+        let settings = validated_system_one_settings(settings.clone())?;
         self.connection.execute(
             "INSERT INTO jev_settings VALUES (?1, ?2) ON CONFLICT(provider_id) DO UPDATE SET settings=excluded.settings",
-            params![settings.provider_id, serde_json::to_string(settings)?],
+            params![settings.provider_id, serde_json::to_string(&settings)?],
         )?;
         Ok(())
     }
@@ -222,10 +220,7 @@ impl DeviceProviderStore {
         if settings.provider_id != provider {
             return Err(DeviceProviderError);
         }
-        settings
-            .to_config_and_runtime()
-            .map_err(|_| DeviceProviderError)?;
-        Ok(settings)
+        validated_system_one_settings(settings)
     }
 
     /// Runs the configured `SystemOne` provider with the session's sealed policy.
@@ -240,6 +235,17 @@ impl DeviceProviderStore {
         operation_id: &str,
         session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
         input: JevContextRequest,
+    ) -> Result<StoredJevContext, DeviceProviderError> {
+        self.evaluate_configured_context_once_authorized(operation_id, session, input, &|| true)
+            .await
+    }
+
+    async fn evaluate_configured_context_once_authorized(
+        &self,
+        operation_id: &str,
+        session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
+        input: JevContextRequest,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<StoredJevContext, DeviceProviderError> {
         use std::sync::Arc;
         use winwincode_execution_port::agent_config::validate_agent_session_config;
@@ -268,7 +274,7 @@ impl DeviceProviderStore {
             retry,
         )
         .with_cancellation(cancellation);
-        self.evaluate_context_once(
+        self.evaluate_context_once_authorized(
             operation_id,
             &configuration_digest,
             &runtime,
@@ -278,6 +284,7 @@ impl DeviceProviderStore {
                 device: crate::JevDevice::Remote,
                 dtype: crate::JevDtype::Auto,
             },
+            can_start,
         )
         .await
     }
@@ -289,6 +296,7 @@ impl DeviceProviderStore {
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         request: &mut serde_json::Value,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<(), DeviceProviderError> {
         use winwincode_execution_port::agent_config::{
             AgentSessionConfigSnapshot, validate_agent_session_config,
@@ -326,9 +334,9 @@ impl DeviceProviderStore {
         {
             return Err(DeviceProviderError);
         }
-        self.prepare_jev_judge_request(open, &session, request)
+        self.prepare_jev_judge_request(open, &session, request, can_start)
             .await?;
-        self.prepare_jev_context_items(open, &session, &job, request)
+        self.prepare_jev_context_items(open, &session, &job, request, can_start)
             .await?;
         let object = request.as_object_mut().ok_or(DeviceProviderError)?;
         object.remove("winwincodeJevContext");
@@ -342,6 +350,7 @@ impl DeviceProviderStore {
         session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
         job: &winwincode_execution_port::generated::ExecutionJob,
         request: &mut serde_json::Value,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<(), DeviceProviderError> {
         use winwincode_execution_port::jev_decision::ContextRetention;
         let Some(context) = session.profile.source.settings.jev_context.as_ref() else {
@@ -387,10 +396,11 @@ impl DeviceProviderStore {
                 continue;
             }
             let result = self
-                .evaluate_configured_context_once(
+                .evaluate_configured_context_once_authorized(
                     &format!("jev:{}:{index}", open.model_exchange_id.0),
                     session,
                     scoring_input,
+                    can_start,
                 )
                 .await?;
             if let StoredJevContext::Completed { run, .. } = result
@@ -431,6 +441,32 @@ impl DeviceProviderStore {
         policy: &JevPolicy,
         options: JevExecutionOptions,
     ) -> Result<StoredJevContext, DeviceProviderError> {
+        self.evaluate_context_once_authorized(
+            operation_id,
+            configuration_digest,
+            runtime,
+            input,
+            policy,
+            options,
+            &|| true,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Exact receipt identity, scoring policy and live authorization are distinct inputs"
+    )]
+    async fn evaluate_context_once_authorized(
+        &self,
+        operation_id: &str,
+        configuration_digest: &str,
+        runtime: &JevRuntime,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<StoredJevContext, DeviceProviderError> {
         validate_policy(policy).map_err(|_| DeviceProviderError)?;
         let hash = configuration_digest
             .strip_prefix("sha256:")
@@ -454,15 +490,15 @@ impl DeviceProviderStore {
         ))?;
         let digest = format!("{:x}", Sha256::digest(request_json.as_bytes()));
         let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO jev_context_exchanges (operation_id, digest, request_json) VALUES (?1, ?2, ?3)",
-            params![operation_id, digest, request_json],
+            "INSERT OR IGNORE INTO jev_context_exchanges (operation_id, digest, request_json) SELECT ?1, ?2, ?3 WHERE ?4",
+            params![operation_id, digest, request_json, can_start()],
         )?;
         let (original, receipt, saved_request): (String, Option<String>, Option<String>) =
             self.connection.query_row(
                 "SELECT digest, result, request_json FROM jev_context_exchanges WHERE operation_id=?1",
                 [operation_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+            ).optional()?.ok_or(DeviceProviderError)?;
         if original != digest
             || saved_request
                 .as_ref()
@@ -479,8 +515,13 @@ impl DeviceProviderStore {
         if inserted == 0 {
             return Ok(StoredJevContext::Incomplete);
         }
+        let runtime = runtime.clone().with_attempt_journal(
+            self.connection.path().ok_or(DeviceProviderError)?,
+            operation_id,
+            "context",
+        );
         let run = runtime
-            .evaluate_context(input, policy, options)
+            .evaluate_context_authorized(input, policy, options, can_start)
             .await
             .map_err(|_| DeviceProviderError)?;
         let stored = self.connection.execute(
@@ -597,6 +638,21 @@ fn is_assistant_commentary(item: &serde_json::Value) -> bool {
             })
 }
 
+// Device JEV uses SystemOne. Self-hosted NLI keeps its separate hardware defaults.
+fn validated_system_one_settings(
+    mut settings: crate::OpenJevRemoteSettings,
+) -> Result<crate::OpenJevRemoteSettings, DeviceProviderError> {
+    settings
+        .devices
+        .get_or_insert_with(|| vec!["remote".into()]);
+    settings.dtypes.get_or_insert_with(|| vec!["auto".into()]);
+    let (config, _) = settings
+        .to_config_and_runtime()
+        .map_err(|_| DeviceProviderError)?;
+    crate::HttpsJevRemoteTransport::try_new_system_one(&config).map_err(|_| DeviceProviderError)?;
+    Ok(settings)
+}
+
 pub(crate) fn configured_context_digest(
     session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
     settings: &crate::OpenJevRemoteSettings,
@@ -649,8 +705,197 @@ mod tests {
         assert!(execution_plan_history(&[]).is_empty());
     }
 
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One durable operation across expiry, renewal, immutable replay and uncertain-result recovery"
+    )]
+    fn live_authorization_guards_each_context_operation_but_allows_exact_recovery() {
+        let root = std::env::temp_dir().join(format!("wwc-context-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let provider = Arc::new(crate::MockJevProvider::healthy("context"));
+        let runtime = JevRuntime::new(
+            vec![provider.clone()],
+            crate::JevRuntimeConfig {
+                timeout: std::time::Duration::from_secs(1),
+                retries: 1,
+            },
+        );
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let input = JevContextRequest {
+            task: "verify command".into(),
+            candidate: "old commentary".into(),
+            protected: false,
+            archive_eligible: true,
+        };
+        let policy: JevPolicy = serde_json::from_value(serde_json::json!({
+            "version":"fixture-policy", "minimumConfidence":0.6, "pinThreshold":0.9,
+            "keepThreshold":0.9, "compactThreshold":0.9, "dropThreshold":0.9,
+            "taskMemoryThreshold":0.5, "projectMemoryThreshold":0.7, "longTermMemoryThreshold":0.9
+        }))
+        .unwrap();
+        let options = JevExecutionOptions {
+            device: JevDevice::Cpu,
+            dtype: JevDtype::Float32,
+        };
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let first = store
+                .evaluate_context_once_authorized(
+                    "jev:first",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    &policy,
+                    options,
+                    &|| provider.calls() == 0,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                first,
+                StoredJevContext::Completed {
+                    replayed: false,
+                    ..
+                }
+            ));
+            assert!(
+                store
+                    .evaluate_context_once_authorized(
+                        "jev:next",
+                        &digest,
+                        &runtime,
+                        input.clone(),
+                        &policy,
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .is_err()
+            );
+            let rows: i64 = store
+                .connection
+                .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 1);
+            let replay = store
+                .evaluate_context_once_authorized(
+                    "jev:first",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    &policy,
+                    options,
+                    &|| false,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                replay,
+                StoredJevContext::Completed { replayed: true, .. }
+            ));
+            let changed = JevContextRequest {
+                candidate: "changed".into(),
+                ..input.clone()
+            };
+            assert!(
+                store
+                    .evaluate_context_once_authorized(
+                        "jev:first",
+                        &digest,
+                        &runtime,
+                        changed,
+                        &policy,
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(provider.calls(), 1);
+            store
+                .evaluate_context_once_authorized(
+                    "jev:next",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    &policy,
+                    options,
+                    &|| true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(provider.calls(), 2);
+            store
+                .connection
+                .execute(
+                    "UPDATE jev_context_exchanges SET result=NULL WHERE operation_id='jev:first'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .evaluate_context_once_authorized(
+                        "jev:first",
+                        &digest,
+                        &runtime,
+                        input,
+                        &policy,
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .unwrap(),
+                StoredJevContext::Incomplete
+            );
+            assert_eq!(provider.calls(), 2);
+        });
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[derive(Debug)]
     struct Scores(usize);
+
+    #[test]
+    fn system_one_import_defaults_are_executable_before_first_inference() {
+        let root = std::env::temp_dir().join(format!("wwc-jev-defaults-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({
+            "providerId":"typesafe-systemone", "endpoint":"https://nli.invalid/score",
+            "apiKey":"offline-fixture", "timeoutMs":1000, "retries":0
+        }))
+        .unwrap();
+        store.save_jev_settings(&settings).unwrap();
+        let saved = store.resolve_jev_settings("typesafe-systemone").unwrap();
+        let (config, _) = saved.to_config_and_runtime().unwrap();
+        crate::HttpsJevRemoteTransport::try_new_system_one(&config)
+            .expect("accepted Device settings must construct the actual SystemOne transport");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_one_import_rejects_explicit_unsupported_hardware_before_saving() {
+        let root = std::env::temp_dir().join(format!("wwc-jev-hardware-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({
+            "providerId":"typesafe-systemone", "endpoint":"https://nli.invalid/score",
+            "apiKey":"offline-fixture", "timeoutMs":1000, "retries":0,
+            "devices":["cpu"], "dtypes":["float32"]
+        }))
+        .unwrap();
+        assert!(store.save_jev_settings(&settings).is_err());
+        assert!(store.resolve_jev_settings("typesafe-systemone").is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     impl JevRemoteTransport for Scores {
         fn score(
@@ -823,6 +1068,10 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
+                let mut not_started = original.clone();
+                assert!(store.prepare_jev_model_request(&open, &mut not_started, &|| false).await.is_err());
+                let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row.get(0)).unwrap();
+                assert_eq!(rows, 0, "the real preparation entry must forward the live guard");
                 let stored = store
                     .evaluate_context_once(
                         &format!("jev:{}:1", open.model_exchange_id.0),
@@ -882,7 +1131,7 @@ mod tests {
                     .remove("winwincodeJevTask");
                 let mut prepared = original.clone();
                 store
-                    .prepare_jev_model_request(&open, &mut prepared)
+                    .prepare_jev_model_request(&open, &mut prepared, &|| false)
                     .await
                     .unwrap();
                 assert_eq!(prepared, expected);
@@ -892,7 +1141,7 @@ mod tests {
                 let mut unchanged = oversized.clone();
                 unchanged.as_object_mut().unwrap().remove("winwincodeJevContext");
                 unchanged.as_object_mut().unwrap().remove("winwincodeJevTask");
-                store.prepare_jev_model_request(&open, &mut oversized).await.unwrap();
+                store.prepare_jev_model_request(&open, &mut oversized, &|| true).await.unwrap();
                 assert_eq!(oversized, unchanged);
                 assert_eq!(store.connection.query_row(
                     "SELECT COUNT(*) FROM jev_context_exchanges", [], |row| row.get::<_, i64>(0)
@@ -910,7 +1159,7 @@ mod tests {
                         "jobDigest":format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&invalid_job).unwrap())),
                         "job":invalid_job,
                     });
-                    assert!(store.prepare_jev_model_request(&open, &mut changed).await.is_err());
+                    assert!(store.prepare_jev_model_request(&open, &mut changed, &|| true).await.is_err());
                 }
                 // A saved score cannot be reused after instruction context changes.
                 for pointer in ["/request/instructions", "/request/input/0/content"] {
@@ -918,7 +1167,7 @@ mod tests {
                     *changed.pointer_mut(pointer).unwrap() = serde_json::json!("new requirement");
                     assert!(
                         store
-                            .prepare_jev_model_request(&open, &mut changed)
+                            .prepare_jev_model_request(&open, &mut changed, &|| true)
                             .await
                             .is_err()
                     );
@@ -982,7 +1231,7 @@ mod tests {
                 let reopened = DeviceProviderStore::open(&directory).unwrap();
                 let mut replay = original.clone();
                 reopened
-                    .prepare_jev_model_request(&open, &mut replay)
+                    .prepare_jev_model_request(&open, &mut replay, &|| true)
                     .await
                     .unwrap();
                 assert_eq!(replay, expected);
@@ -998,7 +1247,7 @@ mod tests {
                 assert!(pending[0].run.is_none());
                 let mut interrupted = original.clone();
                 reopened
-                    .prepare_jev_model_request(&open, &mut interrupted)
+                    .prepare_jev_model_request(&open, &mut interrupted, &|| true)
                     .await
                     .unwrap();
                 let mut retained = original.clone();
@@ -1014,7 +1263,7 @@ mod tests {
                 reopened.connection.execute("UPDATE jev_context_exchanges SET request_json='tampered'", []).unwrap();
                 assert!(reopened.model_jev_receipts(&open).is_err());
                 let mut corrupt_replay = original.clone();
-                assert!(reopened.prepare_jev_model_request(&open, &mut corrupt_replay).await.is_err());
+                assert!(reopened.prepare_jev_model_request(&open, &mut corrupt_replay, &|| true).await.is_err());
                 assert_eq!(corrupt_replay, original);
 
 
@@ -1022,7 +1271,7 @@ mod tests {
                 altered["winwincodeJevTask"]["job"]["goal"] = serde_json::json!("tampered");
                 assert!(
                     reopened
-                        .prepare_jev_model_request(&open, &mut altered)
+                        .prepare_jev_model_request(&open, &mut altered, &|| true)
                         .await
                         .is_err()
                 );

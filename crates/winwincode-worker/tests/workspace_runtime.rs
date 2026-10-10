@@ -49,6 +49,202 @@ struct Fixture {
     workspaces: PathBuf,
 }
 
+struct ObserverTerminalFixture {
+    _fixture: Fixture,
+    runtime: JobWorkspaceRuntime,
+    active: ActiveJob,
+    open: ModelOpenMessage,
+    completed: serde_json::Value,
+}
+
+async fn observer_terminal_fixture(name: &str) -> ObserverTerminalFixture {
+    let fixture = Fixture::new(name);
+    fixture.install_validation_config_text(&baseline_unavailable_validation_config());
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".into()),
+    ))
+    .await
+    .unwrap();
+    let observation = executed.observation_request.unwrap();
+    let configuration = ObservationModelConfiguration::try_new(
+        "observer-provider",
+        "observer-model",
+        ModelGatewayRoute {
+            capability: "observer-strict-json".into(),
+            route: "enterprise-observer".into(),
+        },
+    )
+    .unwrap();
+    let open = runtime
+        .prepare_observation_model_open(
+            &active,
+            &observation,
+            &configuration,
+            &Instant("2026-08-28T00:00:07.000Z".into()),
+        )
+        .unwrap();
+    let response = serde_json::json!({
+        "schemaVersion":1,"observationId":observation.intent.observation_id.0,
+        "decision":"accept","reasonCode":"criteria_satisfied",
+        "summary":"The fixture satisfies the bounded criterion.","rootCauses":[],
+        "repairClass":null,"confidenceBps":9000,
+    })
+    .to_string();
+    for (sequence, payload) in [
+        (1, serde_json::json!({"type":"created"})),
+        (
+            2,
+            serde_json::json!({"type":"output_text_delta","delta":response}),
+        ),
+    ] {
+        runtime
+            .accept_observation_model_chunk(
+                &active,
+                &observation_chunk(&open, sequence, &payload, false),
+                &Instant("2026-08-28T00:00:08.000Z".into()),
+            )
+            .unwrap()
+            .unwrap();
+    }
+    ObserverTerminalFixture {
+        _fixture: fixture,
+        runtime,
+        active,
+        open,
+        completed: serde_json::json!({"type":"completed","responseId":"observer-fixture-response"}),
+    }
+}
+
+#[tokio::test]
+async fn observer_terminal_admission_accepts_optional_end_turn_and_exact_replay() {
+    for (name, end_turn) in [("missing", None), ("null", Some(serde_json::Value::Null))] {
+        let mut fixture = observer_terminal_fixture(name).await;
+        if let Some(end_turn) = end_turn {
+            fixture.completed["endTurn"] = end_turn;
+        }
+        let chunk = observation_chunk(&fixture.open, 3, &fixture.completed, true);
+        let accepted = fixture
+            .runtime
+            .accept_observation_model_chunk(
+                &fixture.active,
+                &chunk,
+                &Instant("2026-08-28T00:00:08.300Z".into()),
+            )
+            .expect("canonical optional endTurn is not a protocol failure")
+            .unwrap();
+        assert_eq!(
+            accepted.completed_progress.last().map(|p| &p.state),
+            Some(&ChangeBatchProgressState::Accepted)
+        );
+        assert_eq!(
+            accepted.receipt.as_ref().map(|r| &r.source),
+            Some(&ObservationSource::Model)
+        );
+        let replay = fixture
+            .runtime
+            .accept_observation_model_chunk(
+                &fixture.active,
+                &chunk,
+                &Instant("2026-08-28T00:00:08.400Z".into()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replay.retention,
+            ObservationChunkRetention::Duplicate {
+                confirmed_sequence: 3
+            }
+        );
+        assert!(replay.completed_progress.is_empty());
+        let mut changed = fixture.completed.clone();
+        changed["responseId"] = serde_json::json!("different-response");
+        assert!(
+            fixture
+                .runtime
+                .accept_observation_model_chunk(
+                    &fixture.active,
+                    &observation_chunk(&fixture.open, 3, &changed, true),
+                    &Instant("2026-08-28T00:00:08.500Z".into()),
+                )
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn observer_terminal_admission_rejects_false_and_invalid_optional_types() {
+    let mut fixture = observer_terminal_fixture("invalid-optional").await;
+    for end_turn in [
+        serde_json::json!(false),
+        serde_json::json!("true"),
+        serde_json::json!(1),
+        serde_json::json!({}),
+    ] {
+        fixture.completed["endTurn"] = end_turn;
+        assert!(
+            fixture
+                .runtime
+                .accept_observation_model_chunk(
+                    &fixture.active,
+                    &observation_chunk(&fixture.open, 3, &fixture.completed, true),
+                    &Instant("2026-08-28T00:00:08.300Z".into()),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .pending_observation_model_open(&fixture.active)
+                .unwrap(),
+            Some(fixture.open.clone())
+        );
+    }
+}
+
+#[tokio::test]
+async fn observer_terminal_admission_keeps_exact_lease_and_rejects_tool_frames() {
+    let mut fixture = observer_terminal_fixture("authority-optional").await;
+    fixture.completed["endTurn"] = serde_json::json!(true);
+    let mut chunk = observation_chunk(&fixture.open, 3, &fixture.completed, true);
+    chunk.lease.fencing_token = FencingToken("2".into());
+    assert_eq!(
+        fixture
+            .runtime
+            .accept_observation_model_chunk(
+                &fixture.active,
+                &chunk,
+                &Instant("2026-08-28T00:00:08.300Z".into()),
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    let tool = serde_json::json!({"type":"output_item_done","item":{"type":"function_call","call_id":"fixture-call","name":"fixture","arguments":"{}"}});
+    assert!(
+        fixture
+            .runtime
+            .accept_observation_model_chunk(
+                &fixture.active,
+                &observation_chunk(&fixture.open, 3, &tool, false),
+                &Instant("2026-08-28T00:00:08.300Z".into()),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .pending_observation_model_open(&fixture.active)
+            .unwrap(),
+        Some(fixture.open.clone())
+    );
+}
+
 impl Fixture {
     fn new(name: &str) -> Self {
         let unique = format!(
@@ -609,6 +805,111 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
     restarted
         .close_job(&active.job.job_id, WorkspaceCloseReason::Completed)
         .expect("close recovered candidate workspace");
+}
+
+#[test]
+fn linked_source_worktree_recovers_and_replaces_the_original_checkout() {
+    let fixture = Fixture::new("linked-source-recovery");
+    let repository = fixture.repository();
+    let common = fixture.root.join("common-repository");
+    std::fs::rename(&repository, &common).expect("move shared repository");
+    git(
+        &common,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            repository.to_str().expect("source path"),
+            "HEAD",
+        ],
+    );
+    assert!(repository.join(".git").is_file());
+    let predecessor = active_job();
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&predecessor, None)
+        .expect("open from linked source");
+    std::fs::write(checkout.join("fixture.txt"), b"retained candidate\n")
+        .expect("retain predecessor files");
+    drop(first);
+
+    let mut recovered = fixture.runtime();
+    assert_eq!(
+        recovered
+            .open_for_job_recovering(
+                &predecessor,
+                None,
+                &Instant("2026-08-28T00:00:05.000Z".into()),
+            )
+            .expect("recover exact linked-source checkout"),
+        checkout
+    );
+    drop(recovered);
+    let successor = replacement_successor(&predecessor);
+    let receipt = replacement_authority(&predecessor, &successor);
+    let mut replaced = fixture.runtime();
+    assert_eq!(
+        replaced
+            .open_for_job_recovering(
+                &successor,
+                Some(&receipt),
+                &Instant("2026-08-28T00:10:00.000Z".into()),
+            )
+            .expect("replace exact linked-source checkout"),
+        checkout
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("fixture.txt")).expect("retained candidate"),
+        b"retained candidate\n"
+    );
+    replaced
+        .close_job(&successor.job.job_id, WorkspaceCloseReason::Completed)
+        .expect("close linked-source workspace");
+}
+
+#[test]
+fn recovered_checkout_rejects_a_foreign_common_repository_with_identical_commit() {
+    let fixture = Fixture::new("foreign-common-recovery");
+    let predecessor = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&predecessor, None)
+        .expect("open original checkout");
+    let revision = git_output(&checkout, &["rev-parse", "HEAD"]);
+    drop(runtime);
+    let foreign = fixture.root.join("foreign-repository");
+    git(
+        &fixture.root,
+        &[
+            "clone",
+            "--no-hardlinks",
+            fixture.repository().to_str().expect("source path"),
+            foreign.to_str().expect("foreign path"),
+        ],
+    );
+    git(
+        &fixture.repository(),
+        &[
+            "worktree",
+            "remove",
+            checkout.to_str().expect("checkout path"),
+        ],
+    );
+    git(
+        &foreign,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            checkout.to_str().expect("checkout path"),
+            &revision,
+        ],
+    );
+    let mut recovered = fixture.runtime();
+    assert!(recovered.open_for_job(&predecessor, None).is_err());
+    let successor = replacement_successor(&predecessor);
+    let receipt = replacement_authority(&predecessor, &successor);
+    assert!(recovered.open_for_job(&successor, Some(&receipt)).is_err());
 }
 
 #[test]
@@ -1841,6 +2142,96 @@ async fn terminal_observer_frame_replays_after_restart_before_receipt_commit() {
         ]
     );
     assert!(recovered.receipt.is_some());
+}
+
+#[tokio::test]
+async fn observer_original_response_survives_legal_renewal_and_rejects_rebinding() {
+    let (fixture, mut active, open, completed) =
+        Box::pin(prepare_terminal_observer_replay_fixture()).await;
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(&active, None, &Instant("2026-08-28T00:00:05.000Z".into()))
+        .unwrap();
+    active.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
+    runtime.renew_lease(&active).unwrap();
+    assert_eq!(
+        runtime.pending_observation_model_open(&active).unwrap(),
+        Some(open.clone())
+    );
+    let applied = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T01:10:00.000Z".into()),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(applied.receipt.is_some());
+    assert_eq!(
+        applied
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [
+            &ChangeBatchProgressState::ObservationCompleted,
+            &ChangeBatchProgressState::Accepted
+        ]
+    );
+    let mut changed = completed.clone();
+    changed.lease = active.lease.clone();
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &active,
+                &changed,
+                &Instant("2026-08-28T01:10:00.000Z".into())
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch,
+        "response must retain the exact original request authority"
+    );
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T01:10:01.000Z".into()),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(replay.completed_progress.is_empty());
+    let mut replaced = active.clone();
+    replaced.lease.fencing_token = FencingToken("2".into());
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &replaced,
+                &completed,
+                &Instant("2026-08-28T01:10:02.000Z".into())
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    let late = runtime
+        .accept_observation_model_chunk(&active, &completed, &active.lease.expires_at)
+        .expect("exact retained observation after expiry")
+        .expect("observation receipt");
+    assert!(late.completed_progress.is_empty());
+    assert!(late.receipt.is_some());
+    let mut cancelled = active.clone();
+    cancelled.lifecycle = ActiveJobLifecycle::Cancelling;
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &cancelled,
+            &completed,
+            &Instant("2026-08-28T01:10:03.000Z".into()),
+        )
+        .expect("completed observation replays during cancellation")
+        .expect("receipt");
+    assert!(replay.completed_progress.is_empty());
+    assert!(replay.receipt.is_some());
 }
 
 #[tokio::test]

@@ -395,6 +395,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
 }
 
 async fn shutdown_session_runtime(sess: &Arc<Session>) {
+    crate::tools::ExecutionFacts::seal(sess);
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
@@ -407,9 +408,8 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         .unified_exec_manager
         .terminate_all_processes()
         .await;
-    if let Err(err) = sess.services.code_mode_service.shutdown().await {
-        warn!("failed to shutdown code mode session: {err}");
-    }
+    let code_mode_result = sess.services.code_mode_service.shutdown().await;
+    crate::tools::ExecutionFacts::finish_shutdown(sess, code_mode_result).await;
     sess.stop_mcp_prewarm_worker().await;
     {
         let _refresh = sess.mcp_refresh.acquire().await;
@@ -520,6 +520,8 @@ pub(super) async fn submission_loop(
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
     while let Ok(sub) = rx_sub.recv().await {
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::before_response_dispatch(&sub.op).await;
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
@@ -578,16 +580,12 @@ pub(super) async fn submission_loop(
                 }
                 Op::RecoverTurn {
                     thread_settings,
-                    submit_change_batch,
+                    start,
                     reply,
                 } => {
-                    let result = turn_input::handle_recovery(
-                        &sess,
-                        thread_settings,
-                        submit_change_batch,
-                        sub.id.clone(),
-                    )
-                    .await;
+                    let result =
+                        turn_input::handle_recovery(&sess, thread_settings, start, sub.id.clone())
+                            .await;
                     let _ = reply.send(result);
                     false
                 }

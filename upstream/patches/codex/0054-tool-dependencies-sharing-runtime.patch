@@ -1,0 +1,350 @@
+diff --git a/codex-rs/core/src/tools/tool_sharing.rs b/codex-rs/core/src/tools/tool_sharing.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/tool_sharing.rs
+@@ -0,0 +1,345 @@
++#[path = "tool_sharing_io.rs"]
++mod io;
++use io::bind;
++use io::input_context;
++use io::link;
++use io::read_shared;
++pub(super) use io::recover_actual;
++pub(super) use io::recover_shared;
++pub(super) use io::revalidate_delivery;
++use io::source_fact;
++// SPDX-License-Identifier: Apache-2.0
++use super::context::ToolInvocation;
++use super::context::ToolPayload;
++use super::execution_facts::ToolFactRecord;
++use super::execution_facts::digest;
++use super::execution_facts::operation_digest;
++use super::execution_facts::snapshot;
++use super::execution_facts::storage_error;
++use super::registry::AnyToolResult;
++use super::registry::CoreToolRuntime;
++use super::registry::handle_any_tool;
++use crate::ToolCallGate;
++use crate::ToolCallGateAttachment;
++use crate::ToolCallGatePayload;
++use crate::ToolCallGateRequest;
++use crate::ToolInputContext;
++use crate::ToolInputProofRequest;
++use crate::ToolResultReadRequest;
++use crate::function_tool::FunctionCallError;
++use codex_state::ToolCoalescingPermission;
++use codex_state::ToolDependencySnapshot;
++use codex_state::ToolInputBindingFact;
++use codex_state::ToolOutputDelivery;
++use codex_state::ToolOutputDisposition;
++use codex_state::ToolSharingFact;
++use codex_state::ToolSharingKind;
++use std::collections::BTreeMap;
++use std::sync::Arc;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++use tokio::sync::Mutex;
++use tokio::sync::watch;
++use tokio_util::sync::CancellationToken;
++
++/// Only trusted shared reads enter this pool. Entries own the actual execution;
++/// logical caller cancellation releases one lease, never another caller's lease.
++#[derive(Default)]
++struct SharingPool(Mutex<BTreeMap<String, Arc<Flight>>>);
++struct Flight {
++    source: Arc<ToolFactRecord>,
++    result: watch::Receiver<Option<Result<String, String>>>,
++    ready: watch::Receiver<Option<()>>,
++    waiters: AtomicUsize,
++    cancellation: CancellationToken,
++}
++struct Waiter {
++    flight: Arc<Flight>,
++    facts: Arc<ToolFactRecord>,
++    finished: bool,
++}
++impl Waiter {
++    fn new(flight: Arc<Flight>, facts: Arc<ToolFactRecord>) -> Self {
++        Self {
++            flight,
++            facts,
++            finished: false,
++        }
++    }
++}
++impl Drop for Waiter {
++    fn drop(&mut self) {
++        if !self.finished {
++            let store = Arc::clone(&self.facts.store);
++            let sequence = self.facts.sequence;
++            tokio::spawn(async move {
++                if let Err(error) = store.cancel_tool_waiter(sequence).await {
++                    tracing::warn!(%error, "logical tool waiter cancellation was not persisted");
++                }
++            });
++        }
++        if self.flight.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
++            self.flight.cancellation.cancel();
++        }
++    }
++}
++
++pub(super) struct ToolDispatch {
++    facts: Arc<ToolFactRecord>,
++    trusted: Option<(
++        Arc<dyn ToolCallGate>,
++        ToolInputContext,
++        ToolDependencySnapshot,
++    )>,
++    sharing: Option<SharingDispatch>,
++}
++enum SharingDispatch {
++    Cached(String),
++    Flight { lease: Waiter, follower: bool },
++}
++impl ToolDispatch {
++    pub(super) async fn prepare(
++        invocation: &ToolInvocation,
++        tool: Arc<dyn CoreToolRuntime>,
++        facts: Arc<ToolFactRecord>,
++    ) -> Result<Self, FunctionCallError> {
++        let operation = operation_digest(invocation, tool.as_ref());
++        let context = input_context(invocation, tool.as_ref(), facts.sequence, operation.clone());
++        let gate = if matches!(
++            tool.authorization_policy(),
++            super::authorization::AuthorizationPolicy::HostOperation
++        ) {
++            invocation
++                .session
++                .services
++                .thread_extension_data
++                .get::<ToolCallGateAttachment>()
++                .map(|a| a.gate())
++        } else {
++            None
++        };
++        let trusted = if let Some(gate) = gate {
++            gate.freeze_tool_input(context.clone())
++                .await
++                .map(|snapshot| (gate, context, snapshot))
++        } else {
++            None
++        };
++        let mut dispatch = Self {
++            facts: Arc::clone(&facts),
++            trusted,
++            sharing: None,
++        };
++        let Some((gate, context, input)) = dispatch.trusted.as_ref() else {
++            facts.claim(invocation, tool.as_ref()).await?;
++            return Ok(dispatch);
++        };
++        let thread = invocation.session.thread_id.to_string();
++        if let Some(source) = facts
++            .store
++            .reusable_tool_execution(&thread, &operation, input)
++            .await
++            .map_err(storage_error)?
++        {
++            let raw = read_shared(gate, context, input, &source, &facts.store).await?;
++            link(&facts, &source, input, ToolSharingKind::Reuse).await?;
++            dispatch.sharing = Some(SharingDispatch::Cached(raw));
++            return Ok(dispatch);
++        }
++        if input.coalescing != ToolCoalescingPermission::SharedRead {
++            facts.claim(invocation, tool.as_ref()).await?;
++            bind(&facts, context, input).await?;
++            return Ok(dispatch);
++        }
++        let pool = invocation
++            .session
++            .services
++            .thread_extension_data
++            .get_or_init(SharingPool::default);
++        let key = digest(serde_json::json!([thread, operation, input]));
++        let (sender, receiver) = watch::channel(None);
++        let (ready_sender, ready_receiver) = watch::channel(None);
++        let candidate = Arc::new(Flight {
++            source: Arc::clone(&facts),
++            result: receiver,
++            ready: ready_receiver,
++            waiters: AtomicUsize::new(1),
++            cancellation: CancellationToken::new(),
++        });
++        let (flight, follower) = {
++            let mut flights = pool.0.lock().await;
++            // A closed preparation cannot strand future callers. Completed
++            // flights return through the durable, authorized reuse lookup.
++            flights.retain(|_, flight| {
++                flight.result.borrow().is_none()
++                    && flight.result.has_changed().is_ok()
++                    && !flight.cancellation.is_cancelled()
++            });
++            if let Some(flight) = flights.get(&key) {
++                flight.waiters.fetch_add(1, Ordering::AcqRel);
++                (Arc::clone(flight), true)
++            } else {
++                flights.insert(key.clone(), Arc::clone(&candidate));
++                (candidate, false)
++            }
++        };
++        let lease = Waiter::new(Arc::clone(&flight), Arc::clone(&facts));
++        if follower {
++            wait_ready(&flight, invocation).await?;
++            let source = source_fact(&flight.source, invocation).await?;
++            link(&facts, &source, input, ToolSharingKind::Merged).await?;
++            dispatch.sharing = Some(SharingDispatch::Flight { lease, follower });
++            return Ok(dispatch);
++        }
++        facts.claim(invocation, tool.as_ref()).await?;
++        bind(&facts, context, input).await?;
++        ready_sender.send_replace(Some(()));
++        let mut execution = invocation.clone();
++        execution.cancellation_token = flight.cancellation.child_token();
++        let actual = Self {
++            facts,
++            trusted: dispatch.trusted.clone(),
++            sharing: None,
++        };
++        let execution_cancel = flight.cancellation.clone();
++        let running_flight = Arc::clone(&flight);
++        tokio::spawn(async move {
++            let output = tokio::select! {
++                result = actual.execute_actual(execution, tool) => result.and_then(|result| snapshot(&result)),
++                _ = execution_cancel.cancelled() => {
++                    actual.facts.completed(None).await.ok();
++                    Err(sharing_error("all_shared_waiters_cancelled"))
++                }
++            };
++            sender.send_replace(Some(output.map_err(|error| error.to_string())));
++            let mut flights = pool.0.lock().await;
++            if flights
++                .get(&key)
++                .is_some_and(|current| Arc::ptr_eq(current, &running_flight))
++            {
++                flights.remove(&key);
++            }
++        });
++        // The lease is owned by this logical caller. The spawned execution owns
++        // only the actual attempt, not an implicit extra waiter.
++        dispatch.sharing = Some(SharingDispatch::Flight {
++            lease,
++            follower: false,
++        });
++        Ok(dispatch)
++    }
++
++    pub(super) async fn run(
++        self,
++        invocation: ToolInvocation,
++        tool: Arc<dyn CoreToolRuntime>,
++    ) -> Result<AnyToolResult, FunctionCallError> {
++        match self.sharing {
++            None => self.execute_actual(invocation, tool).await,
++            Some(SharingDispatch::Cached(raw)) => {
++                super::result_recovery::shared_output(&raw, &invocation, tool.as_ref())
++            }
++            Some(SharingDispatch::Flight {
++                mut lease,
++                follower,
++            }) => {
++                let mut receiver = lease.flight.result.clone();
++                let raw = loop {
++                    if let Some(result) = receiver.borrow().clone() {
++                        lease.finished = true;
++                        break result.map_err(sharing_error)?;
++                    }
++                    tokio::select! {
++                        changed = receiver.changed() => changed.map_err(|_| sharing_error("shared_execution_unavailable"))?,
++                        _ = invocation.cancellation_token.cancelled() => return Err(sharing_error("logical_waiter_cancelled")),
++                    }
++                };
++                if follower {
++                    let (gate, context, input) = self
++                        .trusted
++                        .as_ref()
++                        .ok_or_else(|| sharing_error("shared_policy_unavailable"))?;
++                    let source = source_fact(&lease.flight.source, &invocation).await?;
++                    // Re-read the exact durable source after current authority and
++                    // input validation; the watch channel is only a wake-up.
++                    let retained =
++                        read_shared(gate, context, input, &source, &self.facts.store).await?;
++                    return super::result_recovery::shared_output(
++                        &retained,
++                        &invocation,
++                        tool.as_ref(),
++                    );
++                }
++                super::result_recovery::shared_output(&raw, &invocation, tool.as_ref())
++            }
++        }
++    }
++
++    async fn execute_actual(
++        &self,
++        invocation: ToolInvocation,
++        tool: Arc<dyn CoreToolRuntime>,
++    ) -> Result<AnyToolResult, FunctionCallError> {
++        let result = handle_any_tool(tool.as_ref(), invocation).await;
++        self.facts
++            .completed(result.as_ref().ok().map(snapshot).transpose()?)
++            .await?;
++        if let Some((gate, context, input)) = &self.trusted
++            && let Ok(result) = &result
++        {
++            let proof = gate
++                .verify_tool_input(ToolInputProofRequest {
++                    context: context.clone(),
++                    snapshot: input.clone(),
++                    output: result.result.code_mode_result(&result.payload),
++                })
++                .await;
++            self.facts
++                .store
++                .validate_tool_input(&context.request.thread_id, self.facts.sequence, proof)
++                .await
++                .map_err(storage_error)?;
++        }
++        result
++    }
++}
++async fn wait_ready(flight: &Flight, invocation: &ToolInvocation) -> Result<(), FunctionCallError> {
++    let mut ready = flight.ready.clone();
++    loop {
++        if ready.borrow().is_some() {
++            return Ok(());
++        }
++        tokio::select! {
++            changed = ready.changed() => changed.map_err(|_| sharing_error("shared_preparation_unavailable"))?,
++            _ = invocation.cancellation_token.cancelled() => return Err(sharing_error("logical_waiter_cancelled")),
++        }
++    }
++}
++
++fn sharing_error(error: impl std::fmt::Display) -> FunctionCallError {
++    FunctionCallError::RespondToModel(format!("tool_sharing: {error}"))
++}
++
++#[cfg(test)]
++#[path = "tool_sharing_tests.rs"]
++mod tests;
++
++pub(super) async fn has_trusted_recovery_policy(
++    replay: &super::execution_facts::ToolFactReplay,
++    tool: &dyn CoreToolRuntime,
++) -> Result<bool, FunctionCallError> {
++    if !matches!(
++        tool.authorization_policy(),
++        super::authorization::AuthorizationPolicy::HostOperation
++    ) {
++        return Ok(false);
++    }
++    Ok(replay
++        .store
++        .verified_tool_input_binding(replay.fact.request_sequence)
++        .await
++        .map_err(storage_error)?
++        .is_some_and(|binding| {
++            binding.snapshot.reuse == crate::ToolReusePermission::ImmutableValue
++        }))
++}

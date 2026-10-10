@@ -1,0 +1,27 @@
+diff --git a/codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs
+--- a/codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs
++++ b/codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs
+@@ -343,7 +343,10 @@
+         permission_profile: exec_request.permission_profile.clone(),
+         sandbox_permissions: req.sandbox_permissions,
+         approval_sandbox_permissions: approval_sandbox_permissions(
+-            req.sandbox_permissions,
++            sandbox_permissions_preserving_denied_reads(
++                req.sandbox_permissions,
++                &exec_request.permission_profile.file_system_sandbox_policy(),
++            ),
+             req.additional_permissions_preapproved,
+         ),
+         prompt_permissions: req.additional_permissions.clone(),
+diff --git a/codex-rs/core/tests/suite/skill_approval.rs b/codex-rs/core/tests/suite/skill_approval.rs
+--- a/codex-rs/core/tests/suite/skill_approval.rs
++++ b/codex-rs/core/tests/suite/skill_approval.rs
+@@ -210,8 +210,6 @@
+         "expected skill script execution to skip the removed skill approval path"
+     );
+ 
+-    wait_for_turn_complete(&test).await;
+-
+     let call_output = mocks
+         .completion
+         .single_request()

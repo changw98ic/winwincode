@@ -49,6 +49,8 @@ function response(status, payload) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    // These fixed outage fixtures test error mapping after an explicit deferral.
+    ...(status >= 500 ? { headers: { get: name => name === 'retry-after' ? '301' : null } } : {}),
     async text() {
       return JSON.stringify(payload)
     },
@@ -649,7 +651,7 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
     client.submitQuery({ ...query, requestId: requestId(3) }),
     error => {
       assert.ok(error instanceof ControlPlaneClientError)
-      assert.deepEqual(Reflect.ownKeys(error).sort(), [
+      assert.deepEqual(Object.keys(error).sort(), [
         'code',
         'details',
         'message',
@@ -1849,6 +1851,7 @@ test('recursive error cleaning rejects every canonical sensitive key and prototy
       return {
         ok: false,
         status: 500,
+        headers: { get: name => name === 'retry-after' ? '301' : null },
         async text() {
           return JSON.stringify({
             schemaVersion,

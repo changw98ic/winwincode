@@ -1,0 +1,156 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 07f02a36..17462403 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -458,11 +458,11 @@ impl CodexThread {
+             turn_id,
+             thread_settings,
+             trace,
+-            submit_change_batch,
++            start,
+         } = request;
+         match self
+             .io
+-            .submit_recover_turn(thread_settings, trace, turn_id, submit_change_batch)
++            .submit_recover_turn(thread_settings, trace, turn_id, start)
+             .await?
+         {
+             TurnInputSubmission::Started { turn_id } => {
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index c59e4ad1..4c72eae4 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -578,16 +578,12 @@ pub(super) async fn submission_loop(
+                 }
+                 Op::RecoverTurn {
+                     thread_settings,
+-                    submit_change_batch,
++                    start,
+                     reply,
+                 } => {
+-                    let result = turn_input::handle_recovery(
+-                        &sess,
+-                        thread_settings,
+-                        submit_change_batch,
+-                        sub.id.clone(),
+-                    )
+-                    .await;
++                    let result =
++                        turn_input::handle_recovery(&sess, thread_settings, start, sub.id.clone())
++                            .await;
+                     let _ = reply.send(result);
+                     false
+                 }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 76456d06..2a3fb354 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -350,6 +350,7 @@ use codex_protocol::protocol::WarningEvent;
+ use codex_protocol::turn_input::TurnInputMode;
+ use codex_protocol::turn_input::TurnInputRequest;
+ use codex_protocol::turn_input::TurnInputSubmission;
++use codex_protocol::turn_input::TurnStartOptions;
+ use codex_protocol::user_input::UserInput;
+ use codex_skills_extension::HostSkillsService;
+ use codex_tools::ToolName;
+@@ -893,14 +894,14 @@ impl SessionIo {
+         thread_settings: ThreadSettingsOverrides,
+         trace: Option<W3cTraceContext>,
+         turn_id: String,
+-        submit_change_batch: bool,
++        start: TurnStartOptions,
+     ) -> CodexResult<TurnInputSubmission> {
+         let (reply_tx, reply_rx) = oneshot::channel();
+         self.submit_with_id(Submission {
+             id: turn_id,
+             op: Op::RecoverTurn {
+                 thread_settings,
+-                submit_change_batch,
++                start,
+                 reply: reply_tx,
+             },
+             trace,
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 71d97069..7490feed 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -160,15 +160,12 @@ pub(super) async fn handle(
+ pub(super) async fn handle_recovery(
+     session: &Arc<Session>,
+     thread_settings: ThreadSettingsOverrides,
+-    submit_change_batch: bool,
++    start: TurnStartOptions,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
+     let request = TurnInputRequest::user_input(Vec::new())
+         .with_thread_settings(thread_settings)
+-        .on_start(TurnStartOptions {
+-            submit_change_batch,
+-            ..TurnStartOptions::default()
+-        });
++        .on_start(start);
+     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
+ }
+ 
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index 7d61bb96..94c22b46 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -202,7 +202,7 @@ async fn recovery_rejects_active_turn_without_injecting_or_applying_settings() {
+             approval_policy: Some(AskForApproval::Never),
+             ..Default::default()
+         },
+-        false,
++        TurnStartOptions::default(),
+         "recovered-turn".to_string(),
+     )
+     .await
+diff --git a/codex-rs/core/tests/suite/turn_input_submission.rs b/codex-rs/core/tests/suite/turn_input_submission.rs
+index d4452ab2..fffa663f 100644
+--- a/codex-rs/core/tests/suite/turn_input_submission.rs
++++ b/codex-rs/core/tests/suite/turn_input_submission.rs
+@@ -269,7 +269,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+                 ..Default::default()
+             },
+             trace: None,
+-            submit_change_batch: false,
++            start: TurnStartOptions::default(),
+         })
+         .await
+         .expect("recovered turn should start");
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 66030436..c77eaaa9 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -59,6 +59,7 @@ use crate::request_user_input::RequestUserInputResponse;
+ use crate::turn_input::TurnInputMode;
+ use crate::turn_input::TurnInputRequest;
+ use crate::turn_input::TurnInputSubmission;
++use crate::turn_input::TurnStartOptions;
+ use codex_extension_items::image_generation::ImageGenerationFailure;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::PathUri;
+@@ -577,7 +578,7 @@ pub enum Op {
+     /// Resume an interrupted regular turn.
+     RecoverTurn {
+         thread_settings: ThreadSettingsOverrides,
+-        submit_change_batch: bool,
++        start: TurnStartOptions,
+         reply: oneshot::Sender<CodexResult<TurnInputSubmission>>,
+     },
+ 
+diff --git a/codex-rs/protocol/src/turn_input.rs b/codex-rs/protocol/src/turn_input.rs
+index 3aacbff7..cf8ab549 100644
+--- a/codex-rs/protocol/src/turn_input.rs
++++ b/codex-rs/protocol/src/turn_input.rs
+@@ -47,8 +47,8 @@ pub struct RecoverTurnRequest {
+     pub turn_id: String,
+     pub thread_settings: ThreadSettingsOverrides,
+     pub trace: Option<W3cTraceContext>,
+-    /// Re-advertise the host-owned terminal handoff when recovering a delegated turn.
+-    pub submit_change_batch: bool,
++    /// Restore the original turn-start contract without appending new input.
++    pub start: TurnStartOptions,
+ }
+ 
+ impl TurnInputRequest {

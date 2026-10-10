@@ -45,12 +45,14 @@ use crate::shell::ShellType;
 use crate::tools::network_approval::DeferredNetworkApproval;
 use codex_core_plugins::PluginMetricsSidecar;
 
+mod action_admission;
 mod async_watcher;
 mod errors;
 mod head_tail_buffer;
 mod process;
 mod process_manager;
 mod process_state;
+mod recovery;
 
 pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
     process_manager::set_deterministic_process_ids_for_tests(enabled);
@@ -124,6 +126,7 @@ pub(crate) struct WriteStdinRequest<'a> {
 pub(crate) struct WriteStdinInteractionEvent<'a> {
     pub session: &'a Arc<Session>,
     pub turn: &'a Arc<TurnContext>,
+    pub call_id: &'a str,
 }
 
 impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {

@@ -99,6 +99,10 @@ impl RequestUserInputHandler {
 }
 
 impl CoreToolRuntime for RequestUserInputHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         true
     }

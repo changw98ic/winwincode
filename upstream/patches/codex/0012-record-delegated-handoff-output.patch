@@ -1,0 +1,86 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2206,6 +2206,21 @@
+             }
+         }
+     }
++    if let Some(handoff) = &handoff {
++        // The delegated tool completes by yielding to the host. Preserve that
++        // fact in history before the next turn can normalize the original call;
++        // patch application and validation are still owned by the host.
++        let response_item = ResponseInputItem::CustomToolCallOutput {
++            call_id: handoff.call_id.clone(),
++            name: Some("submit_change_batch".to_string()),
++            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
++                "ChangeBatch proposal handed to host for application and validation.".to_string(),
++            ),
++        }
++        .into();
++        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
++            .await;
++    }
+     Ok(handoff)
+ }
+ 
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -59,6 +59,57 @@
+ }
+ 
+ #[tokio::test]
++async fn delegated_handoff_records_the_original_custom_call_output_before_continuation() {
++    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
++    let session = Arc::new(session);
++    let turn_context = Arc::new(turn_context);
++    let handoff = ChangeBatchHandoff {
++        call_id: "batch-original".to_string(),
++        proposal: "{\"schemaVersion\":1}".to_string(),
++    };
++    let call = ResponseItem::CustomToolCall {
++        id: None,
++        status: None,
++        call_id: handoff.call_id.clone(),
++        name: "submit_change_batch".to_string(),
++        namespace: None,
++        input: handoff.proposal.clone(),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    session
++        .record_conversation_items(&turn_context, std::slice::from_ref(&call))
++        .await;
++    let completion = handoff.clone();
++    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
++        FuturesOrdered::new();
++    in_flight.push_back(Box::pin(async move {
++        Ok(ToolCallCompletion::Continuation(
++            ToolContinuation::YieldToHost(completion),
++        ))
++    }));
++    assert_eq!(
++        drain_in_flight(&mut in_flight, session.clone(), turn_context)
++            .await
++            .unwrap(),
++        Some(handoff.clone())
++    );
++    let output = ResponseInputItem::CustomToolCallOutput {
++        call_id: handoff.call_id,
++        name: Some("submit_change_batch".to_string()),
++        output: codex_protocol::models::FunctionCallOutputPayload::from_text(
++            "ChangeBatch proposal handed to host for application and validation.".to_string(),
++        ),
++    }
++    .into();
++    let mut items = crate::session::tests::raw_history_items(&session.clone_history().await);
++    for item in &mut items {
++        item.set_id(None);
++        item.clear_internal_chat_message_metadata_passthrough();
++    }
++    assert_eq!(items, vec![call, output]);
++}
++
++#[tokio::test]
+ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
+     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
+     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();

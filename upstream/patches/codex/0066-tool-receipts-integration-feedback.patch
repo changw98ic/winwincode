@@ -1,0 +1,228 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/code_mode_host.rs b/codex-rs/app-server/tests/suite/v2/code_mode_host.rs
+--- a/codex-rs/app-server/tests/suite/v2/code_mode_host.rs
++++ b/codex-rs/app-server/tests/suite/v2/code_mode_host.rs
+@@ -91,6 +91,7 @@
+     let codex_home = TempDir::new()?;
+     MockResponsesConfig::new(&model_server.uri())
+         .enable_feature(Feature::CodeModeOnly)
++        .with_root_config("web_search = \"disabled\"")
+         .write(codex_home.path())?;
+     let original_config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+     let mut app_server = TestAppServer::builder()
+diff --git a/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs b/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
+--- a/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
++++ b/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
+@@ -757,7 +757,19 @@
+             .as_str()
+             .is_some_and(|text| text.contains("Generated images are saved"))
+     );
+-    assert_eq!(output["output"].as_array().map(Vec::len), Some(3));
++    assert_eq!(output["output"].as_array().map(Vec::len), Some(4));
++    let receipt_text = output["output"][3]["text"]
++        .as_str()
++        .expect("image generation should return Core receipt references");
++    let receipt_body = receipt_text
++        .strip_prefix("<core_tool_receipts>")
++        .and_then(|text| text.strip_suffix("</core_tool_receipts>"))
++        .expect("Core receipts should have complete fragment markers");
++    let receipts: serde_json::Value = serde_json::from_str(receipt_body)?;
++    assert_eq!(receipts["type"], "core_tool_receipts");
++    assert_eq!(receipts["schema_version"], 1);
++    assert_eq!(receipts["receipts"].as_array().map(Vec::len), Some(1));
++    assert_eq!(receipts["receipts"][0]["execution"], "completed");
+ 
+     Ok(())
+ }
+@@ -954,7 +966,9 @@
+         .with_model_provider("openai-custom")
+         .with_provider_name("OpenAI")
+         .with_provider_base_url(&format!("{server_uri}/api/codex"))
+-        .with_root_config(&format!("chatgpt_base_url = \"{server_uri}\""))
++        .with_root_config(&format!(
++            "chatgpt_base_url = \"{server_uri}\"\nweb_search = \"disabled\""
++        ))
+         .with_provider_config("supports_websockets = false\nrequires_openai_auth = true");
+     if matches!(mode, ImagegenTestMode::CodeModeOnly) {
+         config = config.enable_feature(Feature::CodeModeOnly);
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+--- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+@@ -1068,7 +1068,10 @@
+     let codex_home = TempDir::new()?;
+     MockResponsesConfig::new(&server.uri())
+         .enable_feature(Feature::CodeModeOnly)
+-        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
++        .with_root_config(&format!(
++            "chatgpt_base_url = \"{}\"\nweb_search = \"disabled\"",
++            server.uri()
++        ))
+         .write(codex_home.path())?;
+     mount_analytics_capture(&server, codex_home.path()).await?;
+ 
+diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
+--- a/codex-rs/core/tests/suite/code_mode.rs
++++ b/codex-rs/core/tests/suite/code_mode.rs
+@@ -127,13 +127,14 @@
+ }
+ 
+ fn custom_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
+-    match req.custom_tool_call_output(call_id).get("output") {
++    let items = match req.custom_tool_call_output(call_id).get("output") {
+         Some(Value::Array(items)) => items.clone(),
+         Some(Value::String(text)) => {
+             vec![serde_json::json!({ "type": "input_text", "text": text })]
+         }
+         _ => panic!("custom tool output should be serialized as text or content items"),
+-    }
++    };
++    runtime_output_items(items)
+ }
+ 
+ fn tool_names(body: &Value) -> Vec<String> {
+@@ -154,13 +155,80 @@
+ }
+ 
+ fn function_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
+-    match req.function_call_output(call_id).get("output") {
++    let items = match req.function_call_output(call_id).get("output") {
+         Some(Value::Array(items)) => items.clone(),
+         Some(Value::String(text)) => {
+             vec![serde_json::json!({ "type": "input_text", "text": text })]
+         }
+         _ => panic!("function tool output should be serialized as text or content items"),
++    };
++    runtime_output_items(items)
++}
++
++fn runtime_output_items(mut items: Vec<Value>) -> Vec<Value> {
++    // Check Core feedback while preserving exact runtime payload assertions.
++    while let Some(text) = items
++        .last()
++        .and_then(|item| item.get("text"))
++        .and_then(Value::as_str)
++    {
++        let (kind, payload_key, limit) = if text.starts_with("<core_tool_receipts>") {
++            ("core_tool_receipts", "receipts", 4)
++        } else if text.starts_with("<model_behavior_diagnosis>") {
++            ("model_behavior_diagnosis", "diagnostics", 2)
++        } else {
++            break;
++        };
++        let payload = text
++            .strip_prefix(&format!("<{kind}>"))
++            .and_then(|text| text.strip_suffix(&format!("</{kind}>")))
++            .expect("Core feedback should have complete fragment markers");
++        let feedback: Value = serde_json::from_str(payload).expect("Core feedback should be JSON");
++        assert_eq!(feedback["type"], kind);
++        assert_eq!(feedback["schema_version"], 1);
++        let entries = feedback[payload_key]
++            .as_array()
++            .expect("Core feedback should contain evidence references");
++        assert!(!entries.is_empty() && entries.len() <= limit);
++        if kind == "core_tool_receipts" {
++            for receipt in entries {
++                assert!(
++                    receipt["source_id"]
++                        .as_str()
++                        .is_some_and(|id| !id.is_empty() && id.len() <= 80)
++                );
++                assert!(
++                    receipt["tool"]
++                        .as_str()
++                        .is_some_and(|tool| !tool.is_empty() && tool.chars().count() <= 64)
++                );
++                assert!(
++                    receipt["request_sequence"]
++                        .as_i64()
++                        .is_some_and(|sequence| sequence > 0)
++                );
++            }
++        } else {
++            assert_eq!(feedback["assessment"], "possible");
++            for diagnostic in entries {
++                assert!(
++                    diagnostic["diagnostic_id"]
++                        .as_str()
++                        .is_some_and(|id| !id.is_empty() && id.len() <= 80)
++                );
++                assert!(
++                    diagnostic["calls"]
++                        .as_array()
++                        .is_some_and(|calls| calls.len() <= 2)
++                );
++                assert!(diagnostic["question"].as_str().is_some_and(
++                    |question| !question.is_empty() && question.chars().count() <= 256
++                ));
++            }
++        }
++        items.pop();
+     }
++    items
+ }
+ 
+ fn text_item(items: &[Value], index: usize) -> &str {
+@@ -214,20 +282,11 @@
+ }
+ 
+ fn custom_tool_output_last_non_empty_text(req: &ResponsesRequest, call_id: &str) -> Option<String> {
+-    match req.custom_tool_call_output(call_id).get("output") {
+-        Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+-        Some(Value::Array(items)) => items
+-            .iter()
+-            .filter_map(|item| item.get("text").and_then(Value::as_str))
+-            .rfind(|text| !text.trim().is_empty())
+-            .map(str::to_string),
+-        Some(Value::String(_))
+-        | Some(Value::Object(_))
+-        | Some(Value::Number(_))
+-        | Some(Value::Bool(_))
+-        | Some(Value::Null)
+-        | None => None,
+-    }
++    custom_tool_output_items(req, call_id)
++        .iter()
++        .filter_map(|item| item.get("text").and_then(Value::as_str))
++        .rfind(|text| !text.trim().is_empty())
++        .map(str::to_string)
+ }
+ 
+ async fn run_code_mode_turn(
+diff --git a/codex-rs/core/tests/suite/model_runtime_selectors.rs b/codex-rs/core/tests/suite/model_runtime_selectors.rs
+--- a/codex-rs/core/tests/suite/model_runtime_selectors.rs
++++ b/codex-rs/core/tests/suite/model_runtime_selectors.rs
+@@ -117,7 +117,12 @@
+ 
+     let mut builder = test_codex()
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+-        .with_config(configure);
++        .with_config(move |config| {
++            config.web_search_mode = codex_core::config::Constrained::allow_any(
++                codex_protocol::config_types::WebSearchMode::Disabled,
++            );
++            configure(config);
++        });
+     let test = builder.build(&server).await?;
+     let models_manager = test.thread_manager.get_models_manager();
+     let available_model = wait_for_model_available(&models_manager, &model_slug).await;
+@@ -194,9 +199,6 @@
+             // Code-mode entrypoints.
+             codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
+             codex_code_mode::WAIT_TOOL_NAME.to_string(),
+-            "request_user_input".to_string(),
+-            // Hosted Responses tool.
+-            "web_search".to_string(),
+         ]
+     );
+ 
+diff --git a/codex-rs/tui/src/version.rs b/codex-rs/tui/src/version.rs
+--- a/codex-rs/tui/src/version.rs
++++ b/codex-rs/tui/src/version.rs
+@@ -1,2 +1,7 @@
+ /// The current Codex CLI version as embedded at compile time.
+-pub const CODEX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
++pub const CODEX_CLI_VERSION: &str = if cfg!(test) {
++    // Keep rendered test fixtures stable across workspace version updates.
++    "0.0.0"
++} else {
++    env!("CARGO_PKG_VERSION")
++};

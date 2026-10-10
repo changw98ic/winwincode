@@ -86,6 +86,7 @@ corepack pnpm verify:api-production-vertical
 ```
 
 真实模型执行需要配置可用的 Provider 和 Credential 引用。
+ChatGPT 账号可按[接入说明](docs/codex-login-integration.md)直接授权，或复用设备上的 Codex 登录态。
 
 ## 当前状态与限制
 

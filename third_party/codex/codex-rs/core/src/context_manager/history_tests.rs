@@ -1584,6 +1584,43 @@ fn normalize_adds_missing_output_for_function_call() {
     );
 }
 
+#[test]
+fn normalize_reports_unavailable_code_mode_result_without_rewriting_call() {
+    let call = ResponseItem::CustomToolCall {
+        id: Some(ResponseItemId::with_suffix("ctc", "interrupted")),
+        status: None,
+        call_id: "interrupted-exec".to_string(),
+        name: "exec".to_string(),
+        namespace: None,
+        input: "await tools.request_user_input({questions: []})".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = create_history_with_items(vec![call.clone()]);
+    history.normalize_history(&default_input_modalities());
+    let items = raw_items(&history);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0], call);
+    let ResponseItem::CustomToolCallOutput {
+        id,
+        call_id,
+        output,
+        ..
+    } = &items[1]
+    else {
+        panic!("expected recovery observation for the original exec call");
+    };
+    assert!(id.is_some());
+    assert_eq!(call_id, "interrupted-exec");
+    let text = output.text_content().expect("recovery observation");
+    assert!(text.contains("<code_mode_result_unavailable>"));
+    assert!(text.contains("outcome_unknown"));
+    history.normalize_history(&default_input_modalities());
+    assert_eq!(raw_items(&history), items);
+    let mut replay = create_history_with_items(vec![call]);
+    replay.normalize_history(&default_input_modalities());
+    assert_eq!(raw_items(&replay), items);
+}
+
 #[cfg(not(debug_assertions))]
 #[test]
 fn normalize_adds_missing_output_for_custom_tool_call() {

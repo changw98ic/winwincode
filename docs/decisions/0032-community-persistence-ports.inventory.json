@@ -86,6 +86,7 @@
       "source": "crates/winwincode-storage/src/lib.rs",
       "role": "composite",
       "stableErrors": [
+        "CandidateGitRetentionError",
         "StorageError"
       ]
     }

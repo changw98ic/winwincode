@@ -1,6 +1,6 @@
 [package]
 name = "winwincode-kernel-helper"
-description = "Internal helper entrypoint for WinWinCode sandbox and filesystem operations"
+description = "Internal helper for WinWinCode Code Mode, sandbox and filesystem operations"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 codex-arg0.workspace = true
+codex-code-mode-host.workspace = true
+tokio.workspace = true
 
 [build-dependencies]
 sha2.workspace = true

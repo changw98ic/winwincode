@@ -29,7 +29,7 @@ use winwincode_storage::{
     receipt_scope_key, repository_scope_from_receipt_key,
 };
 
-use crate::execution_port_service::{lease_stamp, load_runtime_replay_authority};
+use crate::execution_port_service::{lease_stamp, load_running_runtime_authority};
 
 const ACTION_RECEIPT_STREAM_PREFIX: &str = "action-enforcement-receipt:";
 const ACTION_RECEIPT_TOPIC: &str = "action.enforcement-receipt.issued";
@@ -163,13 +163,16 @@ fn resolve_action_authority(
             .map_err(|_| authority_rejected())?
         }
         winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(_) => {
-            load_runtime_replay_authority(storage, &job, evaluated_at)
+            load_running_runtime_authority(storage, &job, evaluated_at)
                 .map_err(|_| authority_rejected())?
         }
     };
-    if request.lease != lease_stamp(&authority.lease)
-        || request.worker_session_id != authority.worker_session_id
+    if !winwincode_execution_port::execution_identity::retained_lease_matches_current(
+        &request.lease,
+        &lease_stamp(&authority.lease),
+    ) || request.worker_session_id != authority.worker_session_id
         || request.session_identity != authority.session_identity
+        || !winwincode_execution_port::execution_identity::canonical_instant(&request.sent_at)
         || request.sent_at.0 < authority.lease.issued_at.0
         || request.sent_at.0 >= authority.lease.expires_at.0
         || evaluated_at.0 < authority.lease.issued_at.0

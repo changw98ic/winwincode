@@ -174,17 +174,36 @@ impl ObservationModelConfiguration {
 pub struct JobWorkspaceError {
     code: JobWorkspaceErrorCode,
     message: &'static str,
+    stage: &'static str,
+    cause_code: &'static str,
 }
 
 impl JobWorkspaceError {
     fn new(code: JobWorkspaceErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            stage: "job_workspace",
+            cause_code: "JOB_WORKSPACE",
+        }
     }
 
     /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> JobWorkspaceErrorCode {
         self.code
+    }
+
+    /// Safe failure boundary, independent of private checkout paths.
+    #[must_use]
+    pub const fn stage(&self) -> &'static str {
+        self.stage
+    }
+
+    /// Safe lower-level category preserved through candidate preparation.
+    #[must_use]
+    pub const fn cause_code(&self) -> &'static str {
+        self.cause_code
     }
 }
 
@@ -197,30 +216,39 @@ impl fmt::Display for JobWorkspaceError {
 impl std::error::Error for JobWorkspaceError {}
 
 impl From<WorkspaceError> for JobWorkspaceError {
-    fn from(_: WorkspaceError) -> Self {
-        Self::new(
+    fn from(error: WorkspaceError) -> Self {
+        let mut failure = Self::new(
             JobWorkspaceErrorCode::Workspace,
             "detached Job workspace operation failed",
-        )
+        );
+        failure.stage = "workspace";
+        failure.cause_code = error.code().as_str();
+        failure
     }
 }
 
 impl From<CandidateProductError> for JobWorkspaceError {
     fn from(error: CandidateProductError) -> Self {
-        Self::new(
+        let mut failure = Self::new(
             if error.code() == crate::stage_product::CandidateProductErrorCode::UnchangedCandidate {
                 JobWorkspaceErrorCode::UnchangedCandidate
             } else {
                 JobWorkspaceErrorCode::Candidate
             },
             "detached Job candidate preparation failed",
-        )
+        );
+        failure.stage = "candidate_prepare";
+        failure.cause_code = error.cause_code();
+        failure
     }
 }
 
 impl From<ChangeBatchStoreError> for JobWorkspaceError {
     fn from(error: ChangeBatchStoreError) -> Self {
-        Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message())
+        let mut failure = Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message());
+        failure.stage = "change_batch_store";
+        failure.cause_code = "CHANGE_BATCH_STORE";
+        failure
     }
 }
 
@@ -962,6 +990,16 @@ impl JobWorkspaceRuntime {
         for record in &records {
             if !same_change_batch_lease_authority(&record.event, active) {
                 return Err(authority_error());
+            }
+            if self
+                .change_batch_store
+                .workspace_binding_for_batch(&record.event.identity.batch_id)?
+                .state
+                == BatchState::Quarantined
+            {
+                return Err(change_batch_error(
+                    "ChangeBatch workspace remains quarantined",
+                ));
             }
             if record.receipt.as_ref().is_some_and(|receipt| {
                 matches!(
@@ -2041,6 +2079,86 @@ impl JobWorkspaceRuntime {
         self.consume_workspace(job_id, reason)
     }
 
+    /// Closes a terminal Job while retaining any unresolved batch checkout.
+    ///
+    /// Failed or cancelled Jobs may release their execution lease after the
+    /// exact unresolved workspace is durably quarantined. Its files, receipt,
+    /// active batch and accepted revision remain unchanged for diagnosis.
+    /// Successful Jobs still require the ordinary proven cleanup boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign authority, unavailable durable state, or unresolved
+    /// mutation on a successful Job.
+    pub fn prepare_terminal_job_close(
+        &mut self,
+        active: &ActiveJob,
+        reason: WorkspaceCloseReason,
+        now: &Instant,
+    ) -> Result<Option<ChangeBatchProgressEvent>, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        let workspace_id = workspace.id().to_owned();
+        let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
+        let Some(binding) = binding.filter(|binding| binding.active_batch_id.is_some()) else {
+            self.prepare_close_job(&active.job.job_id, reason, now)?;
+            return Ok(None);
+        };
+        if reason == WorkspaceCloseReason::Completed {
+            return Err(change_batch_error(
+                "Successful Job has an unresolved ChangeBatch",
+            ));
+        }
+        let batch_id = binding
+            .active_batch_id
+            .as_ref()
+            .ok_or_else(authority_error)?;
+        let record = self
+            .change_batch_store
+            .batch_record(batch_id)?
+            .ok_or_else(authority_error)?;
+        if !same_change_batch_lease_authority(&record.event, active)
+            || self
+                .change_batch_store
+                .workspace_binding_for_batch(batch_id)?
+                != binding
+        {
+            return Err(authority_error());
+        }
+        let progress = self.change_batch_store.progress_events(batch_id)?;
+        let terminal = if binding.state == BatchState::Quarantined {
+            progress
+                .last()
+                .filter(|event| event.state == ChangeBatchProgressState::InfrastructureFailed)
+                .cloned()
+                .ok_or_else(authority_error)?
+        } else {
+            next_progress(
+                &progress,
+                &record.event,
+                ChangeBatchProgressState::InfrastructureFailed,
+                "Job ended with unresolved ChangeBatch; checkout retained for diagnosis",
+                Vec::new(),
+                now,
+            )
+        };
+        self.change_batch_store.retain_workspace_progress(
+            &workspace_id,
+            &terminal,
+            binding.state,
+            BatchState::Quarantined,
+        )?;
+        // Drop only the live owner lock. The quarantined checkout is never
+        // consumed or exposed to another execution through recovery.
+        self.active.remove(&active.job.job_id.0);
+        Ok(Some(terminal))
+    }
+
     /// Returns whether this process owns an open checkout for the Job.
     #[must_use]
     pub fn contains(&self, job_id: &ExecutionJobId) -> bool {
@@ -2166,6 +2284,9 @@ impl JobWorkspaceRuntime {
             .model_open
             .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
         validate_observation_model_open_payload(&open, &record.request)?;
+        if !same_observation_model_authority(&open, active) {
+            return Err(authority_error());
+        }
         Ok(Some(open))
     }
 
@@ -2276,6 +2397,9 @@ impl JobWorkspaceRuntime {
                 .model_open
                 .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
             validate_observation_model_open_payload(&open, request)?;
+            if !same_observation_model_authority(&open, active) {
+                return Err(authority_error());
+            }
             return Ok(open);
         }
         let payload = observation_provider_payload(request, configuration)?;
@@ -2358,12 +2482,14 @@ impl JobWorkspaceRuntime {
                 active,
                 &binding.accepted_revision,
             );
-        if active.lifecycle != ActiveJobLifecycle::Running
+        if (active.lifecycle != ActiveJobLifecycle::Running && !terminal_replay)
             || !same_authority(workspace.provenance(), active)
             || !same_change_batch_identity_lease_authority(&intent.identity, active)
-            || chunk.lease != active.lease
-            || chunk.session_identity != active.session_identity
-            || chunk.worker_session_id != active.worker_session_id
+            || !same_observation_model_authority(retained_open, active)
+            || now.0 < active.lease.issued_at.0
+            || chunk.lease != retained_open.lease
+            || chunk.session_identity != retained_open.session_identity
+            || chunk.worker_session_id != retained_open.worker_session_id
             || (!terminal_replay
                 && (!same_change_batch_identity_authority(
                     &intent.identity,
@@ -2372,12 +2498,6 @@ impl JobWorkspaceRuntime {
                 ) || binding.state != BatchState::ObservationPending
                     || binding.active_batch_id.as_ref() != Some(&intent.identity.batch_id)
                     || binding.checkpoint_revision.as_ref() != Some(&intent.result_revision)))
-            || (terminal_replay
-                && !pending_terminal_route
-                && !matches!(
-                    binding.state,
-                    BatchState::Accepted | BatchState::RepairRequired | BatchState::Quarantined
-                ))
         {
             return Err(authority_error());
         }
@@ -2397,6 +2517,9 @@ impl JobWorkspaceRuntime {
             },
             now,
         )?;
+        // A completed historical observation is keyed by its original authority
+        // and exact retained frame bytes, not by a later batch's workspace phase.
+        // Retention above still rejects changed bytes and new terminal frames.
         if terminal_replay && !pending_terminal_route {
             return Ok(Some(ObservationChunkApplication {
                 retention,
@@ -3266,6 +3389,15 @@ fn same_authority(provenance: &WorkspaceProvenance, active: &ActiveJob) -> bool 
     provenance == &expected
 }
 
+fn same_observation_model_authority(open: &ModelOpenMessage, active: &ActiveJob) -> bool {
+    let mut original = open.lease.clone();
+    original.expires_at = active.lease.expires_at.clone();
+    original == active.lease
+        && open.lease.expires_at.0 <= active.lease.expires_at.0
+        && open.session_identity == active.session_identity
+        && open.worker_session_id == active.worker_session_id
+}
+
 fn same_change_batch_lease_authority(event: &ChangeBatchProposalEvent, active: &ActiveJob) -> bool {
     event.identity.job_id == active.job.job_id
         && event.identity.attempt == active.job.attempt
@@ -3711,17 +3843,17 @@ fn parse_observation_model_chunk(
                 .is_some_and(|value| {
                     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
                 })
-                && object.get("endTurn").and_then(serde_json::Value::as_bool) == Some(true) =>
+                && matches!(
+                    object.get("endTurn"),
+                    None | Some(serde_json::Value::Null | serde_json::Value::Bool(true))
+                ) =>
         {
-            let model_usage = terminal_model_usage(object);
+            let model_usage = terminal_model_usage(object)
+                .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0));
             ParsedObservationModelChunk {
                 response_delta: Vec::new(),
-                terminal_status: Some(if model_usage.is_some() {
-                    "completed"
-                } else {
-                    "provider_error"
-                }),
-                model_usage,
+                terminal_status: Some("completed"),
+                model_usage: Some(model_usage),
             }
         }
         "error"
@@ -3762,14 +3894,19 @@ fn terminal_model_usage(
         .and_then(serde_json::Value::as_u64)
         .and_then(|cost| i64::try_from(cost).ok())
         .filter(|cost| (0..=9_007_199_254_740_991).contains(cost));
-    total_tokens.map(|tokens| ExecutionOutcomeUsage {
-        cost_microunits: actual_cost_microunits,
-        runtime_millis: 0,
-        tokens: Some(tokens),
-        known_tokens: tokens,
-        accounting_status:
-            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
-    })
+    let mut usage = total_tokens.map_or_else(
+        || ExecutionOutcomeUsage::unknown(0, 0),
+        |tokens| ExecutionOutcomeUsage {
+            cost_microunits: None,
+            runtime_millis: 0,
+            tokens: Some(tokens),
+            known_tokens: tokens,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        },
+    );
+    usage.cost_microunits = actual_cost_microunits;
+    (total_tokens.is_some() || actual_cost_microunits.is_some()).then_some(usage)
 }
 
 fn observation_receipt_from_terminal(
@@ -3778,11 +3915,17 @@ fn observation_receipt_from_terminal(
 ) -> Result<ObservationReceipt, JobWorkspaceError> {
     let intent = &record.request.intent;
     let (response, source, usage) = if completed {
-        if let (Ok(response), Some(usage)) = (
-            parse_observation_response_strict(&record.response_bytes, intent),
-            record.model_usage.clone(),
-        ) {
-            (response, ObservationSource::Model, Some(usage))
+        if let Ok(response) = parse_observation_response_strict(&record.response_bytes, intent) {
+            (
+                response,
+                ObservationSource::Model,
+                Some(
+                    record
+                        .model_usage
+                        .clone()
+                        .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0)),
+                ),
+            )
         } else {
             (
                 observation_infrastructure_response(intent),

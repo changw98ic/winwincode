@@ -1,0 +1,367 @@
+diff --git a/codex-rs/core/src/context/tool_diagnostics.rs b/codex-rs/core/src/context/tool_diagnostics.rs
+index 39dc9118..3e76d70c 100644
+--- a/codex-rs/core/src/context/tool_diagnostics.rs
++++ b/codex-rs/core/src/context/tool_diagnostics.rs
+@@ -16,15 +16,18 @@ impl ContextualUserFragment for ToolDiagnosticFeedback {
+     }
+     fn body(&self) -> String {
+         let diagnostics: Vec<_> = self.0.iter()
+-            .filter(|diagnostic| diagnostic.diagnostic_id.len() <= 80).take(2)
++            .filter(|diagnostic| bounded_reference(&diagnostic.diagnostic_id).is_some()).take(2)
+             .map(|diagnostic| serde_json::json!({
+                 "diagnostic_id": diagnostic.diagnostic_id, "evidence_version": diagnostic.evidence_version,
+                 "kind": diagnostic.kind, "progress": diagnostic.progress_source_sequence.map_or("unknown", |_| "verified_receipt"),
+                 "calls": diagnostic.evidence.iter().rev().take(2).map(|call| serde_json::json!({
+                     "request_sequence": call.request_sequence,
+-                    "tool": call.tool_name.chars().take(64).collect::<String>(),
++                    "tool": bounded_text(&call.tool_name, 64, 96),
++                    "parent_call_id": call.parent_call_id.as_deref().and_then(bounded_reference),
++                    "cell_id": call.cell_id.as_deref().and_then(bounded_reference),
++                    "operation_digest": bounded_reference(&call.operation_digest),
+                 })).collect::<Vec<_>>(),
+-                "question": diagnostic.question.chars().take(256).collect::<String>(),
++                "question": bounded_text(&diagnostic.question, 256, 256),
+             })).collect();
+         serde_json::json!({
+             "type": "model_behavior_diagnosis", "schema_version": 1,
+@@ -33,3 +36,32 @@ impl ContextualUserFragment for ToolDiagnosticFeedback {
+         }).to_string()
+     }
+ }
++
++/// Omit an oversized identity rather than truncating it into a different identity.
++fn bounded_reference(value: &str) -> Option<&str> {
++    if value.len() > 80 {
++        return None;
++    }
++    (serde_json::to_string(value).ok()?.len() <= 96).then_some(value)
++}
++
++/// Bound JSON-escaped bytes as well as characters, including control characters.
++fn bounded_text(value: &str, max_chars: usize, max_json_bytes: usize) -> String {
++    let mut remaining = max_json_bytes.saturating_sub(2);
++    value
++        .chars()
++        .take(max_chars)
++        .take_while(|character| {
++            let size = match *character {
++                '"' | '\\' => 2,
++                '\u{0000}'..='\u{001f}' => 6,
++                _ => character.len_utf8(),
++            };
++            if size > remaining {
++                return false;
++            }
++            remaining -= size;
++            true
++        })
++        .collect()
++}
+diff --git a/codex-rs/core/src/context/tool_diagnostics_tests.rs b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+index c06755d2..5758831d 100644
+--- a/codex-rs/core/src/context/tool_diagnostics_tests.rs
++++ b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+@@ -5,39 +5,105 @@ use codex_state::ToolDiagnostic;
+ use codex_state::ToolDiagnosticCall;
+ use codex_state::ToolDiagnosticKind;
+ use codex_utils_output_truncation::approx_token_count;
+-#[test]
+-fn diagnostic_context_caps_evidence_and_question_size() {
+-    let diagnosis = ToolDiagnostic {
++
++fn diagnosis() -> ToolDiagnostic {
++    ToolDiagnostic {
+         schema_version: 1,
+         diagnostic_id: "d".repeat(80),
+         thread_id: "thread".into(),
+         kind: ToolDiagnosticKind::RepeatedOperation,
+-        evidence_version: 1,
+-        progress_source_sequence: None,
+-        question: "😀".repeat(10_000),
+-        evidence: (1..20)
++        evidence_version: i64::MAX,
++        progress_source_sequence: Some(i64::MAX),
++        question: "Is this repetition justified?".into(),
++        evidence: vec![ToolDiagnosticCall {
++            request_sequence: i64::MAX,
++            logical_id: "logical".into(),
++            tool_name: "mcp.fixture.check".into(),
++            operation_digest: "a".repeat(64),
++            parent_call_id: Some("parent-exec".into()),
++            cell_id: Some("cell-1".into()),
++        }],
++    }
++}
++
++#[test]
++fn diagnostic_context_caps_evidence_and_question_size() {
++    for text in ["😀", "\u{0000}", "\\\""] {
++        let mut diagnosis = diagnosis();
++        diagnosis.question = text.repeat(10_000);
++        diagnosis.evidence = (1..20)
+             .map(|request_sequence| ToolDiagnosticCall {
+                 request_sequence,
+                 logical_id: "logical".into(),
+-                tool_name: "😀".repeat(10_000),
+-                operation_digest: "digest".into(),
+-                parent_call_id: None,
+-                cell_id: None,
++                tool_name: text.repeat(10_000),
++                operation_digest: "a".repeat(80),
++                parent_call_id: Some("p".repeat(80)),
++                cell_id: Some("c".repeat(80)),
+             })
+-            .collect(),
+-    };
++            .collect();
++        let fragment = ToolDiagnosticFeedback(vec![diagnosis; 8]);
++        let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
++        let diagnoses = body["diagnostics"].as_array().unwrap();
++        assert_eq!(diagnoses.len(), 2);
++        for diagnosis in diagnoses {
++            assert!(serde_json::to_string(&diagnosis["question"]).unwrap().len() <= 256);
++            let calls = diagnosis["calls"].as_array().unwrap();
++            assert_eq!(calls.len(), 2);
++            for call in calls {
++                assert!(serde_json::to_string(&call["tool"]).unwrap().len() <= 96);
++                assert_eq!(call["parent_call_id"], "p".repeat(80));
++                assert_eq!(call["cell_id"], "c".repeat(80));
++                assert_eq!(call["operation_digest"], "a".repeat(80));
++            }
++        }
++        assert!(approx_token_count(&fragment.render()) < 1_000);
++    }
++}
++
++#[test]
++fn diagnostic_context_keeps_exact_call_provenance() {
++    let diagnosis = diagnosis();
++    let fragment = ToolDiagnosticFeedback(vec![diagnosis.clone()]);
++    let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
++    let call = &body["diagnostics"][0]["calls"][0];
++    assert_eq!(call["request_sequence"], i64::MAX);
++    assert_eq!(call["parent_call_id"], "parent-exec");
++    assert_eq!(call["cell_id"], "cell-1");
++    assert_eq!(call["operation_digest"], "a".repeat(64));
++    assert_eq!(body["diagnostics"][0]["question"], diagnosis.question);
++}
++
++#[test]
++fn diagnostic_context_omits_oversized_references_without_aliasing_them() {
++    for identity in [
++        "x".repeat(81),
++        "😀".repeat(80),
++        "\u{0000}".repeat(80),
++        "\\".repeat(80),
++    ] {
++        let mut diagnosis = diagnosis();
++        diagnosis.evidence[0].parent_call_id = Some(identity.clone());
++        diagnosis.evidence[0].cell_id = Some(identity.clone());
++        diagnosis.evidence[0].operation_digest = identity;
++        let fragment = ToolDiagnosticFeedback(vec![diagnosis; 8]);
++        let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
++        for diagnosis in body["diagnostics"].as_array().unwrap() {
++            let call = &diagnosis["calls"][0];
++            assert!(call["parent_call_id"].is_null());
++            assert!(call["cell_id"].is_null());
++            assert!(call["operation_digest"].is_null());
++            assert_eq!(call["request_sequence"], i64::MAX);
++        }
++        assert!(approx_token_count(&fragment.render()) < 1_000);
++    }
++}
++
++#[test]
++fn malformed_diagnostic_identity_cannot_expand_feedback() {
++    let mut diagnosis = diagnosis();
++    diagnosis.diagnostic_id = "\u{0000}".repeat(80);
+     let fragment = ToolDiagnosticFeedback(vec![diagnosis; 8]);
+     let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
+-    let diagnoses = body["diagnostics"].as_array().unwrap();
+-    assert_eq!(diagnoses.len(), 2);
+-    assert!(
+-        diagnoses
+-            .iter()
+-            .all(|item| item["calls"].as_array().unwrap().len() == 2)
+-    );
+-    assert_eq!(
+-        diagnoses[0]["question"].as_str().unwrap().chars().count(),
+-        256
+-    );
++    assert!(body["diagnostics"].as_array().unwrap().is_empty());
+     assert!(approx_token_count(&fragment.render()) < 1_000);
+ }
+diff --git a/codex-rs/core/src/tools/tool_diagnostic_detector.rs b/codex-rs/core/src/tools/tool_diagnostic_detector.rs
+index c195065a..7cc6409c 100644
+--- a/codex-rs/core/src/tools/tool_diagnostic_detector.rs
++++ b/codex-rs/core/src/tools/tool_diagnostic_detector.rs
+@@ -139,6 +139,20 @@ impl Detector {
+         calls: &[&ToolExecutionFact],
+         question: &str,
+     ) -> ToolDiagnostic {
++        let mut branches = BTreeSet::new();
++        let evidence = calls
++            .iter()
++            .rev()
++            .filter(|fact| {
++                kind != ToolDiagnosticKind::BranchExpansion
++                    || fact
++                        .request
++                        .parent_call_id
++                        .as_deref()
++                        .is_some_and(|parent| branches.insert(parent))
++            })
++            .take(4)
++            .collect::<Vec<_>>();
+         ToolDiagnostic {
+             schema_version: 1,
+             diagnostic_id: digest(serde_json::json!([
+@@ -156,16 +170,14 @@ impl Detector {
+                 .max()
+                 .unwrap_or(1),
+             progress_source_sequence: self.progress,
+-            evidence: calls
+-                .iter()
+-                .rev()
+-                .take(4)
++            evidence: evidence
++                .into_iter()
+                 .rev()
+                 .map(|fact| ToolDiagnosticCall {
+                     request_sequence: fact.request_sequence,
+                     logical_id: fact.request.logical_id.clone(),
+                     tool_name: fact.request.tool_name.clone(),
+-                    operation_digest: operation(fact),
++                    operation_digest: self.operation(fact),
+                     parent_call_id: fact.request.parent_call_id.clone(),
+                     cell_id: fact.request.cell_id.clone(),
+                 })
+diff --git a/codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs b/codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs
+index 1fe404b9..936413d6 100644
+--- a/codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs
++++ b/codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs
+@@ -1,12 +1,17 @@
+ // SPDX-License-Identifier: Apache-2.0
+ use super::*;
+ use codex_state::ToolAttemptReceipt;
++use codex_state::ToolCoalescingPermission;
++use codex_state::ToolDependencySnapshot;
+ use codex_state::ToolExecutionStatus;
+ use codex_state::ToolOutputDelivery;
+ use codex_state::ToolOutputDisposition;
+ use codex_state::ToolProgressFact;
+ use codex_state::ToolRequestIdentity;
+ use codex_state::ToolRequestResolution;
++use codex_state::ToolReusePermission;
++use codex_state::ToolSharingFact;
++use codex_state::ToolSharingKind;
+ use pretty_assertions::assert_eq;
+ fn request(
+     sequence: i64,
+@@ -65,6 +70,106 @@ fn repeated_requests_produce_stable_evidence_but_transport_replay_does_not_count
+     assert_eq!(first[0].diagnostic_id, second[0].diagnostic_id);
+     assert!(second[0].evidence_version > first[0].evidence_version);
+ }
++
++#[test]
++fn shared_call_evidence_keeps_the_operation_that_triggered_the_diagnosis() {
++    for kind in [ToolSharingKind::Reuse, ToolSharingKind::Merged] {
++        let mut detector = Detector::default();
++        let operation = "a".repeat(64);
++        detector.consume(vec![request(1, &operation, Some("parent"), Some("cell"))]);
++        for sequence in 2..=6 {
++            let mut event = request(sequence, "same-input", Some("parent"), Some("cell"));
++            event.sequence = sequence * 2;
++            if let ToolRuntimeFact::Request(fact) = &mut event.fact {
++                fact.attempt = None;
++            }
++            detector.consume(vec![
++                event,
++                ToolRuntimeEvent {
++                    sequence: sequence * 2 + 1,
++                    fact: ToolRuntimeFact::Sharing(ToolSharingFact {
++                        schema_version: 1,
++                        thread_id: "thread".into(),
++                        request_sequence: sequence,
++                        source_request_sequence: 1,
++                        source_attempt_id: "attempt-1".into(),
++                        operation_digest: operation.clone(),
++                        snapshot: ToolDependencySnapshot {
++                            policy_revision: "1".repeat(64),
++                            dependency_digest: "2".repeat(64),
++                            account_scope_digest: "3".repeat(64),
++                            session_scope_digest: "4".repeat(64),
++                            validity_epoch: "5".repeat(64),
++                            reuse: ToolReusePermission::ImmutableValue,
++                            coalescing: ToolCoalescingPermission::SharedRead,
++                        },
++                        kind,
++                        disposition: ToolOutputDisposition::Accepted,
++                        delivery: ToolOutputDelivery::Offered,
++                        cancelled: false,
++                    }),
++                },
++            ]);
++        }
++        let diagnoses = detector.diagnose("thread", "owner");
++        assert_eq!(diagnoses.len(), 1);
++        assert_eq!(diagnoses[0].kind, ToolDiagnosticKind::RepeatedOperation);
++        assert_eq!(diagnoses[0].evidence.len(), 4);
++        assert!(diagnoses[0].evidence.iter().all(|call| {
++            call.request_sequence >= 3
++                && call.operation_digest == operation
++                && call.parent_call_id.as_deref() == Some("parent")
++                && call.cell_id.as_deref() == Some("cell")
++        }));
++    }
++}
++
++#[test]
++fn branch_expansion_evidence_compares_distinct_parent_calls() {
++    let mut detector = Detector::default();
++    detector.consume(
++        (1..=12)
++            .map(|sequence| {
++                let branch = (sequence - 1) / 4;
++                request(
++                    sequence,
++                    "same",
++                    Some(&format!("parent-{branch}")),
++                    Some(&format!("cell-{branch}")),
++                )
++            })
++            .collect(),
++    );
++    let diagnoses = detector.diagnose("thread", "owner");
++    let branch = diagnoses
++        .iter()
++        .find(|diagnostic| diagnostic.kind == ToolDiagnosticKind::BranchExpansion)
++        .unwrap();
++    assert_eq!(branch.evidence.len(), 3);
++    assert_eq!(
++        branch
++            .evidence
++            .iter()
++            .map(|call| call.request_sequence)
++            .collect::<Vec<_>>(),
++        [4, 8, 12]
++    );
++    let visible = branch.evidence.iter().rev().take(2).collect::<Vec<_>>();
++    assert_ne!(visible[0].parent_call_id, visible[1].parent_call_id);
++    assert_ne!(visible[0].cell_id, visible[1].cell_id);
++    let repeated = diagnoses
++        .iter()
++        .find(|diagnostic| diagnostic.kind == ToolDiagnosticKind::RepeatedOperation)
++        .unwrap();
++    assert_eq!(
++        repeated
++            .evidence
++            .iter()
++            .map(|call| call.request_sequence)
++            .collect::<Vec<_>>(),
++        [9, 10, 11, 12]
++    );
++}
+ #[test]
+ fn alternating_cycles_and_branch_expansion_are_separate_questions() {
+     let mut detector = Detector::default();

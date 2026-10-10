@@ -105,16 +105,7 @@ export interface ReviewFileEntry {
   readonly previewError: string | null
 }
 
-export interface ReviewActivity {
-  readonly callId: string
-  readonly activityType: RuntimeActivityProjection['activityType']
-  readonly command: string | null
-  readonly status: RuntimeActivityProjection['status']
-  readonly outcome: RuntimeActivityProjection['outcome']
-  readonly exitCode: number | null
-  /** Original runtime position; snippets cite this instead of copying output. */
-  readonly sourceRef: string
-}
+export type ReviewActivity = RuntimeActivityProjection
 
 export interface ReviewActivitySegment {
   readonly key: string
@@ -124,7 +115,7 @@ export interface ReviewActivitySegment {
   readonly attempt: number
   readonly role: string | null
   readonly state: string | null
-  /** The projection stops at 100 activities per session; the cut is shown. */
+  /** The projection retains the most recent 100 activities per session. */
   readonly truncated: boolean
   readonly activities: readonly ReviewActivity[]
 }
@@ -781,15 +772,7 @@ export function createStrongFlowReviewViewModel(
         role: session.runtimeContext?.agentIdentity.role ?? null,
         state,
         truncated: session.activities.length >= MAX_ACTIVITIES_PER_SESSION,
-        activities: Object.freeze(session.activities.slice(0, MAX_ACTIVITIES_PER_SESSION).map(activity => Object.freeze({
-          callId: activity.callId,
-          activityType: activity.activityType,
-          command: activity.command,
-          status: activity.status,
-          outcome: activity.outcome,
-          exitCode: activity.exitCode,
-          sourceRef: activity.sourceRef,
-        }))),
+        activities: Object.freeze(session.activities.slice(-MAX_ACTIVITIES_PER_SESSION).map(activity => Object.freeze({ ...activity }))),
       })
     }))
   }

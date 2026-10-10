@@ -230,7 +230,13 @@ pub(crate) fn execute_at(
     } else {
         None
     };
-    if let Err(rejection) = validate_authority(message, authority, &context) {
+    let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
+        storage,
+        &message.lease,
+        &job.payload_digest,
+        authority,
+    )?;
+    if let Err(rejection) = validate_authority(message, authority, &context, accepted_window) {
         return Ok(rejection_ack(message, 0, rejection));
     }
 
@@ -320,6 +326,8 @@ pub(crate) fn execute_at(
             "failed to encode runtime ledger state: {error}"
         )))
     })?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_state(state.len());
     let events = vec![
         NewOutboxEvent::internal(
             runtime_outbox_event_id(&stream_id, &message.event),
@@ -407,16 +415,9 @@ fn validate_trusted_lease_time(
         .map_err(|_| Rejection::Conflict("runtime ingress time is not canonical"))?;
     let issued_at = instant_millis(authority.issued_at())
         .map_err(|_| Rejection::Conflict("runtime authority issuedAt is not canonical"))?;
-    let expires_at = instant_millis(authority.expires_at())
-        .map_err(|_| Rejection::Conflict("runtime authority expiresAt is not canonical"))?;
     if now < issued_at {
         return Err(Rejection::Conflict(
             "runtime ingress precedes the scheduler-owned lease",
-        ));
-    }
-    if now >= expires_at {
-        return Err(Rejection::Expired(
-            "runtime ingress observed an expired scheduler-owned lease",
         ));
     }
     Ok(())
@@ -746,7 +747,6 @@ enum LedgerDecision {
 #[derive(Clone, Copy)]
 enum Rejection {
     Conflict(&'static str),
-    Expired(&'static str),
     StaleFencingToken(&'static str),
     WorkerInstance(&'static str),
 }
@@ -755,7 +755,6 @@ impl Rejection {
     fn status(self) -> LeaseWriteStatus {
         match self {
             Self::Conflict(_) => LeaseWriteStatus::RejectedConflict,
-            Self::Expired(_) => LeaseWriteStatus::RejectedExpiredLease,
             Self::StaleFencingToken(_) => LeaseWriteStatus::RejectedStaleFencingToken,
             Self::WorkerInstance(_) => LeaseWriteStatus::RejectedWorkerInstance,
         }
@@ -764,7 +763,6 @@ impl Rejection {
     fn code(self) -> ExecutionPortErrorCode {
         match self {
             Self::Conflict(_) => ExecutionPortErrorCode::MessageConflict,
-            Self::Expired(_) => ExecutionPortErrorCode::LeaseExpired,
             Self::StaleFencingToken(_) => ExecutionPortErrorCode::StaleFencingToken,
             Self::WorkerInstance(_) => ExecutionPortErrorCode::WorkerInstanceChanged,
         }
@@ -773,17 +771,13 @@ impl Rejection {
     fn message(self) -> &'static str {
         match self {
             Self::Conflict(message)
-            | Self::Expired(message)
             | Self::StaleFencingToken(message)
             | Self::WorkerInstance(message) => message,
         }
     }
 
     fn retryable(self) -> bool {
-        matches!(
-            self,
-            Self::Expired(_) | Self::StaleFencingToken(_) | Self::WorkerInstance(_)
-        )
+        matches!(self, Self::StaleFencingToken(_) | Self::WorkerInstance(_))
     }
 }
 
@@ -1010,6 +1004,7 @@ fn validate_authority(
     message: &RuntimeEventMessage,
     authority: &SessionBindingAuthority,
     context: &RuntimeContext,
+    accepted_window: bool,
 ) -> Result<(), Rejection> {
     let active = authority.active_lease();
     let attempt = u64::try_from(message.lease.attempt)
@@ -1045,9 +1040,7 @@ fn validate_authority(
             "runtime event fencing token is not scheduler-owned",
         ));
     }
-    if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
-    {
+    if !accepted_window {
         return Err(Rejection::Conflict(
             "runtime event changed the scheduler-owned lease window",
         ));
@@ -1056,17 +1049,12 @@ fn validate_authority(
         .map_err(|_| Rejection::Conflict("runtime event sentAt is not canonical"))?;
     let issued_at = instant_millis(&message.lease.issued_at)
         .map_err(|_| Rejection::Conflict("runtime event issuedAt is not canonical"))?;
-    let expires_at = instant_millis(&message.lease.expires_at)
-        .map_err(|_| Rejection::Conflict("runtime event expiresAt is not canonical"))?;
     let occurred_at = instant_millis(&message.event.occurred_at)
         .map_err(|_| Rejection::Conflict("runtime event occurredAt is not canonical"))?;
     if sent_at < issued_at {
         return Err(Rejection::Conflict(
             "runtime event sentAt precedes its lease",
         ));
-    }
-    if sent_at >= expires_at {
-        return Err(Rejection::Expired("runtime event lease has expired"));
     }
     if occurred_at < issued_at || occurred_at > sent_at {
         return Err(Rejection::Conflict(
@@ -1173,6 +1161,8 @@ fn load_ledger(
     let Some(state) = storage.load_state(stream_id)? else {
         return Ok(None);
     };
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_read(state.payload.len());
     decode_runtime_ledger_state(&state, stream_id).map(Some)
 }
 
@@ -1198,6 +1188,8 @@ pub(crate) fn decode_runtime_ledger_state(
         ));
     }
     for (index, entry) in ledger.events.iter().enumerate() {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::event_validation();
         let expected_sequence = u64::try_from(index + 1)
             .map_err(|_| StorageError::adapter("runtime ledger sequence is out of range"))?;
         let sequence = u64::try_from(entry.event.sequence.0)
@@ -1233,6 +1225,8 @@ fn runtime_ledger_digest(ledger: &RuntimeLedgerState) -> Result<Sha256Digest, Ru
             "failed to encode runtime ledger digest: {error}"
         )))
     })?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::ledger_digest(encoded.len());
     Ok(Sha256Digest(format!(
         "sha256:{:x}",
         Sha256::digest(encoded)

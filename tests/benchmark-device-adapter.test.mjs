@@ -1,0 +1,304 @@
+// SPDX-License-Identifier: Apache-2.0
+import assert from 'node:assert/strict'
+import { createDecipheriv, createECDH, hkdfSync } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import test from 'node:test'
+import { benchmarkDeviceProfiles, deviceBenchmarkExperimentBinding,
+  persistedBenchmarkDeviceFailure, removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
+import { buildBenchmarkPlan } from '../scripts/run-real-task-benchmark.mjs'
+import { deviceBenchmarkProfileKey } from '../scripts/device-agent-environment.mjs'
+import { benchmarkDeviceEnvironment, deviceTaskProvider } from '../scripts/run-device-task-vertical.mjs'
+import { DEVICE_PROVIDER_ENCRYPTION_CONTEXT, runtimeChildEnvironment,
+  seedDeviceLocalProvider } from '../scripts/device-production-fixture.mjs'
+
+const models = ['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash']
+const providerEnvironment = Object.fromEntries(['ZHIPU', 'XIAOMI', 'DEEPSEEK', 'OPENCODE']
+  .flatMap((prefix, index) => [[`${prefix}_API_KEY`, 'fixture-only'],
+    [`${prefix}_BASE_URL`, 'https://provider.invalid'], [`${prefix}_MODEL`, models[index]]]))
+providerEnvironment.XIAOMI_RESPONSES_URL = 'https://provider.invalid/v1/responses'
+
+async function assertEncryptedDeviceProviderSave(provider, expectedMode) {
+  const device = createECDH('prime256v1')
+  device.generateKeys()
+  const saved = new Map()
+  const snapshot = { clientNodeId: 'device-owned', revision: 0,
+    encryptionPublicKey: device.getPublicKey().toString('base64'), providers: [] }
+  let posted = false
+  const api = { async request(path, options) {
+    if (options?.method === 'POST') {
+      assert.equal(posted, false)
+      posted = true
+      const envelope = options.body
+      assert.equal(JSON.stringify(envelope).includes('responsesStructuredOutput'), false)
+      assert.equal(JSON.stringify(envelope).includes(provider.apiKey), false)
+      const aad = `${DEVICE_PROVIDER_ENCRYPTION_CONTEXT}\n${envelope.clientNodeId}\n${envelope.requestId}\n${envelope.expectedRevision}`
+      const shared = device.computeSecret(Buffer.from(envelope.publicKey, 'base64'))
+      const key = hkdfSync('sha256', shared, Buffer.from(DEVICE_PROVIDER_ENCRYPTION_CONTEXT), Buffer.from(aad), 32)
+      const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'))
+      const bytes = Buffer.from(envelope.ciphertext, 'base64')
+      cipher.setAAD(Buffer.from(aad))
+      cipher.setAuthTag(bytes.subarray(-16))
+      const mutation = JSON.parse(Buffer.concat([cipher.update(bytes.subarray(0, -16)), cipher.final()]).toString())
+      assert.equal(mutation.operation, 'save')
+      assert.equal(mutation.apiKey, provider.apiKey)
+      assert.deepEqual(mutation.customHeaders, provider.customHeaders)
+      assert.equal(mutation.config.protocol, provider.protocol)
+      assert.equal(mutation.config.responsesStructuredOutput, expectedMode)
+      if (expectedMode === undefined) assert.equal(Object.hasOwn(mutation.config, 'responsesStructuredOutput'), false)
+      saved.set(mutation.config.providerId, mutation.config)
+      return { status: 202 }
+    }
+    return { status: 200, json: { snapshot: { ...snapshot,
+      providers: [...saved.values()].map(config => ({ config, credentialConfigured: true })) },
+    ...(path.includes('/receipts/') ? { receipt: { outcome: 'saved' } } : {}) } }
+  } }
+  const receipt = await seedDeviceLocalProvider({ api, publicClientId: 'client-owned', ...provider })
+  assert.equal(receipt.receiptOutcome, 'saved')
+  assert.equal(posted, true)
+  assert.equal(saved.get(provider.providerId).responsesStructuredOutput, expectedMode)
+}
+
+test('encrypted Device Provider save retains the explicit MiMo structured-output capability', async () => {
+  for (const name of ['mimo', 'glm', 'deepseek', 'qwen']) {
+    const provider = deviceTaskProvider(name, providerEnvironment)
+    // Supply the option explicitly to isolate encrypted transport from profile selection.
+    if (name === 'mimo') provider.responsesStructuredOutput = 'json_object'
+    await assertEncryptedDeviceProviderSave(provider, name === 'mimo' ? 'json_object' : undefined)
+  }
+})
+
+test('MiMo profile retains text in the encrypted Device Provider configuration', async () => {
+  const provider = deviceTaskProvider('mimo', providerEnvironment)
+  assert.equal(provider.responsesStructuredOutput, 'text')
+  await assertEncryptedDeviceProviderSave(provider, 'text')
+})
+
+test('benchmark Device proxy is opt-in and stays out of Server and generic runtime environments', () => {
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[0]
+  const proxy = 'http://fixture-user:fixture-password@proxy.invalid:8080'
+  const before = { HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY,
+    WWC_DEVICE_PROVIDER_HTTPS_PROXY: process.env.WWC_DEVICE_PROVIDER_HTTPS_PROXY }
+  const source = { WWC_DEVICE_PROVIDER_HTTPS_PROXY: proxy,
+    HTTP_PROXY: 'http://ambient.invalid:8080', HTTPS_PROXY: 'http://ambient.invalid:8080' }
+  const device = benchmarkDeviceEnvironment(cell, {}, source)
+  assert.equal(device.WWC_DEVICE_PROVIDER_HTTPS_PROXY, proxy)
+  assert.equal(device.HTTP_PROXY, undefined)
+  assert.equal(device.HTTPS_PROXY, undefined)
+  assert.equal(benchmarkDeviceEnvironment(cell, {}, { HTTPS_PROXY: proxy }).WWC_DEVICE_PROVIDER_HTTPS_PROXY, undefined)
+  assert.equal(benchmarkDeviceEnvironment(cell, {}, {}).WWC_DEVICE_PROVIDER_HTTPS_PROXY, undefined)
+  const runtime = runtimeChildEnvironment({ ...source, ...device, PATH: '/usr/bin:/bin' })
+  assert.deepEqual(runtime, { PATH: '/usr/bin:/bin' })
+  assert.deepEqual(source, { WWC_DEVICE_PROVIDER_HTTPS_PROXY: proxy,
+    HTTP_PROXY: 'http://ambient.invalid:8080', HTTPS_PROXY: 'http://ambient.invalid:8080' })
+  assert.deepEqual({ HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY,
+    WWC_DEVICE_PROVIDER_HTTPS_PROXY: process.env.WWC_DEVICE_PROVIDER_HTTPS_PROXY }, before)
+})
+
+test('Device admission retains the full plan while provisioning only the selected available profiles', () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const original = JSON.stringify(plan)
+  const options = { concurrency: 12, selectedConfigurationIds: ['main-C', 'main-A'],
+    agentSettings: {}, providerEnvironment }
+  const profiles = benchmarkDeviceProfiles(plan, options)
+  assert.deepEqual([...new Set(plan.cells.map(cell => cell.configurationId))],
+    ['main-A', 'main-B', 'main-C', 'main-D', 'jev-context-only', 'jev-judge-only', 'jev-full'])
+  assert.deepEqual([...new Set(profiles.map(profile => profile.configurationId))], ['main-A', 'main-C'])
+  assert.deepEqual(profiles.map(deviceBenchmarkProfileKey), ['main-A', 'main-A--native-panel', 'main-C'])
+  assert.equal(profiles[0].executionFusion, false)
+  assert.equal(profiles[1].executionFusion, true)
+  assert.equal(profiles[2].executionFusion, true)
+  assert.equal(plan.cells.filter(cell => profiles.some(profile => profile.configurationId === cell.configurationId)).length, 200)
+  assert.equal(plan.cells.length, 700)
+  assert.equal(JSON.stringify(plan), original)
+  assert.throws(() => benchmarkDeviceProfiles(plan, { agentSettings: {}, providerEnvironment }),
+    { code: 'BENCHMARK_CONFIGURATION_UNAVAILABLE' })
+  for (const configurationId of ['main-B', 'main-D', 'jev-context-only', 'jev-judge-only', 'jev-full']) {
+    assert.throws(() => benchmarkDeviceProfiles(plan, { ...options,
+      selectedConfigurationIds: ['main-A', configurationId] }), { code: 'BENCHMARK_CONFIGURATION_UNAVAILABLE' })
+  }
+  for (const selectedConfigurationIds of [[], ['main-A', 'main-A'], ['unknown'], 'main-A', [null]]) {
+    assert.throws(() => benchmarkDeviceProfiles(plan, { ...options, selectedConfigurationIds }),
+      { code: 'BENCHMARK_CONFIGURATION_SELECTION_INVALID' })
+  }
+})
+
+test('expanding Device admission preserves the settings binding and changed JEV settings change its identity', () => {
+  const options = { experimentId: 'cloud', agentSettings: {}, providerEvidence: [],
+    frozenSourceIdentity: {}, productSourceSealSha256: 'fixture-seal' }
+  const binding = value => deviceBenchmarkExperimentBinding({ ...options, ...value }, {}, { tasks: [] })
+  assert.deepEqual(binding({ concurrency: 1, selectedConfigurationIds: ['main-A'] }),
+    binding({ concurrency: 12, selectedConfigurationIds: ['main-A', 'main-C'] }))
+  assert.notEqual(binding({}).agentSettingsSha256,
+    binding({ agentSettings: { jevSettingsFile: '/private/real-settings' } }).agentSettingsSha256)
+  assert.equal(Object.hasOwn(binding({}), 'publicSmokeExecutionLock'), false)
+  const executionLock = resolve('private-cloud-smoke.lock')
+  assert.equal(binding({ publicSmokeExecutionLock: 'private-cloud-smoke.lock' }).publicSmokeExecutionLock, executionLock)
+  assert.notDeepEqual(binding({ publicSmokeExecutionLock: executionLock }), binding({}))
+  assert.notDeepEqual(binding({ publicSmokeExecutionLock: executionLock }),
+    binding({ publicSmokeExecutionLock: `${executionLock}.other` }))
+  for (const publicSmokeExecutionLock of ['', null, 1, {}]) assert.throws(() => binding({ publicSmokeExecutionLock }),
+    /public smoke execution lock must be a host path/u)
+})
+
+function cleanupFixture(t) {
+  const directory = mkdtempSync(resolve(tmpdir(), 'benchmark-terminal-smoke-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const launch = { directory, productSessionId: 'psn_01J00000000000000000000001',
+    deliveryId: 'dlv_01J00000000000000000000001' }
+  const id = `benchmark_public_smoke_${launch.productSessionId}`
+  const neighbor = 'benchmark_public_smoke_psn_01J00000000000000000000002'
+  const report = { ...launch, complete: false, errorCode: 'DEVICE_PRODUCT_FAILED',
+    publicClientId: 'client-owned', publicSmoke: { id } }
+  const reportPath = resolve(directory, 'device-task-result.json')
+  const save = () => writeFileSync(reportPath, `${JSON.stringify(report)}\n`)
+  save()
+  const readCursor = { deliveryId: launch.deliveryId, token: 'current' }
+  const delivery = { deliveryId: launch.deliveryId, readCursor, status: 'failed', attention: [] }
+  const aggregate = { readCursor, runs: [{ id: 'run-owned', state: 'failed' }],
+    items: [{ id: 'item-owned', state: 'failed' }] }
+  const device = createECDH('prime256v1')
+  device.generateKeys()
+  let revision = 0
+  const servers = new Set([id, neighbor])
+  const mutations = []
+  const api = {
+    async query(name, parameters) {
+      assert.equal(parameters.deliveryId, launch.deliveryId)
+      if (name === 'delivery.get') return { result: delivery }
+      assert.equal(name, 'workrun.get')
+      assert.equal(parameters.workItemId, null)
+      assert.deepEqual(parameters.atCursor, delivery.readCursor)
+      return { result: aggregate }
+    },
+    async request(path, options) {
+      assert.ok(path.startsWith('/api/v1/clients/client-owned/extensions'))
+      if (options?.method === 'POST') {
+        const envelope = options.body
+        assert.equal(envelope.expectedRevision, revision)
+        const context = 'winwincode.device-extensions.v1'
+        const aad = `${context}\n${envelope.clientNodeId}\n${envelope.requestId}\n${revision}`
+        const shared = device.computeSecret(Buffer.from(envelope.publicKey, 'base64'))
+        const key = hkdfSync('sha256', shared, Buffer.from(context), Buffer.from(aad), 32)
+        const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'))
+        const bytes = Buffer.from(envelope.ciphertext, 'base64')
+        cipher.setAAD(Buffer.from(aad))
+        cipher.setAuthTag(bytes.subarray(-16))
+        const mutation = JSON.parse(Buffer.concat([cipher.update(bytes.subarray(0, -16)), cipher.final()]).toString())
+        assert.deepEqual(mutation, { operation: 'delete', kind: 'mcp', id })
+        mutations.push(mutation)
+        servers.delete(mutation.id)
+        revision += 1
+        return { status: 202 }
+      }
+      return { status: 200, json: { online: true,
+        snapshot: { clientNodeId: 'device-owned', revision,
+          encryptionPublicKey: device.getPublicKey().toString('base64'),
+          mcpServers: [...servers].map(serverId => ({ id: serverId })) },
+        ...(path.includes('/receipts/') ? { receipt: { outcome: 'deleted' } } : {}),
+      } }
+    },
+  }
+  return { launch, id, neighbor, report, reportPath, save, delivery, aggregate, mutations, servers,
+    runtime: { api, devicePath: { publicClientId: report.publicClientId } } }
+}
+
+test('nonterminal and absent persisted product projections retain the typed interruption and original evidence', t => {
+  const fixture = cleanupFixture(t)
+  for (const delivery of [
+    null,
+    { detail: { ...fixture.delivery, status: 'running' },
+      workRunAggregate: { ...fixture.aggregate, runs: [{ id: 'run-owned', state: 'running' }],
+        items: [{ id: 'item-owned', state: 'in_progress' }] } },
+    { detail: { ...fixture.delivery, status: 'failed' },
+      workRunAggregate: { ...fixture.aggregate, runs: [{ id: 'run-owned', state: 'failed' },
+        { id: 'still-active', state: 'running' }] } },
+  ]) {
+    const report = { ...fixture.report, errorCode: 'TRUSTED_FACTS_UNAVAILABLE', delivery }
+    writeFileSync(fixture.reportPath, `${JSON.stringify(report)}\n`)
+    const bytes = readFileSync(fixture.reportPath, 'utf8')
+    const interruption = Object.assign(new Error('query returned 503'), {
+      code: report.errorCode, status: 503, report,
+    })
+    assert.throws(() => persistedBenchmarkDeviceFailure(report, fixture.launch, interruption), error => {
+      assert.equal(error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+      assert.equal(error.status, 503)
+      assert.equal(error.cause, interruption)
+      assert.equal(error.unresolvedDeviceExecution, true)
+      return true
+    })
+    assert.equal(readFileSync(fixture.reportPath, 'utf8'), bytes)
+    assert.equal(fixture.mutations.length, 0)
+    assert.equal(fixture.servers.has(fixture.id), true)
+  }
+})
+
+test('persisted failure classification accepts terminal product facts and rejects identity or cursor conflicts', t => {
+  const fixture = cleanupFixture(t)
+  const report = { ...fixture.report,
+    delivery: { detail: fixture.delivery, workRunAggregate: fixture.aggregate } }
+  const failure = Object.assign(new Error('product failed'), { code: 'DEVICE_PRODUCT_FAILED', report })
+  const observation = persistedBenchmarkDeviceFailure(report, fixture.launch, failure)
+  assert.equal(observation.delivery, fixture.delivery)
+  assert.equal(observation.workRunAggregate, fixture.aggregate)
+  for (const conflict of ['report', 'session', 'delivery', 'cursor']) {
+    const changed = structuredClone(report)
+    if (conflict === 'session') changed.productSessionId = 'another-session'
+    if (conflict === 'delivery') changed.deliveryId = 'another-delivery'
+    if (conflict === 'cursor') changed.delivery.workRunAggregate.readCursor = {
+      ...changed.delivery.workRunAggregate.readCursor, token: 'older',
+    }
+    const error = Object.assign(new Error('query interrupted'), { code: 'TRUSTED_FACTS_UNAVAILABLE',
+      status: 503, report: conflict === 'report' ? report : changed })
+    if (conflict === 'report') changed.errorCode = 'changed'
+    assert.throws(() => persistedBenchmarkDeviceFailure(changed, fixture.launch, error), thrown => {
+      assert.equal(thrown.code, 'ERR_ASSERTION')
+      assert.notEqual(thrown.unresolvedDeviceExecution, true)
+      return true
+    })
+  }
+})
+
+test('terminal failed tasks delete only their own MCP and preserve the original result evidence', async t => {
+  const fixture = cleanupFixture(t)
+  const original = readFileSync(fixture.reportPath, 'utf8')
+  assert.deepEqual(await removeTerminalBenchmarkPublicSmoke(fixture.launch, fixture.runtime), { outcome: 'deleted' })
+  assert.equal(fixture.servers.has(fixture.id), false)
+  assert.equal(fixture.servers.has(fixture.neighbor), true)
+  assert.equal(fixture.mutations.length, 1)
+  assert.equal(readFileSync(fixture.reportPath, 'utf8'), original)
+  const receipt = JSON.parse(readFileSync(resolve(fixture.launch.directory, 'public-smoke-removal.json'), 'utf8'))
+  assert.deepEqual(receipt, { id: fixture.id, publicClientId: 'client-owned',
+    readCursor: fixture.delivery.readCursor, receipt: { outcome: 'deleted' } })
+  assert.deepEqual(await removeTerminalBenchmarkPublicSmoke(fixture.launch, fixture.runtime), { outcome: 'deleted' })
+  assert.equal(fixture.mutations.length, 1, 'retained cleanup does not issue another mutation')
+})
+
+test('stale failed reports cannot remove public smoke while any role or item remains active', async t => {
+  for (const state of ['queued', 'leased', 'running']) {
+    const fixture = cleanupFixture(t)
+    fixture.aggregate.runs.push({ id: 'role-still-active', state })
+    assert.equal(await removeTerminalBenchmarkPublicSmoke(fixture.launch, fixture.runtime), null)
+    assert.equal(fixture.mutations.length, 0)
+    assert.equal(fixture.servers.has(fixture.id), true)
+    assert.equal(existsSync(resolve(fixture.launch.directory, 'public-smoke-removal.json')), false)
+  }
+  const fixture = cleanupFixture(t)
+  fixture.aggregate.items[0].state = 'ready'
+  assert.equal(await removeTerminalBenchmarkPublicSmoke(fixture.launch, fixture.runtime), null)
+  assert.equal(fixture.mutations.length, 0)
+})
+
+test('cleanup rejects mixed projections and foreign MCP or Device identities before deletion', async t => {
+  for (const kind of ['cursor', 'server', 'device']) {
+    const fixture = cleanupFixture(t)
+    if (kind === 'cursor') fixture.aggregate.readCursor = { ...fixture.aggregate.readCursor, token: 'older' }
+    if (kind === 'server') fixture.report.publicSmoke.id = fixture.neighbor
+    if (kind === 'device') fixture.report.publicClientId = 'client-other'
+    fixture.save()
+    await assert.rejects(removeTerminalBenchmarkPublicSmoke(fixture.launch, fixture.runtime))
+    assert.equal(fixture.mutations.length, 0)
+    assert.equal(fixture.servers.has(fixture.id), true)
+  }
+})

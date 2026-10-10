@@ -31,6 +31,12 @@ impl McpBindingClients {
         self.clients.get(server).cloned()
     }
 
+    pub(crate) fn server_names(&self) -> Vec<String> {
+        let mut names = self.clients.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     pub(crate) async fn list_resources(
         &self,
         server: &str,

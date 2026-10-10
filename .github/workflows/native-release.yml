@@ -98,12 +98,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils bubblewrap pkg-config libcap-dev
+          sudo bash scripts/install-code-mode-linux-build-deps.sh
+          printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+
+      - name: Install macOS Code Mode build dependencies
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install llvm@19
+          printf 'LIBCLANG_PATH=%s/lib\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=%s/bin/clang\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
 
       - name: Install pinned Rust
         shell: bash
@@ -157,6 +168,14 @@ jobs:
             --evidence release-artifacts \
             --output release-artifact-security-report.json \
             --sensitive-input "$key_file"
+
+      - name: Verify native Code Mode with the release helper
+        shell: bash
+        env:
+          WINWINCODE_CODE_MODE_TEST_HELPER: ${{ github.workspace }}/release-artifacts/${{ matrix.target }}/bin/winwincode-kernel-helper
+        run: |
+          set -euo pipefail
+          cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
 
       - name: Upload release artifact security report
         if: ${{ always() && steps.security.outcome != 'skipped' }}

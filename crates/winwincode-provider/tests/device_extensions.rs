@@ -70,7 +70,7 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
     drop(store);
     // An actual v1 database has only these Provider tables; migration must preserve identity/data.
     let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("v1 fixture");
-    db.execute_batch("DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
+    db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
     let config = json!({"providerId":"retained","displayName":"Retained","endpoint":"https://example.com/v1/messages","protocol":"anthropic_messages","modelIds":["model"],"enabled":true});
     db.execute(
         "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -296,6 +296,122 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
             .restore_extensions(&root.join("failed-worker"))
             .expect("failed MCP excluded")
             .is_empty()
+    );
+    drop(store);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn benchmark_mcp_scope_keeps_generic_extensions_and_restores_the_task_snapshot() {
+    let root = std::env::temp_dir().join(format!("wwc-benchmark-mcp-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let directory = root.join("private");
+    let home = root.join("worker");
+    let mut store = DeviceProviderStore::open(&directory).expect("store");
+    let configuration = json!({"command":"python3","args":["-u",fixture()]}).to_string();
+    let selected = "benchmark_public_smoke_source_a";
+    let neighbor = "benchmark_public_smoke_source_b";
+    for id in [selected, neighbor, "ordinary_probe"] {
+        assert_eq!(
+            apply(
+                &mut store,
+                &json!({"operation":"save_mcp","id":id,"configuration":configuration,"enabled":true})
+            ),
+            DeviceExtensionOutcome::Saved
+        );
+        assert_eq!(
+            apply(&mut store, &json!({"operation":"test_mcp","id":id})),
+            DeviceExtensionOutcome::Tested
+        );
+    }
+    assert_eq!(
+        apply(
+            &mut store,
+            &json!({"operation":"save_skill","id":"useful","enabled":true,
+                "content":"---\nname: useful\ndescription: Ordinary skill\n---\nKeep this skill.\n"})
+        ),
+        DeviceExtensionOutcome::Saved
+    );
+    let server_ids = |servers: Vec<winwincode_provider::InstalledMcpTools>| {
+        servers
+            .into_iter()
+            .map(|server| server.server)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        server_ids(
+            store
+                .refresh_benchmark_extensions(&home, selected)
+                .expect("task A")
+        ),
+        [selected, "ordinary_probe"]
+    );
+    assert!(home.join("skills/useful/SKILL.md").exists());
+    let installed = fs::read_to_string(home.join("config.toml")).expect("native config");
+    assert!(installed.contains(selected));
+    assert!(installed.contains("ordinary_probe"));
+    assert!(!installed.contains(neighbor));
+    assert_eq!(
+        server_ids(
+            store
+                .refresh_extensions(&root.join("ordinary-worker"))
+                .expect("ordinary task")
+        ),
+        [selected, neighbor, "ordinary_probe"]
+    );
+    assert_eq!(
+        store
+            .extension_snapshot("device")
+            .expect("Device unchanged")
+            .mcp_servers
+            .len(),
+        3
+    );
+    assert_eq!(
+        apply(
+            &mut store,
+            &json!({"operation":"delete","kind":"mcp","id":selected})
+        ),
+        DeviceExtensionOutcome::Deleted
+    );
+    drop(store);
+    let store = DeviceProviderStore::open(&directory).expect("restart");
+    // In-flight recovery restores A even though Device configuration now differs.
+    assert_eq!(
+        server_ids(store.restore_extensions(&home).expect("restore task A")),
+        [selected, "ordinary_probe"]
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).expect("restored config"),
+        installed
+    );
+    assert_eq!(
+        server_ids(
+            store
+                .refresh_benchmark_extensions(&home, neighbor)
+                .expect("next task B")
+        ),
+        [neighbor, "ordinary_probe"]
+    );
+    assert!(
+        store
+            .refresh_benchmark_extensions(&home, "ordinary_probe")
+            .is_err()
+    );
+    assert!(
+        store
+            .refresh_benchmark_extensions(&home, "benchmark_public_smoke_")
+            .is_err()
+    );
+    // Ordinary sessions still receive all enabled, tested Device extensions.
+    assert_eq!(
+        server_ids(
+            store
+                .refresh_extensions(&root.join("ordinary-worker"))
+                .expect("ordinary task")
+        ),
+        [neighbor, "ordinary_probe"]
     );
     drop(store);
     fs::remove_dir_all(root).expect("cleanup");

@@ -42,8 +42,8 @@ pub struct ModelLeaseAuthority {
     pub session_identity: SessionIdentity,
 }
 
-/// Caller-owned current-lease check. Implementations read the same authority
-/// that governs the Worker Job and never derive authority from a model frame.
+/// Caller-owned execution and retained-exchange checks. Implementations read
+/// the authority that governs the Worker Job and never derive it from a frame.
 pub trait ModelLeaseAuthoritySource: Send + Sync {
     /// Verifies that the exact lease, attempt, fence, Worker process, and
     /// session remain current at `now`.
@@ -54,6 +54,18 @@ pub trait ModelLeaseAuthoritySource: Send + Sync {
     fn validate_current(
         &self,
         authority: &ModelLeaseAuthority,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection>;
+
+    /// Proves the identity of an existing exchange for response delivery,
+    /// acknowledgements, replay and cancellation. This authorizes no new work.
+    ///
+    /// # Errors
+    /// Rejects unknown or foreign exchanges and unavailable identity evidence.
+    fn validate_retained_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection>;
 
@@ -175,6 +187,8 @@ impl ModelCursorSnapshot {
             return Err(ModelCursorStateError::CursorMismatch);
         }
         for (index, frame) in self.frames.iter().enumerate() {
+            #[cfg(test)]
+            crate::audit_model_metrics::record_fingerprint_visit();
             let expected = u64::try_from(index)
                 .ok()
                 .and_then(|value| value.checked_add(1))
@@ -251,7 +265,7 @@ impl ModelCursorSnapshot {
         Ok(())
     }
 
-    fn fingerprint(&self, sequence: u64) -> Option<&ModelChunkFingerprint> {
+    pub(crate) fn fingerprint(&self, sequence: u64) -> Option<&ModelChunkFingerprint> {
         let index = usize::try_from(sequence.checked_sub(1)?).ok()?;
         self.frames.get(index)
     }
@@ -514,11 +528,6 @@ where
         command: OpenModelExchangeCommand,
     ) -> Result<ModelOpenOutcome, ModelPortClientError> {
         require_authority_shape(&command.authority)?;
-        self.require_current(
-            &command.authority,
-            &command.model_exchange_id,
-            &command.metadata.sent_at,
-        )?;
         let message = ModelOpenMessage {
             kind: ModelOpenMessageKind::ModelOpen,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -540,6 +549,11 @@ where
                 && active.request_id == message.request_id
                 && active.stream == stream
             {
+                self.require_retained(
+                    &command.authority,
+                    &message.model_exchange_id,
+                    &message.sent_at,
+                )?;
                 return Ok(ModelOpenOutcome::Duplicate);
             }
             return Err(client_error(
@@ -547,6 +561,11 @@ where
                 "model exchange identity was reused with different input",
             ));
         }
+        self.require_current(
+            &command.authority,
+            &message.model_exchange_id,
+            &message.sent_at,
+        )?;
         let snapshot = self.load_cursor(&stream)?;
         self.port
             .send(ExecutionPortMessage::ModelOpenMessage(message.clone()))
@@ -581,7 +600,7 @@ where
         ack: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         let active = self.active_exchange(&chunk.model_exchange_id)?.clone();
-        self.require_current(&active.authority, &active.model_exchange_id, &ack.sent_at)?;
+        self.require_retained(&active.authority, &chunk.model_exchange_id, &ack.sent_at)?;
         require_exact_chunk(&active, chunk)?;
         let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
             .map_err(|_| canonical_mapping_error())?;
@@ -649,11 +668,7 @@ where
                     "embedded Codex model stream rejected a chunk",
                 )
             })?;
-        let termination = chunk.is_final.then_some(if chunk.error.is_some() {
-            ModelTerminationReason::ProviderError
-        } else {
-            ModelTerminationReason::Completed
-        });
+        let termination = chunk_termination(chunk);
         self.store
             .record_delivery(
                 &active.stream,
@@ -694,7 +709,7 @@ where
         acknowledgement: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         require_authority_shape(&authority)?;
-        self.require_current(
+        self.require_retained(
             &authority,
             &chunk.model_exchange_id,
             &acknowledgement.sent_at,
@@ -781,9 +796,8 @@ where
         })
     }
 
-    /// Cancels one exact model exchange under its current lease and fencing
-    /// authority. Exact retries resend the same canonical acknowledgement
-    /// without interrupting the embedded stream twice.
+    /// Cancels one exact retained model exchange. Exact retries resend the same
+    /// canonical acknowledgement without interrupting the embedded stream twice.
     ///
     /// # Errors
     ///
@@ -795,7 +809,7 @@ where
         metadata: ModelMessageMetadata,
     ) -> Result<ModelCancellationReceipt, ModelPortClientError> {
         let active = self.active_exchange(model_exchange_id)?.clone();
-        self.require_current(
+        self.require_retained(
             &active.authority,
             &active.model_exchange_id,
             &metadata.sent_at,
@@ -892,7 +906,7 @@ where
             return Ok(ModelDisconnectOutcome::AlreadyTerminal(reason));
         }
         if self
-            .require_current(
+            .require_retained(
                 &active.authority,
                 &active.model_exchange_id,
                 &metadata.sent_at,
@@ -986,6 +1000,20 @@ where
                 "model exchange is not open on this Worker",
             )
         })
+    }
+
+    fn require_retained(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelPortClientError> {
+        if !canonical_instant(now) {
+            return Err(invalid("model receipt time is not canonical"));
+        }
+        self.authority
+            .validate_retained_exchange(authority, exchange, now)
+            .map_err(|_| stale_authority_error())
     }
 
     fn require_current(
@@ -1259,6 +1287,14 @@ fn require_authority_shape(authority: &ModelLeaseAuthority) -> Result<(), ModelP
         return Err(invalid("model exchange authority is invalid"));
     }
     Ok(())
+}
+
+pub(crate) fn chunk_termination(chunk: &ModelChunkMessage) -> Option<ModelTerminationReason> {
+    chunk.is_final.then_some(if chunk.error.is_some() {
+        ModelTerminationReason::ProviderError
+    } else {
+        ModelTerminationReason::Completed
+    })
 }
 
 fn require_exact_chunk(

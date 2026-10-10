@@ -6,7 +6,7 @@ use crate::{
     DeviceProviderError, DeviceProviderStore, JevExecutionOptions, JevHypothesis, JevRun,
     JevRuntime, JevScores,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 /// Scores are entailment, contradiction and neutral; none remain unknown.
@@ -25,6 +25,7 @@ impl DeviceProviderStore {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
         request: &mut serde_json::Value,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<(), DeviceProviderError> {
         let judge = request
             .as_object_mut()
@@ -83,13 +84,14 @@ impl DeviceProviderStore {
                 continue;
             }
             let result = self
-                .evaluate_configured_judge_once(
+                .evaluate_configured_judge_once_authorized(
                     &format!("judge:{}:{index}", open.model_exchange_id.0),
                     session,
                     JevHypothesis {
                         premise: premise.into(),
                         hypothesis: hypothesis.into(),
                     },
+                    can_start,
                 )
                 .await?;
             let scores = match result {
@@ -163,6 +165,17 @@ impl DeviceProviderStore {
         session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
         input: JevHypothesis,
     ) -> Result<StoredJevJudge, DeviceProviderError> {
+        self.evaluate_configured_judge_once_authorized(operation_id, session, input, &|| true)
+            .await
+    }
+
+    async fn evaluate_configured_judge_once_authorized(
+        &self,
+        operation_id: &str,
+        session: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
+        input: JevHypothesis,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<StoredJevJudge, DeviceProviderError> {
         use std::sync::Arc;
         winwincode_execution_port::agent_config::validate_agent_session_config(session)
             .map_err(|_| DeviceProviderError)?;
@@ -190,7 +203,7 @@ impl DeviceProviderStore {
             retry,
         )
         .with_cancellation(cancellation);
-        self.evaluate_judge_once(
+        self.evaluate_judge_once_authorized(
             operation_id,
             &digest,
             &runtime,
@@ -199,6 +212,7 @@ impl DeviceProviderStore {
                 device: crate::JevDevice::Remote,
                 dtype: crate::JevDtype::Auto,
             },
+            can_start,
         )
         .await
     }
@@ -215,6 +229,26 @@ impl DeviceProviderStore {
         runtime: &JevRuntime,
         input: JevHypothesis,
         options: JevExecutionOptions,
+    ) -> Result<StoredJevJudge, DeviceProviderError> {
+        self.evaluate_judge_once_authorized(
+            operation_id,
+            configuration_digest,
+            runtime,
+            input,
+            options,
+            &|| true,
+        )
+        .await
+    }
+
+    async fn evaluate_judge_once_authorized(
+        &self,
+        operation_id: &str,
+        configuration_digest: &str,
+        runtime: &JevRuntime,
+        input: JevHypothesis,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<StoredJevJudge, DeviceProviderError> {
         let hash = configuration_digest
             .strip_prefix("sha256:")
@@ -237,14 +271,18 @@ impl DeviceProviderStore {
             options,
         ))?;
         let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO jev_judge_exchanges (operation_id,request_json) VALUES (?1,?2)",
-            params![operation_id, request],
+            "INSERT OR IGNORE INTO jev_judge_exchanges (operation_id,request_json) SELECT ?1,?2 WHERE ?3",
+            params![operation_id, request, can_start()],
         )?;
-        let (saved, result): (String, Option<String>) = self.connection.query_row(
-            "SELECT request_json,result FROM jev_judge_exchanges WHERE operation_id=?1",
-            [operation_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let (saved, result): (String, Option<String>) = self
+            .connection
+            .query_row(
+                "SELECT request_json,result FROM jev_judge_exchanges WHERE operation_id=?1",
+                [operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(DeviceProviderError)?;
         if saved != request {
             return Err(DeviceProviderError);
         }
@@ -262,7 +300,12 @@ impl DeviceProviderStore {
         if inserted == 0 {
             return Ok(StoredJevJudge::Incomplete);
         }
-        let evaluated = runtime.evaluate(input, options).await;
+        let runtime = runtime.clone().with_attempt_journal(
+            self.connection.path().ok_or(DeviceProviderError)?,
+            operation_id,
+            "judge",
+        );
+        let evaluated = runtime.evaluate_authorized(input, options, can_start).await;
         let run = JevRun {
             value: evaluated.value.map(|value| {
                 [
@@ -354,7 +397,7 @@ mod tests {
             let original = serde_json::json!({"request":{"input":[{"type":"function_call_output","output":"Test failed"}]},
                 "winwincodeJevJudge":[{"claimKey":"test","premise":"Test failed","hypothesis":"Test passed"}]});
             let mut request = original.clone();
-            store.prepare_jev_judge_request(&open,&session,&mut request).await.unwrap();
+            store.prepare_jev_judge_request(&open,&session,&mut request, &|| true).await.unwrap();
             assert_eq!(request["request"]["input"][0],original["request"]["input"][0]);
             assert!(request.get("winwincodeJevJudge").is_none());
             let feedback = request["request"]["input"][1]["content"][0]["text"].as_str().unwrap();
@@ -363,11 +406,18 @@ mod tests {
             assert!(!feedback.contains("invalid-offline-key"));
             assert_eq!(provider.calls(),1);
             let mut replay = original.clone();
-            store.prepare_jev_judge_request(&open,&session,&mut replay).await.unwrap();
+            store.prepare_jev_judge_request(&open,&session,&mut replay, &|| false).await.unwrap();
+            let mut not_started = original.clone();
+            not_started["winwincodeJevJudge"].as_array_mut().unwrap().push(serde_json::json!({
+                "claimKey":"next", "premise":"new evidence", "hypothesis":"next claim"
+            }));
+            assert!(store.prepare_jev_judge_request(&open,&session,&mut not_started, &|| false).await.is_err());
+            let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| row.get(0)).unwrap();
+            assert_eq!(rows, 1, "the real Judge preparation entry must forward the live guard");
             assert_eq!(request,replay);
             store.connection.execute("UPDATE jev_judge_exchanges SET result=NULL WHERE operation_id=?1",[operation]).unwrap();
             let mut pending = original;
-            store.prepare_jev_judge_request(&open,&session,&mut pending).await.unwrap();
+            store.prepare_jev_judge_request(&open,&session,&mut pending, &|| true).await.unwrap();
             let text = pending["request"]["input"][1]["content"][0]["text"].as_str().unwrap();
             let rows: serde_json::Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
             assert!(rows[0]["scoresEntailmentContradictionNeutral"].is_null());
@@ -378,10 +428,155 @@ mod tests {
                     crate::device_jev_context::MAX_JEV_REMOTE_REQUEST_BYTES),
                     "hypothesis":"review this claim"}]
             });
-            store.prepare_jev_judge_request(&open,&session,&mut oversized).await.unwrap();
+            store.prepare_jev_judge_request(&open,&session,&mut oversized, &|| true).await.unwrap();
             let feedback = oversized["request"]["input"][0]["content"][0]["text"].as_str().unwrap();
             assert!(feedback.contains("semantic_input_too_large"));
             assert_eq!(provider.calls(),1);
+        });
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One durable operation across expiry, renewal, immutable replay and uncertain-result recovery"
+    )]
+    fn live_authorization_guards_each_judge_operation_but_allows_exact_recovery() {
+        let root = std::env::temp_dir().join(format!("wwc-judge-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let provider = Arc::new(MockJevProvider::healthy("judge"));
+        let runtime = JevRuntime::new(
+            vec![provider.clone()],
+            JevRuntimeConfig {
+                timeout: Duration::from_secs(1),
+                retries: 1,
+            },
+        );
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let input = JevHypothesis {
+            premise: "command exited zero".into(),
+            hypothesis: "command succeeded".into(),
+        };
+        let options = JevExecutionOptions {
+            device: JevDevice::Cpu,
+            dtype: JevDtype::Float32,
+        };
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let first = store
+                .evaluate_judge_once_authorized(
+                    "judge:first",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    options,
+                    &|| provider.calls() == 0,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                first,
+                StoredJevJudge::Completed {
+                    replayed: false,
+                    ..
+                }
+            ));
+            assert!(
+                store
+                    .evaluate_judge_once_authorized(
+                        "judge:next",
+                        &digest,
+                        &runtime,
+                        input.clone(),
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .is_err()
+            );
+            let rows: i64 = store
+                .connection
+                .query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                rows, 1,
+                "an unissued operation must not create an unknown paid receipt"
+            );
+            let replay = store
+                .evaluate_judge_once_authorized(
+                    "judge:first",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    options,
+                    &|| false,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                replay,
+                StoredJevJudge::Completed { replayed: true, .. }
+            ));
+            let changed = JevHypothesis {
+                hypothesis: "changed".into(),
+                ..input.clone()
+            };
+            assert!(
+                store
+                    .evaluate_judge_once_authorized(
+                        "judge:first",
+                        &digest,
+                        &runtime,
+                        changed,
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(provider.calls(), 1);
+            // Legal renewal permits the original, never-started next operation once.
+            store
+                .evaluate_judge_once_authorized(
+                    "judge:next",
+                    &digest,
+                    &runtime,
+                    input.clone(),
+                    options,
+                    &|| true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(provider.calls(), 2);
+            store
+                .connection
+                .execute(
+                    "UPDATE jev_judge_exchanges SET result=NULL WHERE operation_id='judge:first'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .evaluate_judge_once_authorized(
+                        "judge:first",
+                        &digest,
+                        &runtime,
+                        input,
+                        options,
+                        &|| false
+                    )
+                    .await
+                    .unwrap(),
+                StoredJevJudge::Incomplete
+            );
+            assert_eq!(provider.calls(), 2);
         });
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
@@ -399,7 +594,8 @@ mod tests {
         ));
         let store = DeviceProviderStore::open(&root).unwrap();
         // Upgrade an existing version-7 store without changing its context rows.
-        store.connection.execute_batch("DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; PRAGMA user_version=7;
+        store.connection.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks;
+            PRAGMA user_version=7;
             INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input');").unwrap();
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();

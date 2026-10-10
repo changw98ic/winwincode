@@ -374,21 +374,23 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
         &format!("sha256:{:x}", Sha256::digest(secret_bytes)),
         "the digest persists exactly the sha256 of the issued material"
     );
-    assert_eq!(
-        enrollment.get("downlinkFromSequence"),
-        Some(&serde_json::json!(1))
-    );
     assert!(enrollment.get("heartbeatIntervalMs").is_some());
+    assert!(enrollment.get("downlinkFromSequence").is_none());
+    assert_eq!(body["frames"], serde_json::json!([]));
     assert_eq!(
-        body.get("frames")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len),
-        Some(1)
+        cursors(&data_directory, node_id).server_to_client_ack_sequence,
+        0
     );
-    assert_eq!(
-        body["frames"][0].get("kind"),
-        Some(&serde_json::json!("client.enrollment_accepted"))
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        storage
+            .client_downlink_outbox()
+            .unwrap()
+            .deliverable(node_id, 0, 16)
+            .unwrap()
+            .is_empty()
     );
+    drop(storage);
 
     let record = node_snapshot(&data_directory, node_id).expect("enrolled node");
     assert_eq!(
@@ -401,7 +403,7 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
     // The authenticated hello takes presence online on the same stream.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 0),
         Some(credential),
     )
     .await;
@@ -440,17 +442,17 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
     let attempts = vec![
         // A non-enroll exchange without any credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             None,
         ),
         // A malformed credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some("not-hex"),
         ),
         // A well-formed but wrong credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some(wrong_hex.as_str()),
         ),
         // A plausible credential against a node that does not exist.
@@ -482,7 +484,7 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
     // The real credential still authenticates: the failures changed nothing.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -505,7 +507,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -518,7 +520,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
     // Sequence 4 arrives while the cursor sits at 2: gap with a replay hint.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 0),
         Some(&credential),
     )
     .await;
@@ -544,7 +546,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
                 heartbeat_frame(&node_id, INSTANCE, 3, 1),
                 heartbeat_frame(&node_id, INSTANCE, 4, 1),
             ],
-            1,
+            0,
         ),
         Some(&credential),
     )
@@ -573,7 +575,7 @@ async fn duplicate_frames_confirm_without_reexecution() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -585,7 +587,7 @@ async fn duplicate_frames_confirm_without_reexecution() {
     // the presence projection does not execute a second time.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -614,7 +616,7 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -622,7 +624,7 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
 
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 3, 2)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 3, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -654,7 +656,7 @@ async fn a_pending_enrollment_heartbeat_is_refused() {
     // the `pending_enrollment` node: no heartbeat instant, no presence move.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 0),
         Some(&credential),
     )
     .await;
@@ -722,7 +724,7 @@ async fn a_second_enroll_after_enrollment_is_refused() {
     // inside an authenticated batch is refused at the conflict outcome.
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -746,7 +748,7 @@ async fn a_second_enroll_after_enrollment_is_refused() {
                     client_version: "0.1.0-alpha.1".to_owned(),
                 })),
             )],
-            1,
+            0,
         ),
         Some(&credential),
     )
@@ -780,7 +782,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -790,7 +792,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     // superseded and the stream continues under the new instance.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 1),
+        &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 0),
         Some(&credential),
     )
     .await;
@@ -810,7 +812,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     // cursor does not move.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 0),
         Some(&credential),
     )
     .await;
@@ -893,4 +895,303 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
+}
+
+fn direct_exchange(
+    application: &ClientExchangeApplication,
+    credential: Option<&str>,
+    body: &str,
+) -> Result<serde_json::Value, winwincode_server::ClientExchangeError> {
+    let response = application.exchange(
+        credential.map(|value| value.as_bytes().to_vec()),
+        body.as_bytes(),
+        winwincode_domain::Instant("2026-10-03T12:00:00.000Z".into()),
+    )?;
+    Ok(serde_json::from_slice(&response).expect("exchange JSON"))
+}
+
+fn direct_enrollment(root: &Path) -> (ClientExchangeApplication, String, String) {
+    let app = ClientExchangeApplication::open(root, &ClientExchangeConfig::default())
+        .expect("application");
+    let response =
+        direct_exchange(&app, None, &exchange_request(&[enroll_frame(1)], 0)).expect("enroll");
+    let node = response["enrollment"]["clientNodeId"]
+        .as_str()
+        .expect("node")
+        .to_owned();
+    let credential = response["enrollment"]["deviceCredential"]
+        .as_str()
+        .expect("credential")
+        .to_owned();
+    direct_exchange(
+        &app,
+        Some(&credential),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0),
+    )
+    .expect("hello");
+    (app, node, credential)
+}
+
+#[test]
+fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_restore_old_policy() {
+    let directory = test_directory("policy-durability");
+    let (app, node, credential) = direct_enrollment(&directory);
+    let storage = SqliteStorage::open(&directory).unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_policy_write BEFORE UPDATE OF accepting_connections, lock_state
+         ON client_nodes BEGIN SELECT RAISE(ABORT, 'injected policy write failure'); END;",
+        )
+        .unwrap();
+
+    let mut locked = heartbeat_frame(&node, INSTANCE, 3, 0);
+    locked["payload"]["acceptingConnections"] = serde_json::json!(false);
+    locked["payload"]["lockState"] = serde_json::json!("locked");
+    let request = exchange_request(&[locked], 0);
+    direct_exchange(&app, Some(&credential), &request).expect_err("policy was not persisted");
+    assert_eq!(cursors(&directory, &node).client_to_server_ack_sequence, 2);
+    let before = node_snapshot(&directory, &node).unwrap();
+    assert!(before.accepting_connections);
+    assert_eq!(
+        before.lock_state,
+        winwincode_storage::ClientLockState::Unlocked
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER fail_policy_write;")
+        .unwrap();
+    let retried = direct_exchange(&app, Some(&credential), &request).unwrap();
+    assert_eq!(retried["ackSequence"], 3);
+    let locked = node_snapshot(&directory, &node).unwrap();
+    assert!(!locked.accepting_connections);
+    assert_eq!(
+        locked.lock_state,
+        winwincode_storage::ClientLockState::Locked
+    );
+
+    direct_exchange(
+        &app,
+        Some(&credential),
+        &exchange_request(&[heartbeat_frame(&node, INSTANCE, 4, 0)], 0),
+    )
+    .unwrap();
+    let unlocked = node_snapshot(&directory, &node).unwrap();
+    assert!(unlocked.accepting_connections);
+    assert_eq!(
+        unlocked.lock_state,
+        winwincode_storage::ClientLockState::Unlocked
+    );
+    let duplicate = direct_exchange(&app, Some(&credential), &request).unwrap();
+    assert_eq!(duplicate["ackSequence"], 4);
+    assert_eq!(node_snapshot(&directory, &node).unwrap(), unlocked);
+}
+
+#[test]
+fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack() {
+    use winwincode_client_port::{
+        domain::{
+            RepositoryAvailability, RepositoryBindingProjection, RepositoryDirtyState,
+            RepositoryKind,
+        },
+        messages::ClientRepositoryUpsertPayload,
+    };
+    let root = test_directory("command-receipts");
+    let (app, node, credential) = direct_enrollment(&root);
+    let mut command = ClientRepositoryUpsertPayload {
+        command: CommandContext {
+            expected_revision: 0,
+            idempotency_key: "repository-create".into(),
+        },
+        repository: RepositoryBindingProjection {
+            repository_binding_id: "rbd_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            display_name: "original".into(),
+            repository_kind: RepositoryKind::Git,
+            default_branch: "main".into(),
+            head_commit: "a".repeat(40),
+            dirty_state: RepositoryDirtyState::Clean,
+            availability: RepositoryAvailability::Available,
+            repository_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            last_scanned_at: "2026-10-03T12:00:00.000Z".into(),
+        },
+    };
+    let first = frame(
+        &node,
+        INSTANCE,
+        3,
+        ClientToServerMessage::RepositoryUpsert(command.clone()),
+    );
+    assert_eq!(
+        direct_exchange(&app, Some(&credential), &exchange_request(&[first], 0)).expect("create")["ackSequence"],
+        3
+    );
+    drop(app);
+    let app =
+        ClientExchangeApplication::open(&root, &ClientExchangeConfig::default()).expect("restart");
+    command.repository.display_name = "conflicting edit".into();
+    let changed = frame(
+        &node,
+        INSTANCE,
+        4,
+        ClientToServerMessage::RepositoryUpsert(command.clone()),
+    );
+    assert!(
+        direct_exchange(&app, Some(&credential), &exchange_request(&[changed], 0))
+            .expect_err("same key with changed payload")
+            .is_invalid_request()
+    );
+    assert_eq!(cursors(&root, &node).client_to_server_ack_sequence, 3);
+    command.command.idempotency_key = "repository-update-stale".into();
+    let stale = frame(
+        &node,
+        INSTANCE,
+        4,
+        ClientToServerMessage::RepositoryUpsert(command),
+    );
+    let response = direct_exchange(
+        &app,
+        Some(&credential),
+        &exchange_request(std::slice::from_ref(&stale), 0),
+    )
+    .expect("rejection is a settled business result");
+    assert_eq!(response["ackSequence"], 4);
+    let result = &response["frames"][0];
+    assert_eq!(result["kind"], "client.command_ack");
+    assert_eq!(result["payload"]["status"], "rejected_revision_conflict");
+    assert_eq!(result["payload"]["currentRevision"], 1);
+    let replay =
+        direct_exchange(&app, Some(&credential), &exchange_request(&[stale], 0)).expect("replay");
+    assert_eq!(
+        replay["frames"], response["frames"],
+        "rejection remains in the durable downlink"
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeps the durable recovery setup and ordered rejection scenarios together"
+)]
+fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
+    use winwincode_client_port::messages::{
+        ClientWorkerReconcilePayload, ClientWorkerReconciliation,
+    };
+    use winwincode_storage::{
+        AccessGrantIssuance, GrantPermissions, GrantSource, GrantTrustMode, OccupancyClaim,
+        OccupancyLeaseState,
+    };
+    let root = test_directory("device-recovery");
+    let (app, node, credential) = direct_enrollment(&root);
+    let now = winwincode_domain::Instant("2026-10-03T12:00:00.000Z".into());
+    let lease_id = "ocl_AAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let user = "usr_AAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let grant = AccessGrantIssuance::try_new(
+        "cag_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+        &node,
+        user,
+        user,
+        GrantTrustMode::Trusted,
+        None,
+    )
+    .expect("grant");
+    storage
+        .client_connect_ledger()
+        .expect("grants")
+        .create_grant(
+            &grant,
+            GrantSource::Administrator,
+            GrantPermissions::USE,
+            &now,
+        )
+        .expect("grant");
+    let claim = OccupancyClaim::try_new(lease_id, &node, user, "req_AAAAAAAAAAAAAAAAAAAAAAAAAA")
+        .expect("claim");
+    let lease = storage
+        .client_occupancy_ledger()
+        .expect("occupancy")
+        .atomic_claim(&claim, &now)
+        .expect("claim");
+    storage
+        .client_occupancy_ledger()
+        .expect("occupancy")
+        .record_acknowledgement(lease_id, lease.fencing_token, None, &now)
+        .expect("ack");
+    let revision = storage
+        .client_node_registry()
+        .expect("registry")
+        .snapshot(&node)
+        .expect("snapshot")
+        .expect("node")
+        .revision;
+    storage
+        .client_node_registry()
+        .expect("registry")
+        .update_presence(&node, ClientPresenceState::Offline, revision)
+        .expect("offline");
+    storage
+        .client_occupancy_ledger()
+        .expect("occupancy")
+        .mark_recovery_pending(
+            lease_id,
+            &winwincode_domain::Instant("2026-10-03T12:05:00.000Z".into()),
+            &now,
+        )
+        .expect("recover");
+    drop(storage);
+    direct_exchange(
+        &app,
+        Some(&credential),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 3)], 0),
+    )
+    .expect("reconnect");
+    let report = |sequence, workers, occurred_at: &str, occupancy: &str| {
+        let mut value = frame(
+            &node,
+            INSTANCE,
+            sequence,
+            ClientToServerMessage::WorkerReconcile(ClientWorkerReconcilePayload {
+                occupancy_lease_id: Some(occupancy.into()),
+                workers,
+            }),
+        );
+        value["occurredAt"] = occurred_at.into();
+        direct_exchange(&app, Some(&credential), &exchange_request(&[value], 0)).expect("report");
+    };
+    let state = || {
+        SqliteStorage::open(&root)
+            .expect("storage")
+            .client_occupancy_ledger()
+            .expect("occupancy")
+            .snapshot(lease_id)
+            .expect("snapshot")
+            .expect("lease")
+    };
+    report(4, vec![], "2026-10-03T11:59:00.000Z", lease_id);
+    assert_eq!(
+        state().state,
+        OccupancyLeaseState::RecoveryPending,
+        "old report cannot authorize recovery"
+    );
+    report(
+        5,
+        vec![ClientWorkerReconciliation {
+            worker_session_id: "wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            worker_instance_id: "wki_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            reconcile_state: winwincode_client_port::domain::WorkerReconcileState::Unknown,
+            observed_at: now.0.clone(),
+        }],
+        &now.0,
+        lease_id,
+    );
+    assert_eq!(
+        state().state,
+        OccupancyLeaseState::RecoveryPending,
+        "unknown process keeps the lease fenced"
+    );
+    report(6, vec![], &now.0, "ocl_BBBBBBBBBBBBBBBBBBBBBBBBBB");
+    assert_eq!(state().state, OccupancyLeaseState::RecoveryPending);
+    report(7, vec![], &now.0, lease_id);
+    assert_eq!(state().state, OccupancyLeaseState::Draining);
+    assert_eq!(state().fencing_token, lease.fencing_token);
 }

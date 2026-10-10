@@ -19,6 +19,7 @@ use crate::{
     application::{
         CoordinationError, CoordinationErrorCode,
         attention::ResolvedAttentionTransition,
+        candidate_rejection::{CandidateRejectedTransition, current_candidate_rejection},
         session_binding::{
             DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
             accept_replacement_worker_session_with_authority, accept_worker_session_with_authority,
@@ -53,6 +54,8 @@ pub enum DeliveryMutationOperation {
     WorkRunDispatchStarted,
     #[serde(rename = "workrun.terminal")]
     WorkRunTerminal,
+    #[serde(rename = "candidate.rejected")]
+    CandidateRejected,
     #[serde(rename = "session.bound")]
     SessionBound,
     #[serde(rename = "execution.attempt.replaced")]
@@ -80,6 +83,7 @@ impl FromStr for DeliveryMutationOperation {
             "delivery.spec.updated" => Ok(Self::DeliverySpecUpdated),
             "workrun.dispatch.started" => Ok(Self::WorkRunDispatchStarted),
             "workrun.terminal" => Ok(Self::WorkRunTerminal),
+            "candidate.rejected" => Ok(Self::CandidateRejected),
             "session.bound" => Ok(Self::SessionBound),
             "execution.attempt.replaced" => Ok(Self::ExecutionAttemptReplaced),
             "attention.resolved" => Ok(Self::AttentionResolved),
@@ -346,6 +350,15 @@ pub struct ResolveDeliveryAttention {
     pub transition: ResolvedAttentionTransition,
 }
 
+/// Product refusal of an exact already-successful writer's source.
+#[derive(Debug, Clone)]
+pub struct RejectDeliveryCandidate {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: CandidateRejectedTransition,
+}
+
 /// Specialized bounded-rework clarification append created only from
 /// [`crate::application::workrun_execution::advance_rework`].
 #[derive(Debug, Clone)]
@@ -367,6 +380,7 @@ pub enum DeliveryCommand {
     ReplaceExecutionAttempt(Box<ReplaceDeliveryExecutionAttempt>),
     StartWorkRunDispatch(Box<StartDeliveryWorkRunDispatch>),
     ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
+    RejectCandidate(Box<RejectDeliveryCandidate>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
     ClarifyRework(Box<ClarifyDeliveryRework>),
@@ -756,6 +770,7 @@ impl<'journal> DeliveryStore<'journal> {
             command.operation,
             DeliveryMutationOperation::WorkRunDispatchStarted
                 | DeliveryMutationOperation::WorkRunTerminal
+                | DeliveryMutationOperation::CandidateRejected
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
                 | DeliveryMutationOperation::ReworkClarified
@@ -1059,6 +1074,23 @@ impl<'journal> DeliveryStore<'journal> {
         self.append_authorized(
             append,
             AppendAuthority::Terminal(&command.facts, command.unchanged_recovery.as_ref()),
+        )
+    }
+
+    fn reject_candidate(
+        &self,
+        command: RejectDeliveryCandidate,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.transition.delivery().id().clone(),
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::CandidateRejected,
+                expected_revision: command.expected_revision,
+                snapshot: command.transition.delivery().clone(),
+            },
+            AppendAuthority::CandidateRejected(&command.transition),
         )
     }
 
@@ -1501,6 +1533,22 @@ impl<'journal> DeliveryStore<'journal> {
                     ));
                 }
             }
+            AppendAuthority::CandidateRejected(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::CandidateRejected,
+                    "candidate.rejected",
+                )?;
+                transition
+                    .validate_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if transition.delivery() != &command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "candidate refusal differs from its sealed transition",
+                    ));
+                }
+            }
             AppendAuthority::Attention(transition) => {
                 validate_authorized_operation(
                     command.operation,
@@ -1711,6 +1759,7 @@ enum AppendAuthority<'transition> {
         Option<&'transition crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
     ),
     Attention(&'transition ResolvedAttentionTransition),
+    CandidateRejected(&'transition CandidateRejectedTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition WorkRunStartResult),
     WorkRun(
@@ -1946,6 +1995,7 @@ fn validate_generic_append_delta(
         )),
         DeliveryMutationOperation::DeliveryCreated
         | DeliveryMutationOperation::WorkRunTerminal
+        | DeliveryMutationOperation::CandidateRejected
         | DeliveryMutationOperation::AttentionResolved
         | DeliveryMutationOperation::VerdictSubmitted
         | DeliveryMutationOperation::ReworkClarified
@@ -2042,12 +2092,30 @@ fn validate_spec_update_delta(
     before: &Delivery,
     after: &Delivery,
 ) -> Result<(), DeliveryStoreError> {
+    // A precise, already settled candidate refusal can explicitly start a new
+    // Spec. Ordinary Attention and active execution retain the existing gate.
+    let restart_refused_candidate = current_candidate_rejection(before).is_some_and(|fact| {
+        !before.snapshot().work_run_aggregate.runs.iter().any(|run| {
+            matches!(
+                run.state,
+                winwincode_domain::WorkRunState::Queued
+                    | winwincode_domain::WorkRunState::Leased
+                    | winwincode_domain::WorkRunState::Running
+            )
+        }) && before
+            .snapshot()
+            .attention_items
+            .iter()
+            .filter(|item| item.blocking && item.status == crate::domain::AttentionItemStatus::Open)
+            .all(|item| item.id == fact.attention_id())
+    });
     let before = before.snapshot();
     let after = after.snapshot();
-    let valid = matches!(
+    let valid = (matches!(
         before.status,
         DeliveryStatus::Draft | DeliveryStatus::Clarifying | DeliveryStatus::Ready
-    ) && after.schema_version == before.schema_version
+    ) || restart_refused_candidate)
+        && after.schema_version == before.schema_version
         && after.id == before.id
         && after.revision == before.revision.saturating_add(1)
         && after.status == DeliveryStatus::Ready
@@ -2120,6 +2188,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             }
             DeliveryCommand::StartWorkRunDispatch(start) => self.start_workrun_dispatch(*start),
             DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
+            DeliveryCommand::RejectCandidate(rejected) => self.reject_candidate(*rejected),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
             DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),
@@ -2882,6 +2951,43 @@ mod tests {
             }))
             .expect_err("WorkContract must be derived from the current Spec");
         assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
+    fn ordinary_needs_attention_cannot_replace_its_spec() {
+        let mut pending = snapshot(1, "draft").into_snapshot();
+        pending.status = DeliveryStatus::NeedsAttention;
+        pending.attention_items.push(crate::domain::AttentionItem {
+            schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+            id: winwincode_domain::AttentionItemId("att_01J00000000000000000000001".into()),
+            delivery_id: pending.id.clone(),
+            delivery_spec_id: pending.spec.id.clone(),
+            work_run_id: None,
+            item_type: crate::domain::AttentionItemType::VerificationBlocked,
+            title: "Ordinary verification is blocked".into(),
+            context: "Existing unresolved verification".into(),
+            options: vec![],
+            assigned_to: None,
+            blocking: true,
+            status: crate::domain::AttentionItemStatus::Open,
+            resolution: None,
+            resolved_by: None,
+            created_at_millis: pending.updated_at_millis,
+            resolved_at_millis: None,
+        });
+        let pending = Delivery::try_from_snapshot(pending).expect("ordinary blocking Attention");
+        let replacement = snapshot(2, "ready");
+        let mut ready = pending.clone().into_snapshot();
+        ready.status = DeliveryStatus::Ready;
+        let ready = Delivery::try_from_snapshot(ready).expect("allowed source state control");
+        validate_spec_update_delta(&ready, &replacement)
+            .expect("the rest of the exact Spec delta is valid");
+        assert_eq!(
+            validate_spec_update_delta(&pending, &replacement)
+                .expect_err("ordinary Attention has no refused-candidate restart authority")
+                .code(),
+            DeliveryStoreErrorCode::InvalidStoreOptions
+        );
     }
 
     #[test]

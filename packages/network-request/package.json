@@ -1,0 +1,17 @@
+{
+  "name": "@winwincode/network-request",
+  "version": "0.1.0-alpha.2",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.d.mts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "license": "Apache-2.0",
+  "files": [
+    "src"
+  ]
+}

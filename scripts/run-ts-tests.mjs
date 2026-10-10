@@ -17,6 +17,22 @@ const root = resolve(import.meta.dirname, '..')
 // momentarily missing asset (see tests/fixtures/real-browser-harness.mjs).
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
+  'tests/api-production-device-prerequisites.test.mjs',
+  'tests/network-request.test.mjs',
+  'tests/network-diagnostics.test.mjs',
+  'tests/diagnostics-boundary.test.mjs',
+  'tests/device-diagnostics-export.test.mjs',
+  'tests/device-agent-environment.test.mjs',
+  'tests/device-task-runtime-unified.test.mjs',
+  'tests/device-extension-mutation.test.mjs',
+  'tests/approval-settlement-export.test.mjs',
+  'tests/approval-settlement-runtime.test.mjs',
+  'tests/benchmark-supervisor.test.mjs',
+  'tests/native-fusion-benchmark.test.mjs',
+  'tests/device-fixture-shutdown.test.mjs',
+  'tests/device-task-runtime.test.mjs',
+  'tests/device-provider-structured-output.test.mjs',
+  'tests/device-provider-credentials.test.mjs',
   'tests/architecture-documentation.test.mjs',
   'tests/candidate-run-preview-ui.test.mjs',
   'tests/okqq-sidebar-board-wiring.test.mjs',
@@ -43,6 +59,13 @@ const canonicalTestFiles = Object.freeze([
   'tests/browser-control-packages.test.mjs',
   'tests/browser-ui-package.test.mjs',
   'tests/client-server-separation.test.mjs',
+  'tests/codex-handoff-patch-replay.test.mjs',
+  'tests/code-mode-cancellation-evidence.test.mjs',
+  'tests/code-mode-patch-replay.test.mjs',
+  'tests/code-mode-dispatch-patch-replay.test.mjs',
+  'tests/code-mode-native-build.test.mjs',
+  'tests/native-kernel-acceptance-runner.test.mjs',
+  'tests/compact-kernel-helper.test.mjs',
   'tests/community-core-finalize.test.mjs',
   'tests/community-persistence-ports.test.mjs',
   'tests/engineering-runtime-backlog.test.mjs',
@@ -82,6 +105,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/readme-quickstart.test.mjs',
   'tests/real-task-benchmark.test.mjs',
   'tests/benchmark-public-smoke.test.mjs',
+  'tests/benchmark-device-adapter.test.mjs',
   'tests/real-task-benchmark-runner.test.mjs',
   'tests/publish-benchmark-submission.test.mjs',
   'tests/release-artifact-contract.test.mjs',
@@ -91,6 +115,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/server-durable-event-hub-contract.test.mjs',
   'tests/session-identity-contract.test.mjs',
   'tests/settings-control-plane-integration.test.mjs',
+  'tests/codex-login-settings.test.mjs',
   'tests/strongflow-canonical-api-contract.test.mjs',
   'tests/workrun-single-path-source-gate.test.mjs',
   'tests/strongflow-projection-contract.test.mjs',
@@ -127,6 +152,6 @@ function runTests(arguments_) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-runTests(['--test', '--test-concurrency=1', ...canonicalTestFiles])
+runTests(['--experimental-test-module-mocks', '--test', '--test-concurrency=1', ...canonicalTestFiles])
 
 process.stdout.write(`canonical TypeScript tests passed: ${canonicalTestFiles.length}\n`)

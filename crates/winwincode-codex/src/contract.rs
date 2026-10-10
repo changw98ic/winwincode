@@ -30,6 +30,7 @@ use crate::candidate_artifact_outbox::{
 use crate::diagnostic_artifact_outbox::{
     DiagnosticArtifactAuthority, DiagnosticArtifactUpload, RetainedDiagnosticArtifact,
 };
+use crate::failure_diagnostic::CodexFailureDiagnostic;
 
 /// Local first-start check shared with a Provider thread; it carries no secrets.
 pub type LocalModelStartGuard = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -223,7 +224,8 @@ pub struct DelegatedObserverPreflight {
 
 /// Internal durable accounting for one terminal Observer call. A missing usage
 /// means the Provider terminal charge was not proven and must fail closed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegatedObserverSettlement {
     pub batch_id: winwincode_domain::ChangeBatchId,
     pub completed_at: Instant,
@@ -331,6 +333,8 @@ pub trait CodexCoreAdapter {
 
     /// Supplies the existing shared Core authority gate for revalidation inside
     /// the Provider thread. Lightweight adapters use the Worker's lease deadline.
+    /// Every role must enqueue its exact original request in the shared execution
+    /// outbox before dispatch. Renewal never rewrites that request proof.
     ///
     /// # Errors
     /// Rejects an invalid trusted clock or unavailable authority source.
@@ -353,6 +357,31 @@ pub trait CodexCoreAdapter {
         _thread_id: &CodexThreadId,
     ) -> Result<Option<ExecutionOutcomeUsage>, Self::Error> {
         Ok(None)
+    }
+
+    /// Restores the exact persisted Worker session before opening its checkout.
+    /// A lease renewal changes its deadline, not its existing session identity.
+    ///
+    /// # Errors
+    /// Rejects a stored run whose Job, snapshot, lease, or thread differs.
+    fn recovered_worker_session_id(
+        &mut self,
+        _dispatch: &JobDispatchMessage,
+    ) -> Result<Option<WorkerSessionId>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Returns the first retained safe classification for this exact run.
+    fn retained_failure_diagnostic(
+        &self,
+        _thread_id: &CodexThreadId,
+    ) -> Option<CodexFailureDiagnostic> {
+        None
+    }
+
+    /// Classifies an adapter error before a durable thread exists.
+    fn error_diagnostic(&self, _error: &Self::Error) -> Option<CodexFailureDiagnostic> {
+        None
     }
 
     fn ensure_thread(
@@ -475,6 +504,20 @@ pub trait CodexCoreAdapter {
         thread_id: &CodexThreadId,
         now: &Instant,
     ) -> impl Future<Output = Result<CodexPoll, Self::Error>> + Send;
+
+    /// Releases an unaccepted poll delivery for exact replay. Durable operation
+    /// identities and committed effects remain unchanged; this must never reset
+    /// action receipts or terminal ACKs.
+    ///
+    /// # Errors
+    /// Rejects a thread or operation that does not match the retained delivery.
+    fn release_poll_delivery(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _delivery: &CodexPoll,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn accept_model_chunk(
         &mut self,
@@ -801,7 +844,8 @@ pub trait CodexCoreAdapter {
         request: &RuntimeReplayRequestMessage,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error>;
 
-    /// Atomically finalizes the adapter run and retains its first canonical outcome frame.
+    /// Closes Core, retains its final execution facts, then atomically finalizes
+    /// the run and its first canonical outcome with the complete runtime cursor.
     /// Exact retries return the originally retained frame.
     ///
     /// # Errors
@@ -811,7 +855,7 @@ pub trait CodexCoreAdapter {
         &mut self,
         thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,
-    ) -> Result<DurableExecutionDelivery, Self::Error>;
+    ) -> impl Future<Output = Result<DurableExecutionDelivery, Self::Error>> + Send;
 
     /// Drains newly produced adapter messages for durable retention by the worker.
     ///
@@ -859,6 +903,12 @@ pub enum ExecutionPortFailureKind {
 /// Outbound canonical `ExecutionPort` used identically by local and remote IO.
 pub trait WorkerExecutionPort {
     type Error;
+
+    /// A response may carry controls as well as the outbound acceptance receipt.
+    /// Drivers must consume those controls before starting another outbound batch.
+    fn has_pending_controls(&self) -> bool {
+        false
+    }
 
     /// Existing ports default to a connection failure, which yields the batch.
     fn failure_kind(_error: &Self::Error) -> ExecutionPortFailureKind {

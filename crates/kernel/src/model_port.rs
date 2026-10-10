@@ -48,6 +48,8 @@ pub struct ModelPortFailure {
     pub message: String,
     /// Provider HTTP status, when supplied by the model runtime.
     pub status: Option<u16>,
+    /// Explicit host retry classification. Absent on legacy canonical errors.
+    pub retryable: Option<bool>,
     /// Provider-requested retry delay, when supplied by the model runtime.
     pub provider_retry_after_millis: Option<u64>,
     /// Provider-issued request identity, when supplied by the model runtime.
@@ -62,6 +64,7 @@ impl ModelPortFailure {
             code: code.into(),
             message: message.into(),
             status: None,
+            retryable: None,
             provider_retry_after_millis: None,
             provider_request_id: None,
         }
@@ -86,6 +89,17 @@ pub type ModelPortStream =
 
 /// The kernel's only model-execution dependency.
 pub trait ModelPort: fmt::Debug + Send + Sync {
+    /// Measures host-added task context without calling a model provider.
+    ///
+    /// # Errors
+    /// Returns a failure when the current task binding cannot be recovered.
+    fn compaction_context_overhead_bytes(
+        &self,
+        _thread_id: &str,
+    ) -> Result<usize, ModelPortFailure> {
+        Ok(0)
+    }
+
     /// Start one model request. Dropping the returned stream cancels host work.
     fn stream(
         &self,
@@ -105,6 +119,12 @@ impl KernelModelStreamTransport {
 }
 
 impl ModelStreamTransport for KernelModelStreamTransport {
+    fn compaction_context_overhead_bytes(&self, thread_id: &str) -> Result<usize, ApiError> {
+        self.port
+            .compaction_context_overhead_bytes(thread_id)
+            .map_err(|error| model_port_api_error(&error))
+    }
+
     fn stream(
         &self,
         request: ModelStreamRequest,
@@ -225,6 +245,7 @@ struct ModelPortFailureWire {
     code: String,
     message: String,
     status: Option<u16>,
+    retryable: Option<bool>,
     provider_retry_after_millis: Option<u64>,
     provider_request_id: Option<String>,
 }
@@ -235,6 +256,7 @@ impl From<ModelPortFailureWire> for ModelPortFailure {
             code: failure.code,
             message: failure.message,
             status: failure.status,
+            retryable: failure.retryable,
             provider_retry_after_millis: failure.provider_retry_after_millis,
             provider_request_id: failure.provider_request_id,
         }
@@ -352,6 +374,28 @@ fn model_port_api_error(failure: &ModelPortFailure) -> ApiError {
     match failure.code.as_str() {
         "CONTEXT_WINDOW_EXCEEDED" => ApiError::ContextWindowExceeded,
         "QUOTA" | "QUOTA_EXCEEDED" => ApiError::QuotaExceeded,
+        "AUTH"
+        | "MISSING_CREDENTIAL"
+        | "INVALID_CREDENTIAL"
+        | "INVALID_REQUEST"
+        | "NO_ADAPTER"
+        | "UNKNOWN_MODEL"
+        | "UNSUPPORTED_CONTENT"
+        | "CONTENT_FILTER"
+        | "UNSUPPORTED_OPTION"
+        | "UNSUPPORTED_REASONING_EFFORT"
+        | "UNSUPPORTED_TOOL"
+        | "LEASE_EXPIRED"
+        | "STALE_FENCING_TOKEN"
+        | "WORKER_INSTANCE_CHANGED"
+        | "MODEL_AUTHORITY_EXPIRED"
+        | "MODEL_AUTHORITY_STALE"
+        | "DEVICE_MODEL_PAUSED"
+        | "DEVICE_MODEL_INTERRUPTED"
+        | "DEVICE_MODEL_IDENTITY_CONFLICT"
+        | "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED"
+        | "CANCELLED" => ApiError::InvalidRequest { message },
+        _ if failure.retryable == Some(false) => ApiError::InvalidRequest { message },
         "RATE_LIMIT" | "SERVER" | "TIMEOUT" | "TRANSPORT" | "EMPTY_RESPONSE" => {
             ApiError::Retryable {
                 message,
@@ -360,17 +404,12 @@ fn model_port_api_error(failure: &ModelPortFailure) -> ApiError {
                     .map(Duration::from_millis),
             }
         }
-        "AUTH"
-        | "MISSING_CREDENTIAL"
-        | "INVALID_CREDENTIAL"
-        | "INVALID_REQUEST"
-        | "STUCK_TOOL_REPEAT_LIMIT"
-        | "NO_ADAPTER"
-        | "UNKNOWN_MODEL"
-        | "UNSUPPORTED_CONTENT"
-        | "UNSUPPORTED_OPTION"
-        | "UNSUPPORTED_REASONING_EFFORT"
-        | "UNSUPPORTED_TOOL" => ApiError::InvalidRequest { message },
+        _ if failure.retryable == Some(true) => ApiError::Retryable {
+            message,
+            delay: failure
+                .provider_retry_after_millis
+                .map(Duration::from_millis),
+        },
         _ => ApiError::Stream(message),
     }
 }
@@ -423,6 +462,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn explicit_terminal_failure_overrides_legacy_retry_category() {
+        for code in ["RATE_LIMIT", "SERVER", "TRANSPORT", "INCOMPLETE_STREAM"] {
+            let mut failure = ModelPortFailure::new(code, "terminal");
+            failure.retryable = Some(false);
+            assert!(matches!(
+                model_port_api_error(&failure),
+                ApiError::InvalidRequest { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_transient_failure_preserves_retry_after() {
+        let mut failure = ModelPortFailure::new("INCOMPLETE_STREAM", "stream interrupted");
+        failure.retryable = Some(true);
+        failure.provider_retry_after_millis = Some(2_000);
+        assert!(
+            matches!(model_port_api_error(&failure), ApiError::Retryable { delay: Some(delay), .. } if delay == Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn authority_and_authentication_failures_cannot_request_retry() {
+        for code in [
+            "AUTH",
+            "LEASE_EXPIRED",
+            "MODEL_AUTHORITY_EXPIRED",
+            "CANCELLED",
+            "DEVICE_MODEL_PAUSED",
+        ] {
+            let mut failure = ModelPortFailure::new(code, "terminal");
+            failure.retryable = Some(true);
+            assert!(matches!(
+                model_port_api_error(&failure),
+                ApiError::InvalidRequest { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_error_frame_retains_explicit_terminal_classification() {
+        let stream: ModelPortStream = Box::pin(futures::stream::iter([Ok(
+            r#"{"type":"error","error":{"code":"RATE_LIMIT","message":"terminal","retryable":false,"status":429,"providerRetryAfterMillis":750}}"#.to_owned(),
+        )]));
+        let (sender, mut receiver) = mpsc::channel(1);
+        forward_model_stream(stream, sender).await;
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            Err(ApiError::InvalidRequest { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn closed_stream_uses_the_canonical_kernel_error_namespace() {
         let stream: ModelPortStream = Box::pin(futures::stream::empty());
@@ -448,9 +540,11 @@ mod tests {
     }
 
     #[test]
-    fn repeated_tool_stop_is_not_retryable() {
+    fn content_filter_failure_is_terminal_even_when_host_misclassifies_retry() {
+        let mut failure = ModelPortFailure::new("CONTENT_FILTER", "Provider filtered response");
+        failure.retryable = Some(true);
         assert!(matches!(
-            model_port_api_error(&ModelPortFailure::new("STUCK_TOOL_REPEAT_LIMIT", "stopped")),
+            model_port_api_error(&failure),
             ApiError::InvalidRequest { .. }
         ));
     }

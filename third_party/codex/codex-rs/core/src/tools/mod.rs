@@ -1,4 +1,13 @@
+pub(crate) mod agent_wait_graph;
 mod approvals;
+mod authorization;
+mod execution_facts;
+pub(crate) use execution_facts::ExecutionFacts;
+mod result_recovery;
+mod tool_diagnostics;
+mod tool_reconciliation;
+mod tool_sharing;
+pub(crate) use authorization::authorize_request;
 pub(crate) mod code_mode;
 pub(crate) mod context;
 mod control_tool_analytics;
@@ -145,3 +154,7 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
         exec_output.aggregated_output.text.clone()
     }
 }
+
+pub(crate) use tool_diagnostics::ToolDiagnostics;
+
+mod tool_receipts;

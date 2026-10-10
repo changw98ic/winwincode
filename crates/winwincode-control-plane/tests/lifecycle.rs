@@ -1032,9 +1032,10 @@ fn local_storage_open_failure_closes_the_event_publisher() {
     assert_eq!(
         fs::read_dir(&temporary_parent)
             .expect("temporary parent should remain readable")
-            .count(),
-        0,
-        "failed startup must release the instance-owned temporary root"
+            .map(|entry| entry.expect("temporary entry should be readable").path())
+            .collect::<Vec<_>>(),
+        [temporary_parent.join(".winwincode-control-plane-lifecycle.lock")],
+        "failed startup must release instance roots and retain the stable coordinator lock"
     );
     fs::remove_dir_all(root).expect("failed startup should leave no open file handles");
 }

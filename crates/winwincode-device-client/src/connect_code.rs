@@ -6,16 +6,14 @@
 //! The device generates its own 8-digit one-time connect code, publishes it
 //! to the Control Plane as a `sha256` digest inside a durable
 //! `client.connect_code.published` frame (persist-before-send through the
-//! daemon's outbox path), and answers every `client.access.challenge` by
-//! checking that the challenged code generation is still the local current,
-//! unexpired, non-revoked code on an unlocked node.
+//! daemon's outbox path). Browser authorization consumes the published code
+//! on Server; Device receives no authorization challenge.
 //!
 //! Secret boundary: the plaintext code exists only in the process memory of
 //! whoever generated it ([`ConnectCodePlaintext`] redacts its `Debug`
 //! output). It never enters the durable store, the outbox, or any log
 //! payload — only the digest does. A restart therefore loses the ability to
-//! *display* the code but never the ability to *verify* challenges against
-//! the durable digest.
+//! *display* the code. The Server retains the digest used for authorization.
 
 use std::fmt;
 use std::time::Duration;
@@ -23,13 +21,11 @@ use std::time::Duration;
 use getrandom::fill as getrandom_fill;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use winwincode_client_port::domain::{ClientChallengeAckStatus, ClientLockState, ConnectCodeState};
+use winwincode_client_port::domain::{ClientLockState, ConnectCodeState};
 use winwincode_client_port::exchange::{FrameCodec, OutboxSession};
 use winwincode_client_port::messages::{
-    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientAccessChallengeAckPayload,
-    ClientConnectCodePublishedPayload, ClientToServerEnvelope, ClientToServerMessage,
-    CommandContext, ServerAccessChallengePayload,
+    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientConnectCodePublishedPayload, ClientToServerEnvelope,
+    ClientToServerMessage, CommandContext,
 };
 
 use crate::identity::generate_prefixed_id;
@@ -99,49 +95,6 @@ pub struct PublishedConnectCode {
     pub plaintext: ConnectCodePlaintext,
     /// The durable state that replaced the previous generation.
     pub record: ConnectCodeStateRecord,
-}
-
-/// Local verdict for one `client.access.challenge` (plan 11.4 step 7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChallengeVerdict {
-    /// The challenged code is the current, active, unexpired generation and
-    /// the node accepts new connections.
-    Confirmed,
-    /// The challenge names an unknown code id or a foreign digest (any older
-    /// generation after a refresh lands here).
-    UnknownCode,
-    /// The code was revoked (locally disabled) before use.
-    CodeRevoked,
-    /// The code's 120-second window has passed.
-    CodeExpired,
-    /// The node is locked; every challenge is refused (plan 12.1).
-    Locked,
-    /// New connections are locally disabled without a full lock.
-    NewConnectionsDisabled,
-}
-
-impl ChallengeVerdict {
-    /// The wire verdict for `client.access.challenge_ack`. The frozen v1
-    /// schema carries exactly two statuses, so every local rejection maps to
-    /// `stale_generation`; the precise local reason stays in
-    /// [`ChallengeVerdict`].
-    #[must_use]
-    pub const fn wire_status(self) -> ClientChallengeAckStatus {
-        match self {
-            Self::Confirmed => ClientChallengeAckStatus::Confirmed,
-            Self::UnknownCode
-            | Self::CodeRevoked
-            | Self::CodeExpired
-            | Self::Locked
-            | Self::NewConnectionsDisabled => ClientChallengeAckStatus::StaleGeneration,
-        }
-    }
-
-    /// Whether the challenge was confirmed.
-    #[must_use]
-    pub const fn is_confirmed(self) -> bool {
-        matches!(self, Self::Confirmed)
-    }
 }
 
 /// Failure of a connect-code publication or frame append.
@@ -260,7 +213,7 @@ pub fn connection_policy(store: &DeviceStore) -> Result<ConnectionPolicyRecord, 
 /// durable digest state.
 ///
 /// Every publication replaces the previous generation: the old code stops
-/// validating challenges immediately, and the new row carries
+/// being published as current, and the new row carries
 /// `generation + 1`. The plaintext is returned for local display only; it is
 /// never written to the store.
 ///
@@ -302,25 +255,6 @@ pub fn publish_connect_code(
     Ok(PublishedConnectCode { plaintext, record })
 }
 
-/// Revokes the current code (the local disable, plan 11.1 `禁止新连接`'s
-/// code-side counterpart). Returns the revoked record, or `None` when no
-/// active code exists.
-///
-/// # Errors
-///
-/// Returns a store failure when the write fails.
-pub fn revoke_connect_code(
-    store: &mut DeviceStore,
-    now: OffsetDateTime,
-) -> Result<Option<ConnectCodeStateRecord>, DeviceStoreError> {
-    let stamp = rfc3339(now);
-    if store.revoke_connect_code_state(&stamp)? {
-        Ok(store.connect_code_state()?)
-    } else {
-        Ok(None)
-    }
-}
-
 /// Persists a new connection policy (lock state plus whether new
 /// connections are accepted) and returns the stored record.
 ///
@@ -342,49 +276,6 @@ pub fn set_connection_policy(
     Ok(record)
 }
 
-/// Evaluates one `client.access.challenge` against the local code
-/// generation and connection policy (plan 11.4 step 7: `确认该 code
-/// generation 仍有效并 ACK`).
-///
-/// The verdict order is: unknown code/foreign digest, revoked, expired,
-/// locked, new connections disabled, confirmed.
-///
-/// # Errors
-///
-/// Returns a store failure when the durable reads fail or a stored stamp is
-/// not RFC 3339.
-pub fn evaluate_access_challenge(
-    store: &DeviceStore,
-    challenge: &ServerAccessChallengePayload,
-    now: OffsetDateTime,
-) -> Result<ChallengeVerdict, DeviceStoreError> {
-    let policy = connection_policy(store)?;
-    let Some(record) = store.connect_code_state()? else {
-        return Ok(ChallengeVerdict::UnknownCode);
-    };
-    if record.connect_code_id != challenge.connect_code_id
-        || record.code_digest != challenge.code_digest
-    {
-        // Any older generation after a refresh fails both comparisons; a
-        // foreign digest can never match the current publication.
-        return Ok(ChallengeVerdict::UnknownCode);
-    }
-    if record.state != ConnectCodeState::Active {
-        return Ok(ChallengeVerdict::CodeRevoked);
-    }
-    let expires_at = parse_rfc3339(&record.expires_at)?;
-    if now >= expires_at {
-        return Ok(ChallengeVerdict::CodeExpired);
-    }
-    if policy.lock_state == ClientLockState::Locked {
-        return Ok(ChallengeVerdict::Locked);
-    }
-    if !policy.accepting_connections {
-        return Ok(ChallengeVerdict::NewConnectionsDisabled);
-    }
-    Ok(ChallengeVerdict::Confirmed)
-}
-
 /// Builds the `client.connect_code.published` payload's message for one
 /// publication. The digest rides alone; the plaintext is not part of the
 /// message type at all.
@@ -401,27 +292,6 @@ pub fn published_message(record: &ConnectCodeStateRecord) -> ClientToServerMessa
         expires_at: record.expires_at.clone(),
         remaining_attempts: 5,
     })
-}
-
-/// Builds the `client.access.challenge_ack` message for one verdict.
-///
-/// The idempotency key is deterministic per challenge id, so a server replay
-/// of the same unanswered challenge produces the same key with the same
-/// payload and replays the first verdict instead of creating a second one.
-#[must_use]
-pub fn challenge_ack_message(
-    challenge: &ServerAccessChallengePayload,
-    verdict: ChallengeVerdict,
-) -> ClientToServerMessage {
-    ClientToServerMessage::AccessChallengeAck(Box::new(ClientAccessChallengeAckPayload {
-        command: CommandContext {
-            expected_revision: 0,
-            idempotency_key: format!("challenge-ack-{}", challenge.challenge_id),
-        },
-        challenge_id: challenge.challenge_id.clone(),
-        connect_code_id: challenge.connect_code_id.clone(),
-        status: verdict.wire_status(),
-    }))
 }
 
 /// Appends the durable `client.connect_code.published` frame for one
@@ -483,11 +353,4 @@ fn map_outbox_error(
 /// RFC 3339 UTC stamp of the caller's clock observation.
 fn rfc3339(time: OffsetDateTime) -> String {
     crate::canonical_rfc3339(time)
-}
-
-/// Parses a stored or wire RFC 3339 stamp, fail-closing on corruption.
-fn parse_rfc3339(stamp: &str) -> Result<OffsetDateTime, DeviceStoreError> {
-    OffsetDateTime::parse(stamp, &Rfc3339).map_err(|error| {
-        DeviceStoreError::adapter(format!("stored timestamp {stamp} is not RFC 3339: {error}"))
-    })
 }

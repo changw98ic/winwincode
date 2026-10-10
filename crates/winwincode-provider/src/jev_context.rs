@@ -57,6 +57,17 @@ impl JevRuntime {
         policy: &JevPolicy,
         options: JevExecutionOptions,
     ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
+        self.evaluate_context_authorized(input, policy, options, &|| true)
+            .await
+    }
+
+    pub(crate) async fn evaluate_context_authorized(
+        &self,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
         validate_policy(policy)?;
         if input.task.trim().is_empty() || input.candidate.trim().is_empty() {
             return Err(JevDecisionError::InvalidMetadata);
@@ -73,7 +84,9 @@ impl JevRuntime {
             premise: premise.clone(),
             hypothesis: hypothesis.to_owned(),
         });
-        let run = self.batch_evaluate(hypotheses.into(), options).await;
+        let run = self
+            .batch_evaluate_authorized(hypotheses.into(), options, can_start)
+            .await;
         let mut failures = run.failures;
         let mut value = None;
         if let (Some(batch), Some(observation)) = (&run.value, &run.observation) {
@@ -106,6 +119,20 @@ impl JevRuntime {
                     provider_id: observation.provider_id.clone(),
                     kind: JevProviderErrorKind::InvalidResponse,
                     latency: Duration::ZERO,
+                    network: Some(
+                        winwincode_network::NetworkFailure::new(
+                            winwincode_network::ErrorKind::ProtocolInvalid,
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::Decode,
+                        )
+                        .with_diagnostic(
+                            winwincode_network::NetworkDiagnostic::new(
+                                winwincode_network::DiagnosticCode::ResponseInvariant,
+                            ),
+                        ),
+                    ),
+                    attempt: None,
+                    connection_wait: false,
                 });
             }
         }

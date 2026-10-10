@@ -3,15 +3,24 @@
 //! Provider IO and stream conversion for the device execution runtime.
 //! This crate does not depend on the Server or Control Plane.
 
+mod chatgpt_oauth;
+mod codex_login;
 pub mod credential_leak_gate;
 mod jev;
 mod jev_context;
 mod provider_anthropic;
+mod provider_codex;
 pub mod provider_https_sse;
+mod provider_media;
 mod provider_openai;
+mod provider_response_schema;
+mod provider_sse_failure_log;
 mod provider_sse_framing;
 pub mod provider_stream;
-mod provider_transport;
+mod provider_tool_arguments;
+mod provider_transport {
+    pub(crate) use winwincode_network::transport::*;
+}
 mod types;
 
 pub use credential_leak_gate::{
@@ -44,10 +53,10 @@ pub use provider_stream::{
 pub use types::{
     ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind, ModelExecutionCertainty,
     ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
-    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGatewayErrorKind,
-    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderGatewayTerminalCharge,
-    ProviderGatewayTerminalOutcome, ProviderStreamControlAction, ResolvedSecret, SecretStoreError,
-    SecretStoreErrorKind,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderFailureDiagnostic,
+    ProviderFailureMetadata, ProviderGatewayErrorKind, ProviderGatewayOpenReceipt,
+    ProviderGatewayTerminal, ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome,
+    ProviderStreamControlAction, ResolvedSecret, SecretStoreError, SecretStoreErrorKind,
 };
 
 mod device_store;
@@ -60,9 +69,18 @@ mod device_accounting;
 mod device_model;
 pub use device_model::{model_failure, public_model_chunk};
 
+mod device_model_concurrency;
+pub use device_model_concurrency::{DeviceModelAdmission, DeviceModelPermit};
+
 mod device_extensions;
 mod mcp_connection;
 pub use device_extensions::InstalledMcpTools;
 
 mod device_jev_judge;
 pub use device_jev_judge::StoredJevJudge;
+
+#[cfg(test)]
+mod diagnostics_regression_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod audit_model_replay_metrics;

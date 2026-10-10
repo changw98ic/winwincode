@@ -34,7 +34,7 @@ winwincode-local 只负责在本机组装 Control Plane 和 Worker。
 | `apps/client` | 页面、组件、路由、表单、图表、浏览器状态和请求 | 业务判定、领域持久化、Worker 调度和执行 |
 | `winwincode-server` | 一个认证后的 HTTP、WebSocket 和健康检查边界 | 另建业务状态或第二个执行协议 |
 | `winwincode-control-plane` | ProductSession、Delivery、Approval、Attention、Provider、Credential 引用、Scheduler、Publication、Audit、策略与产品持久化 | Codex 内部 Plan、Agent、工具和代码执行 |
-| `winwincode-worker` | WorkerSession、Job、Lease、Fencing、工作区、候选、产物、运行事件和结果 | 产品状态、组织权限和长期 Provider 密钥 |
+| `winwincode-worker` | WorkerSession、Job、Lease、Fencing、工作区、候选、产物、运行事件、结果与 Device 模型交接 | 产品状态、组织权限与组织级 Credential 管理 |
 | `winwincode-kernel` | CodexThread、Turn、Plan、Agent Graph、工具、Shell、沙箱、权限、Diff、用量和恢复 | 产品会话、交付状态、Worker 生命周期和发布决定 |
 | `winwincode-kernel-helper` | 经过身份校验的辅助可执行文件和握手 | 产品状态、网络 API 和长期凭据 |
 | `winwincode-local` | 读取进程配置、组装两个 Rust 模块、启动、停止和有限诊断 | 业务写入、Provider 路由、工作区和执行决策 |
@@ -79,7 +79,7 @@ flowchart TB
 
 - HTTP Command 和 Query 携带 `requestId` 与 `expectedRevision`，Server 返回生成合同定义的结果或错误。
 - WebSocket 只发送 Projection、运行事件、审批请求、Attention、任务和在线状态，不作为业务写入通道。
-- Control Plane 与 Worker 通过版本化 [`ExecutionPort 合同`](contracts/execution-port-v1.md)交换注册、能力、心跳、Job、Lease、Fencing、运行事件、模型流、输入、审批、取消、结果和产物引用。
+- Control Plane 与 Worker 通过版本化 [`ExecutionPort 合同`](contracts/execution-port-v1.md)交换注册、心跳、Job、Lease、Fencing、运行事件、模型流、输入、审批、取消、结果和产物引用。
 - Server 的 [`GeneratedContractDispatcher`](../crates/winwincode-server/src/dispatcher.rs) 是公开请求的唯一入口；运行时先验证租户范围、主体、请求相关性和当前版本。
 - 同进程部署仍使用同一 typed frame；分进程部署只替换传输，不替换状态语义。
 
@@ -96,6 +96,38 @@ flowchart TB
 
 `SessionBinding` 把四种身份与 Delivery、WorkItem、Job、Lease 和 Fencing 事实关联起来。
 重启、重试、Worker 替换或重新验证时，每个身份按自己的生命周期推进；旧尝试的运行、结果和取消事实保持不变。
+
+### Code Mode 与公共工具执行
+
+工具执行边界由 [ADR-0040](decisions/0040-code-mode-shared-tool-runtime.md) 固定。
+
+模型通过 `exec` 和 `wait` 使用工具。Code Mode 在内部按需发现获准工具、加载定义并编排调用。Shell、文件、MCP 和宿主工具都进入 Core 公共执行层，由实际工具的 Adapter 执行。
+
+```mermaid
+flowchart TD
+  Model[当前模型] <-->|exec / wait| Mode
+  subgraph Core[Codex Core]
+    Mode[Code Mode：执行与编排] <-->|查询与定义| Discovery[按需发现与定义加载]
+    Discovery -. 读取获准视图 .-> Catalog[统一工具目录]
+    Mode <-->|真实工具调用与结果| Dispatch[公共工具执行层]
+    Dispatch <--> Builtin[内置工具 Adapter]
+    Dispatch <--> MCP[MCP Adapter]
+    Dispatch <--> Host[宿主工具 Adapter]
+    Mode -. 控制与等待事实 .-> Diagnosis[模型行为诊断]
+    Dispatch -. 调用与结果事实 .-> Diagnosis
+    Diagnosis --> Context[模型上下文：证据与问题]
+  end
+  MCP <--> Server[MCP Server]
+  Context -->|exec / wait / yield 边界| Model
+```
+
+公共执行层按真实工具身份处理授权和 hook，并保存逻辑请求、实际尝试、父调用、cell、等待和恢复事实。执行状态、结果接受和交付处置分别保存。精确传输回放恢复原观测；新的逻辑请求形成新的观测。
+
+Adapter 提供可信输入依赖、账号与会话作用域，以及结果有效性和业务恢复规则。结果复用与并发合并分别取得许可。共享一次实际执行的每个逻辑请求保留自己的结果处置和取消状态。
+
+模型行为诊断默认覆盖所有任务。诊断依据调用、等待及可信进展事实，判断疑似循环、等待死锁和执行爆炸。Core 将证据和问题送入当前模型上下文，由模型选择下一步。正常 yield 和诊断交付保留活跃 cell。
+
+Worker 将 Core 事实可靠交付给 Control Plane。DSH 与 StrongFlow 使用同一份公共投影，显示真实工具、父子关联、共享来源、恢复和诊断状态。任务恢复前核对原工具目录、策略、Kernel 接口及运行时身份。
 
 ## 唯一的交付数据模型
 
@@ -168,9 +200,55 @@ flowchart TD
 
 ## Provider、Credential 与外部副作用
 
-Provider Gateway 是 Control Plane 内部的唯一模型路由和长期 Credential 使用者。Worker 只通过 `execution-port-model-stream` 请求模型并接收流；请求中只带短期引用、路由和预算事实。Credential 服务保存受保护引用，公开合同和持久 Delivery 不保存原始密钥。
+当前模型执行有两种生产装配，使用同一份 `ModelOpen` / `ModelChunk` / `ModelAck` 合同：服务端路径由 Control Plane 的 Provider Gateway 解析组织模型路由和 Credential 引用；Device 路径由 Worker 的 `with_device_providers` 接入设备上的 `winwincode-provider` 持久化存储与执行通道。设备 Provider 组件负责设备凭据、调用去重、恢复与结算，Worker 负责受当前租约约束的执行交接。Credential 服务管理组织受保护引用；公开合同、ExecutionPort 消息和持久 Delivery 均不携带原始密钥。
+
+两种装配共用执行身份与交付边界。Core、子角色和 Observer 都先把原始模型请求可靠交接给现有 outbox，再由驱动器派发；角色决定请求内容，生命周期规则由公共执行机制决定。详见 [Worker 消费与交付边界](execution-delivery-boundaries.md)。
 
 Publication 先在 Control Plane 写入审批绑定、操作键和本地 receipt，再执行外部写入；重试通过同一操作键查询已存在的结果。Audit Ledger 保存主体、范围、操作、结果和摘要链，不复制命令正文、模型正文或凭据。
+
+## 并发限制与 Fusion
+
+任务并发和任务内部的模型并发分别计数。一个 Worker 同时执行一个 Job，
+该 Job 内部的 Fusion 成员可以同时调用多个 Provider。
+
+| 层级 | 当前限制 | 计数范围与实际影响 |
+| --- | --- | --- |
+| Device 占用 | 每设备 1 个活跃占用 | 约束设备持有者，同一持有者可启动多个 WorkerSession。 |
+| Device WorkerSession | 使用协议容量上界 1024，不再设生产业务上限 4 | 这是现有协议的计数边界；Supervisor 不再额外限制 Worker 进程数。Server 仍按持久预留和设备容量判断空位。 |
+| Worker Job | 生产 Worker 最多 1 个 | 约束一个 Worker 的执行任务，不限制该任务内部只能调用一个模型。 |
+| 执行准入 | 同一 ProductSession 为 1；组织、项目、仓库、Delivery 和 WorkerPool 不再额外限制业务并发；排队上限为 10000 | 同一上下文保持顺序，独立任务可并行；仓库写冲突检查仍生效。旧版默认 1/4 的策略原子升级，其他策略配置不覆盖。 |
+| Device Provider | 同一设备每个 Provider 最多 3 个在途模型请求 | 全设备 Worker 进程共用配额，不按 Worker 分别放大。三槽满后仅该请求等待，其他 Provider 和取消消息继续处理；完成或进程退出后释放。GLM、MiMo、DeepSeek、Qwen 四家合计最多 12 路。 |
+| Fusion 面板 | 3 至 16 个成员 | 同一轮所有成员并发发起，各自保存结果；收齐该轮结果后再执行依赖它们的聚合。 |
+| Benchmark 批次 | 调度器默认并发 1，可传入正整数；单个 plan 顺序推进 cell | 独立 Fusion cell 同时发起四个成员，再等待全部结果；批次并发与 cell 内成员并发分别控制。 |
+
+生产 Device 的容量值来自
+[`service.rs`](../crates/winwincode-device-client/src/service.rs)，Worker 的 Job 数量来自
+[`main.rs`](../crates/winwincode-worker/src/main.rs)。模型线程派发位于
+[`device_model.rs`](../crates/winwincode-worker/src/device_model.rs)。Provider 的配额按设备目录和
+Provider ID 共享；满额请求保留在 durable outbox 等待重试，不写入首次调用记录。
+已记录交换的精确重放不占新的调用槽位。连接测试共用同一 Provider 配额，
+满额时沿用不可用结果，不等待并阻塞 Device 控制循环。
+
+[`Fusion 面板`](../crates/winwincode-fusion/src/panel.rs)使用 `FuturesUnordered`
+并发收集成员；[`基准运行器`](../scripts/run-real-task-benchmark.mjs)使用
+`Promise.allSettled` 等待四个成员。完成顺序可以不同，聚合输入仍按固定供应商顺序排列。
+成员结果分别落盘，恢复时保留原回执顺序。已启动成员收尾后才返回；
+持久化、证据及未决账本错误优先于成员终止，聚合不会提前开始。
+
+基准的四个成员通过共享 runtime 启动独立 ProductSession/Job 时，各成员可以同时进入
+Running，再由 Provider 配额约束模型请求。生产 Fusion 在同一个 Job 内同时发起四家
+Provider 的成员调用，四家各占一个槽位；同一家 Provider 的其他任务共用该家的三个槽位。
+
+Benchmark 的重复工具保护按同一请求身份在 run 内累计计数，第六次在执行前停止。
+`public_smoke` 的参数固定为 `{}`，其比较身份还包含可信工作区中、冻结任务契约允许的
+源码路径和内容摘要；修改源码属于不同请求，日志、缓存和构建产物不参与计数。
+原始请求摘要单独用于重放校验，已准入调用的重放不重新读取当前源码、不重复计数。
+旧记录没有源码证据时不回填当前源码，已保留的停止事实继续有效。
+
+Server Model admission 另有 `workerConcurrencyLimit`、Provider `concurrentRequests`、
+RPM/TPM 和路由队列。这些控制服务端 Provider Gateway 装配；当前 managed Worker
+在 Device 本地处理 `ModelOpen`，不经过该服务端模型准入，不能把这些值当作当前
+Device Provider 的实际并发上限。
 
 ## 本地与企业部署
 
@@ -240,7 +318,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 | Helper 身份在执行前校验 | [`crates/helper/src/main.rs`](../crates/helper/src/main.rs) | [`crates/winwincode-codex/src/helper_release.rs`](../crates/winwincode-codex/src/helper_release.rs) |
 | Local 只组装两个 Rust 运行模块 | [`crates/winwincode-local/src/lib.rs`](../crates/winwincode-local/src/lib.rs) | [`tests/browser-local-controls-production.test.mjs`](../tests/browser-local-controls-production.test.mjs) |
 | ProductSession 与绑定身份可恢复 | [`crates/winwincode-session/src/lib.rs`](../crates/winwincode-session/src/lib.rs) | [`crates/winwincode-control-plane/tests/session_identity_vertical.rs`](../crates/winwincode-control-plane/tests/session_identity_vertical.rs) |
-| Provider Gateway 集中模型和凭据引用 | [`crates/winwincode-control-plane/src/provider_gateway.rs`](../crates/winwincode-control-plane/src/provider_gateway.rs) | [`crates/winwincode-control-plane/tests/provider_production.rs`](../crates/winwincode-control-plane/tests/provider_production.rs) |
+| Provider Gateway 管理组织模型与凭据引用 | [`crates/winwincode-control-plane/src/provider_gateway.rs`](../crates/winwincode-control-plane/src/provider_gateway.rs) | [`crates/winwincode-control-plane/tests/provider_production.rs`](../crates/winwincode-control-plane/tests/provider_production.rs) |
 | Publication 以 receipt 保护外部写入 | [`crates/winwincode-publication/src/coordinator.rs`](../crates/winwincode-publication/src/coordinator.rs) | [`crates/winwincode-publication/tests/publication_coordinator.rs`](../crates/winwincode-publication/tests/publication_coordinator.rs) |
 | Audit 保存摘要链和 retention | [`crates/winwincode-audit/src/lib.rs`](../crates/winwincode-audit/src/lib.rs) | [`crates/winwincode-audit/tests/audit_store.rs`](../crates/winwincode-audit/tests/audit_store.rs) |
 | Storage 原子写入 state、receipt 和 outbox | [`crates/winwincode-storage/src/lib.rs`](../crates/winwincode-storage/src/lib.rs) | [`crates/winwincode-storage/tests/execution_registry.rs`](../crates/winwincode-storage/tests/execution_registry.rs) |

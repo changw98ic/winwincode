@@ -33,6 +33,12 @@ shasum -a 256 /tmp/winwincode-upstream/SOURCE-CANDIDATE_COMMIT.tar.gz
 
 Codex 源码位于 `third_party/codex/`，Rust Kernel 直接构建它，不经过命令行回退或独立 app-server。
 
+Code Mode 使用产品 helper 中的原生 V8 运行时。Kernel 直接启动已认证 helper 的 stdio 模式，并通过协议管理 cell。安装目录和数据目录可以位于不同文件系统。`.cargo/config.toml` 固定 V8 sandbox 的源码构建参数。ICU 数据由 `deno_core_icudata` 内嵌；构建驱动核对固定数据摘要，再将数据提供给 V8 快照生成。Date 和 Intl 在运行时使用这份数据。Temporal 保持关闭。
+
+源码构建需要 Python 3、curl 和本机编译工具链。macOS 使用 Xcode，并为 bindgen 指定 libclang 19 或更新版本的 `LIBCLANG_PATH`；V8 使用固定 Chromium Clang。Linux 使用 `scripts/install-code-mode-linux-build-deps.sh` 安装 LLVM 23 和运行资源，并设置 `LIBCLANG_PATH=/usr/lib/llvm-23/lib`、`CLANG_BASE_PATH=/usr/lib/llvm-23`。安装脚本核对 LLVM 软件源签名密钥，并将 Debian 的原生 compiler-rt 资源映射到 GN 要求的目录。开发构建和发布构建都使用优化的 V8 引擎。首次构建会下载 Chromium 构建工具并编译 V8。`corepack pnpm test:rust` 先构建产品 helper，再运行真实 Kernel 的 Code Mode 测试。四目标发布矩阵使用各目标的 release helper 执行同一测试。
+
+`.github/workflows/native-code-mode.yml` 在 PR 中执行四目标原生 host 构建、身份查询和真实 Kernel 验收。正式发布在主线核验通过后执行产物验收。
+
 ### 1. 核对候选
 
 在仓库外展开候选并检查：
@@ -51,12 +57,30 @@ Codex 源码位于 `third_party/codex/`，Rust Kernel 直接构建它，不经�
 2. 更新 `upstream/sources.lock.json` 的 tag、version、commit、archive SHA-256、接口、符号和生产闭包；
 3. 更新 `third_party/codex.UPSTREAM.json` 的同一身份、候选原始 Cargo lock SHA-256 和已应用补丁列表；
 4. 逐个审查 `upstream/patches/codex/*.patch`。上游已包含的修复应删除对应补丁与记录；仍需要的补丁针对候选重新生成；
-5. 从仓库根目录精确应用保留补丁：
+5. 从仓库根目录按清单顺序精确应用保留补丁。`stripComponents` 是相对 Codex 源码根目录应用时剥离的路径层数，缺省为 `1`；旧 `0006` 带 `third_party/codex` 前缀，明确记录为 `3`：
 
    ```bash
-   patch --batch --strip=1 \
-     --directory=third_party/codex \
-     --input=upstream/patches/codex/PATCH_FILE.patch
+   node --input-type=module <<'NODE'
+   import { readFileSync } from 'node:fs'
+   import { spawnSync } from 'node:child_process'
+   import { createHash } from 'node:crypto'
+   const lock = JSON.parse(readFileSync('upstream/sources.lock.json', 'utf8'))
+   for (const patch of lock.patches) {
+     if (patch.planned || !patch.file.startsWith('upstream/patches/codex/')) continue
+     const input = readFileSync(patch.file)
+     if (patch.patchSha256 && createHash('sha256').update(input).digest('hex') !== patch.patchSha256) {
+       throw new Error(`Patch digest mismatch: ${patch.file}`)
+     }
+     const result = spawnSync('patch', [
+       '--batch', '--forward', '--fuzz=0',
+       `--strip=${patch.stripComponents ?? 1}`,
+       '--directory=third_party/codex',
+     ], { input, encoding: 'utf8' })
+     process.stdout.write(result.stdout ?? '')
+     process.stderr.write(result.stderr ?? '')
+     if (result.error || result.status !== 0) throw new Error(`Patch failed: ${patch.file}`)
+   }
+   NODE
    ```
 
 6. 通过 Cargo 规范命令更新根 `Cargo.lock`，不要手改 lock；
@@ -74,6 +98,8 @@ corepack pnpm verify
 ```
 
 另外逐项比较 `upstream/sources.lock.json` 与 `third_party/codex.UPSTREAM.json` 的 commit、版本、原始 lock、补丁列表和许可证。生产闭包、公共接口或补丁锚点发生未解释变化时停止升级。
+
+`node --test tests/codex-handoff-patch-replay.test.mjs` 离线验证交接实现及回归文件：逆向补丁后的文件必须匹配固定归档的原始 SHA-256，再按声明顺序应用并逐字节比较当前源码。升级时重新核对原始摘要；该定向检查只覆盖这两个文件，完整补丁集仍须在干净候选上重放。
 
 ### 4. 回滚 Codex
 

@@ -9,7 +9,7 @@
 
 use std::{fmt, path::Path};
 
-use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest};
+use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::{
     generated::{ExecutionLeaseStamp, ExecutionPortMessage, LeaseRenewMessage},
     transport::{
@@ -20,8 +20,9 @@ use winwincode_execution_port::{
 use winwincode_storage::{
     ExecutionLeaseRenewal, LeaseWriteStatus, ProductStateStorage, SqliteStorage,
     WorkerOutboundAcknowledgement, WorkerOutboundAuthority, WorkerOutboundClaim,
-    WorkerOutboundEnqueueRequest, WorkerOutboundPageCursor, WorkerOutboundQueueConfig,
-    WorkerOutboundQueueError, WorkerOutboundQueueErrorCode, WorkerSlotAuthority,
+    WorkerOutboundConfirmationProgress, WorkerOutboundEnqueueRequest, WorkerOutboundPageCursor,
+    WorkerOutboundQueueConfig, WorkerOutboundQueueError, WorkerOutboundQueueErrorCode,
+    WorkerSlotAuthority,
 };
 
 use crate::{
@@ -335,6 +336,42 @@ impl DurableWorkerInteractionOutbound {
             )
         });
         Ok(claims)
+    }
+
+    /// Reliably accepts an authenticated remote receipt before raw-frame cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign or unclaimed interaction receipts and storage failures.
+    pub fn confirm_remote(
+        &mut self,
+        worker: &WorkerId,
+        instance: &WorkerInstanceId,
+        message: &ExecutionMessageId,
+        now: &Instant,
+    ) -> Result<bool, WorkerInteractionConnectionError> {
+        self.storage
+            .worker_outbound_queue(self.config)
+            .map_err(|error| map_connection_error(&error))?
+            .confirm_remote(worker, instance, message, now)
+            .map_err(|error| map_connection_error(&error))
+    }
+
+    /// Retries proven cleanup independently of repeated transport ACKs.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed durable proofs or failure to load the cleanup batch.
+    pub fn retry_confirmed(
+        &mut self,
+        worker: &WorkerId,
+        instance: &WorkerInstanceId,
+    ) -> Result<WorkerOutboundConfirmationProgress, WorkerInteractionConnectionError> {
+        self.storage
+            .worker_outbound_queue(self.config)
+            .map_err(|error| map_connection_error(&error))?
+            .retry_confirmed(worker, instance)
+            .map_err(|error| map_connection_error(&error))
     }
 
     /// Acknowledges a claimed message and securely removes its raw frame.

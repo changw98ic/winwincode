@@ -303,3 +303,30 @@ impl SqliteConfig {
             .await
     }
 }
+
+/// Keeps the same storage fault active after an errored connection is discarded.
+#[cfg(test)]
+pub(crate) async fn open_page_limited_test_pool(
+    options: SqliteConnectOptions,
+    page_limit: std::sync::Arc<std::sync::atomic::AtomicI64>,
+) -> Result<SqlitePool, Error> {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _metadata| {
+            let limit = page_limit.load(std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                let actual: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "PRAGMA max_page_count={limit}"
+                )))
+                .fetch_one(connection)
+                .await?;
+                assert_eq!(
+                    actual, limit,
+                    "replacement connection must retain the storage budget"
+                );
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await
+}

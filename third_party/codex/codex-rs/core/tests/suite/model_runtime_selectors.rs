@@ -117,7 +117,12 @@ async fn response_for_remote_model(
 
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(configure);
+        .with_config(move |config| {
+            config.web_search_mode = codex_core::config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
+            configure(config);
+        });
     let test = builder.build(&server).await?;
     let models_manager = test.thread_manager.get_models_manager();
     let available_model = wait_for_model_available(&models_manager, &model_slug).await;
@@ -194,9 +199,6 @@ async fn remote_tool_mode_selector_overrides_feature_flags() -> Result<()> {
             // Code-mode entrypoints.
             codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
             codex_code_mode::WAIT_TOOL_NAME.to_string(),
-            "request_user_input".to_string(),
-            // Hosted Responses tool.
-            "web_search".to_string(),
         ]
     );
 
@@ -232,6 +234,9 @@ async fn remote_code_mode_only_selector_fails_closed_when_host_is_disabled() -> 
     let mut model = remote_model("test-tool-mode-code-mode-only-host-disabled");
     model.tool_mode = Some(ToolMode::CodeModeOnly);
     let response = response_for_remote_model(model, |config| {
+        config.web_search_mode = codex_core::config::Constrained::allow_any(
+            codex_protocol::config_types::WebSearchMode::Disabled,
+        );
         config
             .features
             .disable(Feature::CodeModeHost)

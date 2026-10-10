@@ -2182,29 +2182,33 @@ async fn drain_in_flight(
 ) -> CodexResult<Option<ChangeBatchHandoff>> {
     let mut handoff = None;
     while let Some(res) = in_flight.next().await {
-        match res {
-            Ok(ToolCallCompletion::Response(response_input)) => {
-                let response_item = response_input.into();
-                sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-                    .await;
-                mark_thread_memory_mode_polluted_if_external_context(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    &response_item,
-                )
-                .await;
-            }
-            Ok(ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(next))) => {
+        let response_input = match res {
+            Ok(ToolCallCompletion::Response(response)) => response,
+            Ok(ToolCallCompletion::Continuation {
+                response,
+                continuation: ToolContinuation::YieldToHost(next),
+            }) => {
                 if handoff.replace(next).is_some() {
                     return Err(CodexErr::InvalidRequest(
                         "multiple submit_change_batch handoffs in one response".to_string(),
                     ));
                 }
+                response
             }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+                continue;
             }
-        }
+        };
+        let response_item = response_input.into();
+        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+            .await;
+        mark_thread_memory_mode_polluted_if_external_context(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            &response_item,
+        )
+        .await;
     }
     Ok(handoff)
 }
@@ -2826,10 +2830,13 @@ async fn try_run_sampling_request(
     } else {
         Some(turn_context.turn_timing_state.begin_tool_blocking())
     };
-    let handoff = if response_completed {
+    let handoff = if response_completed || !turn_context.submit_change_batch {
+        // Ordinary tools already started when their call item arrived. Preserve
+        // their actual output even when the surrounding stream closes early.
+        // ToolCallRuntime still owns cancellation and handler teardown.
         drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?
     } else {
-        // A cancelled or incomplete stream never commits a terminal handoff.
+        // An incomplete delegated batch never starts or commits a handoff.
         in_flight.clear();
         None
     };

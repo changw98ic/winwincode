@@ -106,7 +106,7 @@ fn worker_frame() -> TypedFrame {
 #[test]
 fn all_canonical_fixture_messages_round_trip_through_remote_json() {
     let messages = fixture_messages();
-    assert_eq!(messages.len(), 31);
+    assert_eq!(messages.len(), 30);
 
     for (direction, message) in messages {
         let frame = TypedFrame::new(direction, message).expect("typed frame is valid");

@@ -1,0 +1,234 @@
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -98,6 +98,7 @@
+ ) {
+     sess.record_conversation_items(turn_context, std::slice::from_ref(item))
+         .await;
++    crate::tools::ToolDiagnostics::record_model_response(sess, turn_context, item).await;
+     let defers_mailbox_delivery = finalized_facts.map_or_else(
+         || {
+             completed_item_defers_mailbox_delivery_to_next_turn(
+diff --git a/codex-rs/core/src/tools/cell_facts.rs b/codex-rs/core/src/tools/cell_facts.rs
+--- a/codex-rs/core/src/tools/cell_facts.rs
++++ b/codex-rs/core/src/tools/cell_facts.rs
+@@ -94,10 +94,22 @@
+                 } else {
+                     "cell_owner_unverified"
+                 };
++                crate::tools::tool_diagnostics::ToolDiagnostics::unavailable_wait(
++                    session, turn, call_id, cell_id, state,
++                )
++                .await;
+                 return Err(FunctionCallError::RespondToModel(serde_json::json!({
+                     "type": "code_cell_recovery", "schema_version": 1, "state": state, "cell": cell,
+                 }).to_string()));
+             }
++            crate::tools::tool_diagnostics::ToolDiagnostics::unavailable_wait(
++                session,
++                turn,
++                call_id,
++                cell_id,
++                "cell_not_found",
++            )
++            .await;
+             return Ok(None);
+         };
+         let store = facts
+@@ -123,8 +135,17 @@
+             .await
+             .map_err(storage_error)?;
+         let Some(wait) = wait else {
++            crate::tools::tool_diagnostics::ToolDiagnostics::unavailable_wait(
++                session,
++                turn,
++                call_id,
++                cell_id,
++                "cell_closed",
++            )
++            .await;
+             return Ok(None);
+         };
++        crate::tools::tool_diagnostics::ToolDiagnostics::refresh(session).await;
+         Ok(Some(ToolCellWait {
+             facts: Arc::clone(&facts),
+             thread_id: session.thread_id.to_string(),
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -157,9 +157,15 @@
+                 });
+         }
+         exec.session.services.elicitations.wait_until_clear().await;
+-        let output = handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
+-            .await
+-            .map_err(FunctionCallError::RespondToModel)?;
++        let output = handle_runtime_response(
++            &exec,
++            response,
++            &call_id,
++            args.max_output_tokens,
++            started_at,
++        )
++        .await
++        .map_err(FunctionCallError::RespondToModel)?;
+         Ok(CoreToolOutput {
+             output: boxed_tool_output(output),
+             continuation,
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -253,10 +253,17 @@
+ pub(super) async fn handle_runtime_response(
+     exec: &ExecContext,
+     response: RuntimeResponse,
++    call_id: &str,
+     max_output_tokens: Option<usize>,
+     started_at: std::time::Instant,
+ ) -> Result<FunctionToolOutput, String> {
+     let script_status = format_script_status(&response);
++    let feedback = crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
++        &exec.session,
++        &exec.turn,
++        call_id,
++    )
++    .await;
+ 
+     match response {
+         RuntimeResponse::Yielded { content_items, .. } => {
+@@ -264,6 +271,9 @@
+             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
++            if let Some(feedback) = feedback {
++                content_items.push(feedback);
++            }
+             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
+         }
+         RuntimeResponse::Terminated { content_items, .. } => {
+@@ -271,6 +281,9 @@
+             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
++            if let Some(feedback) = feedback {
++                content_items.push(feedback);
++            }
+             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
+         }
+         RuntimeResponse::Result {
+@@ -288,6 +301,9 @@
+             }
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
++            if let Some(feedback) = feedback {
++                content_items.push(feedback);
++            }
+             Ok(FunctionToolOutput::from_content(
+                 content_items,
+                 Some(success),
+diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+@@ -96,13 +96,45 @@
+                 let exec = ExecContext { session, turn };
+                 let started_at = std::time::Instant::now();
+                 let cell_id = codex_code_mode::CellId::new(args.cell_id);
+-                let durable_wait = crate::tools::execution_facts::ExecutionFacts::begin_cell_wait(
+-                    &exec.session,
+-                    &exec.turn,
+-                    cell_id.as_str(),
+-                    &call_id,
+-                )
+-                .await?;
++                let durable_wait =
++                    match crate::tools::execution_facts::ExecutionFacts::begin_cell_wait(
++                        &exec.session,
++                        &exec.turn,
++                        cell_id.as_str(),
++                        &call_id,
++                    )
++                    .await
++                    {
++                        Ok(wait) => wait,
++                        Err(FunctionCallError::RespondToModel(error)) => {
++                            let mut content = vec![
++                                codex_protocol::models::FunctionCallOutputContentItem::InputText {
++                                    text: error,
++                                },
++                            ];
++                            if let Some(feedback) =
++                                crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
++                                    &exec.session,
++                                    &exec.turn,
++                                    &call_id,
++                                )
++                                .await
++                            {
++                                content.push(feedback);
++                            }
++                            telemetry.finish(/*success*/ false);
++                            return Ok(CoreToolOutput {
++                                output: boxed_tool_output(
++                                    crate::tools::context::FunctionToolOutput::from_content(
++                                        content,
++                                        Some(false),
++                                    ),
++                                ),
++                                continuation: None,
++                            });
++                        }
++                        Err(error) => return Err(error),
++                    };
+                 let wait_future = async {
+                     if args.terminate {
+                         exec.session
+@@ -180,6 +212,7 @@
+                 let output = handle_runtime_response(
+                     &exec,
+                     wait_response.into(),
++                    &call_id,
+                     args.max_tokens,
+                     started_at,
+                 )
+diff --git a/codex-rs/core/src/tools/execution_facts.rs b/codex-rs/core/src/tools/execution_facts.rs
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -30,8 +30,8 @@
+ /// Core-owned process incarnation and durable receipts, shared by all tool families.
+ #[derive(Default)]
+ pub(crate) struct ExecutionFacts {
+-    store: OnceCell<Arc<StateRuntime>>,
+-    owner_id: OnceCell<String>,
++    pub(super) store: OnceCell<Arc<StateRuntime>>,
++    pub(super) owner_id: OnceCell<String>,
+     cells: Mutex<HashMap<String, (String, String)>>,
+     pub(super) active_requests: Mutex<HashSet<i64>>,
+ }
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -3,6 +3,7 @@
+ mod execution_facts;
+ pub(crate) use execution_facts::ExecutionFacts;
+ mod result_recovery;
++mod tool_diagnostics;
+ mod tool_reconciliation;
+ pub(crate) use authorization::authorize_request;
+ pub(crate) mod code_mode;
+@@ -151,3 +152,5 @@
+         exec_output.aggregated_output.text.clone()
+     }
+ }
++
++pub(crate) use tool_diagnostics::ToolDiagnostics;
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -750,6 +750,7 @@
+         }
+ 
+         facts.claim(&invocation, tool.as_ref()).await?;
++        super::tool_diagnostics::ToolDiagnostics::refresh(&invocation.session).await;
+         notify_tool_start(&invocation).await;
+         let mut control_tool_analytics = tool
+             .is_builtin_control_tool()

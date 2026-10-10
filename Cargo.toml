@@ -24,6 +24,7 @@ members = [
   "crates/winwincode-integration-core",
   "crates/winwincode-integration-sqlite",
   "crates/winwincode-local",
+  "crates/winwincode-network",
   "crates/winwincode-observability-core",
   "crates/winwincode-observability-sqlite",
   "crates/winwincode-s3-artifact-adapter",
@@ -59,6 +60,8 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std
 codex-core-api = { path = "third_party/codex/codex-rs/core-api" }
 codex-api = { path = "third_party/codex/codex-rs/codex-api" }
 codex-arg0 = { path = "third_party/codex/codex-rs/arg0" }
+codex-code-mode = { path = "third_party/codex/codex-rs/code-mode" }
+codex-code-mode-host = { path = "third_party/codex/codex-rs/code-mode-host" }
 codex-protocol = { path = "third_party/codex/codex-rs/protocol" }
 codex-shell-command = { path = "third_party/codex/codex-rs/shell-command" }
 codex-model-provider-info = { path = "third_party/codex/codex-rs/model-provider-info" }
@@ -72,7 +75,7 @@ quick-xml = "=0.41.0"
 # native link. The path source below backports the upstream named-SAVEPOINT fix.
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
 rcgen = "=0.14.7"
-rustls = "=0.23.36"
+rustls = "=0.23.45"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
@@ -98,6 +101,7 @@ winwincode-connector-slack = { path = "crates/winwincode-connector-slack" }
 winwincode-connector-teams = { path = "crates/winwincode-connector-teams" }
 winwincode-connector-webhook = { path = "crates/winwincode-connector-webhook" }
 winwincode-provider = { path = "crates/winwincode-provider" }
+winwincode-network = { path = "crates/winwincode-network" }
 winwincode-publication = { path = "crates/winwincode-publication" }
 winwincode-session = { path = "crates/winwincode-session" }
 winwincode-storage = { path = "crates/winwincode-storage" }
@@ -117,9 +121,8 @@ codegen-units = 1
 lto = "thin"
 strip = "symbols"
 
-# The production adapter bounds the authenticated helper image at 64 MiB.
-# Strip the development helper so local composition uses the same bounded
-# release-shaped executable rather than an oversized debug image.
+# Strip the development helper. Production composition rebuilds it in release
+# mode when it exceeds the authenticated helper's 64 MiB image boundary.
 [profile.dev.package.winwincode-kernel-helper]
 strip = "symbols"
 

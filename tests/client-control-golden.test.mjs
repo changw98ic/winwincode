@@ -19,7 +19,6 @@ const CLIENT_TO_SERVER_KINDS = Object.freeze([
   'client.hello',
   'client.heartbeat',
   'client.connect_code.published',
-  'client.access.challenge_ack',
   'client.occupancy.ack',
   'client.occupancy.rejected',
   'client.repository.upsert',
@@ -37,8 +36,6 @@ const CLIENT_TO_SERVER_KINDS = Object.freeze([
 ])
 
 const SERVER_TO_CLIENT_KINDS = Object.freeze([
-  'client.enrollment_accepted',
-  'client.access.challenge',
   'client.occupancy.offer',
   'client.occupancy.release',
   'client.occupancy.force_fence',
@@ -47,7 +44,6 @@ const SERVER_TO_CLIENT_KINDS = Object.freeze([
   'client.worker.stop',
   'client.candidate.apply',
   'client.client_lock',
-  'client.credential_rotate',
   'client.provider.apply',
   'client.extension.apply',
   'client.repository.register',
@@ -77,8 +73,6 @@ const FACT_KINDS = Object.freeze(new Set([
   'client.worker.reconcile',
   'client.repository.status',
   'client.command_ack',
-  'client.enrollment_accepted',
-  'client.access.challenge',
 ]))
 
 // Repository traffic is stamped only when an active occupancy lease exists
@@ -247,8 +241,8 @@ const invalidFiles = readdirSync(invalidDir, { withFileTypes: true })
   .sort()
 
 test('kind registry matches the ClientControlPort plan verbatim', () => {
-  assert.equal(CLIENT_TO_SERVER_KINDS.length, 19)
-  assert.equal(SERVER_TO_CLIENT_KINDS.length, 14)
+  assert.equal(CLIENT_TO_SERVER_KINDS.length, 18)
+  assert.equal(SERVER_TO_CLIENT_KINDS.length, 11)
   assert.equal(new Set(ALL_KINDS).size, ALL_KINDS.length)
 })
 

@@ -58,6 +58,47 @@ pub fn observed_verification_command_is_test(command: &[String]) -> bool {
     }
 }
 
+/// Recognizes test, build and source checks for advisory progress records.
+/// Shell expansions and control flow are not interpreted as check results.
+#[must_use]
+pub fn observed_verification_command_is_check(command: &[String]) -> bool {
+    if observed_verification_command_is_test(command) {
+        return true;
+    }
+    let Some(tokens) = observed_command_tokens(command) else {
+        return false;
+    };
+    let tokens = tokens
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let tokens = match tokens.as_slice() {
+        [corepack, rest @ ..] if corepack == "corepack" => rest,
+        tokens => tokens,
+    };
+    match tokens {
+        [tool, subcommand, ..] if tool == "cargo" => {
+            matches!(subcommand.as_str(), "check" | "clippy" | "build")
+                || (subcommand == "fmt" && tokens.iter().any(|arg| arg == "--check"))
+        }
+        [tool, rest @ ..] if matches!(tool.as_str(), "pnpm" | "npm" | "yarn" | "bun") => {
+            let script = match rest {
+                [run, script, ..] if run == "run" => Some(script.as_str()),
+                [script, ..] => Some(script.as_str()),
+                _ => None,
+            };
+            matches!(
+                script,
+                Some(
+                    "lint" | "build" | "typecheck" | "verify" | "format:check" | "contracts:check"
+                )
+            )
+        }
+        [tool, ..] if tool == "tsc" => true,
+        _ => false,
+    }
+}
+
 fn canonical_observed_command(command: &[String]) -> Option<String> {
     match command {
         [shell, flag, script]
@@ -293,5 +334,26 @@ mod tests {
             "run".to_owned(),
             "test".to_owned(),
         ]));
+    }
+    #[test]
+    fn advisory_checks_recognize_shell_invocations_without_argument_false_positives() {
+        for argv in [
+            vec!["/bin/zsh", "-lc", "corepack pnpm typecheck"],
+            vec!["cargo", "fmt", "--all", "--", "--check"],
+            vec!["cargo", "test"],
+        ] {
+            assert!(observed_verification_command_is_check(
+                &argv.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+        for argv in [
+            vec!["printf", "build"],
+            vec!["cargo", "fmt"],
+            vec!["/bin/zsh", "-lc", "cargo check; printf done"],
+        ] {
+            assert!(!observed_verification_command_is_check(
+                &argv.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
     }
 }

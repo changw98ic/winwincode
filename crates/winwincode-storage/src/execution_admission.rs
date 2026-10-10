@@ -637,6 +637,63 @@ impl<'storage> ExecutionAdmission<'storage> {
         &mut self,
         policy: &ExecutionAdmissionPolicy,
     ) -> Result<bool, ExecutionAdmissionError> {
+        self.configure_policy_inner(policy, None)
+    }
+
+    /// Configures the production scheduler defaults without a global Job cap.
+    /// A `ProductSession` still executes one Job at a time; provider concurrency
+    /// and repository write exclusion are enforced at their own boundaries.
+    /// Only the exact former defaults can be upgraded in an existing database.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed boundaries, different installed policies, and `SQLite` failures.
+    pub fn configure_runtime_policy(
+        &mut self,
+        boundary: ExecutionAdmissionBoundary,
+        runtime_limited: bool,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        let limits = ExecutionAdmissionLimits {
+            max_concurrent: if matches!(boundary, ExecutionAdmissionBoundary::ProductSession { .. })
+            {
+                1
+            } else {
+                i64::MAX as u64
+            },
+            max_queued: 10_000,
+            token_budget: None,
+            cost_budget_microunits: None,
+            max_runtime_millis: runtime_limited.then_some(604_800_000),
+        };
+        let old_max_concurrent = match &boundary {
+            ExecutionAdmissionBoundary::ProductSession { .. } => None,
+            ExecutionAdmissionBoundary::WorkerPool { worker_pool_id, .. } => {
+                match worker_pool_id.0.as_str() {
+                    "wpl_00000000000000000000000001" | "wpl_000000000000000000000000D3" => Some(1),
+                    "wpl_000000000000000000000000F7" => Some(4),
+                    _ => None,
+                }
+            }
+            _ => Some(1),
+        };
+        let former_default = old_max_concurrent.map(|max_concurrent| ExecutionAdmissionPolicy {
+            boundary: boundary.clone(),
+            limits: ExecutionAdmissionLimits {
+                max_concurrent,
+                ..limits
+            },
+        });
+        self.configure_policy_inner(
+            &ExecutionAdmissionPolicy { boundary, limits },
+            former_default.as_ref(),
+        )
+    }
+
+    fn configure_policy_inner(
+        &mut self,
+        policy: &ExecutionAdmissionPolicy,
+        former_default: Option<&ExecutionAdmissionPolicy>,
+    ) -> Result<bool, ExecutionAdmissionError> {
         validate_policy(policy)?;
         let boundary_key = boundary_key(&policy.boundary)?;
         let boundary_json = encode_json(&policy.boundary)?;
@@ -659,9 +716,19 @@ impl<'storage> ExecutionAdmission<'storage> {
         if let Some(existing) = existing {
             let existing = complete_policy(&existing)?;
             if existing != *policy {
-                return Err(ExecutionAdmissionError::invalid(
-                    "execution admission policy is already configured differently",
-                ));
+                if former_default != Some(&existing) {
+                    return Err(ExecutionAdmissionError::invalid(
+                        "execution admission policy is already configured differently",
+                    ));
+                }
+                upgrade_runtime_policy(
+                    &transaction,
+                    &boundary_key,
+                    &existing.limits,
+                    policy.limits.max_concurrent,
+                )?;
+                transaction.commit().map_err(sql_error)?;
+                return Ok(true);
             }
             transaction.commit().map_err(sql_error)?;
             return Ok(false);
@@ -2715,6 +2782,46 @@ fn to_sql_integer(value: u64, field: &str) -> Result<i64, ExecutionAdmissionErro
     i64::try_from(value).map_err(|_| {
         ExecutionAdmissionError::invalid(format!("{field} exceeds the supported range"))
     })
+}
+
+fn upgrade_runtime_policy(
+    connection: &Connection,
+    boundary_key: &str,
+    previous: &ExecutionAdmissionLimits,
+    max_concurrent: u64,
+) -> Result<(), ExecutionAdmissionError> {
+    let updated = connection
+        .execute(
+            "UPDATE execution_admission_policies SET max_concurrent = ?2
+             WHERE boundary_key = ?1 AND max_concurrent = ?3
+               AND max_queued = ?4 AND token_budget IS ?5
+               AND cost_budget_microunits IS ?6 AND max_runtime_millis IS ?7",
+            params![
+                boundary_key,
+                to_sql_integer(max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_queued, "maxQueued")?,
+                previous
+                    .token_budget
+                    .map(|value| to_sql_integer(value, "tokenBudget"))
+                    .transpose()?,
+                previous
+                    .cost_budget_microunits
+                    .map(|value| to_sql_integer(value, "costBudgetMicrounits"))
+                    .transpose()?,
+                previous
+                    .max_runtime_millis
+                    .map(|value| to_sql_integer(value, "maxRuntimeMillis"))
+                    .transpose()?,
+            ],
+        )
+        .map_err(sql_error)?;
+    if updated != 1 {
+        return Err(ExecutionAdmissionError::invalid(
+            "execution admission defaults changed during upgrade",
+        ));
+    }
+    Ok(())
 }
 
 fn from_sql_integer(value: i64, field: &str) -> Result<u64, ExecutionAdmissionError> {

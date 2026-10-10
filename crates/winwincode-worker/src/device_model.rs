@@ -2,6 +2,14 @@
 
 //! Device-local model lane. Only execution control and public task events use the server port.
 
+#[cfg(test)]
+#[path = "device_model_concurrency_tests.rs"]
+mod concurrency_tests;
+
+#[cfg(all(test, feature = "test-support"))]
+#[path = "device_model_history_regression_tests.rs"]
+mod history_regression_tests;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -10,7 +18,10 @@ use std::{
     sync::mpsc,
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelChunkMessage};
-use winwincode_provider::{DeviceProviderError, DeviceProviderStore, model_failure};
+use winwincode_provider::{
+    DeviceModelAdmission, DeviceModelPermit, DeviceProviderError, DeviceProviderStore,
+    model_failure,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceModelSendOutcome {
@@ -163,14 +174,33 @@ impl DeviceModels {
                         Err(DeviceProviderError)
                     };
                 }
-                if self.pending.len() >= 16 {
-                    return Ok(DeviceModelSendOutcome::NotStarted);
-                }
+                let store = DeviceProviderStore::open(&self.directory);
+                let admission = store
+                    .as_ref()
+                    .map_err(|error| *error)
+                    .and_then(|store| store.try_model_permit(open));
+                let permit = match admission {
+                    Ok(DeviceModelAdmission::Ready(permit)) => permit,
+                    Ok(DeviceModelAdmission::Deferred) => {
+                        return Ok(DeviceModelSendOutcome::NotStarted);
+                    }
+                    Err(_) => {
+                        let chunks = store
+                            .as_ref()
+                            .ok()
+                            .and_then(|store| store.reject_model_start(open).ok())
+                            .unwrap_or_else(|| {
+                                vec![model_failure(open, "DEVICE_PROVIDER_UNAVAILABLE")]
+                            });
+                        self.chunks.extend(chunks);
+                        return Ok(DeviceModelSendOutcome::Handled);
+                    }
+                };
                 self.pending.insert(id.clone(), digest);
                 // ponytail: bounded blocking HTTPS runs outside the Worker loop; adapter deadlines
                 // bound cancellation cleanup while heartbeats and tool approval remain responsive.
                 if self
-                    .start_provider(open, start_deadline, start_guard)
+                    .start_provider(open, start_deadline, start_guard, permit)
                     .is_err()
                 {
                     self.pending.remove(&id);
@@ -199,6 +229,7 @@ impl DeviceModels {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         start_deadline: Option<std::time::Instant>,
         start_guard: Option<winwincode_codex::LocalModelStartGuard>,
+        permit: DeviceModelPermit,
     ) -> std::io::Result<()> {
         #[cfg(any(test, feature = "test-support"))]
         if std::mem::take(&mut self.fail_next_start) {
@@ -210,9 +241,10 @@ impl DeviceModels {
         std::thread::Builder::new()
             .name("device-provider".to_owned())
             .spawn(move || {
+                let permit = std::cell::RefCell::new(Some(permit));
                 let chunks = DeviceProviderStore::open(&directory)
                     .and_then(|store| {
-                        store.execute_model_authorized(&open, || {
+                        let can_start = || {
                             start_guard.as_ref().map_or_else(
                                 || {
                                     start_deadline.is_some_and(|deadline| {
@@ -221,7 +253,37 @@ impl DeviceModels {
                                 },
                                 |check| check(),
                             )
-                        })
+                        };
+                        let before_attempt = || {
+                            if permit.borrow().is_some() {
+                                return Ok(());
+                            }
+                            loop {
+                                if !can_start()
+                                    || store.model_cancelled(&open.model_exchange_id.0)?
+                                {
+                                    return Err(DeviceProviderError);
+                                }
+                                match store.try_model_attempt_permit(&open)? {
+                                    DeviceModelAdmission::Ready(acquired) => {
+                                        *permit.borrow_mut() = Some(acquired);
+                                        return Ok(());
+                                    }
+                                    DeviceModelAdmission::Deferred => {
+                                        std::thread::sleep(std::time::Duration::from_millis(25));
+                                    }
+                                }
+                            }
+                        };
+                        let after_attempt = || {
+                            permit.borrow_mut().take();
+                        };
+                        store.execute_model_recovering_authorized(
+                            &open,
+                            can_start,
+                            before_attempt,
+                            after_attempt,
+                        )
                     })
                     .unwrap_or_else(|_| {
                         vec![model_failure(
@@ -455,14 +517,14 @@ mod tests {
     }
 
     #[test]
-    fn full_local_lane_defers_a_never_started_request_without_losing_its_identity() {
+    fn full_provider_slots_defer_a_never_started_request_without_losing_its_identity() {
         let root = temp_root("deferred-start");
         let mut models = DeviceModels::open(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
         .unwrap();
-        let open: ExecutionPortMessage = serde_json::from_value(
+        let mut open: ExecutionPortMessage = serde_json::from_value(
             fixture["messages"]
                 .as_array()
                 .unwrap()
@@ -472,11 +534,22 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        for slot in 0..16 {
-            models
-                .pending
-                .insert(format!("occupied-{slot}"), "digest".into());
+        if let ExecutionPortMessage::ModelOpenMessage(request) = &mut open {
+            let payload = br#"{"provider":"fixture-provider","request":{"model":"fixture-model"}}"#;
+            request.request.data_base64 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
+            request.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(payload));
         }
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let ExecutionPortMessage::ModelOpenMessage(request) = &open else {
+            unreachable!()
+        };
+        let permits = (0..3)
+            .map(|_| match store.try_model_permit(request).unwrap() {
+                DeviceModelAdmission::Ready(permit) => permit,
+                DeviceModelAdmission::Deferred => panic!("expected a free Provider slot"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             models
                 .send(
@@ -487,7 +560,9 @@ mod tests {
                 .unwrap(),
             DeviceModelSendOutcome::NotStarted
         );
-        models.pending.clear();
+        assert!(models.pending.is_empty());
+        assert!(!store.model_start_recorded(request).unwrap());
+        drop(permits);
         models.fail_next_start = true;
         assert_eq!(
             models

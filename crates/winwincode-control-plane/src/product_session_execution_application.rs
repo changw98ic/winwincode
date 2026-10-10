@@ -749,12 +749,13 @@ where
                     if canonical.payload != chunk.payload {
                         return Err(storage_ingress("non-public model payload"));
                     }
-                    attach_model_exchange(&mut context, dispatch, chunk)?;
-                    project_verified_product_session_chunks(
-                        context.storage(),
-                        std::slice::from_ref(chunk),
-                    )
-                    .map_err(application_ingress)?;
+                    if prepare_public_model_frame(&mut context, dispatch, chunk)? {
+                        project_verified_product_session_chunks(
+                            context.storage(),
+                            std::slice::from_ref(chunk),
+                        )
+                        .map_err(application_ingress)?;
+                    }
                     return Ok(vec![ExecutionPortMessage::ModelAckMessage(
                         ModelAckMessage {
                             ack_sequence: winwincode_domain::ExecutionAckSequence(chunk.sequence.0),
@@ -872,7 +873,7 @@ fn register_core_approval(
         }
         ExecutionScope::WorkRunExecutionScope(scope) => {
             let now = context.server_time().clone();
-            let current = crate::execution_port_service::load_runtime_replay_authority(
+            let current = crate::execution_port_service::load_running_runtime_authority(
                 context.storage(),
                 &job,
                 &now,
@@ -884,7 +885,6 @@ fn register_core_approval(
                 &request.session_identity.worker_session_id,
                 dispatch,
                 context.storage(),
-                &now,
             )?;
             if current.session_identity != request.session_identity
                 || current.worker_session_id != request.worker_session_id
@@ -1002,7 +1002,6 @@ fn product_interaction_authority(
         &session_identity.worker_session_id,
         dispatch,
         context.storage(),
-        &now,
     )?;
     if session_identity.work_run_id.is_some()
         || session_identity.product_session_id != job_scope.product_session_id
@@ -1210,7 +1209,7 @@ fn accept_worker_binding(
         }
         return Ok(());
     }
-    context.validate_first_seen_dispatch(dispatch)?;
+    context.validate_dispatch_observation(dispatch)?;
     let staged = staged_binding(context, job, dispatch, message)?;
     let current = context
         .storage()
@@ -1245,11 +1244,12 @@ fn accept_worker_binding(
 }
 
 #[allow(clippy::too_many_lines)]
-fn attach_model_exchange(
+/// Retains an authorized public frame and returns whether Chat may project it.
+fn prepare_public_model_frame(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     message: &ModelChunkMessage,
-) -> Result<(), DurableExecutionPortError> {
+) -> Result<bool, DurableExecutionPortError> {
     let repository_scope = context.repository_scope().clone();
     let scope_key =
         repository_scope_key(&repository_scope).map_err(DurableExecutionPortError::Storage)?;
@@ -1298,13 +1298,24 @@ fn attach_model_exchange(
             && binding.execution_scope() == &staged.execution_scope
             && binding.worker_pool_id() == &staged.worker_pool_id
     });
+    if record.session().state() == winwincode_session::ProductSessionState::Cancelled {
+        // Cancellation fences execution and public text, not observations of
+        // the already accepted dispatch. Keep the immutable frame receipt and
+        // acknowledge it without opening an exchange or changing Chat state.
+        if successor_binding.is_none() {
+            return Err(storage_ingress(
+                "cancelled Chat model frame differs from the bound execution",
+            ));
+        }
+        return Ok(false);
+    }
     if successor_binding
         .is_some_and(|binding| binding.includes_model_exchange(&message.model_exchange_id))
     {
         // The original durable binding already attached this exact exchange.
         // Its receipt can be Continued or ExecutionBindingReplaced; never
         // reinterpret that receipt through a different command on later frames.
-        return Ok(());
+        return Ok(true);
     }
     let replacement = context
         .storage()
@@ -1366,7 +1377,7 @@ fn attach_model_exchange(
             .map_err(|error| product_session_ingress(&error))?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Seals one exact public frame before projection. A known exchange alone is
@@ -1384,21 +1395,21 @@ fn retain_chat_model_frame_authority(
     if retained_chat_model_frame(context.storage(), &scope, message)? {
         return Ok(());
     }
-    let now = context.server_time().clone();
-    let live = context
+    let accepted = context
         .storage()
         .execution_registry()
-        .and_then(|registry| registry.load_live_lease_for_period(dispatch.lease(), &now))
+        .and_then(|registry| registry.load_accepted_lease_for_period(dispatch.lease()))
         .map_err(DurableExecutionPortError::Storage)?;
-    if live.is_none() {
+    if accepted.is_none() {
         return Err(storage_ingress(
-            "new Chat model frame requires a current live lease",
+            "Chat model frame requires an accepted dispatch identity",
         ));
     }
     let bytes = serde_json::to_vec(&serde_json::json!({
         "protocol":"winwincode.chat-model-frame-authority.v1",
         "messageId":message.message_id,"modelExchangeId":message.model_exchange_id,
         "lease":message.lease,"sequence":message.sequence,"frameDigest":digest,
+        "frame":message,
     }))
     .map_err(|_| storage_ingress("Chat model frame cannot encode"))?;
     context
@@ -1556,7 +1567,7 @@ fn accept_terminal(
         .map_err(|error| product_session_ingress(&error))?;
     let replayed = replay.is_some();
     if !replayed {
-        context.validate_first_seen_dispatch(dispatch)?;
+        context.validate_dispatch_observation(dispatch)?;
         reconcile_product_session_model_exchange(
             context.storage(),
             &job.job_id,
@@ -1611,7 +1622,7 @@ fn accept_unstarted_terminal(
         ));
     }
     if !already_terminal {
-        context.validate_first_seen_dispatch(dispatch)?;
+        context.validate_dispatch_observation(dispatch)?;
     }
     let command_context = internal_context(
         context.repository_scope(),

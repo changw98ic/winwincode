@@ -224,15 +224,9 @@ fn validate_trusted_lease_time(
 ) -> Result<(), StorageError> {
     let now = instant_millis(server_time)?;
     let issued_at = instant_millis(facts.authority().issued_at())?;
-    let expires_at = instant_millis(facts.authority().expires_at())?;
     if now < issued_at {
         return Err(StorageError::invalid_input(
             "terminal ingress precedes the scheduler-owned lease",
-        ));
-    }
-    if now >= expires_at {
-        return Err(StorageError::invalid_input(
-            "terminal ingress observed an expired scheduler-owned lease",
         ));
     }
     Ok(())
@@ -535,12 +529,7 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     let expires_at = instant_millis(&message.lease.expires_at)?;
     let finished_at = instant_millis(&message.outcome.finished_at)?;
     let sent_at = instant_millis(&message.sent_at)?;
-    if issued_at >= expires_at
-        || finished_at < issued_at
-        || finished_at >= expires_at
-        || sent_at < finished_at
-        || sent_at > expires_at
-    {
+    if issued_at >= expires_at || finished_at < issued_at || sent_at < finished_at {
         return Err(StorageError::invalid_input(
             "job.outcome time is outside its active lease",
         ));

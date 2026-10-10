@@ -317,8 +317,8 @@ pub fn load_device_identity(
 /// identity row with the assigned `clientNodeId` and `publicClientId` and
 /// replaces the local credential secret with the issued Device Credential.
 ///
-/// Called exactly once, when the `client.enrollment_accepted` exchange
-/// response arrives; a later call is refused so a replay can never rotate the
+/// Called exactly once, when the enrollment exchange response
+/// returns the issued credential; a later call is refused so a replay can never rotate the
 /// adopted identity.
 ///
 /// # Errors

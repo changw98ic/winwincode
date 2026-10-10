@@ -91,7 +91,6 @@
     "executionPortMessages": [
       "worker.register",
       "worker.registration_result",
-      "worker.capabilities",
       "worker.heartbeat",
       "worker.heartbeat_ack",
       "job.dispatch",
@@ -675,7 +674,6 @@
       "executionPortMessages": [
         "worker.register",
         "worker.registration_result",
-        "worker.capabilities",
         "worker.heartbeat",
         "worker.heartbeat_ack",
         "lease.renew"

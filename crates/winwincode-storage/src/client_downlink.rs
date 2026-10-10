@@ -2,8 +2,7 @@
 
 //! Durable Server → Client downlink outbox for the `ClientControlPort`.
 //!
-//! Every Server-to-Client frame (`client.enrollment_accepted`,
-//! `client.access.challenge`, and later occupancy and worker frames) is
+//! Every Server-to-Client command (occupancy and worker frames) is
 //! persisted here before delivery and is delivered by the client exchange
 //! under the per-client `server_to_client_ack_sequence` cursor owned by the
 //! `ClientNode` registry (plan 9.2). A frame is retained until the Device
@@ -281,6 +280,21 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         highest_sequence(connection, client_node_id)
     }
 
+    /// Loads a retained command for an authenticated digest-only handshake.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt retained frame.
+    pub fn frame_by_message_id(
+        &self,
+        node: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, ClientDownlinkError> {
+        self.storage.connection().map_err(|storage| storage_error(&storage))?
+            .query_row("SELECT frame FROM client_downlink_frames WHERE client_node_id = ?1 AND message_id = ?2", params![node, message_id], |row| row.get(0))
+            .optional().map_err(|sql| sql_error(&sql))
+    }
+
     /// Deletes every retained frame at or below `ack_sequence` and returns
     /// the deleted count.
     ///
@@ -535,6 +549,24 @@ fn error(kind: ClientDownlinkErrorKind, message: impl Into<String>) -> ClientDow
     }
 }
 
+pub(crate) fn next_sequence_in_transaction(
+    connection: &rusqlite::Connection,
+    client_node_id: &str,
+) -> Result<u64, ClientDownlinkError> {
+    let cursor = server_to_client_ack(connection, client_node_id)?;
+    let highest = highest_sequence(connection, client_node_id)?;
+    cursor
+        .max(highest)
+        .checked_add(1)
+        .filter(|sequence| *sequence <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| {
+            error(
+                ClientDownlinkErrorKind::InvalidInput,
+                "downlink sequence exhausted",
+            )
+        })
+}
+
 pub(crate) fn append_launch_in_transaction(
     connection: &rusqlite::Connection,
     append: &ClientDownlinkAppend,
@@ -543,9 +575,7 @@ pub(crate) fn append_launch_in_transaction(
     validate_client_node_id(&append.client_node_id)?;
     validate_instant(now)?;
     require_client_node(connection, &append.client_node_id)?;
-    let cursor = server_to_client_ack(connection, &append.client_node_id)?;
-    let highest = highest_sequence(connection, &append.client_node_id)?;
-    if append.sequence != cursor.max(highest) + 1 {
+    if append.sequence != next_sequence_in_transaction(connection, &append.client_node_id)? {
         return Err(error(
             ClientDownlinkErrorKind::InvalidInput,
             "downlink sequence is not the next stream position",
