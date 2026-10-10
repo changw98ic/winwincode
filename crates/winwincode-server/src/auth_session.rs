@@ -532,13 +532,15 @@ impl SqliteAuthSessionManager {
             return Err(AuthSessionError::invalid_request());
         }
         let now = self.clock.unix_millis()?;
-        if self.login_limiter.rejected(client, &normalized, now) {
+        // Atomic admission: reserves a tracked slot (or rejects) before the
+        // Argon2 work in verify_credentials, so every attempt is accounted.
+        if !self.login_limiter.admit(client, &normalized, now) {
             return Err(AuthSessionError::rate_limited());
         }
-        let verified = self
-            .accounts
-            .verify_credentials(username, password)
-            .map_err(|_| AuthSessionError::storage())?;
+        let Ok(verified) = self.accounts.verify_credentials(username, password) else {
+            self.login_limiter.release(client, &normalized);
+            return Err(AuthSessionError::storage());
+        };
         match verified {
             Ok(account) => {
                 self.login_limiter.clear(client, &normalized);
