@@ -955,7 +955,7 @@ impl AuthSessionError {
         }
     }
 
-    const fn storage() -> Self {
+    pub(crate) const fn storage() -> Self {
         Self {
             kind: AuthSessionErrorKind::Storage,
         }

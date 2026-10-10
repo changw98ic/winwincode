@@ -2026,16 +2026,19 @@ async fn create_auth_session(
     };
     // A Bearer credential carries the one-time bootstrap proof for first
     // initialization; otherwise the request is a username + password login.
-    let issued = if credentials.bearer().is_some() {
-        state
-            .auth_sessions
-            .initialize(&credentials, &login.username, &login.password)
-    } else {
-        let client = client.ip().to_string();
-        state
-            .auth_sessions
-            .login(&credentials, &client, &login.username, &login.password)
-    };
+    // Both paths run Argon2id (hash or verify), which is deliberately
+    // CPU-expensive; keep it off the async worker threads.
+    let auth_sessions = Arc::clone(&state.auth_sessions);
+    let client = client.ip().to_string();
+    let issued = tokio::task::spawn_blocking(move || {
+        if credentials.bearer().is_some() {
+            auth_sessions.initialize(&credentials, &login.username, &login.password)
+        } else {
+            auth_sessions.login(&credentials, &client, &login.username, &login.password)
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(AuthSessionError::storage()));
     let issued = match issued {
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
