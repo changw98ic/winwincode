@@ -354,27 +354,128 @@ async fn candidate_git_failure_retains_stage_and_cause_without_private_path() {
     assert!(!safe.contains(path.to_str().unwrap()));
 }
 
-#[tokio::test]
-async fn queued_control_cannot_starve_the_durable_outbox() {
-    let (mut worker, port, codex) = started_worker().await;
-    let active = worker.active_jobs()[0].clone();
-    queue_evidence(&codex, &active);
-    // A control is already pending before the flush starts.
-    let control = renewal(&active);
+fn sent_count(port: &DriverPort) -> usize {
     port.controls
-        .queued
-        .borrow_mut()
-        .push_back((ExecutionMessageId(id("xmsg", 'N')), control));
-    worker.flush_durable_outbox().await.unwrap();
-    let sent = port
-        .controls
         .trace
         .borrow()
         .iter()
         .filter(|event| event.starts_with("sent:"))
-        .count();
+        .count()
+}
+
+fn pending_delivery_ids(codex: &FakeCodex) -> Vec<String> {
+    use winwincode_codex::CodexCoreAdapter;
+    codex
+        .clone()
+        .pending_execution_delivery_batch(None, 256)
+        .unwrap()
+        .into_iter()
+        .map(|delivery| delivery.delivery_id)
+        .collect()
+}
+
+#[tokio::test]
+async fn queued_control_preempts_flush_until_the_driver_consumes_it() {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    queue_evidence(&codex, &active);
+    *port.controls.clock.borrow_mut() = "2027-01-15T08:04:55.000Z".into();
+    port.controls
+        .queued
+        .borrow_mut()
+        .push_back((ExecutionMessageId(id("xmsg", 'N')), renewal(&active)));
+    // Controls take priority before the first frame.
+    worker.flush_durable_outbox().await.unwrap();
     assert_eq!(
-        sent, 1,
-        "the flush must make progress by one frame, then yield to the control"
+        sent_count(&port),
+        0,
+        "no frame may precede a queued control"
     );
+    // The normal driver drains the control first, then the outbox progresses.
+    assert!(drive(&mut worker, &port).await.is_none());
+    let trace = port.controls.trace.borrow().clone();
+    assert!(
+        trace[0].starts_with("confirmed:"),
+        "control is consumed first: {trace:?}"
+    );
+    assert!(sent_count(&port) >= 1, "outbox progresses: {trace:?}");
+    assert_eq!(
+        worker.active_jobs()[0].lease.expires_at.0,
+        "2027-01-15T08:10:00.000Z"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_with_pending_cancel_and_backpressure_still_cleans_up_locally() {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    queue_evidence(&codex, &active);
+    let pending_before = pending_delivery_ids(&codex);
+    assert!(!pending_before.is_empty());
+    port.controls.queued.borrow_mut().push_back((
+        ExecutionMessageId(id("xmsg", 'C')),
+        ExecutionPortMessage::JobCancelMessage(cancel_for(&active, 'C')),
+    ));
+    port.recorded.backpressured.set(true);
+    let attempts_before = port.recorded.attempts.get();
+
+    let report = worker.shutdown(now()).await.unwrap();
+
+    assert_eq!(worker.lifecycle(), WorkerLifecycleState::Stopped);
+    assert_eq!(
+        port.recorded.attempts.get(),
+        attempts_before,
+        "no outbound frame is attempted while a control is queued"
+    );
+    let calls = codex.calls();
+    assert!(
+        calls.iter().any(|call| call.starts_with("interrupt:")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| call.starts_with("close:")),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|call| call == "shutdown"), "{calls:?}");
+    assert_eq!(report.cancelled_jobs.len(), 1);
+    // Un-ACKed durable facts keep their original identity for recovery.
+    let pending_after = pending_delivery_ids(&codex);
+    for id in &pending_before {
+        assert!(pending_after.contains(id), "{id} was dropped");
+    }
+}
+
+#[tokio::test]
+async fn shutdown_without_controls_reports_backpressure_and_still_cleans_up() {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    queue_evidence(&codex, &active);
+    let pending_before = pending_delivery_ids(&codex);
+    port.recorded.backpressured.set(true);
+    let attempts_before = port.recorded.attempts.get();
+
+    let report = worker.shutdown(now()).await.unwrap();
+
+    assert_eq!(worker.lifecycle(), WorkerLifecycleState::Stopped);
+    assert!(port.recorded.attempts.get() > attempts_before);
+    assert!(
+        report
+            .delivery_failures
+            .contains(&WorkerErrorCode::ExecutionBackpressure),
+        "{report:?}"
+    );
+    let calls = codex.calls();
+    assert!(
+        calls.iter().any(|call| call.starts_with("interrupt:")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| call.starts_with("close:")),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|call| call == "shutdown"), "{calls:?}");
+    let pending_after = pending_delivery_ids(&codex);
+    for id in &pending_before {
+        assert!(pending_after.contains(id), "{id} was dropped");
+    }
 }

@@ -247,6 +247,10 @@ pub struct WorkerShutdownReport {
     pub cancelled_jobs: Vec<ExecutionJobId>,
     /// Number of Codex interrupt/close/shutdown calls that failed.
     pub codex_failures: usize,
+    /// Delivery or local cleanup steps that failed during shutdown, in order.
+    /// Shutdown keeps going after each one; undelivered durable facts remain
+    /// pending in the outbox under their original identity for recovery.
+    pub delivery_failures: Vec<WorkerErrorCode>,
 }
 
 #[derive(Debug, Clone)]
@@ -2815,8 +2819,15 @@ where
                 .map_err(|_| codex_model_error())?;
         }
         self.pending_candidates.clear();
-        self.flush_durable_execution_deliveries().await?;
+        // Revoke new work first, then finish local cleanup (interrupt,
+        // finish/close, adapter shutdown) regardless of whether any outbound
+        // delivery succeeds. Delivery failures are collected and reported;
+        // unsent durable facts stay pending with their original identity.
         self.lifecycle = WorkerLifecycleState::Draining;
+        let mut delivery_failures = Vec::new();
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
+        }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
         let mut codex_failures = 0;
@@ -2836,29 +2847,39 @@ where
                 // traces. Forward them while the active Job still owns the
                 // runtime cursor so the shutdown outcome binds their final
                 // sequence instead of closing the Job first.
-                self.enqueue_codex_effects()?;
-                self.flush_durable_execution_deliveries().await?;
+                if let Err(error) = self.enqueue_codex_effects() {
+                    delivery_failures.push(error.code);
+                }
+                if let Err(error) = self.flush_durable_execution_deliveries().await {
+                    delivery_failures.push(error.code);
+                }
             }
             let Some(id) = self.active.get(&job_id).map(|job| job.job.job_id.clone()) else {
                 continue;
             };
-            self.finish_job(
-                &job_id,
-                ExecutionOutcomeStatus::Cancelled,
-                "Worker shutdown cancelled the active turn",
-                Vec::new(),
-                None,
-                Some(port_error(
-                    ExecutionPortErrorCode::Cancelled,
+            match self
+                .finish_job(
+                    &job_id,
+                    ExecutionOutcomeStatus::Cancelled,
                     "Worker shutdown cancelled the active turn",
-                    false,
-                )),
-                now.clone(),
-            )
-            .await?;
-            cancelled_jobs.push(id);
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::Cancelled,
+                        "Worker shutdown cancelled the active turn",
+                        false,
+                    )),
+                    now.clone(),
+                )
+                .await
+            {
+                Ok(()) => cancelled_jobs.push(id),
+                Err(error) => delivery_failures.push(error.code),
+            }
         }
-        self.flush_durable_execution_deliveries().await?;
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
+        }
         if self.codex.shutdown().await.is_err() {
             codex_failures += 1;
         }
@@ -2866,6 +2887,7 @@ where
         Ok(WorkerShutdownReport {
             cancelled_jobs,
             codex_failures,
+            delivery_failures,
         })
     }
 

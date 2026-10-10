@@ -383,13 +383,11 @@ where
         let mut sent_bytes = 0;
         let mut deferred = None;
         for delivery in deliveries {
-            // Yield to pending controls only after this batch has attempted at
-            // least one frame (`sent_bytes` counts every dispatched frame,
-            // including deferred model starts); checking before the first
-            // frame starves the durable outbox whenever a control is queued.
-            if (sent_bytes > 0 && self.port.has_pending_controls())
-                || tokio::time::Instant::now() >= deadline
-            {
+            // Controls (cancel, renewal, ACK) always take priority, including
+            // before the first frame: shutdown and the driver must never send
+            // new outbound work while a control is queued. Drivers drain the
+            // control inbox before flushing, so this cannot starve the outbox.
+            if self.port.has_pending_controls() || tokio::time::Instant::now() >= deadline {
                 break;
             }
             let previous_cursor = self.outbox_flush_cursor.clone();
