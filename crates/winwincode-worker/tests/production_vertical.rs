@@ -1821,12 +1821,14 @@ commandIds = ["check", "rust", "python"]
         )
         .unwrap();
         artifact_connection.execute_batch("CREATE TRIGGER fail_batch_b_artifact BEFORE INSERT ON validation_artifact BEGIN SELECT RAISE(ABORT, 'fixture output failure'); END;").unwrap();
-        assert!(
-            worker
-                .workspace_runtime_for_test()
-                .execute_change_batch(&active, &batch, &now)
-                .await
-                .is_err()
+        let executed = worker
+            .workspace_runtime_for_test()
+            .execute_change_batch(&active, &batch, &now)
+            .await
+            .unwrap();
+        assert_eq!(
+            executed.progress.last().unwrap().state,
+            winwincode_execution_port::generated::ChangeBatchProgressState::InfrastructureFailed
         );
         artifact_connection
             .execute_batch("DROP TRIGGER fail_batch_b_artifact;")
@@ -1840,7 +1842,7 @@ commandIds = ["check", "rust", "python"]
         let binding_b = journal.workspace_binding(&workspace_id).unwrap().unwrap();
         assert_eq!(
             binding_b.state,
-            winwincode_worker::change_batch_store::BatchState::ValidationPending
+            winwincode_worker::change_batch_store::BatchState::Quarantined
         );
         assert_eq!(
             binding_b.active_batch_id.as_ref(),
