@@ -83,3 +83,41 @@ async fn expired_unknown_and_delegated_result_reads_are_rejected() {
     assert!(gate.authorize_result_read(request).await.is_err());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[tokio::test]
+async fn result_read_authority_expires_without_owner_clock_refresh() {
+    let home =
+        std::env::temp_dir().join(format!("wwc-result-read-elapsed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let gate = ExecutionPortActionGate::open(
+        &home,
+        catalog(),
+        ExecutionEnvelopeToken {
+            version: 1,
+            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+        },
+        signing_key(),
+    )
+    .unwrap();
+    let mut authority = binding();
+    authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.120Z".into());
+    gate.install_binding(authority.clone(), None).unwrap();
+    let initial = Instant("2030-01-01T00:00:02.000Z".into());
+    gate.update_now(&initial).unwrap();
+    let request = read_request();
+    let authorization = gate.authorize_result_read(request.clone()).await.unwrap();
+    gate.revalidate_result_read(request.clone(), authorization.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    gate.update_now(&initial).unwrap();
+    assert!(gate.authorize_result_read(request.clone()).await.is_err());
+    assert!(
+        gate.revalidate_result_read(request.clone(), authorization)
+            .await
+            .is_err()
+    );
+    gate.cancel_session(&request.session_id).unwrap();
+    gate.remove_binding(&authority).unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

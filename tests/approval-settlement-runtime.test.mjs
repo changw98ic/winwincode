@@ -104,6 +104,33 @@ test('Core pending lookup requires exact job and thread and excludes terminal or
   assert.deepEqual(readDevicePendingApprovalIds(directory, [run, run]), ['apr_a', 'apr_z'])
 })
 
+test('Core pending lookup reads only exact active Worker data despite retained foreign history', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'approval-owned-lookup-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const device = join(directory, 'device-data')
+  const data = join(device, 'worker-sessions', run.workerSessionId, 'data')
+  mkdirSync(join(data, 'codex-runtime'), { recursive: true })
+  const registry = new DatabaseSync(join(device, 'device-client.sqlite3'))
+  registry.exec('CREATE TABLE worker_process_registry(worker_session_id TEXT PRIMARY KEY, data_directory TEXT NOT NULL)')
+  registry.prepare('INSERT INTO worker_process_registry VALUES (?, ?)').run(run.workerSessionId, data)
+  registry.close()
+  const db = new DatabaseSync(join(data, 'codex-runtime', 'worker-codex.sqlite3'))
+  db.exec(`CREATE TABLE codex_run(run_key TEXT PRIMARY KEY, record_json BLOB NOT NULL);
+    CREATE TABLE approval_operation(approval_id TEXT PRIMARY KEY, run_key TEXT NOT NULL, state TEXT NOT NULL)`)
+  db.prepare('INSERT INTO codex_run VALUES (?, ?)').run('owned', Buffer.from(JSON.stringify({
+    job: { jobId: run.executionJobId }, canonicalThreadId: run.codexThreadId, terminal: null,
+  })))
+  db.prepare('INSERT INTO approval_operation VALUES (?, ?, ?)').run('apr_owned', 'owned', 'pending')
+  db.close()
+  for (let index = 0; index < 100; index += 1) {
+    const foreign = join(device, 'worker-sessions', `foreign-${index}`, 'data', 'codex-runtime')
+    mkdirSync(foreign, { recursive: true })
+    writeFileSync(join(foreign, 'worker-codex.sqlite3'), 'foreign history must never be opened')
+  }
+  assert.deepEqual(readDevicePendingApprovalIds(directory, [run, run]), ['apr_owned'])
+  assert.deepEqual(readDevicePendingApprovalIds(directory, [{ ...run, workerSessionId: 'foreign' }]), [])
+})
+
 test('registered driver preserves expiry blockage across projections and clears it only after Core settlement', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'approval-expiry-driver-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))

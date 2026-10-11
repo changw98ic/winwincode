@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
 use crate::model_port_client::{
-    ModelCancellationFingerprint, ModelCancellationPhase, ModelChunkFingerprint,
+    ModelCancellationFingerprint, ModelCancellationPhase, ModelChunkFingerprint, ModelCursorHead,
     ModelCursorSnapshot, ModelCursorStore, ModelLeaseAuthority, ModelTerminationReason,
+    valid_cancellation,
 };
 use crate::performance::{
     DelegatedPerformanceTotals, PerformanceOperationCompletion, PerformanceOperationKind,
@@ -21,13 +22,22 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{ModelExchangeId, Sha256Digest};
 use winwincode_execution_port::replay::{
-    ReplayAcknowledgementStore, ReplayFrame, ReplaySnapshot, ReplayStore, ReplayStreamKey,
+    ReplayAcknowledgementStore, ReplayFrame, ReplayReadQuery, ReplaySnapshot, ReplayStore,
+    ReplayStreamKey,
 };
 use winwincode_execution_port::{
     generated::{ApprovalActionSanitizedDetail, ExecutionPortMessage, ModelChunkMessage},
     runtime_trace_outbox::{ExecutionMode, ObserverMode, PerformanceBaselineReport},
     typed_replay::frame_from_message,
 };
+
+#[cfg(test)]
+#[path = "model_storage_incremental_tests.rs"]
+mod model_storage_incremental_tests;
+
+#[cfg(test)]
+#[path = "input_interaction_store_tests.rs"]
+mod input_interaction_store_tests;
 
 pub(crate) const DATABASE_FILE: &str = "worker-codex.sqlite3";
 const MAX_MODEL_CALL_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -105,6 +115,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    run_key TEXT PRIMARY KEY NOT NULL,
                    record_json BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS post_action_trace (
+                   run_key TEXT NOT NULL, source_key TEXT NOT NULL, sequence INTEGER NOT NULL,
+                   record_json BLOB NOT NULL, PRIMARY KEY(run_key,source_key), UNIQUE(run_key,sequence)
+                 );
                  CREATE TABLE IF NOT EXISTS fusion_panel (
                    run_key TEXT NOT NULL,
                    panel_id TEXT NOT NULL,
@@ -118,6 +132,12 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  CREATE TABLE IF NOT EXISTS model_cursor (
                    stream_key TEXT PRIMARY KEY NOT NULL,
                    snapshot_json BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS model_cursor_frame (
+                   stream_key TEXT NOT NULL REFERENCES model_cursor(stream_key),
+                   sequence INTEGER NOT NULL CHECK(sequence > 0),
+                   fingerprint_json BLOB NOT NULL,
+                   PRIMARY KEY(stream_key, sequence)
                  );
                  -- A request identity is allocated by embedded Codex and is
                  -- stable across a process restart.  Multiple calls for one
@@ -155,6 +175,39 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    context_text BLOB NOT NULL,
                    PRIMARY KEY (run_key, model_call_id)
                  );
+                 CREATE TABLE IF NOT EXISTS model_call_response_seal (
+                   run_key TEXT NOT NULL, model_call_id TEXT NOT NULL,
+                   frame_count INTEGER NOT NULL CHECK(frame_count>0),
+                   response_digest TEXT NOT NULL,
+                   PRIMARY KEY(run_key,model_call_id),
+                   FOREIGN KEY(run_key,model_call_id) REFERENCES model_call_ledger(run_key,model_call_id)
+                 );
+                 CREATE TRIGGER IF NOT EXISTS model_call_frame_sealed_insert BEFORE INSERT ON model_call_frame
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=NEW.run_key AND model_call_id=NEW.model_call_id)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_frame_sealed_update BEFORE UPDATE ON model_call_frame
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=OLD.run_key AND model_call_id=OLD.model_call_id)
+                     OR EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=NEW.run_key AND model_call_id=NEW.model_call_id)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_frame_sealed_delete BEFORE DELETE ON model_call_frame
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=OLD.run_key AND model_call_id=OLD.model_call_id)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_response_seal_immutable BEFORE UPDATE ON model_call_response_seal
+                   BEGIN SELECT RAISE(ABORT,'sealed model response metadata is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_response_seal_delete BEFORE DELETE ON model_call_response_seal
+                   BEGIN SELECT RAISE(ABORT,'sealed model response metadata is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_response_seal_replace BEFORE INSERT ON model_call_response_seal
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=NEW.run_key AND model_call_id=NEW.model_call_id)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response metadata is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_sealed_binding_update
+                   BEFORE UPDATE OF run_key,model_call_id,model_exchange_id,request_digest ON model_call_ledger
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=OLD.run_key AND model_call_id=OLD.model_call_id)
+                     AND (NEW.run_key IS NOT OLD.run_key OR NEW.model_call_id IS NOT OLD.model_call_id
+                       OR NEW.model_exchange_id IS NOT OLD.model_exchange_id OR NEW.request_digest IS NOT OLD.request_digest)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response binding is immutable'); END;
+                 CREATE TRIGGER IF NOT EXISTS model_call_sealed_binding_delete BEFORE DELETE ON model_call_ledger
+                   WHEN EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=OLD.run_key AND model_call_id=OLD.model_call_id)
+                   BEGIN SELECT RAISE(ABORT,'sealed model response binding is immutable'); END;
                  CREATE TABLE IF NOT EXISTS model_thread_lineage (
                    thread_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
@@ -165,6 +218,20 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  CREATE TABLE IF NOT EXISTS runtime_replay (
                    stream_key TEXT PRIMARY KEY NOT NULL,
                    snapshot_json BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_replay_legacy_compaction (
+                     stream_key TEXT PRIMARY KEY NOT NULL,
+                     compacted_through INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_replay_head (
+                   stream_key TEXT PRIMARY KEY NOT NULL,
+                   ack_sequence INTEGER NOT NULL CHECK(ack_sequence >= 0),
+                   highest_sequence INTEGER NOT NULL CHECK(highest_sequence >= ack_sequence)
+                 );
+                 CREATE TABLE IF NOT EXISTS runtime_replay_frame (
+                   stream_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0),
+                   event_id TEXT NOT NULL, digest TEXT NOT NULL, frame BLOB NOT NULL,
+                   PRIMARY KEY(stream_key, sequence), UNIQUE(stream_key, event_id)
                  );
                  CREATE TABLE IF NOT EXISTS execution_outbox (
                    position INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +244,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    UNIQUE(family, correlation_key)
                  );
+                 CREATE INDEX IF NOT EXISTS execution_outbox_deliverable_position
+                   ON execution_outbox(position) WHERE state = 'pending' OR acknowledgement_required = 1;
+                 CREATE INDEX IF NOT EXISTS execution_outbox_model_exchange
+                   ON execution_outbox(json_extract(frame_json,'$.modelExchangeId')) WHERE family='model_open';
                  CREATE TABLE IF NOT EXISTS execution_terminal_outcome (
                    run_key TEXT PRIMARY KEY NOT NULL,
                    frame_digest TEXT NOT NULL,
@@ -236,9 +307,16 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                      (state = 'pending' AND resolution_digest IS NULL)
                      OR (state = 'resolved' AND resolution_digest IS NOT NULL)
                    )
+                 );
+                 CREATE TABLE IF NOT EXISTS input_call (
+                   run_key TEXT NOT NULL,
+                   request_digest TEXT NOT NULL,
+                   record_json BLOB NOT NULL,
+                   PRIMARY KEY(run_key, request_digest)
                  );",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+    migrate_model_cursor_schema(connection)?;
     migrate_mcp_approval_schema(connection)?;
     initialize_performance_schema(connection)
 }
@@ -424,6 +502,191 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
           AND m.model_call_id=performance_operation.operation_id AND m.completed=1);");
     Ok(())
 }
+fn validate_post_action_value(
+    value: &serde_json::Value,
+) -> Result<(&str, i64, bool), AdapterStoreError> {
+    let _: crate::adapter::StoredPostActionTrace =
+        serde_json::from_value(value.clone()).map_err(|_| AdapterStoreError::Corrupt)?;
+    let source = value["sourceKey"]
+        .as_str()
+        .filter(|source| {
+            !source.is_empty() && source.len() <= 253 && !source.chars().any(char::is_control)
+        })
+        .ok_or(AdapterStoreError::Corrupt)?;
+    let sequence = value["sequence"]
+        .as_i64()
+        .filter(|sequence| *sequence > 0)
+        .ok_or(AdapterStoreError::Corrupt)?;
+    let retained = value["retained"]
+        .as_bool()
+        .ok_or(AdapterStoreError::Corrupt)?;
+    let actions = value["actions"]
+        .as_array()
+        .filter(|actions| !actions.is_empty())
+        .ok_or(AdapterStoreError::Corrupt)?;
+    let mut unique = HashSet::new();
+    if actions.iter().any(|action| !unique.insert(action.as_str())) {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok((source, sequence, retained))
+}
+
+fn save_post_action_value(
+    tx: &Transaction<'_>,
+    run_key: &str,
+    value: &serde_json::Value,
+) -> Result<(), AdapterStoreError> {
+    let (source, sequence, retained) = validate_post_action_value(value)?;
+    let previous: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT record_json FROM post_action_trace WHERE run_key=?1 AND source_key=?2",
+            params![run_key, source],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    if let Some(previous) = previous {
+        let mut existing: serde_json::Value =
+            serde_json::from_slice(&previous).map_err(|_| AdapterStoreError::Corrupt)?;
+        validate_post_action_value(&existing)?;
+        if existing["retained"] == true && !retained {
+            return Err(AdapterStoreError::Conflict);
+        }
+        existing["retained"] = retained.into();
+        if existing != *value {
+            return Err(AdapterStoreError::Conflict);
+        }
+    }
+    let bytes = serde_json::to_vec(value).map_err(|_| AdapterStoreError::Corrupt)?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::post_action_write(bytes.len());
+    tx.execute("INSERT INTO post_action_trace VALUES (?1,?2,?3,?4) ON CONFLICT(run_key,source_key) DO UPDATE SET record_json=excluded.record_json",params![run_key,source,sequence,bytes]).map_err(|_|AdapterStoreError::Conflict)?;
+    Ok(())
+}
+
+fn migrate_runtime_outbox_index(connection: &Connection) -> Result<(), AdapterStoreError> {
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    for (column, kind) in [
+        ("runtime_stream_key", "TEXT"),
+        ("runtime_sequence", "INTEGER"),
+    ] {
+        let exists = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('execution_outbox') WHERE name=?1)",
+                [column],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if !exists {
+            tx.execute_batch(&format!(
+                "ALTER TABLE execution_outbox ADD COLUMN {column} {kind};"
+            ))
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        }
+    }
+    let migrated=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_store_migration WHERE migration_key='runtime-outbox-index-v1')",[],|row|row.get::<_,bool>(0)).map_err(|_|AdapterStoreError::Unavailable)?;
+    if !migrated {
+        let rows = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT delivery_id,frame_json FROM execution_outbox WHERE family='runtime'",
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|_| AdapterStoreError::Unavailable)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| AdapterStoreError::Unavailable)?
+        };
+        for (delivery, bytes) in rows {
+            let message: ExecutionPortMessage =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
+                return Err(AdapterStoreError::Corrupt);
+            };
+            if event.event.sequence.0 <= 0 {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            tx.execute("UPDATE execution_outbox SET runtime_stream_key=?2,runtime_sequence=?3 WHERE delivery_id=?1",params![delivery,winwincode_execution_port::runtime_replay::runtime_event_stream_key(&event).as_str(),event.event.sequence.0]).map_err(|_|AdapterStoreError::Unavailable)?;
+        }
+        tx.execute(
+            "INSERT INTO codex_store_migration VALUES ('runtime-outbox-index-v1')",
+            [],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS execution_outbox_runtime_stream ON execution_outbox(family,runtime_stream_key,runtime_sequence,position);").map_err(|_|AdapterStoreError::Unavailable)?;
+    tx.commit().map_err(|_| AdapterStoreError::Unavailable)
+}
+
+fn migrate_post_action_records(connection: &Connection) -> Result<(), AdapterStoreError> {
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let migrated = tx
+        .query_row(
+            "SELECT 1 FROM codex_store_migration WHERE migration_key='post-action-indexed-v1'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .is_some();
+    // Guard installation and the migration marker share one commit. Reopening
+    // an interrupted older upgrade also installs missing guards atomically.
+    tx.execute_batch("CREATE TRIGGER IF NOT EXISTS post_action_block_legacy_insert BEFORE INSERT ON codex_run WHEN json_type(NEW.record_json,'$.postActionTraces') IS NOT NULL BEGIN SELECT RAISE(ABORT,'indexed post-action traces require current binary'); END;
+        CREATE TRIGGER IF NOT EXISTS post_action_block_legacy_update BEFORE UPDATE OF record_json ON codex_run WHEN json_type(NEW.record_json,'$.postActionTraces') IS NOT NULL BEGIN SELECT RAISE(ABORT,'indexed post-action traces require current binary'); END;").map_err(|_| AdapterStoreError::Unavailable)?;
+    if migrated {
+        return tx.commit().map_err(|_| AdapterStoreError::Unavailable);
+    }
+    let rows = {
+        let mut stmt=tx.prepare("SELECT run_key,record_json FROM codex_run WHERE json_type(record_json,'$.postActionTraces') IS NOT NULL").map_err(|_|AdapterStoreError::Unavailable)?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+    };
+    for (run, bytes) in rows {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+        let traces = value["postActionTraces"]
+            .as_array()
+            .ok_or(AdapterStoreError::Corrupt)?;
+        let mut sources = HashSet::new();
+        let mut sequences = HashSet::new();
+        for trace in traces {
+            let (source, sequence, _) = validate_post_action_value(trace)?;
+            if !sources.insert(source) || !sequences.insert(sequence) {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            save_post_action_value(&tx, &run, trace)?;
+        }
+        value
+            .as_object_mut()
+            .ok_or(AdapterStoreError::Corrupt)?
+            .remove("postActionTraces");
+        tx.execute(
+            "UPDATE codex_run SET record_json=?2 WHERE run_key=?1",
+            params![
+                run,
+                serde_json::to_vec(&value).map_err(|_| AdapterStoreError::Corrupt)?
+            ],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    tx.execute(
+        "INSERT INTO codex_store_migration VALUES ('post-action-indexed-v1')",
+        [],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    tx.commit().map_err(|_| AdapterStoreError::Unavailable)
+}
+
 impl AdapterStore {
     pub(crate) fn open(root: &Path) -> Result<Self, AdapterStoreError> {
         std::fs::create_dir_all(root).map_err(|_| AdapterStoreError::Unavailable)?;
@@ -432,6 +695,10 @@ impl AdapterStore {
         create_private_file(&path)?;
         let connection = Connection::open(&path).map_err(|_| AdapterStoreError::Unavailable)?;
         initialize_schema(&connection)?;
+        connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_replay_block_legacy_insert BEFORE INSERT ON runtime_replay BEGIN SELECT RAISE(ABORT, 'indexed runtime replay requires current binary'); END;
+            CREATE TRIGGER IF NOT EXISTS runtime_replay_block_legacy_update BEFORE UPDATE ON runtime_replay BEGIN SELECT RAISE(ABORT, 'indexed runtime replay requires current binary'); END;").map_err(|_|AdapterStoreError::Unavailable)?;
+        migrate_post_action_records(&connection)?;
+        migrate_runtime_outbox_index(&connection)?;
         ensure_model_call_phase_columns(&connection)?;
         ensure_input_operation_choice_identities_column(&connection)?;
         restrict_file(&path)?;
@@ -447,11 +714,10 @@ impl AdapterStore {
         &self.path
     }
 
-    pub(crate) fn load_run<T: DeserializeOwned>(
-        &self,
+    fn load_run_header_in_connection(
+        connection: &Connection,
         run_key: &str,
-    ) -> Result<Option<T>, AdapterStoreError> {
-        let connection = self.lock()?;
+    ) -> Result<Option<serde_json::Value>, AdapterStoreError> {
         let bytes = connection
             .query_row(
                 "SELECT record_json FROM codex_run WHERE run_key = ?1",
@@ -460,9 +726,86 @@ impl AdapterStore {
             )
             .optional()
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        bytes
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
-            .transpose()
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        crate::storage_mechanism_regression::run_header_read(bytes.len());
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+        if value.get("postActionTraces").is_some() {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        Ok(Some(value))
+    }
+
+    /// Loads the persisted run header without reconstructing its post-action
+    /// ledger. Model selection and advisory task context consume header facts.
+    pub(crate) fn load_run_header<T: DeserializeOwned>(
+        &self,
+        run_key: &str,
+    ) -> Result<Option<T>, AdapterStoreError> {
+        let connection = self.lock()?;
+        let Some(value) = Self::load_run_header_in_connection(&connection, run_key)? else {
+            return Ok(None);
+        };
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|_| AdapterStoreError::Corrupt)
+    }
+
+    /// Reconstructs and validates the complete post-action ledger for run
+    /// restoration and explicit audits, under the original connection lock.
+    pub(crate) fn load_run<T: DeserializeOwned>(
+        &self,
+        run_key: &str,
+    ) -> Result<Option<T>, AdapterStoreError> {
+        let connection = self.lock()?;
+        let Some(mut value) = Self::load_run_header_in_connection(&connection, run_key)? else {
+            return Ok(None);
+        };
+        let mut statement = connection
+            .prepare("SELECT source_key,sequence,record_json FROM post_action_trace WHERE run_key=?1 ORDER BY sequence")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let rows = statement
+            .query_map([run_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let mut traces = Vec::new();
+        for row in rows {
+            let (source, sequence, bytes) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            #[cfg(test)]
+            crate::storage_mechanism_regression::post_action_read(bytes.len());
+            let trace: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            let (record_source, record_sequence, _) = validate_post_action_value(&trace)?;
+            #[cfg(test)]
+            crate::storage_mechanism_regression::post_action_validation();
+            if record_source != source || record_sequence != sequence {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            traces.push(trace);
+        }
+        if !traces.is_empty() {
+            value["postActionTraces"] = serde_json::Value::Array(traces);
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|_| AdapterStoreError::Corrupt)
+    }
+
+    pub(crate) fn save_post_action_trace<T: Serialize>(
+        &self,
+        run_key: &str,
+        trace: &T,
+    ) -> Result<(), AdapterStoreError> {
+        let value = serde_json::to_value(trace).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.transaction(|tx| save_post_action_value(tx, run_key, &value))
     }
 
     pub(crate) fn save_run<T: Serialize>(
@@ -1638,6 +1981,11 @@ execution_mode,
                     Err(AdapterStoreError::Conflict)
                 };
             }
+            let sealed: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM model_call_response_seal WHERE run_key=?1 AND model_call_id=?2)",
+                params![run_key,model_call_id], |row|row.get(0),
+            ).map_err(|_|AdapterStoreError::Unavailable)?;
+            if sealed { return Err(AdapterStoreError::Conflict); }
             let next_sequence = transaction
                 .query_row(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM model_call_frame
@@ -1661,6 +2009,45 @@ execution_mode,
         })
     }
 
+    /// Reads one retained duplicate and the indexed delivery boundary. No prior
+    /// response body is decoded while accepting a new contiguous frame.
+    pub(crate) fn model_call_frame_position(
+        &self,
+        run_key: &str,
+        model_call_id: &str,
+        chunk: &ModelChunkMessage,
+    ) -> Result<(bool, bool, bool), AdapterStoreError> {
+        let connection = self.lock()?;
+        let last: Option<(i64,bool)> = connection.query_row(
+            "SELECT sequence,json_extract(frame_json,'$.isFinal') FROM model_call_frame WHERE run_key=?1 AND model_call_id=?2 ORDER BY sequence DESC LIMIT 1",
+            params![run_key,model_call_id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|AdapterStoreError::Unavailable)?;
+        let highest = last.as_ref().map_or(0, |x| x.0);
+        let exact = if chunk.sequence.0 <= highest {
+            let stored: Option<(String,Vec<u8>)> = connection.query_row(
+                "SELECT frame_digest,frame_json FROM model_call_frame WHERE run_key=?1 AND model_call_id=?2 AND sequence=?3",
+                params![run_key,model_call_id,chunk.sequence.0],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|AdapterStoreError::Unavailable)?;
+            if let Some((digest, bytes)) = stored {
+                #[cfg(test)]
+                crate::audit_model_metrics::record_frame_read(bytes.len());
+                if format!("sha256:{:x}", Sha256::digest(&bytes)) != digest {
+                    return Err(AdapterStoreError::Corrupt);
+                }
+                let retained: ModelChunkMessage =
+                    serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+                retained == *chunk
+            } else {
+                return Err(AdapterStoreError::Corrupt);
+            }
+        } else {
+            false
+        };
+        Ok((
+            exact,
+            chunk.sequence.0 == highest.saturating_add(1),
+            last.is_some_and(|x| x.1),
+        ))
+    }
+
     /// Loads the exact response frames in sequence order and validates their
     /// durable envelope before exposing any provider payload to Core.
     pub(crate) fn load_model_call_frames(
@@ -1668,26 +2055,51 @@ execution_mode,
         run_key: &str,
         model_call_id: &str,
     ) -> Result<Vec<ModelChunkMessage>, AdapterStoreError> {
+        self.load_model_call_frames_after(run_key, model_call_id, 0)
+    }
+
+    pub(crate) fn load_model_call_frames_after(
+        &self,
+        run_key: &str,
+        model_call_id: &str,
+        after: u64,
+    ) -> Result<Vec<ModelChunkMessage>, AdapterStoreError> {
         if run_key.trim().is_empty() || model_call_id.trim().is_empty() {
             return Err(AdapterStoreError::Conflict);
         }
         let connection = self.lock()?;
+        Self::load_model_call_frames_after_in_connection(&connection, run_key, model_call_id, after)
+    }
+
+    fn load_model_call_frames_after_in_connection(
+        connection: &Connection,
+        run_key: &str,
+        model_call_id: &str,
+        after: u64,
+    ) -> Result<Vec<ModelChunkMessage>, AdapterStoreError> {
         let mut statement = connection
             .prepare(
                 "SELECT sequence, frame_digest, frame_json
                  FROM model_call_frame
-                 WHERE run_key = ?1 AND model_call_id = ?2
+                 WHERE run_key = ?1 AND model_call_id = ?2 AND sequence > ?3
                  ORDER BY sequence",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let rows = statement
-            .query_map(params![run_key, model_call_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })
+            .query_map(
+                params![
+                    run_key,
+                    model_call_id,
+                    i64::try_from(after).map_err(|_| AdapterStoreError::Conflict)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let mut frames = Vec::new();
         for row in rows {
@@ -1706,9 +2118,11 @@ execution_mode,
                 serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
             frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
                 .map_err(|_| AdapterStoreError::Corrupt)?;
+            crate::model_bridge::validate_chunk_for_retention(&chunk)
+                .map_err(|_| AdapterStoreError::Corrupt)?;
             if chunk.sequence.0 != sequence
                 || chunk.sequence.0
-                    != i64::try_from(frames.len().saturating_add(1))
+                    != i64::try_from(after.saturating_add(frames.len() as u64).saturating_add(1))
                         .map_err(|_| AdapterStoreError::Corrupt)?
                 || (chunk.is_final
                     && !frames.is_empty()
@@ -1728,6 +2142,92 @@ execution_mode,
             return Err(AdapterStoreError::Corrupt);
         }
         Ok(frames)
+    }
+
+    /// Verifies the complete persisted response once. The immutable seal also
+    /// makes a detached final ACK a constant-cost exact-duplicate operation.
+    pub(crate) fn seal_model_call_response(
+        &self,
+        run_key: &str,
+        model_call_id: &str,
+    ) -> Result<(), AdapterStoreError> {
+        if run_key.trim().is_empty() || model_call_id.trim().is_empty() {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let mut connection = self.lock()?;
+        // The same WAL writer transaction owns the complete frame read,
+        // ledger binding validation and seal publication. A count alone cannot
+        // prove that a response has not changed between independent reads.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let seal: Option<(i64, String)> = transaction.query_row(
+            "SELECT frame_count,response_digest FROM model_call_response_seal WHERE run_key=?1 AND model_call_id=?2",
+            params![run_key,model_call_id],
+            |row|Ok((row.get(0)?,row.get(1)?)),
+        ).optional().map_err(|_|AdapterStoreError::Unavailable)?;
+        if let Some((count, digest)) = seal {
+            let last: Option<(i64, bool)> = transaction.query_row(
+                "SELECT sequence,json_extract(frame_json,'$.isFinal') FROM model_call_frame WHERE run_key=?1 AND model_call_id=?2 ORDER BY sequence DESC LIMIT 1",
+                params![run_key,model_call_id],
+                |row|Ok((row.get(0)?,row.get(1)?)),
+            ).optional().map_err(|_|AdapterStoreError::Unavailable)?;
+            if count <= 0 || !valid_sha256_digest(&digest) || last != Some((count, true)) {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            return transaction
+                .commit()
+                .map_err(|_| AdapterStoreError::Unavailable);
+        }
+        let frames = Self::load_model_call_frames_after_in_connection(
+            &transaction,
+            run_key,
+            model_call_id,
+            0,
+        )?;
+        let first = frames.first().ok_or(AdapterStoreError::Corrupt)?;
+        if !frames.last().is_some_and(|frame| frame.is_final) {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        let expected_exchange: Option<String> = transaction.query_row(
+            "SELECT model_exchange_id FROM model_call_ledger WHERE run_key=?1 AND model_call_id=?2",
+            params![run_key,model_call_id], |row|row.get(0),
+        ).optional().map_err(|_|AdapterStoreError::Unavailable)?;
+        if expected_exchange.as_deref() != Some(first.model_exchange_id.0.as_str()) {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        let mut digest = Sha256::new();
+        for frame in &frames {
+            if frame.model_exchange_id != first.model_exchange_id
+                || frame.lease != first.lease
+                || frame.worker_session_id != first.worker_session_id
+                || frame.session_identity != first.session_identity
+            {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            let bytes = serde_json::to_vec(frame).map_err(|_| AdapterStoreError::Corrupt)?;
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        let count = i64::try_from(frames.len()).map_err(|_| AdapterStoreError::Corrupt)?;
+        let digest = format!("sha256:{:x}", digest.finalize());
+        let last: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM model_call_frame WHERE run_key=?1 AND model_call_id=?2",
+            params![run_key,model_call_id], |row|row.get(0),
+        ).map_err(|_|AdapterStoreError::Unavailable)?;
+        if last != count {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let changed = transaction.execute(
+            "INSERT INTO model_call_response_seal(run_key,model_call_id,frame_count,response_digest) VALUES(?1,?2,?3,?4)",
+            params![run_key,model_call_id,count,digest],
+        ).map_err(|_|AdapterStoreError::Unavailable)?;
+        if changed != 1 {
+            return Err(AdapterStoreError::Conflict);
+        }
+        transaction
+            .commit()
+            .map_err(|_| AdapterStoreError::Unavailable)
     }
 
     /// Finds the durable model-call identity which owns one Provider exchange.
@@ -2138,6 +2638,122 @@ execution_mode,
         })
     }
 
+    /// Retains one exact Core call and its private, durable answer intent.
+    /// Product receipts acknowledge individual answers; this record is the
+    /// separate authority for submitting the complete response to Core.
+    pub(crate) fn retain_input_call<T: Serialize + DeserializeOwned>(
+        &self,
+        run_key: &str,
+        request_digest: &str,
+        record: &T,
+    ) -> Result<T, AdapterStoreError> {
+        validate_digest(request_digest)?;
+        if run_key.is_empty() {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.transaction(|transaction| {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO input_call(run_key, request_digest, record_json)
+                 VALUES (?1, ?2, ?3)",
+                    params![run_key, request_digest, bytes],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            let stored: Vec<u8> = transaction
+                .query_row(
+                    "SELECT record_json FROM input_call WHERE run_key=?1 AND request_digest=?2",
+                    params![run_key, request_digest],
+                    |row| row.get(0),
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            serde_json::from_slice(&stored).map_err(|_| AdapterStoreError::Corrupt)
+        })
+    }
+
+    pub(crate) fn load_input_call<T: DeserializeOwned>(
+        &self,
+        run_key: &str,
+        request_digest: &str,
+    ) -> Result<Option<T>, AdapterStoreError> {
+        let bytes: Option<Vec<u8>> = self
+            .lock()?
+            .query_row(
+                "SELECT record_json FROM input_call WHERE run_key=?1 AND request_digest=?2",
+                params![run_key, request_digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
+            .transpose()
+    }
+
+    /// Compare-and-swap prevents an exact replay from replacing an already
+    /// accepted answer or a Core application marker.
+    pub(crate) fn replace_input_call<T: Serialize>(
+        &self,
+        run_key: &str,
+        request_digest: &str,
+        previous: &T,
+        next: &T,
+    ) -> Result<(), AdapterStoreError> {
+        let previous = serde_json::to_vec(previous).map_err(|_| AdapterStoreError::Corrupt)?;
+        let next = serde_json::to_vec(next).map_err(|_| AdapterStoreError::Corrupt)?;
+        let changed = self
+            .lock()?
+            .execute(
+                "UPDATE input_call SET record_json=?4
+             WHERE run_key=?1 AND request_digest=?2 AND record_json=?3",
+                params![run_key, request_digest, previous, next],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if changed != 1 {
+            return Err(AdapterStoreError::Conflict);
+        }
+        Ok(())
+    }
+
+    /// The private answer and its public-operation resolution are one commit.
+    /// A crash cannot leave an accepted answer pending for deadline settlement.
+    pub(crate) fn resolve_input_call_answer<T: Serialize>(
+        &self,
+        operation: &StoredInputOperation,
+        resolution_digest: &str,
+        previous: &T,
+        next: &T,
+    ) -> Result<(), AdapterStoreError> {
+        operation.validate()?;
+        validate_digest(resolution_digest)?;
+        let previous = serde_json::to_vec(previous).map_err(|_| AdapterStoreError::Corrupt)?;
+        let next = serde_json::to_vec(next).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.transaction(|transaction| {
+            if load_input_operation(transaction, &operation.input_request_id)?.as_ref()
+                != Some(operation)
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE input_call SET record_json=?4
+                     WHERE run_key=?1 AND request_digest=?2 AND record_json=?3",
+                    params![operation.run_key, operation.request_digest, previous, next],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            if changed != 1 {
+                return Err(AdapterStoreError::Conflict);
+            }
+            settle_input_operation(
+                transaction,
+                &operation.input_request_id,
+                &operation.request_digest,
+                resolution_digest,
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn retain_input_operation(
         &self,
         operation: &StoredInputOperation,
@@ -2192,31 +2808,12 @@ execution_mode,
     ) -> Result<StoredInputOperation, AdapterStoreError> {
         validate_digest(resolution_digest)?;
         self.transaction(|transaction| {
-            let mut operation = load_input_operation(transaction, input_request_id)?
-                .ok_or(AdapterStoreError::Conflict)?;
-            if operation.request_digest != request_digest {
-                return Err(AdapterStoreError::Conflict);
-            }
-            if operation.state == StoredInputOperationState::Resolved {
-                return if operation.resolution_digest.as_deref() == Some(resolution_digest) {
-                    Ok(operation)
-                } else {
-                    Err(AdapterStoreError::Conflict)
-                };
-            }
-            let changed = transaction
-                .execute(
-                    "UPDATE input_operation SET state = 'resolved', resolution_digest = ?3
-                     WHERE input_request_id = ?1 AND request_digest = ?2 AND state = 'pending'",
-                    params![input_request_id, request_digest, resolution_digest],
-                )
-                .map_err(|_| AdapterStoreError::Unavailable)?;
-            if changed != 1 {
-                return Err(AdapterStoreError::Conflict);
-            }
-            operation.state = StoredInputOperationState::Resolved;
-            operation.resolution_digest = Some(resolution_digest.to_owned());
-            Ok(operation)
+            settle_input_operation(
+                transaction,
+                input_request_id,
+                request_digest,
+                resolution_digest,
+            )
         })
     }
 
@@ -3002,6 +3599,39 @@ fn load_approval_operation(
         .transpose()
 }
 
+fn settle_input_operation(
+    transaction: &Transaction<'_>,
+    input_request_id: &str,
+    request_digest: &str,
+    resolution_digest: &str,
+) -> Result<StoredInputOperation, AdapterStoreError> {
+    let mut operation =
+        load_input_operation(transaction, input_request_id)?.ok_or(AdapterStoreError::Conflict)?;
+    if operation.request_digest != request_digest {
+        return Err(AdapterStoreError::Conflict);
+    }
+    if operation.state == StoredInputOperationState::Resolved {
+        return if operation.resolution_digest.as_deref() == Some(resolution_digest) {
+            Ok(operation)
+        } else {
+            Err(AdapterStoreError::Conflict)
+        };
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE input_operation SET state = 'resolved', resolution_digest = ?3
+             WHERE input_request_id = ?1 AND request_digest = ?2 AND state = 'pending'",
+            params![input_request_id, request_digest, resolution_digest],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    if changed != 1 {
+        return Err(AdapterStoreError::Conflict);
+    }
+    operation.state = StoredInputOperationState::Resolved;
+    operation.resolution_digest = Some(resolution_digest.to_owned());
+    Ok(operation)
+}
+
 fn load_input_operation(
     connection: &Connection,
     input_request_id: &str,
@@ -3145,6 +3775,20 @@ impl ModelCursorStore for AdapterStore {
         load_model_cursor(&connection, stream)
     }
 
+    fn load_head(&mut self, stream: &ReplayStreamKey) -> Result<ModelCursorHead, Self::Error> {
+        let connection = self.lock()?;
+        Ok(load_model_cursor_head(&connection, stream)?.unwrap_or_default())
+    }
+
+    fn load_fingerprint(
+        &mut self,
+        stream: &ReplayStreamKey,
+        sequence: u64,
+    ) -> Result<Option<ModelChunkFingerprint>, Self::Error> {
+        let connection = self.lock()?;
+        load_model_fingerprint(&connection, stream, sequence)
+    }
+
     fn record_delivery(
         &mut self,
         stream: &ReplayStreamKey,
@@ -3152,30 +3796,24 @@ impl ModelCursorStore for AdapterStore {
         fingerprint: &ModelChunkFingerprint,
         termination: Option<ModelTerminationReason>,
     ) -> Result<(), Self::Error> {
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut snapshot = load_model_cursor(&transaction, stream)?.unwrap_or_default();
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.confirmed_sequence != expected_sequence
-            || fingerprint.sequence != expected_sequence.saturating_add(1)
-            || snapshot.termination.is_some()
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
-        snapshot.confirmed_sequence = fingerprint.sequence;
-        snapshot.frames.push(fingerprint.clone());
-        snapshot.termination = termination;
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_model_cursor(&transaction, stream, &snapshot)?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+        self.transaction(|transaction| {
+            let mut head = load_model_cursor_head(transaction, stream)?.unwrap_or_default();
+            if head.confirmed_sequence != expected_sequence || head.termination.is_some() || head.cancellation.is_some()
+                || fingerprint.sequence != expected_sequence.checked_add(1).ok_or(AdapterStoreError::Conflict)? {
+                return Err(AdapterStoreError::Conflict);
+            }
+            validate_model_fingerprint(fingerprint)?;
+            if termination != (if fingerprint.is_final { Some(if fingerprint.has_error { ModelTerminationReason::ProviderError } else { ModelTerminationReason::Completed }) } else { None }) {
+                return Err(AdapterStoreError::Conflict);
+            }
+            head.confirmed_sequence = fingerprint.sequence;
+            head.termination = termination;
+            write_model_cursor(transaction, stream, &head)?;
+            transaction.execute("INSERT INTO model_cursor_frame(stream_key,sequence,fingerprint_json) VALUES(?1,?2,?3)",
+                params![stream.as_str(),i64::try_from(fingerprint.sequence).map_err(|_|AdapterStoreError::Corrupt)?,serde_json::to_vec(fingerprint).map_err(|_|AdapterStoreError::Corrupt)?])
+                .map_err(|_|AdapterStoreError::Unavailable)?;
+            Ok(())
+        })
     }
 
     fn terminate(
@@ -3184,25 +3822,17 @@ impl ModelCursorStore for AdapterStore {
         expected_sequence: u64,
         reason: ModelTerminationReason,
     ) -> Result<(), Self::Error> {
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut snapshot = load_model_cursor(&transaction, stream)?.unwrap_or_default();
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.confirmed_sequence != expected_sequence || snapshot.termination.is_some() {
-            return Err(AdapterStoreError::Conflict);
-        }
-        snapshot.termination = Some(reason);
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_model_cursor(&transaction, stream, &snapshot)?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+        self.transaction(|transaction| {
+            let mut head = load_model_cursor_head(transaction, stream)?.unwrap_or_default();
+            if head.confirmed_sequence != expected_sequence
+                || head.termination.is_some()
+                || head.cancellation.is_some()
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            head.termination = Some(reason);
+            write_model_cursor(transaction, stream, &head)
+        })
     }
 
     fn record_cancellation_intent(
@@ -3211,31 +3841,19 @@ impl ModelCursorStore for AdapterStore {
         expected_sequence: u64,
         fingerprint: &ModelCancellationFingerprint,
     ) -> Result<(), Self::Error> {
-        if fingerprint.phase != ModelCancellationPhase::Intent {
-            return Err(AdapterStoreError::Conflict);
-        }
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut snapshot = load_model_cursor(&transaction, stream)?.unwrap_or_default();
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.confirmed_sequence != expected_sequence
-            || snapshot.termination.is_some()
-            || snapshot.cancellation.is_some()
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
-        snapshot.cancellation = Some(fingerprint.clone());
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_model_cursor(&transaction, stream, &snapshot)?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+        self.transaction(|transaction| {
+            let mut head = load_model_cursor_head(transaction, stream)?.unwrap_or_default();
+            if head.confirmed_sequence != expected_sequence
+                || head.termination.is_some()
+                || head.cancellation.is_some()
+                || fingerprint.phase != ModelCancellationPhase::Intent
+                || !valid_cancellation(fingerprint, expected_sequence)
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            head.cancellation = Some(fingerprint.clone());
+            write_model_cursor(transaction, stream, &head)
+        })
     }
 
     fn complete_cancellation(
@@ -3244,50 +3862,217 @@ impl ModelCursorStore for AdapterStore {
         expected_sequence: u64,
         fingerprint: &ModelCancellationFingerprint,
     ) -> Result<(), Self::Error> {
-        if fingerprint.phase != ModelCancellationPhase::Intent {
-            return Err(AdapterStoreError::Conflict);
-        }
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut snapshot = load_model_cursor(&transaction, stream)?.unwrap_or_default();
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.confirmed_sequence != expected_sequence
-            || snapshot.termination.is_some()
-            || snapshot.cancellation.as_ref() != Some(fingerprint)
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
-        let mut applied = fingerprint.clone();
-        applied.phase = ModelCancellationPhase::Applied;
-        snapshot.cancellation = Some(applied);
-        snapshot.termination = Some(ModelTerminationReason::Cancelled);
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_model_cursor(&transaction, stream, &snapshot)?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+        self.transaction(|transaction| {
+            let mut head = load_model_cursor_head(transaction, stream)?.unwrap_or_default();
+            if head.confirmed_sequence != expected_sequence
+                || head.termination.is_some()
+                || head.cancellation.as_ref() != Some(fingerprint)
+                || fingerprint.phase != ModelCancellationPhase::Intent
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            let mut applied = fingerprint.clone();
+            applied.phase = ModelCancellationPhase::Applied;
+            head.cancellation = Some(applied);
+            head.termination = Some(ModelTerminationReason::Cancelled);
+            write_model_cursor(transaction, stream, &head)
+        })
     }
+}
+
+fn validate_model_fingerprint(frame: &ModelChunkFingerprint) -> Result<(), AdapterStoreError> {
+    let digest = &frame.digest.0;
+    if frame.sequence == 0
+        || frame.sequence > MAX_SAFE_METRIC as u64
+        || frame.message_id.0.is_empty()
+        || digest.len() != 71
+        || !digest.starts_with("sha256:")
+        || !digest[7..]
+            .bytes()
+            .all(|x| x.is_ascii_digit() || (b'a'..=b'f').contains(&x))
+        || frame.has_error && !frame.is_final
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+fn load_model_fingerprint(
+    connection: &Connection,
+    stream: &ReplayStreamKey,
+    sequence: u64,
+) -> Result<Option<ModelChunkFingerprint>, AdapterStoreError> {
+    let bytes = connection
+        .query_row(
+            "SELECT fingerprint_json FROM model_cursor_frame WHERE stream_key=?1 AND sequence=?2",
+            params![
+                stream.as_str(),
+                i64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    bytes
+        .map(|bytes| {
+            #[cfg(test)]
+            crate::audit_model_metrics::record_fingerprint_visit();
+            let frame: ModelChunkFingerprint =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            validate_model_fingerprint(&frame)?;
+            if frame.sequence != sequence {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            Ok(frame)
+        })
+        .transpose()
+}
+
+fn load_model_cursor_head(
+    connection: &Connection,
+    stream: &ReplayStreamKey,
+) -> Result<Option<ModelCursorHead>, AdapterStoreError> {
+    let head: Option<ModelCursorHead> = load_snapshot(connection, "model_cursor", stream.as_str())?;
+    if let Some(head) = &head {
+        if head.confirmed_sequence > MAX_SAFE_METRIC as u64 {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        let last = if head.confirmed_sequence > 0 {
+            Some(
+                load_model_fingerprint(connection, stream, head.confirmed_sequence)?
+                    .ok_or(AdapterStoreError::Corrupt)?,
+            )
+        } else {
+            None
+        };
+        let provider_final = last.as_ref().filter(|f| f.is_final).map(|f| {
+            if f.has_error {
+                ModelTerminationReason::ProviderError
+            } else {
+                ModelTerminationReason::Completed
+            }
+        });
+        if (provider_final.is_some()
+            || matches!(
+                head.termination,
+                Some(ModelTerminationReason::Completed | ModelTerminationReason::ProviderError)
+            ))
+            && head.termination != provider_final
+            || head.termination == Some(ModelTerminationReason::Cancelled)
+                && !head
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(|x| x.phase == ModelCancellationPhase::Applied)
+            || head.cancellation.as_ref().is_some_and(|x| {
+                !valid_cancellation(x, head.confirmed_sequence)
+                    || (head.termination.is_none() && x.phase != ModelCancellationPhase::Intent)
+                    || (head.termination != Some(ModelTerminationReason::Cancelled)
+                        && head.termination.is_some())
+            })
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+    }
+    Ok(head)
 }
 
 fn load_model_cursor(
     connection: &Connection,
     stream: &ReplayStreamKey,
 ) -> Result<Option<ModelCursorSnapshot>, AdapterStoreError> {
-    load_snapshot(connection, "model_cursor", stream.as_str())
+    let Some(head) = load_model_cursor_head(connection, stream)? else {
+        return Ok(None);
+    };
+    let mut snapshot = ModelCursorSnapshot {
+        confirmed_sequence: head.confirmed_sequence,
+        cancellation: head.cancellation,
+        termination: head.termination,
+        frames: Vec::new(),
+    };
+    let mut statement = connection.prepare("SELECT sequence,fingerprint_json FROM model_cursor_frame WHERE stream_key=?1 ORDER BY sequence").map_err(|_|AdapterStoreError::Unavailable)?;
+    let rows = statement
+        .query_map([stream.as_str()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    for row in rows {
+        let (sequence, bytes) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+        let frame: ModelChunkFingerprint =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+        if frame.sequence != u64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)? {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        snapshot.frames.push(frame);
+    }
+    snapshot
+        .validate()
+        .map_err(|_| AdapterStoreError::Corrupt)?;
+    Ok(Some(snapshot))
 }
 
 fn write_model_cursor(
     transaction: &Transaction<'_>,
     stream: &ReplayStreamKey,
-    snapshot: &ModelCursorSnapshot,
+    head: &ModelCursorHead,
 ) -> Result<(), AdapterStoreError> {
-    write_snapshot(transaction, "model_cursor", stream.as_str(), snapshot)
+    write_snapshot(transaction, "model_cursor", stream.as_str(), head)
+}
+
+fn migrate_model_cursor_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let done = transaction
+        .query_row(
+            "SELECT 1 FROM codex_store_migration WHERE migration_key='model-cursor-frames-v1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    if done.is_none() {
+        let records = {
+            let mut statement = transaction
+                .prepare("SELECT stream_key,snapshot_json FROM model_cursor")
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|_| AdapterStoreError::Unavailable)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AdapterStoreError::Unavailable)?
+        };
+        for (stream, bytes) in records {
+            let snapshot: ModelCursorSnapshot =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            snapshot
+                .validate()
+                .map_err(|_| AdapterStoreError::Corrupt)?;
+            for frame in &snapshot.frames {
+                transaction.execute("INSERT INTO model_cursor_frame(stream_key,sequence,fingerprint_json) VALUES(?1,?2,?3)",params![stream,i64::try_from(frame.sequence).map_err(|_|AdapterStoreError::Corrupt)?,serde_json::to_vec(frame).map_err(|_|AdapterStoreError::Corrupt)?]).map_err(|_|AdapterStoreError::Unavailable)?;
+            }
+            let head: ModelCursorHead = snapshot.into();
+            transaction
+                .execute(
+                    "UPDATE model_cursor SET snapshot_json=?1 WHERE stream_key=?2",
+                    params![
+                        serde_json::to_vec(&head).map_err(|_| AdapterStoreError::Corrupt)?,
+                        stream
+                    ],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO codex_store_migration(migration_key) VALUES('model-cursor-frames-v1')",
+                [],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    transaction
+        .commit()
+        .map_err(|_| AdapterStoreError::Unavailable)
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -3342,57 +4127,283 @@ impl From<&ReplaySnapshot> for StoredReplaySnapshot {
     }
 }
 
+/// Moves a legacy snapshot once, under the same transaction as the indexed read.
+/// Its original bytes and full invariants are checked before any row is written.
+fn ensure_runtime_replay(
+    tx: &Transaction<'_>,
+    stream: &ReplayStreamKey,
+) -> Result<bool, AdapterStoreError> {
+    if tx
+        .query_row(
+            "SELECT 1 FROM runtime_replay_head WHERE stream_key=?1",
+            [stream.as_str()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let old: Option<StoredReplaySnapshot> = load_snapshot(tx, "runtime_replay", stream.as_str())?;
+    let Some(old) = old else {
+        return Ok(false);
+    };
+    let snapshot = ReplaySnapshot::from(old);
+    snapshot
+        .validate()
+        .map_err(|_| AdapterStoreError::Corrupt)?;
+    tx.execute(
+        "INSERT INTO runtime_replay_head VALUES (?1,?2,?3)",
+        params![
+            stream.as_str(),
+            replay_integer(snapshot.ack_sequence)?,
+            replay_integer(snapshot.highest_sequence)?
+        ],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    for frame in &snapshot.events {
+        insert_runtime_frame(tx, stream, frame)?;
+    }
+    if snapshot.events.is_empty() && snapshot.highest_sequence > 0 {
+        tx.execute(
+            "INSERT INTO runtime_replay_legacy_compaction VALUES (?1,?2)",
+            params![stream.as_str(), replay_integer(snapshot.highest_sequence)?],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    tx.execute(
+        "DELETE FROM runtime_replay WHERE stream_key=?1",
+        [stream.as_str()],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    Ok(true)
+}
+
+fn replay_integer(value: u64) -> Result<i64, AdapterStoreError> {
+    i64::try_from(value).map_err(|_| AdapterStoreError::Corrupt)
+}
+
+fn insert_runtime_frame(
+    tx: &Transaction<'_>,
+    stream: &ReplayStreamKey,
+    frame: &ReplayFrame,
+) -> Result<(), AdapterStoreError> {
+    if frame.sequence == 0 || frame.event_id.is_empty() || frame.digest.is_empty() {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    tx.execute(
+        "INSERT INTO runtime_replay_frame VALUES (?1,?2,?3,?4,?5)",
+        params![
+            stream.as_str(),
+            replay_integer(frame.sequence)?,
+            frame.event_id,
+            frame.digest,
+            frame.frame
+        ],
+    )
+    .map_err(|_| AdapterStoreError::Conflict)?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_write(
+        "runtime_replay",
+        frame.frame.len() + frame.event_id.len() + frame.digest.len() + 8,
+    );
+    Ok(())
+}
+
+fn read_runtime_head(
+    tx: &Transaction<'_>,
+    stream: &ReplayStreamKey,
+) -> Result<ReplaySnapshot, AdapterStoreError> {
+    let head: Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT ack_sequence,highest_sequence FROM runtime_replay_head WHERE stream_key=?1",
+            [stream.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let Some((ack, highest)) = head else {
+        return Ok(ReplaySnapshot::default());
+    };
+    if ack < 0 || highest < ack {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let tail: Option<(i64, String, String)> = tx.query_row("SELECT sequence,event_id,digest FROM runtime_replay_frame WHERE stream_key=?1 ORDER BY sequence DESC LIMIT 1", [stream.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    // Legacy stores may have compacted an acknowledged prefix or the entire
+    // acknowledged stream. Any retained tail must match the durable high water.
+    let tail_bytes = if let Some((sequence, event_id, digest)) = tail {
+        if sequence <= 0 || sequence != highest || event_id.is_empty() || digest.is_empty() {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        event_id.len() + digest.len() + 8
+    } else {
+        let compacted: Option<i64> = tx.query_row("SELECT compacted_through FROM runtime_replay_legacy_compaction WHERE stream_key=?1", [stream.as_str()], |row| row.get(0)).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+        if ack != highest || (highest > 0 && compacted != Some(highest)) {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        0
+    };
+    #[cfg(test)]
+    crate::storage_mechanism_regression::snapshot_read("runtime_replay", 16 + tail_bytes);
+    #[cfg(not(test))]
+    let _ = tail_bytes;
+    Ok(ReplaySnapshot {
+        ack_sequence: u64::try_from(ack).map_err(|_| AdapterStoreError::Corrupt)?,
+        highest_sequence: u64::try_from(highest).map_err(|_| AdapterStoreError::Corrupt)?,
+        events: Vec::new(),
+    })
+}
+
+fn read_runtime_frames(
+    tx: &Transaction<'_>,
+    stream: &ReplayStreamKey,
+    query: ReplayReadQuery<'_>,
+) -> Result<ReplaySnapshot, AdapterStoreError> {
+    ensure_runtime_replay(tx, stream)?;
+    let mut snapshot = read_runtime_head(tx, stream)?;
+    let (sql, id, sequence, limit) = match query {
+        ReplayReadQuery::Watermarks => return Ok(snapshot),
+        ReplayReadQuery::Conflict { event_id, sequence } => (
+            "SELECT event_id,sequence,digest,frame FROM runtime_replay_frame WHERE stream_key=?1 AND event_id=?2 UNION ALL SELECT event_id,sequence,digest,frame FROM runtime_replay_frame WHERE stream_key=?1 AND sequence=?3 AND event_id<>?2 ORDER BY sequence LIMIT ?4",
+            event_id,
+            replay_integer(sequence)?,
+            2_i64,
+        ),
+        ReplayReadQuery::After {
+            sequence,
+            max_events,
+        } => (
+            "SELECT event_id,sequence,digest,frame FROM runtime_replay_frame WHERE stream_key=?1 AND sequence>?3 ORDER BY sequence LIMIT ?4",
+            "",
+            replay_integer(sequence)?,
+            i64::try_from(max_events).unwrap_or(i64::MAX),
+        ),
+    };
+    let mut stmt = tx
+        .prepare(sql)
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let rows = stmt
+        .query_map(params![stream.as_str(), id, sequence, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    for row in rows {
+        let (event_id, sequence, digest, frame) =
+            row.map_err(|_| AdapterStoreError::Unavailable)?;
+        if sequence <= 0
+            || event_id.is_empty()
+            || digest.is_empty()
+            || u64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?
+                > snapshot.highest_sequence
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        #[cfg(test)]
+        crate::storage_mechanism_regression::snapshot_read(
+            "runtime_replay",
+            frame.len() + event_id.len() + digest.len() + 8,
+        );
+        snapshot.events.push(ReplayFrame::new(
+            event_id,
+            u64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?,
+            digest,
+            frame,
+        ));
+    }
+    #[cfg(test)]
+    crate::storage_mechanism_regression::replay_query(
+        stmt.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    if let ReplayReadQuery::After { sequence, .. } = query {
+        let mut expected = snapshot
+            .events
+            .first()
+            .map_or(sequence.saturating_add(1), |frame| frame.sequence);
+        if expected > sequence.saturating_add(1)
+            && expected > snapshot.ack_sequence.saturating_add(1)
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        for frame in &snapshot.events {
+            if frame.sequence != expected {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            expected = expected.checked_add(1).ok_or(AdapterStoreError::Corrupt)?;
+        }
+        if sequence < snapshot.highest_sequence
+            && snapshot.events.is_empty()
+            && snapshot.highest_sequence > snapshot.ack_sequence
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+    }
+    Ok(snapshot)
+}
+
 impl ReplayStore for AdapterStore {
     type Error = AdapterStoreError;
-
     fn load(&mut self, stream: &ReplayStreamKey) -> Result<Option<ReplaySnapshot>, Self::Error> {
-        let connection = self.lock()?;
-        let stored: Option<StoredReplaySnapshot> =
-            load_snapshot(&connection, "runtime_replay", stream.as_str())?;
-        let snapshot = stored.map(ReplaySnapshot::from);
-        if let Some(snapshot) = &snapshot {
+        self.transaction(|tx| {
+            if !ensure_runtime_replay(tx, stream)? {
+                return Ok(None);
+            }
+            let snapshot = read_runtime_frames(
+                tx,
+                stream,
+                ReplayReadQuery::After {
+                    sequence: 0,
+                    max_events: usize::MAX,
+                },
+            )?;
             snapshot
                 .validate()
                 .map_err(|_| AdapterStoreError::Corrupt)?;
-        }
-        Ok(snapshot)
+            Ok(Some(snapshot))
+        })
     }
-
+    fn load_indexed(
+        &mut self,
+        stream: &ReplayStreamKey,
+        query: ReplayReadQuery<'_>,
+    ) -> Result<Option<ReplaySnapshot>, Self::Error> {
+        self.transaction(|tx| read_runtime_frames(tx, stream, query).map(Some))
+    }
     fn append(
         &mut self,
         stream: &ReplayStreamKey,
         expected_highest_sequence: u64,
         frame: &ReplayFrame,
     ) -> Result<(), Self::Error> {
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
+        self.transaction(|tx| {
+            if !ensure_runtime_replay(tx, stream)? {
+                tx.execute(
+                    "INSERT INTO runtime_replay_head VALUES (?1,0,0)",
+                    [stream.as_str()],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            }
+            let snapshot = read_runtime_head(tx, stream)?;
+            if snapshot.highest_sequence != expected_highest_sequence
+                || Some(frame.sequence) != expected_highest_sequence.checked_add(1)
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            insert_runtime_frame(tx, stream, frame)?;
+            tx.execute(
+                "UPDATE runtime_replay_head SET highest_sequence=?2 WHERE stream_key=?1",
+                params![stream.as_str(), replay_integer(frame.sequence)?],
+            )
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let stored: Option<StoredReplaySnapshot> =
-            load_snapshot(&transaction, "runtime_replay", stream.as_str())?;
-        let mut snapshot = stored.map_or_else(ReplaySnapshot::default, ReplaySnapshot::from);
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.highest_sequence != expected_highest_sequence
-            || frame.sequence != expected_highest_sequence.saturating_add(1)
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
-        snapshot.highest_sequence = frame.sequence;
-        snapshot.events.push(frame.clone());
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_snapshot(
-            &transaction,
-            "runtime_replay",
-            stream.as_str(),
-            &StoredReplaySnapshot::from(&snapshot),
-        )?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+            #[cfg(test)]
+            crate::storage_mechanism_regression::snapshot_write("runtime_replay", 8);
+            Ok(())
+        })
     }
 }
 
@@ -3403,35 +4414,24 @@ impl ReplayAcknowledgementStore for AdapterStore {
         expected_ack_sequence: u64,
         ack_sequence: u64,
     ) -> Result<(), Self::Error> {
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
+        self.transaction(|tx| {
+            ensure_runtime_replay(tx, stream)?;
+            let snapshot = read_runtime_head(tx, stream)?;
+            if snapshot.ack_sequence != expected_ack_sequence
+                || ack_sequence < expected_ack_sequence
+                || ack_sequence > snapshot.highest_sequence
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            tx.execute(
+                "UPDATE runtime_replay_head SET ack_sequence=?2 WHERE stream_key=?1",
+                params![stream.as_str(), replay_integer(ack_sequence)?],
+            )
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let stored: Option<StoredReplaySnapshot> =
-            load_snapshot(&transaction, "runtime_replay", stream.as_str())?;
-        let mut snapshot = stored.map_or_else(ReplaySnapshot::default, ReplaySnapshot::from);
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        if snapshot.ack_sequence != expected_ack_sequence
-            || ack_sequence < expected_ack_sequence
-            || ack_sequence > snapshot.highest_sequence
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
-        snapshot.ack_sequence = ack_sequence;
-        snapshot
-            .validate()
-            .map_err(|_| AdapterStoreError::Corrupt)?;
-        write_snapshot(
-            &transaction,
-            "runtime_replay",
-            stream.as_str(),
-            &StoredReplaySnapshot::from(&snapshot),
-        )?;
-        transaction
-            .commit()
-            .map_err(|_| AdapterStoreError::Unavailable)
+            #[cfg(test)]
+            crate::storage_mechanism_regression::snapshot_write("runtime_replay", 8);
+            Ok(())
+        })
     }
 }
 
@@ -4763,3 +5763,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "storage_indexed_regression.rs"]
+mod indexed_regression_tests;

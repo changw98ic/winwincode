@@ -10,14 +10,16 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
 #[tokio::test]
-async fn ra_c01_early_input_response_is_buffered_for_the_real_turn_waiter() {
+async fn ra_c01_unregistered_input_response_is_rejected_before_real_turn_waiter() {
     let (session, turn, events) = make_session_and_context_with_rx().await;
     let response = RequestUserInputResponse {
         answers: HashMap::new(),
     };
-    session
-        .notify_user_input_response(&turn.sub_id, response.clone())
-        .await;
+    assert!(
+        !session
+            .notify_user_input_response(&turn.sub_id, "early-input", response.clone())
+            .await
+    );
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let request = tokio::spawn({
         let session = session.clone();
@@ -40,6 +42,13 @@ async fn ra_c01_early_input_response_is_buffered_for_the_real_turn_waiter() {
         events.recv().await.unwrap().msg,
         EventMsg::RequestUserInput(_)
     ));
+    tokio::task::yield_now().await;
+    assert!(!request.is_finished());
+    assert!(
+        session
+            .notify_user_input_response(&turn.sub_id, "early-input", response.clone())
+            .await
+    );
     assert_eq!(request.await.unwrap(), Some(response));
 }
 
@@ -95,7 +104,7 @@ async fn ra_c01_early_approval_is_dropped_and_later_exact_waiter_stays_pending()
 }
 
 #[tokio::test]
-async fn ra_c01_early_input_response_is_buffered_in_the_active_turn_for_the_real_waiter() {
+async fn ra_c01_unregistered_input_response_is_rejected_in_active_turn() {
     let (session, turn, events) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let response = RequestUserInputResponse {
@@ -106,9 +115,11 @@ async fn ra_c01_early_input_response_is_buffered_in_the_active_turn_for_the_real
             },
         )]),
     };
-    session
-        .notify_user_input_response(&turn.sub_id, response.clone())
-        .await;
+    assert!(
+        !session
+            .notify_user_input_response(&turn.sub_id, "early-active-turn-input", response.clone())
+            .await
+    );
     let request = tokio::spawn({
         let session = session.clone();
         let turn = turn.clone();
@@ -130,5 +141,12 @@ async fn ra_c01_early_input_response_is_buffered_in_the_active_turn_for_the_real
         events.recv().await.unwrap().msg,
         EventMsg::RequestUserInput(_)
     ));
+    tokio::task::yield_now().await;
+    assert!(!request.is_finished());
+    assert!(
+        session
+            .notify_user_input_response(&turn.sub_id, "early-active-turn-input", response.clone())
+            .await
+    );
     assert_eq!(request.await.unwrap(), Some(response));
 }

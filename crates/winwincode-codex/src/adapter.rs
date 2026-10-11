@@ -43,10 +43,7 @@ use codex_apply_patch::{Hunk, parse_patch};
 use codex_protocol::approvals::{ApplyPatchApprovalRequestEvent, ExecApprovalRequestEvent};
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::{Event as CodexEvent, EventMsg as CodexEventMsg, FileChange};
-use codex_protocol::request_user_input::{
-    RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputQuestion,
-    RequestUserInputResponse,
-};
+use codex_protocol::request_user_input::{RequestUserInputEvent, RequestUserInputQuestion};
 use futures::FutureExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -136,6 +133,8 @@ use crate::workrun_runtime_projection::{
 #[path = "interaction_timeout.rs"]
 mod interaction_timeout;
 use interaction_timeout::StoredInteractionTimeout;
+#[path = "input_interaction.rs"]
+mod input_interaction;
 
 const FORMAT_REPAIR_PROMPT: &str = "Return only one corrected JSON object matching the active ChangeBatchProposal schema. Correct the preceding final answer's formatting or patch syntax. Do not call tools, modify files, broaden scope, or perform implementation work.";
 
@@ -1091,9 +1090,8 @@ impl ProductionCodexAdapter {
             codex_thread_id: run.binding.canonical_thread_id.clone(),
         };
         let stream = identity.stream_key();
-        let snapshot = ReplayStore::load(&mut self.store, &stream)
-            .map_err(map_store_error)?
-            .unwrap_or_default();
+        let snapshot =
+            ReplayStore::load_watermarks(&mut self.store, &stream).map_err(map_store_error)?;
         let sequence = fixed.map_or_else(
             || {
                 snapshot
@@ -1191,10 +1189,7 @@ impl ProductionCodexAdapter {
             .runs
             .get(run_key)
             .ok_or_else(unknown_thread)?
-            .record
-            .post_action_traces
-            .iter()
-            .find(|trace| trace.source_key == source_key)
+            .post_action_trace(source_key)
             .cloned();
         if let Some(existing) = existing.as_ref() {
             if existing.source != source
@@ -1215,9 +1210,8 @@ impl ProductionCodexAdapter {
                 session_identity: run.binding.authority.session_identity.clone(),
                 codex_thread_id: run.binding.canonical_thread_id.clone(),
             };
-            let sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
+            let sequence = ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
                 .map_err(map_store_error)?
-                .unwrap_or_default()
                 .highest_sequence
                 .checked_add(1)
                 .ok_or_else(unavailable)?;
@@ -1237,22 +1231,20 @@ impl ProductionCodexAdapter {
                 occurred_at: occurred_at.clone(),
                 retained: false,
             };
-            self.runs
-                .get_mut(run_key)
-                .ok_or_else(unknown_thread)?
-                .record
-                .post_action_traces
-                .push(trace);
-            self.persist_run(run_key)?;
+            self.store
+                .save_post_action_trace(run_key, &trace)
+                .map_err(map_store_error)?;
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            let position = run.record.post_action_traces.len();
+            run.post_action_trace_positions
+                .insert(source_key.to_owned(), position);
+            run.record.post_action_traces.push(trace);
         }
         let trace = self
             .runs
             .get(run_key)
             .ok_or_else(unknown_thread)?
-            .record
-            .post_action_traces
-            .iter()
-            .find(|trace| trace.source_key == source_key)
+            .post_action_trace(source_key)
             .cloned()
             .ok_or_else(unavailable)?;
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
@@ -1297,16 +1289,14 @@ impl ProductionCodexAdapter {
                 .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
                 .map_err(map_store_error)?;
         }
-        self.runs
-            .get_mut(run_key)
-            .ok_or_else(unknown_thread)?
-            .record
-            .post_action_traces
-            .iter_mut()
-            .find(|stored| stored.source_key == source_key)
-            .ok_or_else(unavailable)?
-            .retained = true;
-        self.persist_run(run_key)?;
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        let stored = run
+            .post_action_trace_mut(source_key)
+            .ok_or_else(unavailable)?;
+        stored.retained = true;
+        self.store
+            .save_post_action_trace(run_key, stored)
+            .map_err(map_store_error)?;
         Ok((!duplicate).then_some(message))
     }
 
@@ -1654,18 +1644,17 @@ impl ProductionCodexAdapter {
         Ok(())
     }
 
-    fn persist_run(&self, run_key: &str) -> Result<(), ProductionCodexError> {
-        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
-        let mut record = run.record.clone();
-        if let Some(state) = record.task_handoff.as_mut() {
-            record
+    fn persist_run(&mut self, run_key: &str) -> Result<(), ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        if let Some(state) = run.record.task_handoff.as_mut() {
+            run.record
                 .terminal
                 .as_ref()
                 .map_or("in_progress", StoredTerminal::handoff_status)
                 .clone_into(&mut state.status);
         }
         self.store
-            .save_run(run_key, &record)
+            .save_run(run_key, &run.record)
             .map_err(map_store_error)
     }
 
@@ -1723,9 +1712,8 @@ impl ProductionCodexAdapter {
                 session_identity: run.binding.authority.session_identity.clone(),
                 codex_thread_id: run.binding.canonical_thread_id.clone(),
             };
-            let snapshot = ReplayStore::load(&mut self.store, &identity.stream_key())
-                .map_err(map_store_error)?
-                .unwrap_or_default();
+            let snapshot = ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?;
             let sequence = snapshot
                 .highest_sequence
                 .checked_add(1)
@@ -1793,9 +1781,8 @@ impl ProductionCodexAdapter {
                 session_identity: run.binding.authority.session_identity.clone(),
                 codex_thread_id: run.binding.canonical_thread_id.clone(),
             };
-            let snapshot = ReplayStore::load(&mut self.store, &identity.stream_key())
-                .map_err(map_store_error)?
-                .unwrap_or_default();
+            let snapshot = ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?;
             let sequence = snapshot
                 .highest_sequence
                 .checked_add(1)
@@ -2107,7 +2094,20 @@ impl ProductionCodexAdapter {
         };
         let event = decoded;
         let is_error_event = matches!(&event.msg, CodexEventMsg::Error(_));
+        let input_call_digest = if let CodexEventMsg::RequestUserInput(request) = &event.msg {
+            Some(private_payload_digest(
+                b"winwincode.kernel-input-request.v1",
+                request,
+            )?)
+        } else {
+            None
+        };
         let result = self.accept_polled_event(run_key, event, now);
+        if result.is_ok()
+            && let Some(digest) = input_call_digest
+        {
+            self.apply_complete_input_call(run_key, &digest).await?;
+        }
         if is_error_event && result.is_ok() {
             // A terminal ErrorEvent can arrive before the first TurnStarted
             // frame.  Quiesce the bridge before WorkerMain flushes queued
@@ -2281,12 +2281,7 @@ impl ProductionCodexAdapter {
                 self.enqueue_approval_request(message)
             }
             CodexEventMsg::RequestUserInput(request) => {
-                if let Some(message) = self.retain_input_request(run_key, &request)? {
-                    self.enqueue_interaction_request(ExecutionPortMessage::InputRequestMessage(
-                        message,
-                    ))?;
-                }
-                Ok(CodexPoll::Pending)
+                self.accept_input_request_event(run_key, &request)
             }
             CodexEventMsg::Error(error) => self.accept_error(run_key, &error, now),
             _ => Ok(CodexPoll::Pending),
@@ -3267,21 +3262,18 @@ impl ProductionCodexAdapter {
         self.retain_failed_terminal(run_key, now)
     }
 
-    fn retain_input_request(
+    fn retain_input_question(
         &self,
         run_key: &str,
         request: &RequestUserInputEvent,
+        question: &RequestUserInputQuestion,
+        expires_at: &Instant,
     ) -> Result<Option<InputRequestMessage>, ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
-        let [question] = request.questions.as_slice() else {
-            return Err(unavailable());
-        };
         if request.call_id.trim().is_empty() || question.id.trim().is_empty() {
             return Err(conflict());
         }
-        let turn_id = non_empty(request.turn_id.clone())
-            .or_else(|| run.record.current_turn_id.clone())
-            .ok_or_else(conflict)?;
+        let turn_id = non_empty(request.turn_id.clone()).ok_or_else(conflict)?;
         let input_request_id = canonical_parts_id(
             "inp",
             b"winwincode-kernel-input.v1",
@@ -3302,14 +3294,14 @@ impl ProductionCodexAdapter {
             .map_err(map_store_error)?;
         let operation = if let Some(existing) = existing {
             // A resumed Core turn can replay the exact tool call after the
-            // host response was durably accepted.  The response is already
-            // queued in the new Session waiter, so the replayed event is an
-            // internal recovery marker rather than a new host prompt.  Keep
-            // all request fields immutable and suppress only this exact,
-            // already-resolved operation; any changed request remains a
-            // conflict.
+            // host response was durably accepted. The call's private answer
+            // intent is reapplied after this exact event recreates its waiter.
+            // Keep all request fields immutable and suppress only this exact,
+            // already-answered product question; changed requests conflict.
             if existing.run_key != run_key
-                || (!timed_out && existing.kernel_session_id != run.record.kernel_session_id)
+                || (!timed_out
+                    && existing.kernel_session_id != run.record.kernel_session_id
+                    && existing.state != StoredInputOperationState::Resolved)
                 || existing.question_id != question.id
                 || existing.turn_id != turn_id
                 || existing.request_digest != request_digest
@@ -3351,8 +3343,9 @@ impl ProductionCodexAdapter {
         };
         let generated = InputRequestMessage {
             allow_empty: false,
+            allow_other: question.is_other.then_some(true),
             choices,
-            expires_at: authority.lease.expires_at.clone(),
+            expires_at: expires_at.clone(),
             input_request_id: InputRequestId(input_request_id.clone()),
             kind: InputRequestMessageKind::InputRequest,
             lease: authority.lease.clone(),
@@ -3409,10 +3402,10 @@ impl ProductionCodexAdapter {
             session_identity: binding.authority.session_identity.clone(),
             codex_thread_id: binding.canonical_thread_id.clone(),
         };
-        let highest_sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
-            .map_err(map_store_error)?
-            .unwrap_or_default()
-            .highest_sequence;
+        let highest_sequence =
+            ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?
+                .highest_sequence;
         if record.terminal_message_id.as_ref() != Some(&original.message_id)
             || !retained_lease_matches_current(&original.lease, &binding.authority.lease)
             || original.worker_session_id != binding.authority.worker_session_id
@@ -3479,6 +3472,9 @@ impl ProductionCodexAdapter {
                     return Err(conflict());
                 }
                 trace.retained = true;
+                self.store
+                    .save_post_action_trace(run_key, trace)
+                    .map_err(map_store_error)?;
             }
         }
         let pending_post_actions = record
@@ -3568,6 +3564,8 @@ impl ProductionCodexAdapter {
         self.runs.insert(
             run_key.to_owned(),
             ActiveRun {
+                input_waiter_incarnation: Uuid::new_v4().to_string(),
+                post_action_trace_positions: index_post_action_traces(&record)?,
                 record,
                 binding,
                 replay,
@@ -5475,94 +5473,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         response: &InputResponseMessage,
         received_at: &Instant,
     ) -> Result<(), Self::Error> {
-        let operation = self
-            .store
-            .load_input_operation(&response.input_request_id.0)
-            .map_err(map_store_error)?
-            .ok_or_else(conflict)?;
-        let run = self
-            .runs
-            .get(&operation.run_key)
-            .ok_or_else(unknown_thread)?;
-        let authority = &run.binding.authority;
-        if response.lease != authority.lease
-            || response.worker_session_id != authority.worker_session_id
-            || response.session_identity != authority.session_identity
-            || response.sent_at != response.responded_at
-            || !canonical_instant(&response.responded_at)
-            || !canonical_instant(received_at)
-            || !canonical_instant(&authority.lease.issued_at)
-            || !canonical_instant(&authority.lease.expires_at)
-            || response.responded_at.0 < authority.lease.issued_at.0
-            || response.responded_at.0 > received_at.0
-            || response.responded_at.0 >= authority.lease.expires_at.0
-            || received_at.0 < authority.lease.issued_at.0
-            || received_at.0 >= authority.lease.expires_at.0
-            || !valid_prefixed_id(&response.input_request_id.0, "inp_")
-            || !valid_prefixed_id(&response.message_id.0, "xmsg_")
-        {
-            return Err(conflict());
-        }
-        let value = interaction_timeout::input_response_value(response)?;
-        // Advance the shared trusted clock only after the response has passed
-        // all identity, lease, shape, and value checks.  An invalid response
-        // must not be able to push a later valid operation past its lease.
-        self.bridge
-            .authority()
-            .update_now(received_at)
-            .map_err(map_bridge_error)?;
-        let resolution_digest = private_payload_digest(b"winwincode.input-response.v1", response)?;
-        if operation.state == StoredInputOperationState::Resolved {
-            self.store
-                .resolve_input_operation(
-                    &operation.input_request_id,
-                    &operation.request_digest,
-                    &resolution_digest,
-                )
-                .map_err(map_store_error)?;
-            return self
-                .outbox
-                .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
-                    response.clone(),
-                ))
-                .map_err(map_store_error);
-        }
-        self.ensure_input_deadline(&operation, response, received_at)
-            .await?;
-        let mut answers = HashMap::new();
-        answers.insert(
-            operation.question_id.clone(),
-            RequestUserInputAnswer {
-                answers: value.into_iter().collect(),
-            },
-        );
-        let resolution = self
-            .kernel
-            .resolve_user_input(
-                &operation.kernel_session_id,
-                operation.turn_id.clone(),
-                RequestUserInputResponse { answers },
-            )
-            .await;
-        resolution.map_err(|_| kernel_error())?;
-        self.store
-            .resolve_input_operation(
-                &operation.input_request_id,
-                &operation.request_digest,
-                &resolution_digest,
-            )
-            .map_err(map_store_error)?;
-        let run = self
-            .runs
-            .get_mut(&operation.run_key)
-            .ok_or_else(unknown_thread)?;
-        run.record.last_activity_at = received_at.clone();
-        self.persist_run(&operation.run_key)?;
-        self.outbox
-            .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
-                response.clone(),
-            ))
-            .map_err(map_store_error)
+        self.accept_input_response_exact(response, received_at)
+            .await
     }
 
     fn retain_execution_delivery(
@@ -5996,10 +5908,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 None => break,
             }
         }
-        let highest_sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
-            .map_err(map_store_error)?
-            .unwrap_or_default()
-            .highest_sequence;
+        let highest_sequence =
+            ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?
+                .highest_sequence;
         let last_event_sequence = i64::try_from(highest_sequence).map_err(|_| unavailable())?;
         if outcome.outcome.last_event_sequence.0 > last_event_sequence {
             return Err(conflict());
@@ -6426,7 +6338,10 @@ fn safe_approval_text(value: &str) -> bool {
 }
 
 struct ActiveRun {
+    // The registered Core incarnation changes even when resume keeps its thread UUID.
+    input_waiter_incarnation: String,
     record: StoredRun,
+    post_action_trace_positions: HashMap<String, usize>,
     binding: ModelRunBinding,
     replay: VecDeque<RuntimeEventMessage>,
     kernel_live: bool,
@@ -6436,6 +6351,38 @@ struct ActiveRun {
     batch_intent_emission: OperationDelivery,
     format_repair_reconciliation: OperationDelivery,
     pending_fusion: Option<crate::FusionPanelFuture>,
+}
+
+impl ActiveRun {
+    fn post_action_trace(&self, source: &str) -> Option<&StoredPostActionTrace> {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::post_action_lookup();
+        self.post_action_trace_positions
+            .get(source)
+            .and_then(|position| self.record.post_action_traces.get(*position))
+    }
+
+    fn post_action_trace_mut(&mut self, source: &str) -> Option<&mut StoredPostActionTrace> {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::post_action_lookup();
+        let position = *self.post_action_trace_positions.get(source)?;
+        self.record.post_action_traces.get_mut(position)
+    }
+}
+
+fn index_post_action_traces(
+    record: &StoredRun,
+) -> Result<HashMap<String, usize>, ProductionCodexError> {
+    let mut positions = HashMap::with_capacity(record.post_action_traces.len());
+    for (position, trace) in record.post_action_traces.iter().enumerate() {
+        if positions
+            .insert(trace.source_key.clone(), position)
+            .is_some()
+        {
+            return Err(unavailable());
+        }
+    }
+    Ok(positions)
 }
 
 // A delivery cursor is scoped to one durable logical operation. A new
@@ -6572,7 +6519,7 @@ struct StoredRun {
     /// compaction so exact terminal replay does not allocate a new id.
     #[serde(default)]
     terminal_message_id: Option<ExecutionMessageId>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     post_action_traces: Vec<StoredPostActionTrace>,
     #[serde(default)]
     pending_completion: Option<StoredPendingCompletion>,
@@ -6737,9 +6684,10 @@ struct StoredTerminalTrace {
     retained: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(not(test), derive(Clone))]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoredPostActionTrace {
+pub(crate) struct StoredPostActionTrace {
     source_key: String,
     event_id: ExecutionEventId,
     sequence: ExecutionSequence,
@@ -6749,6 +6697,24 @@ struct StoredPostActionTrace {
     actions: Vec<PostActionHook>,
     occurred_at: Instant,
     retained: bool,
+}
+
+#[cfg(test)]
+impl Clone for StoredPostActionTrace {
+    fn clone(&self) -> Self {
+        crate::storage_mechanism_regression::post_action_trace_clone();
+        Self {
+            source_key: self.source_key.clone(),
+            event_id: self.event_id.clone(),
+            sequence: self.sequence.clone(),
+            source: self.source,
+            operation: self.operation,
+            outcome: self.outcome,
+            actions: self.actions.clone(),
+            occurred_at: self.occurred_at.clone(),
+            retained: self.retained,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -7531,7 +7497,7 @@ fn canonical_id(prefix: &str, namespace: &[u8], run_key: &str, sequence: u64) ->
     format!("{prefix}_{}", &hex[..26].to_ascii_uppercase())
 }
 
-fn canonical_parts_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
+pub(super) fn canonical_parts_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
     digest.update(namespace);
     for part in parts {
@@ -8380,6 +8346,7 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 #[cfg(test)]
 mod tests {
     include!("storage_post_action_regression.rs");
+    include!("storage_task_context_hotpath_tests.rs");
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,
@@ -8988,7 +8955,7 @@ mod tests {
         let criterion_id = CriterionId("crt_00000000000000000000000001".to_owned());
         let contract = WorkContract {
             constraints: vec!["Keep the exact repository boundary.".to_owned()],
-            created_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            created_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
             criteria: vec![Criterion {
                 id: criterion_id.clone(),
                 description: "The exact fixture behavior is verified.".to_owned(),
@@ -9024,7 +8991,7 @@ mod tests {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Some(Instant("2026-08-28T00:00:00Z".to_owned())),
+                deadline_at: Some(Instant("2026-08-28T00:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
                 max_runtime_seconds: Some(300),
             },
@@ -10601,7 +10568,7 @@ mod tests {
     fn retained_business_terminal_survives_a_corrupt_performance_projection() {
         use super::{
             ActiveRun, ExecutionOutcomeUsage, OperationDelivery, StoredTerminal,
-            terminal_outcome_usage,
+            index_post_action_traces, terminal_outcome_usage,
         };
         let root = test_root("corrupt-optional-performance");
         let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
@@ -10619,6 +10586,8 @@ mod tests {
         adapter.runs.insert(
             key.clone(),
             ActiveRun {
+                input_waiter_incarnation: uuid::Uuid::new_v4().to_string(),
+                post_action_trace_positions: index_post_action_traces(&record).unwrap(),
                 record,
                 binding,
                 replay: std::collections::VecDeque::default(),
@@ -10736,7 +10705,7 @@ mod tests {
         let output = serde_json::json!({"acceptanceCriteriaIds":["crt_00000000000000000000000001"],
             "disposition":"continue", "patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion":1,"validationProfile":"changed"});
-        let at = Instant("2026-08-28T00:00:01Z".into());
+        let at = Instant("2026-08-28T00:00:01.000Z".into());
         let event = delegated_change_batch_event(
             &record,
             &binding,
@@ -10790,7 +10759,7 @@ mod tests {
             );
         }
         let mut replay = settlement.clone();
-        replay.completed_at = Instant("2026-08-28T00:00:02Z".into());
+        replay.completed_at = Instant("2026-08-28T00:00:02.000Z".into());
         adapter
             .retain_delegated_observer_settlement(&thread, replay.clone())
             .expect("an exact old settlement is independent of the current batch");
@@ -10910,7 +10879,7 @@ mod tests {
             .install_active_run(&key, record, binding, false, true)
             .unwrap();
         let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
-        let at = Instant("2026-08-28T00:00:02Z".into());
+        let at = Instant("2026-08-28T00:00:02.000Z".into());
         adapter
             .store
             .claim_model_call(
@@ -11106,9 +11075,9 @@ mod tests {
                 .final_output_json_schema
                 .is_some()
         );
-        let began = Instant("2026-08-28T00:00:00Z".into());
-        let first_end = Instant("2026-08-28T00:00:10Z".into());
-        let second_end = Instant("2026-08-28T00:00:11Z".into());
+        let began = Instant("2026-08-28T00:00:00.000Z".into());
+        let first_end = Instant("2026-08-28T00:00:10.000Z".into());
+        let second_end = Instant("2026-08-28T00:00:11.000Z".into());
         adapter
             .accept_turn_started(&key, "first-turn", &began)
             .unwrap();
@@ -11976,9 +11945,9 @@ mod tests {
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let lease = ExecutionLeaseStamp {
             attempt: 1,
-            expires_at: Instant("2030-01-01T00:05:00Z".to_owned()),
+            expires_at: Instant("2030-01-01T00:05:00.000Z".to_owned()),
             fencing_token: FencingToken("1".to_owned()),
-            issued_at: Instant("2030-01-01T00:00:00Z".to_owned()),
+            issued_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
             job_id: job.job_id.clone(),
             lease_id: LeaseId("lse_00000000000000000000000001".to_owned()),
             worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
@@ -11992,7 +11961,7 @@ mod tests {
             payload_digest: job.payload_digest.clone(),
         };
         let workspace_revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
-        let now = Instant("2030-01-01T00:00:01Z".to_owned());
+        let now = Instant("2030-01-01T00:00:01.000Z".to_owned());
         let snapshot_id =
             winwincode_domain::SnapshotId("snap_00000000000000000000000001".to_owned());
         let start = CodexThreadStart {
@@ -13018,7 +12987,7 @@ mod tests {
             phase: StoredRunPhase::RuntimeStarted,
             last_tokens: 0,
             last_runtime_millis: 0,
-            last_activity_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            last_activity_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
             terminal: None,
             failure_diagnostic: None,
             terminal_trace: None,
@@ -13049,9 +13018,9 @@ mod tests {
             authority: ModelLeaseAuthority {
                 lease: ExecutionLeaseStamp {
                     attempt: 1,
-                    expires_at: Instant("2026-08-28T01:00:00Z".to_owned()),
+                    expires_at: Instant("2026-08-28T01:00:00.000Z".to_owned()),
                     fencing_token: FencingToken("fence-fixture".to_owned()),
-                    issued_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+                    issued_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
                     job_id: record.job.job_id.clone(),
                     lease_id: LeaseId("lease-fixture".to_owned()),
                     worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
@@ -13069,7 +13038,7 @@ mod tests {
                     worker_session_id,
                 },
             },
-            opened_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            opened_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
         };
         (record, binding)
     }

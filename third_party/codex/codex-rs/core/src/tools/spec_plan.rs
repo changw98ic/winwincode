@@ -1091,6 +1091,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(RequestUserInputHandler {
             available_modes: request_user_input_available_modes(features),
         });
+        registry.add(super::handlers::RequestUserInputResultHandler);
     }
 
     if !turn_context.session_source.is_non_root_agent()

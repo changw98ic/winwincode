@@ -1819,3 +1819,97 @@ fn pending_input_uses_current_renewed_lease_after_original_expiry() {
     outbound.close().unwrap();
     Box::new(storage).close().unwrap();
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "real public API input validation, durable response and exact restart replay share one authority"
+)]
+fn optional_other_public_api_retains_raw_unicode_and_replays_the_exact_worker_frame() {
+    let (directory, mut storage, _, runtime, session_revision) = setup_input("input-other-replay");
+    let mut request = input_request(&runtime);
+    request.mode = winwincode_domain::InteractiveInputMode::SingleChoice;
+    request.allow_other = Some(true);
+    request.choices = Some(
+        serde_json::from_value(json!([{
+            "id": id("ich", 1), "label":"continue", "value":"continue"
+        }]))
+        .unwrap(),
+    );
+    ChatInteractionService::new(&mut storage)
+        .record_input(&RecordInputInteractionCommand {
+            authority: input_authority(session_revision),
+            request,
+        })
+        .unwrap();
+    let raw = format!("  {}  ", "🦀".repeat(19_996));
+    assert_eq!(raw.chars().count(), 20_000);
+    let mut command = input_response_command(&raw);
+    command.payload.value.as_mut().unwrap().mode =
+        winwincode_domain::InteractiveInputMode::SingleChoice;
+    let mut outbound = CapturingOutbound::default();
+    for (index, value, mode) in [
+        (
+            0,
+            "🦀".repeat(20_001),
+            winwincode_domain::InteractiveInputMode::SingleChoice,
+        ),
+        (
+            1,
+            " \n\t ".into(),
+            winwincode_domain::InteractiveInputMode::SingleChoice,
+        ),
+        (
+            2,
+            "continue".into(),
+            winwincode_domain::InteractiveInputMode::Text,
+        ),
+    ] {
+        let mut invalid = command.clone();
+        invalid.request_id = RequestId(id("req", 210 + index));
+        let value_ref = invalid.payload.value.as_mut().unwrap();
+        value_ref.value = value;
+        value_ref.mode = mode;
+        let mut clock = FixtureClock(VecDeque::from([at(20)]));
+        assert_eq!(
+            ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+                .respond_input(invalid)
+                .unwrap_err()
+                .code(),
+            ChatInteractionServiceErrorCode::InvalidInput
+        );
+        assert!(outbound.frames.is_empty());
+    }
+    outbound.fail_next = true;
+    let mut clock = FixtureClock(VecDeque::from([at(20)]));
+    assert_eq!(
+        ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+            .respond_input(command.clone())
+            .unwrap_err()
+            .code(),
+        ChatInteractionServiceErrorCode::WorkerDelivery
+    );
+    assert_eq!(outbound.frames.len(), 1);
+    let frame: ExecutionPortMessage = serde_json::from_slice(&outbound.frames[0]).unwrap();
+    let ExecutionPortMessage::InputResponseMessage(response) = frame else {
+        panic!("actual CP input outbound frame");
+    };
+    assert_eq!(response.value.unwrap().value, raw);
+    drop(storage);
+    let mut reopened = SqliteStorage::open(&directory.0).unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(30)]));
+    ChatInteractionApiService::new(&mut reopened, &mut clock, &mut outbound)
+        .respond_input(command.clone())
+        .unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(31)]));
+    ChatInteractionApiService::new(&mut reopened, &mut clock, &mut outbound)
+        .respond_input(command)
+        .unwrap();
+    assert_eq!(outbound.frames.len(), 3);
+    assert!(
+        outbound
+            .frames
+            .iter()
+            .all(|frame| frame == &outbound.frames[0])
+    );
+}

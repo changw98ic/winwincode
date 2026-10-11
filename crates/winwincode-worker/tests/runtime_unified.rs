@@ -729,7 +729,7 @@ fn restart_replays_exact_repair_exchange_and_rejects_changed_approval_owner() {
     run_native(async {
         let root = Fixture::new();
         if std::env::var_os("WWC_RUNTIME_RESTART_PREPARE").is_some() {
-            prepare_restart_input(&root).await;
+            Box::pin(prepare_restart_input(&root)).await;
         }
         run_restart_preparation(&root);
         let retained: serde_json::Value =

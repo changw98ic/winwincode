@@ -262,6 +262,31 @@ pub trait ReplayStore {
     /// Returns the persistence implementation's read error.
     fn load(&mut self, stream: &ReplayStreamKey) -> Result<Option<ReplaySnapshot>, Self::Error>;
 
+    /// Reads only the requested immutable rows and the durable watermarks.
+    /// `None` means this adapter uses the complete-snapshot seam instead.
+    /// The adapter must validate stored rows before returning them.
+    ///
+    /// # Errors
+    /// Returns the adapter's read or corruption error.
+    fn load_indexed(
+        &mut self,
+        _stream: &ReplayStreamKey,
+        _query: ReplayReadQuery<'_>,
+    ) -> Result<Option<ReplaySnapshot>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Reads the acknowledged and retained watermarks without event bodies.
+    ///
+    /// # Errors
+    /// Returns the adapter's read or corruption error.
+    fn load_watermarks(&mut self, stream: &ReplayStreamKey) -> Result<ReplaySnapshot, Self::Error> {
+        if let Some(snapshot) = self.load_indexed(stream, ReplayReadQuery::Watermarks)? {
+            return Ok(snapshot);
+        }
+        Ok(self.load(stream)?.unwrap_or_default())
+    }
+
     /// Atomically appends one frame if the durable retained-highest sequence
     /// still equals `expected_highest_sequence`.
     ///
@@ -274,6 +299,20 @@ pub trait ReplayStore {
         expected_highest_sequence: ReplaySequence,
         frame: &ReplayFrame,
     ) -> Result<(), Self::Error>;
+}
+
+/// Indexed immutable-row selection for a replay operation.
+#[derive(Clone, Copy, Debug)]
+pub enum ReplayReadQuery<'a> {
+    Watermarks,
+    Conflict {
+        event_id: &'a str,
+        sequence: ReplaySequence,
+    },
+    After {
+        sequence: ReplaySequence,
+        max_events: usize,
+    },
 }
 
 /// Durable acknowledgement seam for a Worker-owned replay stream.
@@ -385,7 +424,14 @@ impl ReplayStateMachine {
             .map_err(ReplayError::Authority)?;
         validate_frame(stream, frame).map_err(ReplayError::InvalidInput)?;
 
-        let snapshot = load_snapshot(store, stream)?;
+        let snapshot = load_selected(
+            store,
+            stream,
+            ReplayReadQuery::Conflict {
+                event_id: &frame.event_id,
+                sequence: frame.sequence,
+            },
+        )?;
         let expected = snapshot
             .highest_sequence
             .checked_add(1)
@@ -457,7 +503,14 @@ impl ReplayStateMachine {
             return Err(ReplayError::InvalidInput(ReplayInputError::ZeroMaxEvents));
         }
 
-        let snapshot = load_snapshot(store, stream)?;
+        let snapshot = load_selected(
+            store,
+            stream,
+            ReplayReadQuery::After {
+                sequence: after_sequence,
+                max_events,
+            },
+        )?;
         if after_sequence > snapshot.highest_sequence {
             return Err(ReplayError::CursorAhead {
                 requested: after_sequence,
@@ -503,7 +556,7 @@ impl ReplayStateMachine {
         if stream.as_str().is_empty() {
             return Err(ReplayError::InvalidInput(ReplayInputError::EmptyStream));
         }
-        let snapshot = load_snapshot(store, stream)?;
+        let snapshot = load_selected(store, stream, ReplayReadQuery::Watermarks)?;
         if ack_sequence > snapshot.highest_sequence {
             return Err(ReplayError::AckAhead {
                 requested: ack_sequence,
@@ -554,5 +607,30 @@ where
         .map_err(ReplayError::Store)?
         .unwrap_or_default();
     snapshot.validate().map_err(ReplayError::CorruptState)?;
+    Ok(snapshot)
+}
+
+fn load_selected<AuthorityError, S>(
+    store: &mut S,
+    stream: &ReplayStreamKey,
+    query: ReplayReadQuery<'_>,
+) -> Result<ReplaySnapshot, ReplayError<AuthorityError, S::Error>>
+where
+    S: ReplayStore,
+{
+    let Some(snapshot) = store
+        .load_indexed(stream, query)
+        .map_err(ReplayError::Store)?
+    else {
+        return load_snapshot(store, stream);
+    };
+    if snapshot.ack_sequence > snapshot.highest_sequence {
+        return Err(ReplayError::CorruptState(
+            ReplayStateError::AckExceedsHighest {
+                acknowledged: snapshot.ack_sequence,
+                highest: snapshot.highest_sequence,
+            },
+        ));
+    }
     Ok(snapshot)
 }

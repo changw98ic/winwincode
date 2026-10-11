@@ -14,7 +14,8 @@ const sourceRoot = resolve(process.argv[2])
 const out = resolve(process.argv[3])
 const source = name => pathToFileURL(resolve(sourceRoot, 'scripts', name)).href
 const { runBenchmarkSchedule, runBenchmarkPlan, buildBenchmarkPlan } = await import(source('run-real-task-benchmark.mjs'))
-const { persistedBenchmarkDeviceFailure, resolveRegisteredDeviceTask, terminalBenchmarkDeviceFailure } = await import(source('benchmark-device-adapter.mjs'))
+const { reconcileInterruptedBenchmarkDeviceTask, resolveRegisteredDeviceTask, terminalBenchmarkDeviceFailure,
+  recoverBenchmarkDeviceCell } = await import(source('benchmark-device-adapter.mjs'))
 const { driveDelivery } = await import(source('run-api-production-vertical.mjs'))
 const { readDevicePendingApprovalIds } = await import(source('export-device-candidate.mjs'))
 const { resolveDeviceTaskApprovals } = await import(source('device-production-fixture.mjs'))
@@ -70,8 +71,8 @@ try {
 
   // M19: old report is active; the original launch has since become terminal.
   // Exercise the actual adapter classifier and the actual read-only recovery API.
-  // The production catch calls these in this order. The first call throws,
-  // preventing the second. No product invocation or second launch exists here.
+  // The production catch validates the old report and then reads current facts.
+  // No product invocation or second launch exists here.
   const directory = resolve(root, 'm19')
   await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
   await mkdir(resolve(directory, 'device-data/worker-sessions'), { recursive: true })
@@ -81,8 +82,11 @@ try {
     deliveryId: 'dlv_01J00000000000000000000001', productSessionId: 'psn_01J00000000000000000000001' }
   const oldCursor = { deliveryId: launch.deliveryId, deliveryRevision: 6, token: 'old-active-cursor' }
   const currentCursor = { deliveryId: launch.deliveryId, deliveryRevision: 7, token: 'current-terminal-cursor' }
-  const identities = { id: 'wrn_01J00000000000000000000001', executionJobId: 'job_01J00000000000000000000001',
-    workerSessionId: 'wsn_01J00000000000000000000001', attempt: 1 }
+  const identities = { id: 'wrn_01J00000000000000000000001', workItemId: 'wit_01J00000000000000000000001', executionJobId: 'job_01J00000000000000000000001',
+    workerSessionId: 'wsn_01J00000000000000000000001', attempt: 1,
+    leaseId: 'lse_01J00000000000000000000001', fencingToken: '1', workerId: 'worker-owned',
+    workerInstanceId: 'instance-owned', productSessionId: launch.productSessionId,
+    codexThreadId: 'cdx_01J00000000000000000000001' }
   const original = { taskInputDigest: digest('offline-input'), productSessionId: launch.productSessionId,
     deliveryId: launch.deliveryId, modelRoute: { modelId: cell.comparison },
     benchmarkConfiguration: Object.fromEntries(['configurationId', 'track', 'fusion', 'jev', 'jevContext', 'jevJudge'].map(key => [key, cell[key]])),
@@ -125,9 +129,8 @@ try {
     let classifierError = null
     let normalPathResult = null
     try {
-      const observation = persistedBenchmarkDeviceFailure(original, launch,
+      normalPathResult = await reconcileInterruptedBenchmarkDeviceTask(request, launch, {},
         Object.assign(new Error('lease expiry observed before terminal'), { code: original.errorCode, report: original }))
-      normalPathResult = await resolveRegisteredDeviceTask(request, launch, {}, { report: original, reportBytes: Buffer.from(originalBytes), observation })
     } catch (error) { classifierError = { code: error.code, unresolvedDeviceExecution: error.unresolvedDeviceExecution } }
     const normalPathQueries = [...queries]
     const explicitRecovery = await resolveRegisteredDeviceTask(request, launch)
@@ -135,6 +138,48 @@ try {
     assert.equal(explicitRecovery.status, 'failed')
     assert.equal(explicitRecovery.failure.code, 'DEVICE_PRODUCT_FAILED')
     assert.equal(await readFile(resolve(directory, 'device-task-result.json'), 'utf8'), originalBytes)
+    for (const key of ['workItemId', 'executionJobId', 'attempt', 'workerSessionId', 'leaseId', 'fencingToken',
+      'workerId', 'workerInstanceId', 'productSessionId', 'codexThreadId']) {
+      const prior = current.workRunAggregate.runs[0][key]
+      current.workRunAggregate.runs[0][key] = key === 'attempt' ? 2 : 'foreign-identity'
+      await assert.rejects(resolveRegisteredDeviceTask(request, launch), { code: 'ERR_ASSERTION' })
+      current.workRunAggregate.runs[0][key] = prior
+    }
+    current.workRunAggregate.runs[0].state = 'running'
+    await assert.rejects(resolveRegisteredDeviceTask(request, launch, {
+      runtimeResolver: () => assert.fail('read-only reconciliation cannot invoke the runtime'),
+    }), { code: 'DEVICE_EXECUTION_UNRESOLVED', unresolvedDeviceExecution: true })
+    current.workRunAggregate.runs[0].state = 'failed'
+    const ledgerPath = resolve(directory, 'benchmark.sqlite3')
+    const plan = { cells: [cell] }
+    const experimentBinding = { offline: true, originalLaunch: launch }
+    const retainedFailure = Object.assign(new Error('Original execution unresolved'), {
+      code: original.errorCode, unresolvedDeviceExecution: true,
+    })
+    await assert.rejects(runBenchmarkPlan(plan, {
+      ledgerPath, experimentBinding,
+      executeCell: async (_cell, runner) => {
+        await runner.registerLaunch(launch)
+        runner.recordCall({ callId: request.callId, status: 'failed',
+          failure: { code: retainedFailure.code, executionUnresolved: true } })
+        throw retainedFailure
+      },
+    }), error => error === retainedFailure)
+    const finalized = await runBenchmarkPlan(plan, {
+      ledgerPath, experimentBinding,
+      executeCell: () => assert.fail('the original claimed cell cannot launch again'),
+      recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, {}),
+    })
+    assert.equal(finalized.records[0].status, 'failed')
+    assert.equal(finalized.records[0].calls.length, 1)
+    assert.equal(finalized.records[0].calls[0].status, 'returned')
+    assert.equal(finalized.records[0].recovery.originalCalls[0].failure.code, original.errorCode)
+    assert.deepEqual(finalized.records[0].launches, [launch])
+    const repeated = await runBenchmarkPlan(plan, { ledgerPath, experimentBinding,
+      executeCell: () => assert.fail('finalized cell cannot launch again'),
+      recoverCell: () => assert.fail('terminal record must be reused'),
+    })
+    assert.deepEqual(repeated.records, finalized.records)
     red('M19', 'Adapter normal path observes late terminal state of the same original launch', {
       classifierError, normalPathResult, normalPathQueries, explicitRecovery: { status: explicitRecovery.status,
         code: explicitRecovery.failure.code, queries, originalReportPreserved: true }, launchCount: 0,
@@ -157,6 +202,11 @@ try {
     db.exec('CREATE TABLE codex_run(run_key TEXT,record_json BLOB); CREATE TABLE approval_operation(approval_id TEXT,run_key TEXT,state TEXT)')
     db.close()
   }
+  const ownedCore = resolve(pollDir, 'device-data', 'codex-runtime')
+  await mkdir(ownedCore, { recursive: true })
+  const owned = new DatabaseSync(resolve(ownedCore, 'worker-codex.sqlite3'))
+  owned.exec('CREATE TABLE codex_run(run_key TEXT,record_json BLOB); CREATE TABLE approval_operation(approval_id TEXT,run_key TEXT,state TEXT)')
+  owned.close()
   const run = { ...identities, state: 'running', codexThreadId: 'cdx_01J00000000000000000000001' }
   const counts = { 'delivery.get': 0, 'workrun.get': 0, 'approval.list': 0, onProjection: 0, onActive: 0, coreScans: 0 }
   const targetPolls = 5
@@ -177,18 +227,19 @@ try {
     onActiveWorkRuns: async runs => {
       counts.onActive += 1
       const pending = readDevicePendingApprovalIds(pollDir, runs)
-      counts.coreScans += history
+      counts.coreScans += 1
       assert.deepEqual(pending, [])
       await resolveDeviceTaskApprovals({ api: client, runs, approvalOwner: 'execution_port', corePendingApprovalIds: pending })
     },
   }), error => error === stop)
   assert.equal(counts['delivery.get'], targetPolls)
-  assert.equal(counts['workrun.get'], targetPolls)
+  assert.equal(counts['workrun.get'], 1)
+  assert.equal(counts.onProjection, 1)
   assert.equal(counts['approval.list'], targetPolls)
-  receipt.cases.push({ id: 'M21', title: 'Unchanged cursor repeats full projection, approval and Core history reads',
+  receipt.cases.push({ id: 'M21', title: 'Unchanged cursor reuses its bound aggregate; approval lookup selects the owned runtime',
     classification: 'mechanism-measured; no formal-batch latency attribution', historyDatabases: history,
     polls: targetPolls, counts, elapsedMs: performance.now() - started,
-    coreScansMethod: 'one actual readDevicePendingApprovalIds invocation per poll × known fixture database count; not a patched counter',
+    coreScansMethod: 'one actual readDevicePendingApprovalIds invocation per poll × the single canonical owned runtime; foreign histories excluded by targeted lookup',
     pollDelayMillis: 50, status: 'confirmed' })
 } finally {
   await mkdir(out, { recursive: true })

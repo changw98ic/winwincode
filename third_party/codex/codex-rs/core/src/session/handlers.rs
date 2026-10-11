@@ -214,9 +214,11 @@ pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDec
 pub async fn request_user_input_response(
     sess: &Arc<Session>,
     id: String,
+    call_id: String,
     response: RequestUserInputResponse,
 ) {
-    sess.notify_user_input_response(&id, response).await;
+    sess.notify_user_input_response(&id, &call_id, response)
+        .await;
 }
 
 pub async fn request_permissions_response(
@@ -616,8 +618,12 @@ pub(super) async fn submission_loop(
                     patch_approval(&sess, id, decision).await;
                     false
                 }
-                Op::UserInputAnswer { id, response } => {
-                    request_user_input_response(&sess, id, response).await;
+                Op::UserInputAnswer {
+                    id,
+                    call_id,
+                    response,
+                } => {
+                    request_user_input_response(&sess, id, call_id, response).await;
                     false
                 }
                 Op::RequestPermissionsResponse { id, response } => {

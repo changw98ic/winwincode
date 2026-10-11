@@ -688,6 +688,17 @@ impl JevRuntime {
         false
     }
 
+    fn unsupported_provider_failure(provider_id: String) -> JevAttemptFailure {
+        JevAttemptFailure {
+            provider_id,
+            kind: JevProviderErrorKind::Unsupported,
+            latency: Duration::ZERO,
+            network: None,
+            attempt: None,
+            connection_wait: false,
+        }
+    }
+
     async fn run<T>(
         &self,
         batch_size: usize,
@@ -709,14 +720,7 @@ impl JevRuntime {
                 );
             }
             if !capabilities.supports(batch_size, options) {
-                failures.push(JevAttemptFailure {
-                    provider_id: capabilities.provider_id,
-                    kind: JevProviderErrorKind::Unsupported,
-                    latency: Duration::ZERO,
-                    network: None,
-                    attempt: None,
-                    connection_wait: false,
-                });
+                failures.push(Self::unsupported_provider_failure(capabilities.provider_id));
                 continue;
             }
             let mut retry = winwincode_network::RequestRetry::new(
@@ -780,8 +784,11 @@ impl JevRuntime {
                 ) {
                     return JevRun::without_decision(failures);
                 }
-                let Some(delay) = retry.delay_after(&error) else {
-                    break;
+                let delay = match retry.decision_after(&error) {
+                    winwincode_network::RetryDecision::RetryAfter(delay)
+                    | winwincode_network::RetryDecision::DeferredUntil(delay) => delay,
+                    winwincode_network::RetryDecision::Stop
+                    | winwincode_network::RetryDecision::Reconcile => break,
                 };
                 if !winwincode_network::RequestRetry::wait_async(delay, || {
                     can_start() && !self.cancelled()
@@ -2788,6 +2795,87 @@ retries = 0
             assert!(outcome.value.is_some());
             assert_eq!(outcome.failures.len(), 1);
             assert_eq!(remote.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn deferred_jev_waits_for_authority_instead_of_starting_fallback() {
+        #[derive(Debug)]
+        struct DeferredProvider(Arc<AtomicUsize>);
+        impl JevProvider for DeferredProvider {
+            fn evaluate(
+                &self,
+                _input: JevHypothesis,
+                _options: JevExecutionOptions,
+            ) -> BoxFuture<'static, Result<JevEvaluation, JevProviderError>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(JevProviderError::from_network(
+                        winwincode_network::NetworkFailure::http(
+                            503,
+                            Some(Duration::from_secs(301)),
+                        ),
+                    ))
+                })
+            }
+            fn batch_evaluate(
+                &self,
+                _input: Vec<JevHypothesis>,
+                _options: JevExecutionOptions,
+            ) -> BoxFuture<'static, Result<JevBatchEvaluation, JevProviderError>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(JevProviderError::from_network(
+                        winwincode_network::NetworkFailure::http(
+                            503,
+                            Some(Duration::from_secs(301)),
+                        ),
+                    ))
+                })
+            }
+            fn health(&self) -> BoxFuture<'static, JevHealth> {
+                Box::pin(async { JevHealth::Healthy })
+            }
+            fn capabilities(&self) -> JevProviderCapabilities {
+                MockJevProvider::healthy("deferred-jev").capabilities()
+            }
+        }
+        block_on(async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let fallback = Arc::new(MockJevProvider::healthy("fallback"));
+            let runtime = runtime_with(
+                vec![
+                    Arc::new(DeferredProvider(Arc::clone(&calls))),
+                    fallback.clone(),
+                ],
+                JevRuntimeConfig {
+                    timeout: Duration::from_secs(1),
+                    retries: 1,
+                },
+            );
+            let started = Instant::now();
+            let outcome = runtime
+                .evaluate_authorized(hypothesis(), options(), &|| {
+                    started.elapsed() < Duration::from_millis(30)
+                })
+                .await;
+            assert!(outcome.value.is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fallback.calls(),
+                0,
+                "a persisted cooldown cannot be mistaken for a Stop decision"
+            );
+            assert_eq!(outcome.failures.len(), 2);
+            assert_eq!(
+                outcome.failures[0].network.unwrap().retry_after_ms,
+                Some(301_000)
+            );
+            assert_eq!(
+                outcome.failures[1].network.unwrap().kind,
+                winwincode_network::ErrorKind::AuthorityExpired
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
         });
     }
 

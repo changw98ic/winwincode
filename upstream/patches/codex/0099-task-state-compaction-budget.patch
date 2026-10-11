@@ -35,7 +35,7 @@ index 2982748c..873b8608 100644
          mut self,
          prompt_cache_key_override: Option<String>,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index b58e99d9..93d4068a 100644
+index b58e99d9..c527e0fb 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -5,6 +5,7 @@ use crate::Prompt;
@@ -54,26 +54,24 @@ index b58e99d9..93d4068a 100644
  use tracing::error;
  
  pub use codex_prompts::SUMMARIZATION_PROMPT;
-@@ -351,7 +353,48 @@ async fn run_compact_task_inner_impl(
+@@ -351,7 +353,46 @@ async fn run_compact_task_inner_impl(
      let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
      let user_messages = collect_annotated_user_messages(history_items);
  
 -    let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
-+    let prepared_initial_context = if turn_context.config.compact_context_max_tokens.is_some() {
-+        Some(build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await)
-+    } else {
-+        None
++    let prepared_initial_context = match turn_context.config.compact_context_max_tokens {
++        Some(max_tokens) => Some((
++            max_tokens,
++            build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await,
++        )),
++        None => None,
 +    };
-+    let prepared_history = if let Some(max_tokens) = turn_context.config.compact_context_max_tokens
-+    {
++    let prepared_history = if let Some((max_tokens, context)) = prepared_initial_context.as_ref() {
 +        match compaction_context_overhead_tokens(
 +            &sess,
 +            &turn_context,
 +            &initial_context_injection,
-+            &prepared_initial_context
-+                .as_ref()
-+                .expect("budgeted context")
-+                .0,
++            &context.0,
 +        )
 +        .await
 +        {
@@ -81,7 +79,7 @@ index b58e99d9..93d4068a 100644
 +                &user_messages,
 +                &summary_text,
 +                overhead,
-+                max_tokens,
++                *max_tokens,
 +            ),
 +            Err(error) => Err(error),
 +        }
@@ -104,20 +102,20 @@ index b58e99d9..93d4068a 100644
      if let Some(summary_item) = new_history.last_mut() {
          // This replacement history skips `record_conversation_items`; only the appended summary
          // belongs to this compaction turn.
-@@ -359,8 +402,10 @@ async fn run_compact_task_inner_impl(
+@@ -359,8 +400,10 @@ async fn run_compact_task_inner_impl(
      }
      let (window_number, window_ids) = sess.advance_auto_compact_window().await;
  
 -    let (initial_context, world_state_baseline) =
 -        build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
 +    let (initial_context, world_state_baseline) = match prepared_initial_context {
-+        Some(context) => context,
++        Some((_, context)) => context,
 +        None => build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await,
 +    };
      if !initial_context.is_empty() {
          new_history =
              insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
-@@ -393,6 +438,120 @@ async fn run_compact_task_inner_impl(
+@@ -393,6 +436,120 @@ async fn run_compact_task_inner_impl(
      Ok(summary_suffix)
  }
  
@@ -347,3 +345,15 @@ index 0a3ebf45..a002062e 100644
              include_permissions_instructions,
              include_apps_instructions,
              include_collaboration_mode_instructions,
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index 155e3026..a00beb28 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -220,6 +220,7 @@
+         orchestrator_mcp_enabled: false,
+         include_environment_context: false,
+         compact_prompt: None,
++        compact_context_max_tokens: None,
+         notify: None,
+         tui_notifications: TuiNotificationSettings::default(),
+         animations: true,

@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
     ChangeBatchId, ExecutionJobId, Instant, ModelExchangeId, Sha256Digest, WorkspaceRevision,
@@ -69,6 +69,41 @@ pub enum ObservationGateResult {
     Stale,
 }
 
+/// A monotonic cutoff derived from the exact current Server lease. Checkpoint
+/// acceptance checks it after acquiring the writer lock and before commit.
+#[derive(Clone, Copy, Debug)]
+pub struct CheckpointAcceptanceDeadline(std::time::Instant);
+
+impl CheckpointAcceptanceDeadline {
+    /// Binds a trusted Worker clock observation to the current lease deadline.
+    ///
+    /// Returns `None` for invalid time, an unissued lease, or an expired lease.
+    #[must_use]
+    pub fn from_lease_observation(
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+        now: &Instant,
+        observed_at: std::time::Instant,
+    ) -> Option<Self> {
+        Self::from_clock(
+            &crate::driver_clock::DriverClock::new(now.clone(), observed_at),
+            lease,
+        )
+    }
+
+    pub(crate) fn from_clock(
+        clock: &crate::driver_clock::DriverClock,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Option<Self> {
+        clock
+            .start_deadline(&lease.issued_at, &lease.expires_at)
+            .map(Self)
+    }
+
+    fn expired(self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
 /// Whether one durable write inserted new state or replayed existing state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreRetention {
@@ -109,6 +144,20 @@ pub struct ChangeBatchRecord {
     pub base_revision: WorkspaceRevision,
     pub plan_digest: Sha256Digest,
     pub receipt: Option<ChangeBatchReceipt>,
+}
+
+/// Exact durable process-cleanup barrier for one owned validation.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ValidationCleanupRecord {
+    /// Workspace whose owner must remain retained.
+    pub workspace_id: String,
+    /// Frozen identity of the validation whose cleanup is pending or failed.
+    pub identity: ChangeBatchIdentity,
+    /// Stable secret-safe cleanup diagnostic.
+    pub cause_code: String,
+    /// Pending or first failure time from the paired Worker clock.
+    pub occurred_at: Instant,
 }
 
 /// Durable accepted-revision anchor and active batch for one workspace.
@@ -315,6 +364,179 @@ impl ChangeBatchStore {
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database
+    }
+
+    /// Commits the exact cleanup barrier before any validation process starts.
+    ///
+    /// # Errors
+    /// Rejects unresolved cleanup, foreign identity, or unavailable state.
+    pub fn retain_validation_cleanup_pending(
+        &mut self,
+        workspace_id: &str,
+        identity: &ChangeBatchIdentity,
+        now: &Instant,
+    ) -> Result<(), ChangeBatchStoreError> {
+        if !winwincode_execution_port::execution_identity::canonical_instant(now) {
+            return Err(invalid("validation cleanup pending time is invalid"));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| unavailable())?;
+        require_validation_cleanup_identity(&transaction, workspace_id, identity)?;
+        if load_validation_cleanup_record(&transaction, &identity.job_id)?.is_some() {
+            return Err(conflict());
+        }
+        let pending = ValidationCleanupRecord {
+            workspace_id: workspace_id.to_owned(),
+            identity: identity.clone(),
+            cause_code: "VALIDATION_CLEANUP_PENDING".to_owned(),
+            occurred_at: now.clone(),
+        };
+        transaction.execute(
+            "INSERT INTO change_batch_validation_cleanup (job_id, failure_json) VALUES (?1, ?2)",
+            params![identity.job_id.0, canonical_bytes(&pending)?],
+        ).map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| unavailable())
+    }
+
+    /// Clears one exact pending barrier only after its owner confirms cleanup.
+    ///
+    /// # Errors
+    /// Rejects foreign identity, failed cleanup, or unavailable state.
+    pub fn clear_validation_cleanup_pending(
+        &mut self,
+        workspace_id: &str,
+        identity: &ChangeBatchIdentity,
+    ) -> Result<(), ChangeBatchStoreError> {
+        let transaction = self.connection.transaction().map_err(|_| unavailable())?;
+        require_validation_cleanup_identity(&transaction, workspace_id, identity)?;
+        let existing =
+            load_validation_cleanup_record(&transaction, &identity.job_id)?.ok_or_else(conflict)?;
+        if existing.workspace_id != workspace_id
+            || existing.identity != *identity
+            || existing.cause_code != "VALIDATION_CLEANUP_PENDING"
+        {
+            return Err(conflict());
+        }
+        if transaction
+            .execute(
+                "DELETE FROM change_batch_validation_cleanup WHERE job_id = ?1",
+                params![identity.job_id.0],
+            )
+            .map_err(|_| unavailable())?
+            != 1
+        {
+            return Err(conflict());
+        }
+        transaction.commit().map_err(|_| unavailable())
+    }
+
+    /// Retains the first cleanup failure under its exact workspace and batch.
+    ///
+    /// # Errors
+    /// Rejects foreign identity, changed replay bytes, or unavailable state.
+    pub fn retain_validation_cleanup_failure(
+        &mut self,
+        workspace_id: &str,
+        identity: &ChangeBatchIdentity,
+        now: &Instant,
+    ) -> Result<StoreRetention, ChangeBatchStoreError> {
+        if !winwincode_execution_port::execution_identity::canonical_instant(now) {
+            return Err(invalid("validation cleanup failure time is invalid"));
+        }
+        let transaction = self.connection.transaction().map_err(|_| unavailable())?;
+        require_validation_cleanup_identity(&transaction, workspace_id, identity)?;
+        let mut existing =
+            load_validation_cleanup_record(&transaction, &identity.job_id)?.ok_or_else(conflict)?;
+        if existing.workspace_id != workspace_id
+            || existing.identity != *identity
+            || now.0 < existing.occurred_at.0
+        {
+            return Err(conflict());
+        }
+        if existing.cause_code == "VALIDATION_CLEANUP_UNCONFIRMED" {
+            transaction.commit().map_err(|_| unavailable())?;
+            return Ok(StoreRetention::Replay);
+        }
+        "VALIDATION_CLEANUP_UNCONFIRMED".clone_into(&mut existing.cause_code);
+        existing.occurred_at = now.clone();
+        let bytes = canonical_bytes(&existing)?;
+        if transaction
+            .execute(
+                "UPDATE change_batch_validation_cleanup SET failure_json = ?2 WHERE job_id = ?1",
+                params![identity.job_id.0, bytes],
+            )
+            .map_err(|_| unavailable())?
+            != 1
+        {
+            return Err(conflict());
+        }
+        transaction.commit().map_err(|_| unavailable())?;
+        Ok(StoreRetention::Inserted)
+    }
+
+    /// Loads the exact cleanup barrier, including after process restart.
+    ///
+    /// # Errors
+    /// Rejects corrupt or foreign stored identity and unavailable state.
+    pub fn validation_cleanup_record(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<ValidationCleanupRecord>, ChangeBatchStoreError> {
+        load_validation_cleanup_record(&self.connection, job_id)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fail_validation_cleanup_pending_for_test(
+        &self,
+    ) -> Result<(), ChangeBatchStoreError> {
+        self.connection.execute_batch("CREATE TEMP TRIGGER fail_validation_cleanup_pending BEFORE INSERT ON main.change_batch_validation_cleanup BEGIN SELECT RAISE(FAIL, 'injected cleanup pending failure'); END;").map_err(|_| unavailable())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fail_validation_cleanup_diagnostic_for_test(
+        &self,
+    ) -> Result<(), ChangeBatchStoreError> {
+        self.connection.execute_batch("CREATE TEMP TRIGGER fail_validation_cleanup_diagnostic BEFORE UPDATE ON main.change_batch_validation_cleanup BEGIN SELECT RAISE(FAIL, 'injected cleanup diagnostic failure'); END;").map_err(|_| unavailable())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fail_validation_cleanup_clear_for_test(
+        &self,
+    ) -> Result<(), ChangeBatchStoreError> {
+        self.connection.execute_batch("CREATE TEMP TRIGGER fail_validation_cleanup_clear BEFORE DELETE ON main.change_batch_validation_cleanup BEGIN SELECT RAISE(FAIL, 'injected cleanup clear failure'); END;").map_err(|_| unavailable())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn delay_next_validation_cleanup_clear_for_test(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<std::sync::Arc<std::sync::atomic::AtomicUsize>, ChangeBatchStoreError> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let observations = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&observations);
+        self.connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if context.database_name == Some("main")
+                    && matches!(
+                        context.action,
+                        AuthAction::Delete {
+                            table_name: "change_batch_validation_cleanup"
+                        }
+                    )
+                    && observed.fetch_add(1, Ordering::Relaxed) == 0
+                {
+                    std::thread::sleep(delay);
+                }
+                Authorization::Allow
+            }))
+            .map_err(|_| unavailable())?;
+        Ok(observations)
     }
 
     /// Creates or replays the workspace durable accepted-revision anchor.
@@ -1579,6 +1801,7 @@ impl ChangeBatchStore {
     /// # Errors
     ///
     /// Rejects unavailable or corrupt durable state.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_observed_checkpoint(
         &mut self,
         workspace_id: &str,
@@ -1586,6 +1809,50 @@ impl ChangeBatchStore {
         observed_revision: &WorkspaceRevision,
         observed_delta_digest: &Sha256Digest,
         now: &Instant,
+        deadline: CheckpointAcceptanceDeadline,
+    ) -> Result<ObservationGateResult, ChangeBatchStoreError> {
+        self.accept_checkpoint(
+            workspace_id,
+            progress,
+            observed_revision,
+            observed_delta_digest,
+            now,
+            Some(deadline),
+        )
+    }
+
+    /// Exercises the pure revision gate without pretending to own a lease.
+    ///
+    /// # Errors
+    /// Returns the same unavailable or corrupt-state error as the production gate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn accept_revision_without_lease_for_test(
+        &mut self,
+        workspace_id: &str,
+        progress: &ChangeBatchProgressEvent,
+        observed_revision: &WorkspaceRevision,
+        observed_delta_digest: &Sha256Digest,
+        now: &Instant,
+    ) -> Result<ObservationGateResult, ChangeBatchStoreError> {
+        self.accept_checkpoint(
+            workspace_id,
+            progress,
+            observed_revision,
+            observed_delta_digest,
+            now,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_checkpoint(
+        &mut self,
+        workspace_id: &str,
+        progress: &ChangeBatchProgressEvent,
+        observed_revision: &WorkspaceRevision,
+        observed_delta_digest: &Sha256Digest,
+        now: &Instant,
+        deadline: Option<CheckpointAcceptanceDeadline>,
     ) -> Result<ObservationGateResult, ChangeBatchStoreError> {
         require_valid_progress(progress)?;
         if progress.state != ChangeBatchProgressState::Accepted || now.0.is_empty() {
@@ -1596,9 +1863,18 @@ impl ChangeBatchStore {
         }
         let progress_bytes = canonical_bytes(progress)?;
         let batch_id = progress.identity.batch_id.clone();
-        let transaction = self.connection.transaction().map_err(|_| unavailable())?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| unavailable())?;
+        if deadline.is_some_and(CheckpointAcceptanceDeadline::expired) {
+            return Ok(ObservationGateResult::Stale);
+        }
         let record = load_record(&transaction, &batch_id)?;
         if record.event.identity != progress.identity {
+            return Ok(ObservationGateResult::Stale);
+        }
+        if load_validation_cleanup_record(&transaction, &progress.identity.job_id)?.is_some() {
             return Ok(ObservationGateResult::Stale);
         }
         let binding = load_binding(&transaction, workspace_id)?;
@@ -1609,6 +1885,9 @@ impl ChangeBatchStore {
             && existing_progress.as_deref() == Some(progress_bytes.as_slice())
             && receipt_delta_matches(record.receipt.as_ref(), observed_delta_digest)
         {
+            if deadline.is_some_and(CheckpointAcceptanceDeadline::expired) {
+                return Ok(ObservationGateResult::Stale);
+            }
             transaction.commit().map_err(|_| unavailable())?;
             return Ok(ObservationGateResult::Accepted);
         }
@@ -1649,6 +1928,9 @@ impl ChangeBatchStore {
             )
             .map_err(|_| unavailable())?;
         insert_progress(&transaction, progress, &progress_bytes)?;
+        if deadline.is_some_and(CheckpointAcceptanceDeadline::expired) {
+            return Ok(ObservationGateResult::Stale);
+        }
         transaction.commit().map_err(|_| unavailable())?;
         Ok(ObservationGateResult::Accepted)
     }
@@ -1939,6 +2221,10 @@ CREATE TABLE IF NOT EXISTS change_batch_diagnostic (
     evaluation_json BLOB,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS change_batch_validation_cleanup (
+    job_id TEXT PRIMARY KEY,
+    failure_json BLOB NOT NULL
+);
 ";
 
 fn ensure_private_directory(path: &Path) -> Result<(), ChangeBatchStoreError> {
@@ -2088,6 +2374,54 @@ fn load_record(
         receipt: row.2.map(|bytes| decode(&bytes)).transpose()?,
         workspace_id: row.3,
     })
+}
+
+fn load_validation_cleanup_record(
+    connection: &Connection,
+    job_id: &ExecutionJobId,
+) -> Result<Option<ValidationCleanupRecord>, ChangeBatchStoreError> {
+    let bytes = connection
+        .query_row(
+            "SELECT failure_json FROM change_batch_validation_cleanup WHERE job_id = ?1",
+            params![job_id.0],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| unavailable())?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let failure: ValidationCleanupRecord = decode(&bytes)?;
+    let record = load_record(connection, &failure.identity.batch_id)?;
+    if failure.identity.job_id != *job_id
+        || failure.workspace_id != record.workspace_id
+        || failure.identity != record.event.identity
+        || !matches!(
+            failure.cause_code.as_str(),
+            "VALIDATION_CLEANUP_UNCONFIRMED" | "VALIDATION_CLEANUP_PENDING"
+        )
+        || !winwincode_execution_port::execution_identity::canonical_instant(&failure.occurred_at)
+    {
+        return Err(corrupt());
+    }
+    Ok(Some(failure))
+}
+
+fn require_validation_cleanup_identity(
+    connection: &Connection,
+    workspace_id: &str,
+    identity: &ChangeBatchIdentity,
+) -> Result<(), ChangeBatchStoreError> {
+    let record = load_record(connection, &identity.batch_id)?;
+    let binding = load_binding(connection, workspace_id)?;
+    if record.workspace_id != workspace_id
+        || record.event.identity != *identity
+        || binding.active_batch_id.as_ref() != Some(&identity.batch_id)
+        || binding.state != BatchState::ValidationPending
+    {
+        return Err(conflict());
+    }
+    Ok(())
 }
 
 /// Decodes every stored progress fact of one batch in sequence order.
@@ -2618,6 +2952,236 @@ mod tests {
             .expect("validated checkpoint");
     }
 
+    #[test]
+    fn validation_cleanup_failure_survives_restart_and_gates_checkpoint_acceptance() {
+        let (directory, mut store) = open_store();
+        let identity = claim(&mut store);
+        advance_to_validation_pending(&mut store, &identity);
+        advance_to_observation_ready(&mut store, &identity);
+        let before = store.workspace_binding(WORKSPACE).unwrap().unwrap();
+        assert!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .retain_validation_cleanup_pending(WORKSPACE, &identity, &instant())
+            .unwrap();
+        assert_eq!(
+            store
+                .retain_validation_cleanup_failure(WORKSPACE, &identity, &instant())
+                .unwrap(),
+            StoreRetention::Inserted
+        );
+        let later = Instant("2026-09-04T00:00:00.001Z".into());
+        assert_eq!(
+            store
+                .retain_validation_cleanup_failure(WORKSPACE, &identity, &later)
+                .unwrap(),
+            StoreRetention::Replay
+        );
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        let failure = store
+            .validation_cleanup_record(&identity.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failure.identity, identity);
+        assert_eq!(failure.occurred_at, instant());
+        assert_eq!(failure.cause_code, "VALIDATION_CLEANUP_UNCONFIRMED");
+        assert!(
+            store
+                .clear_validation_cleanup_pending(WORKSPACE, &identity)
+                .is_err()
+        );
+        let accepted = progress_event(&identity, 7, ChangeBatchProgressState::Accepted, "accepted");
+        let mut lease = model_open(&identity).lease;
+        lease.expires_at = Instant("2026-09-04T00:01:00.000Z".into());
+        let deadline = CheckpointAcceptanceDeadline::from_lease_observation(
+            &lease,
+            &instant(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .accept_observed_checkpoint(
+                    WORKSPACE,
+                    &accepted,
+                    &revision(RESULT),
+                    &digest('3'),
+                    &instant(),
+                    deadline
+                )
+                .unwrap(),
+            ObservationGateResult::Stale
+        );
+        assert_eq!(store.workspace_binding(WORKSPACE).unwrap().unwrap(), before);
+        assert_eq!(store.progress_events(&identity.batch_id).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn validation_cleanup_failure_rejects_foreign_identity_on_write_and_read() {
+        let (_directory, mut store) = open_store();
+        let identity = claim(&mut store);
+        advance_to_validation_pending(&mut store, &identity);
+        let mut foreign = identity.clone();
+        foreign.session_identity.codex_thread_id.0 = "cdx_00000000000000000000000001".into();
+        assert!(
+            store
+                .retain_validation_cleanup_failure(WORKSPACE, &foreign, &instant())
+                .is_err()
+        );
+        assert!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .retain_validation_cleanup_pending(WORKSPACE, &identity, &instant())
+            .unwrap();
+        store
+            .retain_validation_cleanup_failure(WORKSPACE, &identity, &instant())
+            .unwrap();
+        let mut failure = store
+            .validation_cleanup_record(&identity.job_id)
+            .unwrap()
+            .unwrap();
+        failure.identity = foreign;
+        store
+            .connection
+            .execute(
+                "UPDATE change_batch_validation_cleanup SET failure_json = ?2 WHERE job_id = ?1",
+                params![identity.job_id.0, canonical_bytes(&failure).unwrap()],
+            )
+            .unwrap();
+        assert!(store.validation_cleanup_record(&identity.job_id).is_err());
+    }
+
+    #[test]
+    fn validation_cleanup_pending_survives_failed_diagnostic_and_clear_then_allows_exact_clean_recovery()
+     {
+        let (directory, mut store) = open_store();
+        let identity = claim(&mut store);
+        advance_to_validation_pending(&mut store, &identity);
+        store
+            .retain_validation_cleanup_pending(WORKSPACE, &identity, &instant())
+            .unwrap();
+        assert!(
+            store
+                .retain_validation_cleanup_pending(WORKSPACE, &identity, &instant())
+                .is_err()
+        );
+        store.fail_validation_cleanup_diagnostic_for_test().unwrap();
+        assert!(
+            store
+                .retain_validation_cleanup_failure(WORKSPACE, &identity, &instant())
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .unwrap()
+                .cause_code,
+            "VALIDATION_CLEANUP_PENDING"
+        );
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        let mut foreign = identity.clone();
+        foreign.turn_id = "other-turn".into();
+        assert!(
+            store
+                .clear_validation_cleanup_pending(WORKSPACE, &foreign)
+                .is_err()
+        );
+        store.fail_validation_cleanup_clear_for_test().unwrap();
+        assert!(
+            store
+                .clear_validation_cleanup_pending(WORKSPACE, &identity)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .unwrap()
+                .identity,
+            identity
+        );
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        advance_to_observation_ready(&mut store, &identity);
+        let accepted = progress_event(&identity, 7, ChangeBatchProgressState::Accepted, "accepted");
+        let mut lease = model_open(&identity).lease;
+        lease.expires_at = Instant("2026-09-04T00:01:00.000Z".into());
+        let deadline = CheckpointAcceptanceDeadline::from_lease_observation(
+            &lease,
+            &instant(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .accept_observed_checkpoint(
+                    WORKSPACE,
+                    &accepted,
+                    &revision(RESULT),
+                    &digest('3'),
+                    &instant(),
+                    deadline
+                )
+                .unwrap(),
+            ObservationGateResult::Stale
+        );
+        store
+            .clear_validation_cleanup_pending(WORKSPACE, &identity)
+            .unwrap();
+        assert!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        assert!(
+            store
+                .validation_cleanup_record(&identity.job_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_cleanup_recovery_checkpoint_accepted(&mut store, &lease, &accepted);
+    }
+
+    fn assert_cleanup_recovery_checkpoint_accepted(
+        store: &mut ChangeBatchStore,
+        lease: &ExecutionLeaseStamp,
+        accepted: &ChangeBatchProgressEvent,
+    ) {
+        let deadline = CheckpointAcceptanceDeadline::from_lease_observation(
+            lease,
+            &instant(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .accept_observed_checkpoint(
+                    WORKSPACE,
+                    accepted,
+                    &revision(RESULT),
+                    &digest('3'),
+                    &instant(),
+                    deadline
+                )
+                .unwrap(),
+            ObservationGateResult::Accepted
+        );
+    }
+
     /// Retains the one-shot Observer request for the accepted checkpoint.
     fn request_observation(store: &mut ChangeBatchStore, identity: &ChangeBatchIdentity) {
         store
@@ -2960,7 +3524,7 @@ mod tests {
 
         assert_eq!(
             store
-                .accept_observed_checkpoint(
+                .accept_revision_without_lease_for_test(
                     WORKSPACE,
                     &accepted,
                     &revision("git-tree:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
@@ -2972,7 +3536,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .accept_observed_checkpoint(
+                .accept_revision_without_lease_for_test(
                     WORKSPACE,
                     &accepted,
                     &revision(RESULT),
@@ -2984,7 +3548,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .accept_observed_checkpoint(
+                .accept_revision_without_lease_for_test(
                     WORKSPACE,
                     &accepted,
                     &revision(RESULT),
@@ -3011,7 +3575,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .accept_observed_checkpoint(
+                .accept_revision_without_lease_for_test(
                     WORKSPACE,
                     &repeat,
                     &revision(RESULT),
@@ -3028,6 +3592,105 @@ mod tests {
         assert_eq!(binding.state, BatchState::Accepted);
         assert_eq!(binding.accepted_revision, revision(RESULT));
         assert_eq!(binding.active_batch_id, None);
+    }
+
+    #[test]
+    fn checkpoint_deadline_is_rechecked_after_a_new_sqlite_writer_lock() {
+        for expired_after_lock in [true, false] {
+            let (_directory, mut store) = open_store();
+            let identity = claim(&mut store);
+            let exchange = open_observation_exchange(&mut store, &identity);
+            store
+                .retain_observation_model_chunk(
+                    &observation_frame(&exchange, 1, 'a', b"frame", Some("completed")),
+                    &instant(),
+                )
+                .unwrap();
+            store
+                .retain_observation_receipt(
+                    &accept_receipt(&observation_intent(&identity)),
+                    &instant(),
+                )
+                .unwrap();
+            store
+                .retain_workspace_progress(
+                    WORKSPACE,
+                    &progress_event(
+                        &identity,
+                        8,
+                        ChangeBatchProgressState::ObservationCompleted,
+                        "observation completed",
+                    ),
+                    BatchState::ObservationPending,
+                    BatchState::ObservationPending,
+                )
+                .unwrap();
+            let accepted =
+                progress_event(&identity, 9, ChangeBatchProgressState::Accepted, "accepted");
+            let mut lease = model_open(&identity).lease;
+            lease.expires_at = Instant(
+                if expired_after_lock {
+                    "2026-09-04T00:00:00.100Z"
+                } else {
+                    "2026-09-04T00:00:01.000Z"
+                }
+                .into(),
+            );
+            let deadline = CheckpointAcceptanceDeadline::from_lease_observation(
+                &lease,
+                &instant(),
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let database = store.database_path().to_path_buf();
+            let (locked, ready) = std::sync::mpsc::sync_channel(1);
+            let writer = std::thread::spawn(move || {
+                let connection = Connection::open(database).unwrap();
+                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                locked.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                connection.execute_batch("COMMIT").unwrap();
+            });
+            ready.recv().unwrap();
+            assert!(
+                !deadline.expired(),
+                "guard must be valid before the actual writer wait"
+            );
+            let started = std::time::Instant::now();
+            let outcome = store
+                .accept_observed_checkpoint(
+                    WORKSPACE,
+                    &accepted,
+                    &revision(RESULT),
+                    &digest('3'),
+                    &instant(),
+                    deadline,
+                )
+                .unwrap();
+            let waited = started.elapsed();
+            writer.join().unwrap();
+            assert!(
+                waited >= std::time::Duration::from_millis(200),
+                "canonical production gate must actually wait for its writer lock"
+            );
+            let binding = store.workspace_binding(WORKSPACE).unwrap().unwrap();
+            if expired_after_lock {
+                assert_eq!(outcome, ObservationGateResult::Stale);
+                assert_eq!(binding.accepted_revision, revision(BASE));
+                assert_eq!(binding.active_batch_id, Some(identity.batch_id.clone()));
+                assert!(
+                    !store
+                        .progress_events(&identity.batch_id)
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.state == ChangeBatchProgressState::Accepted)
+                );
+            } else {
+                assert_eq!(outcome, ObservationGateResult::Accepted);
+                assert_eq!(binding.accepted_revision, revision(RESULT));
+                assert_eq!(binding.active_batch_id, None);
+            }
+        }
     }
 
     #[test]

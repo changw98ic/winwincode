@@ -1,7 +1,7 @@
 import { deviceBenchmarkProfileKey } from './device-agent-environment.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, globSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
@@ -12,7 +12,7 @@ import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, e
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
   loadDeviceProviderEnvironment, deviceTaskProvider,
-  runDeviceTaskVertical, resumeRegisteredDeviceTask } from './run-device-task-vertical.mjs'
+  runDeviceTaskVertical } from './run-device-task-vertical.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDeviceTask, terminalDeviceFailure,
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
@@ -139,6 +139,13 @@ export async function executeDeviceBenchmark(options) {
       concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds,
       executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
       recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, sharedOptions),
+      onState: state => {
+        const path = resolve(evidenceRoot, 'scheduler-state.json')
+        const pending = `${path}.pending`
+        writeFileSync(pending, `${JSON.stringify({ schemaVersion: 1,
+          observedAt: new Date().toISOString(), ...state }, null, 2)}\n`, { mode: 0o600 })
+        renameSync(pending, path)
+      },
       onRecord: record => {
         const path = resolve(evidenceRoot, `${sha256(record.runId)}.result.json`)
         const bytes = `${JSON.stringify(record, null, 2)}\n`
@@ -342,12 +349,7 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       catch { throw evidenceFailure() }
     }
     try {
-      const reportBytes = readFileSync(resolve(registeredLaunch.directory, 'device-task-result.json'))
-      const report = JSON.parse(reportBytes)
-      const observation = persistedBenchmarkDeviceFailure(report, registeredLaunch, error)
-      return await finalizeFailure(await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
-        report, reportBytes, observation,
-      }))
+      return await finalizeFailure(await reconcileInterruptedBenchmarkDeviceTask(request, registeredLaunch, options, error))
     } catch (unresolved) {
       if (unresolved.unresolvedDeviceExecution === true) throw unresolved
       // Report, identity or read-cursor conflicts remain evidence failures.
@@ -360,6 +362,17 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     if (options.productSourceSealSha256) assert.equal(result.productSourceSealSha256, options.productSourceSealSha256)
     return result
   } catch { throw evidenceFailure() }
+}
+
+// Preserve and validate the interruption report before querying the same launch.
+// Its nonterminal classification must not prevent a later terminal observation.
+export async function reconcileInterruptedBenchmarkDeviceTask(request, launch, options, error) {
+  const reportBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
+  const report = JSON.parse(reportBytes)
+  try { persistedBenchmarkDeviceFailure(report, launch, error) } catch (failure) {
+    if (failure.unresolvedDeviceExecution !== true) throw failure
+  }
+  return resolveRegisteredDeviceTask(request, launch, options, { report, reportBytes })
 }
 
 export function persistedBenchmarkDeviceFailure(report, launch, error) {
@@ -441,6 +454,36 @@ function persistedDeviceObservation(report, launch) {
     'persisted Delivery and WorkRun states must describe the same read cursor')
   return { registeredLaunch: launch, delivery, workRunAggregate,
     productSession: { id: report.productSessionId } }
+}
+
+function assertRetainedDeviceTaskIdentity(original, observation) {
+  const priorRuns = original.delivery?.workRunAggregate?.runs ?? original.workRuns ?? []
+  const currentRuns = observation.workRunAggregate.runs
+  const fields = ['workItemId', 'executionJobId', 'attempt', 'workerId', 'workerInstanceId',
+    'workerSessionId', 'leaseId', 'fencingToken', 'productSessionId', 'codexThreadId']
+  for (const prior of priorRuns) {
+    const current = currentRuns.find(run => run.id === prior.id)
+    assert.ok(current, 'original WorkRun must remain in the current observation')
+    for (const key of fields) {
+      if (prior[key] != null) assert.deepEqual(current[key], prior[key], `original WorkRun ${key} changed`)
+    }
+    if (prior.workItemId != null) {
+      const latestRetainedAttempt = Math.max(...priorRuns
+        .filter(run => run.workItemId === prior.workItemId).map(run => run.attempt))
+      assert.ok(currentRuns.filter(run => run.workItemId === prior.workItemId)
+        .every(run => run.attempt <= latestRetainedAttempt), 'recovery cannot switch to a new attempt')
+    }
+  }
+  const expired = original.workerLeaseExpired
+  if (expired) {
+    const current = currentRuns.find(run => run.id === expired.workRunId)
+    assert.ok(current, 'expired WorkRun must remain in the current observation')
+    for (const [key, value] of Object.entries({ executionJobId: expired.jobId,
+      workerSessionId: expired.workerSessionId, leaseId: expired.leaseId,
+      workerId: expired.workerId, workerInstanceId: expired.workerInstanceId })) {
+      assert.equal(current[key], value, `expired WorkRun ${key} changed`)
+    }
+  }
 }
 
 function crashedDeviceResult(request, launch, options, expectedReport = null) {
@@ -554,27 +597,24 @@ export async function resolveRegisteredDeviceTask(request, launch, options = {},
       assert.deepEqual(originalBytes, persisted.reportBytes)
       assert.deepEqual(original, persisted.report)
     }
-    let observation = persisted?.observation
-    if (!observation) {
-      try {
-        observation = await inspectRegisteredDeviceTask(launch)
-      } catch (error) {
-        if (!loopbackUnavailable(error)) throw error
-        observation = persistedDeviceObservation(original, launch)
-        assert.ok(terminalBenchmarkDeviceFailure(observation) || observation.delivery.status === 'done',
-          'an unavailable product can only recover from a durable terminal projection')
+    let observation
+    try {
+      observation = await inspectRegisteredDeviceTask(launch)
+    } catch (error) {
+      if (!loopbackUnavailable(error)) throw error
+      observation = persistedDeviceObservation(original, launch)
+      if (!terminalBenchmarkDeviceFailure(observation) && observation.delivery.status !== 'done') {
+        throw Object.assign(new Error('Original product outcome is unavailable', { cause: error }), {
+          code: 'DEVICE_EXECUTION_UNRESOLVED', unresolvedDeviceExecution: true,
+        })
       }
     }
-    if (observation.workRunAggregate.runs.some(run => ['queued', 'leased', 'running'].includes(run.state))
-      && options.runtimeResolver) {
-      const runtime = await options.runtimeResolver(request, {
-        directory: launch.directory, taskInputPath: resolve(launch.directory, 'task-input.json'),
+    assertRetainedDeviceTaskIdentity(original, observation)
+    if (observation.workRunAggregate.runs.some(run => ['queued', 'leased', 'running'].includes(run.state))) {
+      throw Object.assign(new Error('Original product execution is still active'), {
+        code: 'DEVICE_EXECUTION_UNRESOLVED', unresolvedDeviceExecution: true,
       })
-      await resumeRegisteredDeviceTask({ launch, runtime, automaticTaskActions: options.automaticTaskActions ?? false })
-      observation = await inspectRegisteredDeviceTask(launch)
     }
-    assert.ok(observation.workRunAggregate.runs.every(run => !['queued', 'leased', 'running'].includes(run.state)),
-      'active product execution cannot be finalized by recovery')
     const terminalFailure = terminalBenchmarkDeviceFailure(observation)
     if (terminalFailure !== null) {
       const candidate = observation.delivery.currentCandidate

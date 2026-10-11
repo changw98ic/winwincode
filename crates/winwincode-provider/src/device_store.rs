@@ -128,7 +128,7 @@ impl DeviceProviderStore {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 13 {
+        let key = if version == 14 {
             load_device_key(&connection)?
         } else {
             // Only an actual migration needs the writer lock. Worker polling,
@@ -1050,7 +1050,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -1130,6 +1130,27 @@ fn migrate_device_store(
             recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
             PRIMARY KEY(operation_id,sequence)); PRAGMA user_version=13;",
         )?;
+    }
+    migrate_device_response_state(transaction, version)?;
+    Ok(())
+}
+
+fn migrate_device_response_state(
+    transaction: &rusqlite::Transaction<'_>,
+    version: i64,
+) -> Result<(), DeviceProviderError> {
+    if version < 14 {
+        let response_count: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('model_invocation_attempts') WHERE name='response_bytes_received')",[],|row|row.get(0))?;
+        if !response_count {
+            transaction.execute_batch(
+                "ALTER TABLE model_invocation_attempts ADD COLUMN response_bytes_received INTEGER;",
+            )?;
+        }
+        crate::model_response_store::migrate_model_response_index(transaction)?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS model_retry_state (exchange_id TEXT PRIMARY KEY REFERENCES exchanges(exchange_id),
+            policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+            wake_ms INTEGER NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('retry_after','deferred_until')));
+            PRAGMA user_version=14;")?;
     }
     Ok(())
 }

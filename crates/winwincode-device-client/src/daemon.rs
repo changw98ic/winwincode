@@ -1451,18 +1451,16 @@ impl DeviceDaemon {
             return Ok(());
         };
         let lease_id = mirror.occupancy_lease_id.clone();
-        let sessions = self.store.worker_processes_for_lease(&lease_id)?;
         let reports = supervisor
-            .reconcile()
+            .reconcile_pending(&lease_id)
             .map_err(|_| DaemonError::Protocol("worker reconciliation failed".into()))?;
+        let reported_records = reports
+            .iter()
+            .map(|report| report.record.clone())
+            .collect::<Vec<_>>();
         let observed_at = now_rfc3339();
         let workers = reports
             .into_iter()
-            .filter(|report| {
-                sessions
-                    .iter()
-                    .any(|worker| worker.worker_session_id == report.worker_session_id)
-            })
             .map(|report| ClientWorkerReconciliation {
                 worker_session_id: report.worker_session_id,
                 worker_instance_id: report.worker_instance_id,
@@ -1481,13 +1479,15 @@ impl DeviceDaemon {
                 workers,
             },
         ))?;
+        for record in reported_records {
+            self.store.worker_report_queued("reconcile", &record)?;
+        }
         Ok(())
     }
 
     fn publish_worker_exits(&mut self) -> Result<(), DaemonError> {
         // The registry survives a restart; enqueue before marking a report sent.
-        // ponytail: scans process history per heartbeat; add a terminal cursor if history grows large.
-        for worker in self.store.worker_processes()? {
+        for worker in self.store.worker_report_candidates("exit", None)? {
             use winwincode_client_port::domain::ClientWorkerRunState;
             let state = match worker.state.as_str() {
                 "exited" => ClientWorkerRunState::Stopped,
@@ -1499,11 +1499,13 @@ impl DeviceDaemon {
                 .reported_worker_exits
                 .contains(&worker.worker_instance_id)
             {
+                self.store.worker_report_queued("exit", &worker)?;
                 continue;
             }
             let retained =
                 crate::candidate_registry::retain_worker_candidates(self, &worker).is_ok();
             let closure = self.process_closure_for_record(&worker);
+            let report_record = worker.clone();
             self.enqueue(ClientToServerMessage::WorkerState(
                 winwincode_client_port::messages::ClientWorkerStatePayload {
                     process_closure: closure,
@@ -1517,16 +1519,19 @@ impl DeviceDaemon {
             ))?;
             if retained {
                 self.reported_worker_exits.insert(worker.worker_instance_id);
+                self.store.worker_report_queued("exit", &report_record)?;
             }
         }
-        for bytes in self.store.worker_launch_receipts()? {
+        for (grant, bytes) in self.store.pending_worker_launch_receipts()? {
             let stored: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|_| DaemonError::Protocol("Worker launch receipt is corrupt".into()))?;
             let ack = decode_worker_launch_receipt_ack(&stored)?;
             let ClientToServerMessage::WorkerLaunchAck(ack) = ack else {
+                self.store.worker_launch_report_queued(&grant)?;
                 continue;
             };
             let Some(mut closure) = ack.process_closure.clone() else {
+                self.store.worker_launch_report_queued(&grant)?;
                 continue;
             };
             if !closure.never_started
@@ -1534,6 +1539,7 @@ impl DeviceDaemon {
                 || self.store.worker_process(&ack.worker_session_id)?.is_some()
                 || self.reported_worker_exits.contains(&ack.worker_instance_id)
             {
+                self.store.worker_launch_report_queued(&grant)?;
                 continue;
             }
             closure
@@ -1551,6 +1557,7 @@ impl DeviceDaemon {
                 },
             ))?;
             self.reported_worker_exits.insert(ack.worker_instance_id);
+            self.store.worker_launch_report_queued(&grant)?;
         }
         Ok(())
     }
@@ -1681,8 +1688,17 @@ impl DeviceDaemon {
         worker_credentials: &[WorkerCredentialIssuance],
     ) -> Result<usize, DownlinkFailure> {
         self.ingest_worker_credentials(worker_credentials)?;
+        let started = Instant::now();
         let mut accepted = 0_usize;
-        for value in frames {
+        for (visited, value) in frames.iter().enumerate() {
+            // Each completed command keeps its existing durable effect and ACK
+            // ordering. Leave the unaccepted suffix in the Server outbox for
+            // the next exchange using only our persisted downlink cursor.
+            // Count raw frames, including duplicates; a single synchronous
+            // command may exceed this between-command elapsed budget.
+            if visited > 0 && (visited >= 32 || started.elapsed() >= Duration::from_millis(25)) {
+                break;
+            }
             let envelope: ServerToClientEnvelope =
                 decode_downlink_frame(&self.codec, value).map_err(DownlinkFailure::Retriable)?;
             if matches!(

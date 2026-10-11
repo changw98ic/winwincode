@@ -719,6 +719,7 @@ async function driveRegisteredDeviceTask({ api, devicePath, report, supervisor, 
       }
       return driveDelivery(api, input ? null : timeoutMillis, modelRoute, Date.now, {
       deliveryId,
+      pollIntervalMillis: input ? 1_000 : 50,
       resolveAttention: input === null ? true : 'verified-candidate',
       expectDeviceWorkRun: true,
       strictLaunchAnchor: true,
@@ -737,8 +738,10 @@ async function driveRegisteredDeviceTask({ api, devicePath, report, supervisor, 
         save()
       },
       onActiveWorkRuns: async runs => {
-        report.workRuns = runs
-        save()
+        if (JSON.stringify(report.workRuns) !== JSON.stringify(runs)) {
+          report.workRuns = runs
+          save()
+        }
         for (const run of runs) checkDispatchFailure(run.id)
         for (const run of runs) {
           if (anchored.has(run.id)) continue

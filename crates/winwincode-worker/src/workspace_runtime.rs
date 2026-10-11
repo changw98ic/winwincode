@@ -22,6 +22,7 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -72,9 +73,10 @@ use winwincode_execution_port::validation_config::{
 use crate::{
     ActiveJob, ActiveJobLifecycle,
     change_batch_store::{
-        BatchState, ChangeBatchStore, ChangeBatchStoreError, ObservationChunkRetention,
-        ObservationGateResult, ObservationModelFrame, ObservationModelRecord, StoreRetention,
-        ValidationDiagnosticEvaluation, canonical_applied_file_summaries, derive_delta_digest,
+        BatchState, ChangeBatchStore, ChangeBatchStoreError, CheckpointAcceptanceDeadline,
+        ObservationChunkRetention, ObservationGateResult, ObservationModelFrame,
+        ObservationModelRecord, StoreRetention, ValidationDiagnosticEvaluation,
+        canonical_applied_file_summaries, derive_delta_digest,
     },
     context_safety::{contains_sensitive_material, observation_secret_scan_version},
     stage_product::{
@@ -83,7 +85,8 @@ use crate::{
     },
     validation_diagnostics::{ValidationDiagnosticDisposition, decide_validation_diagnostics},
     verification_isolation::{
-        ProtectedInputScope, ProtectionCapability, VerificationIsolation, VerificationScratch,
+        ProtectedInputScope, ProtectionCapability, VerificationCancellation, VerificationIsolation,
+        VerificationScratch,
     },
     workspace::{
         WorkerWorkspace, WorkspaceCleanupReport, WorkspaceCloseReason, WorkspaceError,
@@ -431,6 +434,44 @@ impl ChangeBatchExecutor for DeterministicChangeBatchExecutor {
                 },
             )
         })
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct DelayedDeterministicChangeBatchExecutor {
+    inner: DeterministicChangeBatchExecutor,
+    return_delay: Option<std::time::Duration>,
+}
+
+#[cfg(feature = "test-support")]
+impl ChangeBatchExecutor for DelayedDeterministicChangeBatchExecutor {
+    fn execute<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        let delay = self.return_delay.take();
+        Box::pin(async move {
+            let result = self.inner.execute(request).await;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            result
+        })
+    }
+
+    fn recover<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.inner.recover(request)
+    }
+
+    fn cancel<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.inner.cancel(request)
     }
 }
 
@@ -846,8 +887,29 @@ pub struct JobWorkspaceRuntime {
     partition: Option<(PathBuf, PathBuf)>,
     active: HashMap<String, WorkerWorkspace>,
     change_batch_executor: Box<dyn ChangeBatchExecutor>,
-    validation_artifacts: Box<dyn ValidationArtifactPort>,
+    validation_artifacts: Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
+    pending_validations: HashMap<String, PendingBatchValidation>,
+    unconfirmed_validation_cleanup: HashSet<String>,
+    #[cfg(feature = "test-support")]
+    force_next_validation_cleanup_failure: bool,
+    #[cfg(feature = "test-support")]
+    validation_cleanup_pending_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(feature = "test-support")]
+    validation_cleanup_clear_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(feature = "test-support")]
+    validation_completion_writer_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     change_batch_store: ChangeBatchStore,
+}
+
+impl Drop for JobWorkspaceRuntime {
+    fn drop(&mut self) {
+        for pending in self.pending_validations.values() {
+            pending.task.abort();
+        }
+    }
 }
 
 impl JobWorkspaceRuntime {
@@ -872,7 +934,17 @@ impl JobWorkspaceRuntime {
             partition: None,
             active: HashMap::new(),
             change_batch_executor: Box::new(DeterministicChangeBatchExecutor),
-            validation_artifacts: Box::new(UnavailableValidationArtifactPort),
+            validation_artifacts: Arc::new(Mutex::new(Box::new(UnavailableValidationArtifactPort))),
+            pending_validations: HashMap::new(),
+            unconfirmed_validation_cleanup: HashSet::new(),
+            #[cfg(feature = "test-support")]
+            force_next_validation_cleanup_failure: false,
+            #[cfg(feature = "test-support")]
+            validation_cleanup_pending_barrier: None,
+            #[cfg(feature = "test-support")]
+            validation_cleanup_clear_barrier: None,
+            #[cfg(feature = "test-support")]
+            validation_completion_writer_barrier: None,
             change_batch_store,
         })
     }
@@ -933,7 +1005,7 @@ impl JobWorkspaceRuntime {
         mut self,
         port: impl ValidationArtifactPort + 'static,
     ) -> Self {
-        self.validation_artifacts = Box::new(port);
+        self.validation_artifacts = Arc::new(Mutex::new(Box::new(port)));
         self
     }
 
@@ -951,6 +1023,7 @@ impl JobWorkspaceRuntime {
         active: &ActiveJob,
         replacement: Option<&ExecutionJobReplacementAuthority>,
     ) -> Result<PathBuf, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         if let Some(workspace) = self.active.get(&active.job.job_id.0) {
             if !same_authority(workspace.provenance(), active) {
                 return Err(authority_error());
@@ -984,6 +1057,7 @@ impl JobWorkspaceRuntime {
         replacement: Option<&ExecutionJobReplacementAuthority>,
         _now: &Instant,
     ) -> Result<PathBuf, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let records = self
             .change_batch_store
             .records_for_job(&active.job.job_id)?;
@@ -1106,6 +1180,7 @@ impl JobWorkspaceRuntime {
         active: &ActiveJob,
         execution_mode: RoleExecutionMode,
     ) -> Result<PreparedCandidateArtifact, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get_mut(&active.job.job_id.0)
@@ -1133,6 +1208,7 @@ impl JobWorkspaceRuntime {
         &mut self,
         active: &ActiveJob,
     ) -> Result<PreparedCandidateArtifact, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1152,6 +1228,7 @@ impl JobWorkspaceRuntime {
         now: &Instant,
     ) -> Result<winwincode_execution_port::generated::SnapshotFreezeReceiptMessage, JobWorkspaceError>
     {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1432,6 +1509,78 @@ impl JobWorkspaceRuntime {
         event: &ChangeBatchProposalEvent,
         now: &Instant,
     ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        loop {
+            let now = clock.timestamp().ok_or_else(authority_error)?;
+            if let Some(executed) = self.poll_change_batch(active, event, &now).await? {
+                return Ok(executed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Advances one exact batch without waiting for its read-only validation.
+    /// Only this owner applies the completed validation to the durable batch.
+    ///
+    /// # Errors
+    /// Rejects changed authority, intent bytes, or unavailable durable state.
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::large_futures)]
+    pub async fn poll_change_batch(
+        &mut self,
+        active: &ActiveJob,
+        event: &ChangeBatchProposalEvent,
+        now: &Instant,
+    ) -> Result<Option<ExecutedChangeBatch>, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(event, active)
+        {
+            return Err(authority_error());
+        }
+        if let Some(pending) = self.pending_validations.get(&active.job.job_id.0)
+            && pending.event != *event
+        {
+            return Err(authority_error());
+        }
+        self.require_live_validation_cleanup(&active.job.job_id)?;
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
+        if active.lifecycle == ActiveJobLifecycle::Running && now.0 >= active.lease.expires_at.0 {
+            self.cancel_validation(&active.job.job_id, now).await?;
+            return Err(authority_error());
+        }
+        if let Some(pending) = self.pending_validations.get(&active.job.job_id.0) {
+            if !pending.task.is_finished() {
+                return Ok(None);
+            }
+            let pending = self
+                .pending_validations
+                .remove(&active.job.job_id.0)
+                .ok_or_else(authority_error)?;
+            let completed = pending.task.await;
+            let current = clock.timestamp().ok_or_else(authority_error)?;
+            if completed.is_err() || pending.cancellation.cleanup_failed() {
+                self.retain_unconfirmed_validation_cleanup(&pending.state, &current)?;
+                return Err(validation_cleanup_error());
+            }
+            self.clear_confirmed_validation_cleanup(&pending.state)?;
+            return match completed {
+                Ok(Ok(validation)) => self
+                    .complete_batch_validation(active, pending.state, &validation, &clock)
+                    .map(Some),
+                Ok(Err(_)) => {
+                    let current = clock.timestamp().ok_or_else(authority_error)?;
+                    self.fail_batch_validation(active, pending.state, &current)
+                        .map(Some)
+                }
+                Err(_) => unreachable!("validation JoinError is gated before completion"),
+            };
+        }
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1460,14 +1609,14 @@ impl JobWorkspaceRuntime {
                 {
                     return Err(authority_error());
                 }
-                return Ok(ExecutedChangeBatch {
+                return Ok(Some(ExecutedChangeBatch {
                     progress,
                     receipt,
                     observation_request: self
                         .change_batch_store
                         .observation_request(&event.identity.batch_id)?,
                     replayed: true,
-                });
+                }));
             }
         }
         let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
@@ -1493,16 +1642,44 @@ impl JobWorkspaceRuntime {
             .batch_record(&event.identity.batch_id)?
             .and_then(|record| record.receipt)
         {
-            return Ok(ExecutedChangeBatch {
-                progress: self
-                    .change_batch_store
-                    .progress_events(&event.identity.batch_id)?,
-                receipt,
-                observation_request: self
-                    .change_batch_store
-                    .observation_request(&event.identity.batch_id)?,
-                replayed: true,
-            });
+            let mut progress = self
+                .change_batch_store
+                .progress_events(&event.identity.batch_id)?;
+            let result_revision = receipt
+                .result_revision
+                .clone()
+                .ok_or_else(authority_error)?;
+            let will_validate = self.validation_will_run(active, event, &receipt)?;
+            if will_validate
+                && progress
+                    .last()
+                    .is_some_and(|entry| entry.state == ChangeBatchProgressState::Applied)
+            {
+                append_progress_state(
+                    &mut self.change_batch_store,
+                    &mut progress,
+                    event,
+                    ChangeBatchProgressState::ValidationStarted,
+                    "ChangeBatch validation started",
+                    Vec::new(),
+                    now,
+                )?;
+            }
+            self.schedule_batch_validation(
+                active,
+                BatchValidationState {
+                    workspace_id,
+                    accepted_revision,
+                    result_revision,
+                    progress,
+                    receipt,
+                    retention,
+                    will_validate,
+                    event: event.clone(),
+                },
+                &clock,
+            )?;
+            return Ok(None);
         }
 
         let mut progress = prepare_execution_progress(&mut self.change_batch_store, event, now)?;
@@ -1568,12 +1745,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         if let ChangeBatchExecutionResult::StateUncertain { artifact_ref, .. } = &result {
             let receipt = exact_receipt(
@@ -1601,12 +1778,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         let applied_files = match &result {
             ChangeBatchExecutionResult::Applied { files, .. }
@@ -1617,7 +1794,7 @@ impl JobWorkspaceRuntime {
         let files = canonical_applied_file_summaries(&applied_files)?;
         let result_revision = resolve_checkout_tree(&checkout)?;
         let status = receipt_status(&result);
-        let mut receipt = exact_receipt(
+        let receipt = exact_receipt(
             event,
             &accepted_revision,
             Some(&result_revision),
@@ -1648,12 +1825,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         let applied = next_progress(
             &progress,
@@ -1682,9 +1859,172 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
         }
-        let validation = self
-            .run_result_validation(active, event, &receipt, &progress)
-            .await?;
+        let state = BatchValidationState {
+            workspace_id,
+            accepted_revision,
+            result_revision,
+            progress,
+            receipt,
+            retention,
+            will_validate,
+            event: event.clone(),
+        };
+        if !will_validate {
+            let validation =
+                run_result_validation(self.validation_input(active, event, &state.receipt)?)
+                    .await?;
+            return self
+                .complete_batch_validation(active, state, &validation, &clock)
+                .map(Some);
+        }
+        self.schedule_batch_validation(active, state, &clock)?;
+        Ok(None)
+    }
+
+    fn schedule_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        state: BatchValidationState,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<(), JobWorkspaceError> {
+        let validation = self.validation_input(active, &state.event, &state.receipt)?;
+        let cancellation = validation.cancellation.clone();
+        #[cfg(feature = "test-support")]
+        if std::mem::take(&mut self.force_next_validation_cleanup_failure) {
+            cancellation.force_cleanup_failure_for_test();
+        }
+        let current = self.validation_start_time(active, &state, clock)?;
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_cleanup_pending_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked.recv().map_err(|_| authority_error())?;
+        }
+        self.change_batch_store
+            .retain_validation_cleanup_pending(&state.workspace_id, &state.event.identity, &current)
+            .map_err(|_| {
+                let mut error = validation_cleanup_error();
+                error.stage = "validation_cancel_cleanup_pending";
+                error.cause_code = "VALIDATION_CLEANUP_PENDING_UNAVAILABLE";
+                error
+            })?;
+        // The pending transaction can wait for a writer across the deadline.
+        // Only its exact, still-unstarted marker may be cleared on rejection.
+        if let Err(error) = self.validation_start_time(active, &state, clock) {
+            self.clear_confirmed_validation_cleanup(&state)?;
+            return Err(error);
+        }
+        let task = tokio::spawn(run_result_validation(validation));
+        self.pending_validations.insert(
+            active.job.job_id.0.clone(),
+            PendingBatchValidation {
+                event: state.event.clone(),
+                task,
+                cancellation,
+                state,
+            },
+        );
+        Ok(())
+    }
+
+    fn validation_start_time(
+        &self,
+        active: &ActiveJob,
+        state: &BatchValidationState,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<Instant, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if workspace.id() != state.workspace_id
+            || !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(&state.event, active)
+            || active.lifecycle != ActiveJobLifecycle::Running
+        {
+            return Err(authority_error());
+        }
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        if current.0 < active.lease.issued_at.0
+            || current.0 >= active.lease.expires_at.0
+            || clock
+                .start_deadline(&active.lease.issued_at, &active.lease.expires_at)
+                .is_none()
+        {
+            return Err(authority_error());
+        }
+        Ok(current)
+    }
+
+    fn fail_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        mut state: BatchValidationState,
+        now: &Instant,
+    ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(&state.event, active)
+        {
+            return Err(authority_error());
+        }
+        let terminal = next_progress(
+            &state.progress,
+            &state.event,
+            ChangeBatchProgressState::InfrastructureFailed,
+            "owned validation did not produce evidence; exact checkpoint quarantined",
+            Vec::new(),
+            now,
+        );
+        self.change_batch_store.retain_workspace_progress(
+            &state.workspace_id,
+            &terminal,
+            BatchState::ValidationPending,
+            BatchState::Quarantined,
+        )?;
+        state.progress.push(terminal);
+        Ok(ExecutedChangeBatch {
+            progress: state.progress,
+            receipt: state.receipt,
+            observation_request: None,
+            replayed: state.retention == StoreRetention::Replay,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn complete_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        state: BatchValidationState,
+        validation: &ValidationOutcome,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
+        let BatchValidationState {
+            workspace_id,
+            accepted_revision,
+            result_revision,
+            mut progress,
+            mut receipt,
+            retention,
+            will_validate,
+            event,
+        } = state;
+        let event = &event;
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(event, active)
+            || active.lifecycle != ActiveJobLifecycle::Running
+            || now.0 >= active.lease.expires_at.0
+        {
+            return Err(authority_error());
+        }
         if !will_validate || validation.receipt.is_none() {
             // No executable validation: the evidence ends at the exact apply
             // checkpoint, with no decision and no observation.
@@ -1696,6 +2036,13 @@ impl JobWorkspaceRuntime {
             });
         }
         receipt.validation.clone_from(&validation.receipt);
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_completion_writer_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| authority_error())?;
+        }
         let decision = retain_validation_diagnostic_evaluation(
             &mut self.change_batch_store,
             event,
@@ -1789,6 +2136,22 @@ impl JobWorkspaceRuntime {
             progress.push(repair);
         }
         if !observation_requested && decision == ValidationDiagnosticDisposition::Pass {
+            // Diagnostic persistence can wait on another SQLite writer. Check
+            // effective authority again at the accepted-revision seam rather
+            // than authorizing it with the time sampled before those writes.
+            let current = clock.timestamp().ok_or_else(authority_error)?;
+            let now = &current;
+            let workspace = self
+                .active
+                .get(&active.job.job_id.0)
+                .ok_or_else(authority_error)?;
+            if !same_authority(workspace.provenance(), active)
+                || !same_change_batch_lease_authority(event, active)
+                || active.lifecycle != ActiveJobLifecycle::Running
+                || now.0 >= active.lease.expires_at.0
+            {
+                return Err(authority_error());
+            }
             let accepted = next_progress(
                 &progress,
                 event,
@@ -1806,6 +2169,8 @@ impl JobWorkspaceRuntime {
                     .as_ref()
                     .ok_or_else(|| change_batch_error("accepted batch has no exact delta"))?,
                 now,
+                CheckpointAcceptanceDeadline::from_clock(clock, &active.lease)
+                    .ok_or_else(authority_error)?,
             )? != ObservationGateResult::Accepted
             {
                 return Err(change_batch_error(
@@ -1859,135 +2224,19 @@ impl JobWorkspaceRuntime {
     /// Read-only validation commands only: this module never mutates the
     /// checkout, so formatter and writer phases belong to the deterministic
     /// executor delivery and are never executed here.
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::large_futures)]
-    async fn run_result_validation(
-        &mut self,
+    fn validation_input(
+        &self,
         active: &ActiveJob,
         event: &ChangeBatchProposalEvent,
         receipt: &ChangeBatchReceipt,
-        progress: &[ChangeBatchProgressEvent],
-    ) -> Result<ValidationOutcome, JobWorkspaceError> {
+    ) -> Result<ValidationInput, JobWorkspaceError> {
         let workspace = self
             .active
             .get(&active.job.job_id.0)
             .ok_or_else(authority_error)?;
-        let checkout = workspace.layout().checkout().to_path_buf();
-        let configuration = load_validation_configuration(&checkout)?;
-        let changed_paths = git_changed_paths(receipt);
-        let selection = resolve_validation_profile(
-            configuration.as_ref(),
-            validation_profile_text(&event.proposal.validation_profile),
-            &changed_paths,
-        )
-        .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
-        let _ = progress;
-        let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
-        if !selection.executable || commands.is_empty() {
-            return Ok(ValidationOutcome {
-                selection,
-                receipt: None,
-                parser_failed: false,
-                baseline: None,
-                result: None,
-            });
-        }
-        let workspace_root = workspace.layout().root().to_path_buf();
-        let scratch_identity = format!(
-            "{}:{}:{:x}",
-            active.job.job_id.0,
-            active.worker_session_id.0,
-            Sha256::digest(serde_json::to_vec(&event.identity).map_err(|_| {
-                change_batch_error("verification scratch identity cannot be encoded")
-            })?)
-        );
-        let scope = ProtectedInputScope::new(&checkout, &changed_paths)
-            .map_err(|_| change_batch_error("protected verification input scope is invalid"))?;
-        let scratch = VerificationScratch::create(workspace_root, &scratch_identity, 0)
-            .map_err(|_| change_batch_error("verification scratch cannot be allocated"))?;
-        let isolation =
-            VerificationIsolation::open(scope, scratch, verification_helper_executable())
-                .await
-                .map_err(|_| change_batch_error("verification isolation cannot be established"))?;
-        let isolation_binding = IsolationBinding::from(&isolation);
-        let mut checks = Vec::new();
-        let mut artifact_refs = Vec::new();
-        let mut duration_millis = 0_i64;
-        let mut infrastructure = false;
-        let mut failed = false;
-        let mut parser_failed = false;
-        let mut parsed_batches = Vec::new();
-        for (ordinal, command) in commands.iter().enumerate() {
-            let mut run = if isolation.capability().allows_strong_pass() {
-                run_validation_command(
-                    &isolation,
-                    command,
-                    ordinal,
-                    event,
-                    self.validation_artifacts.as_mut(),
-                )
-                .await?
-            } else {
-                ValidationCommandRun::capability_unavailable(
-                    &command.id,
-                    &isolation_binding,
-                    match isolation.capability() {
-                        ProtectionCapability::Unavailable { reason, .. } => reason.clone(),
-                        ProtectionCapability::Available { .. } => unreachable!(),
-                    },
-                )
-            };
-            if run.failed() && command.flaky_rerun_limit == Some(1) {
-                let retry = run_validation_command(
-                    &isolation,
-                    command,
-                    commands.len().saturating_add(ordinal),
-                    event,
-                    self.validation_artifacts.as_mut(),
-                )
-                .await?;
-                run.reconcile_bounded_rerun(retry);
-            }
-            duration_millis = duration_millis.saturating_add(run.duration_millis);
-            artifact_refs.extend(run.artifact_refs.iter().cloned());
-            checks.push(run.check_summary());
-            infrastructure |= run.infrastructure_failure();
-            failed |= run.failed();
-            if let (Some(version), false) = (
-                command.diagnostic_parser_version.as_ref(),
-                run.infrastructure_failure(),
-            ) {
-                match parse_diagnostics(version.clone(), &run.output, &checkout) {
-                    Ok(batch) => parsed_batches.push(batch),
-                    Err(_) => parser_failed = true,
-                }
-            } else if command.diagnostic_parser_version.is_some() {
-                parser_failed = true;
-            }
-            // An infrastructure failure proves nothing about the remaining
-            // profile, so the run stops instead of recording an incomplete
-            // snapshot as if it were complete.
-            if run.infrastructure_failure() {
-                break;
-            }
-        }
-        let status = validation_receipt_status(infrastructure, failed);
-        let result_revision = receipt.result_revision.clone();
-        let result = if parsed_batches.is_empty() {
-            None
-        } else {
-            build_diagnostic_baseline(
-                result_revision.clone().ok_or_else(|| {
-                    change_batch_error("validated ChangeBatch has no result tree")
-                })?,
-                &parsed_batches,
-            )
-            .ok()
-        };
-        let base_batch_id = event.identity.batch_id.clone();
         let baseline = self
             .change_batch_store
-            .diagnostic_baseline(&base_batch_id, &receipt.base_revision)?
+            .diagnostic_baseline(&event.identity.batch_id, &receipt.base_revision)?
             .or_else(|| {
                 retained_history_baseline(
                     &self.change_batch_store,
@@ -1997,22 +2246,204 @@ impl JobWorkspaceRuntime {
                 .ok()
                 .flatten()
             });
-        let receipt = ValidationReceipt {
-            artifact_refs,
-            base_revision: receipt.base_revision.clone(),
-            checks,
-            duration_millis,
-            profile: selection.profile.clone(),
-            result_revision,
-            status,
-        };
-        Ok(ValidationOutcome {
-            selection,
-            receipt: Some(receipt),
-            parser_failed,
+        Ok(ValidationInput {
+            active: active.clone(),
+            event: event.clone(),
+            receipt: receipt.clone(),
+            checkout: workspace.layout().checkout().to_path_buf(),
+            workspace_root: workspace.layout().root().to_path_buf(),
             baseline,
-            result,
+            artifacts: Arc::clone(&self.validation_artifacts),
+            cancellation: VerificationCancellation::default(),
         })
+    }
+
+    /// Stops this Job's read-only validation before cancellation or terminal cleanup.
+    pub(crate) async fn cancel_validation(
+        &mut self,
+        job_id: &ExecutionJobId,
+        now: &Instant,
+    ) -> Result<(), JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        self.require_live_validation_cleanup(job_id)?;
+        if let Some(pending) = self.pending_validations.remove(&job_id.0) {
+            pending.cancellation.cancel();
+            let joined = pending.task.await;
+            if joined.is_err() || pending.cancellation.cleanup_failed() {
+                let current = clock.timestamp().ok_or_else(authority_error)?;
+                self.retain_unconfirmed_validation_cleanup(&pending.state, &current)?;
+                return Err(validation_cleanup_error());
+            }
+            self.clear_confirmed_validation_cleanup(&pending.state)?;
+        }
+        Ok(())
+    }
+
+    fn require_confirmed_validation_cleanup(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<(), JobWorkspaceError> {
+        if self.unconfirmed_validation_cleanup.contains(&job_id.0)
+            || self
+                .change_batch_store
+                .validation_cleanup_record(job_id)?
+                .is_some()
+        {
+            return Err(validation_cleanup_error());
+        }
+        Ok(())
+    }
+
+    fn require_live_validation_cleanup(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<(), JobWorkspaceError> {
+        if self.unconfirmed_validation_cleanup.contains(&job_id.0) {
+            return Err(validation_cleanup_error());
+        }
+        let record = self.change_batch_store.validation_cleanup_record(job_id)?;
+        match (record, self.pending_validations.get(&job_id.0)) {
+            (None, None) => Ok(()),
+            (Some(record), Some(pending))
+                if record.cause_code == "VALIDATION_CLEANUP_PENDING"
+                    && record.identity == pending.event.identity
+                    && record.workspace_id == pending.state.workspace_id =>
+            {
+                Ok(())
+            }
+            _ => Err(validation_cleanup_error()),
+        }
+    }
+
+    fn clear_confirmed_validation_cleanup(
+        &mut self,
+        state: &BatchValidationState,
+    ) -> Result<(), JobWorkspaceError> {
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_cleanup_clear_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked.recv().map_err(|_| authority_error())?;
+        }
+        if self
+            .change_batch_store
+            .clear_validation_cleanup_pending(&state.workspace_id, &state.event.identity)
+            .is_err()
+        {
+            self.unconfirmed_validation_cleanup
+                .insert(state.event.identity.job_id.0.clone());
+            let mut error = validation_cleanup_error();
+            error.stage = "validation_cancel_cleanup_clear";
+            error.cause_code = "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE";
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn retain_unconfirmed_validation_cleanup(
+        &mut self,
+        state: &BatchValidationState,
+        now: &Instant,
+    ) -> Result<(), JobWorkspaceError> {
+        self.unconfirmed_validation_cleanup
+            .insert(state.event.identity.job_id.0.clone());
+        self.change_batch_store
+            .retain_validation_cleanup_failure(&state.workspace_id, &state.event.identity, now)
+            .map_err(|_| {
+                let mut error = validation_cleanup_error();
+                error.stage = "validation_cancel_cleanup_record";
+                error.cause_code = "VALIDATION_CLEANUP_RECORD_UNAVAILABLE";
+                error
+            })?;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn force_next_validation_cleanup_failure_for_test(&mut self) {
+        self.force_next_validation_cleanup_failure = true;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn delay_next_change_batch_apply_return_for_test(&mut self, delay: std::time::Duration) {
+        self.change_batch_executor = Box::new(DelayedDeterministicChangeBatchExecutor {
+            inner: DeterministicChangeBatchExecutor,
+            return_delay: Some(delay),
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_cleanup_pending_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_cleanup_pending_barrier = Some((arrived, writer_locked));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_cleanup_clear_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_cleanup_clear_barrier = Some((arrived, writer_locked));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_completion_writer_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_completion_writer_barrier = Some((arrived, writer_locked));
+    }
+
+    /// # Errors
+    ///
+    /// Rejects an unavailable `SQLite` authorizer setup.
+    #[cfg(feature = "test-support")]
+    pub fn delay_next_validation_cleanup_clear_for_test(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<Arc<std::sync::atomic::AtomicUsize>, JobWorkspaceError> {
+        self.change_batch_store
+            .delay_next_validation_cleanup_clear_for_test(delay)
+            .map_err(Into::into)
+    }
+
+    /// # Errors
+    ///
+    /// Rejects an unavailable `SQLite` cleanup-pending fault trigger setup.
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_pending_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_pending_for_test()
+            .map_err(Into::into)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn pending_validation_task_count_for_test(&self) -> usize {
+        self.pending_validations.len()
+    }
+
+    /// # Errors
+    ///
+    /// Rejects an unavailable `SQLite` cleanup-diagnostic fault trigger setup.
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_diagnostic_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_diagnostic_for_test()
+            .map_err(Into::into)
+    }
+
+    /// # Errors
+    ///
+    /// Rejects an unavailable `SQLite` cleanup-clear fault trigger setup.
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_clear_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_clear_for_test()
+            .map_err(Into::into)
     }
 
     /// Consumes and removes one exact Job workspace at terminal cleanup.
@@ -2026,6 +2457,7 @@ impl JobWorkspaceRuntime {
         job_id: &ExecutionJobId,
         reason: WorkspaceCloseReason,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let workspace = self.active.get(&job_id.0).ok_or_else(authority_error)?;
         if self
             .change_batch_store
@@ -2044,6 +2476,7 @@ impl JobWorkspaceRuntime {
         job_id: &ExecutionJobId,
         reason: WorkspaceCloseReason,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let report = self
             .active
             .get_mut(&job_id.0)
@@ -2066,6 +2499,7 @@ impl JobWorkspaceRuntime {
         reason: WorkspaceCloseReason,
         _now: &Instant,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let workspace = self.active.get(&job_id.0).ok_or_else(authority_error)?;
         let unresolved = self
             .change_batch_store
@@ -2096,6 +2530,7 @@ impl JobWorkspaceRuntime {
         reason: WorkspaceCloseReason,
         now: &Instant,
     ) -> Result<Option<ChangeBatchProgressEvent>, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -2166,6 +2601,7 @@ impl JobWorkspaceRuntime {
     }
 
     pub(crate) fn checkout_for_job(&self, active: &ActiveJob) -> Result<&Path, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -2452,6 +2888,9 @@ impl JobWorkspaceRuntime {
         chunk: &ModelChunkMessage,
         now: &Instant,
     ) -> Result<Option<ObservationChunkApplication>, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
         let Some(record) = self
             .change_batch_store
             .observation_model_record(&chunk.model_exchange_id)?
@@ -2619,6 +3058,16 @@ impl JobWorkspaceRuntime {
         let intent_delta_digest = intent.delta_digest.clone();
         match receipt.response.decision {
             ObservationDecision::Accept => {
+                let current = clock.timestamp().ok_or_else(authority_error)?;
+                let now = &current;
+                if active.lifecycle != ActiveJobLifecycle::Running
+                    || !same_authority(workspace.provenance(), active)
+                    || !same_change_batch_identity_lease_authority(&intent.identity, active)
+                    || now.0 < active.lease.issued_at.0
+                    || now.0 >= active.lease.expires_at.0
+                {
+                    return Err(authority_error());
+                }
                 let accepted = next_progress(
                     &progress,
                     &stored.event,
@@ -2633,6 +3082,8 @@ impl JobWorkspaceRuntime {
                     &intent_result_revision,
                     &intent_delta_digest,
                     now,
+                    CheckpointAcceptanceDeadline::from_clock(&clock, &active.lease)
+                        .ok_or_else(authority_error)?,
                 )? != ObservationGateResult::Accepted
                 {
                     return Err(change_batch_error(
@@ -2759,7 +3210,9 @@ impl JobWorkspaceRuntime {
         progress: &ChangeBatchProgressEvent,
         observed_revision: &WorkspaceRevision,
         observed_delta_digest: &Sha256Digest,
+        now: &Instant,
     ) -> Result<ObservationGateResult, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -2770,22 +3223,213 @@ impl JobWorkspaceRuntime {
             .ok_or_else(authority_error)?;
         if !same_authority(workspace.provenance(), active)
             || !same_change_batch_progress_authority(progress, active, &binding.accepted_revision)
+            || active.lifecycle != ActiveJobLifecycle::Running
         {
             return Ok(ObservationGateResult::Stale);
         }
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let Some(deadline) = CheckpointAcceptanceDeadline::from_clock(&clock, &active.lease) else {
+            return Ok(ObservationGateResult::Stale);
+        };
         self.change_batch_store
             .accept_observed_checkpoint(
                 workspace.id(),
                 progress,
                 observed_revision,
                 observed_delta_digest,
-                &progress.occurred_at,
+                &current,
+                deadline,
             )
             .map_err(Into::into)
     }
 }
 
+#[derive(Debug)]
+struct PendingBatchValidation {
+    event: ChangeBatchProposalEvent,
+    task: tokio::task::JoinHandle<Result<ValidationOutcome, JobWorkspaceError>>,
+    cancellation: VerificationCancellation,
+    state: BatchValidationState,
+}
+
+#[derive(Debug)]
+struct BatchValidationState {
+    workspace_id: String,
+    accepted_revision: WorkspaceRevision,
+    result_revision: WorkspaceRevision,
+    progress: Vec<ChangeBatchProgressEvent>,
+    receipt: ChangeBatchReceipt,
+    retention: StoreRetention,
+    will_validate: bool,
+    event: ChangeBatchProposalEvent,
+}
+
+struct ValidationInput {
+    active: ActiveJob,
+    event: ChangeBatchProposalEvent,
+    receipt: ChangeBatchReceipt,
+    checkout: PathBuf,
+    workspace_root: PathBuf,
+    baseline: Option<DiagnosticBaseline>,
+    artifacts: Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
+    cancellation: VerificationCancellation,
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::large_futures)]
+async fn run_result_validation(
+    input: ValidationInput,
+) -> Result<ValidationOutcome, JobWorkspaceError> {
+    let ValidationInput {
+        active,
+        event,
+        receipt,
+        checkout,
+        workspace_root,
+        baseline,
+        artifacts,
+        cancellation,
+    } = input;
+    if cancellation.is_cancelled() {
+        return Err(change_batch_error("validation cancelled"));
+    }
+    let active = &active;
+    let event = &event;
+    let receipt = &receipt;
+    let configuration = load_validation_configuration(&checkout)?;
+    let changed_paths = git_changed_paths(receipt);
+    let selection = resolve_validation_profile(
+        configuration.as_ref(),
+        validation_profile_text(&event.proposal.validation_profile),
+        &changed_paths,
+    )
+    .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
+    let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
+    if !selection.executable || commands.is_empty() {
+        return Ok(ValidationOutcome {
+            selection,
+            receipt: None,
+            parser_failed: false,
+            baseline: None,
+            result: None,
+        });
+    }
+    let scratch_identity = format!(
+        "{}:{}:{:x}:{}:{}",
+        active.job.job_id.0,
+        active.worker_session_id.0,
+        Sha256::digest(serde_json::to_vec(&event.identity).map_err(|_| {
+            change_batch_error("verification scratch identity cannot be encoded")
+        })?),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| change_batch_error("verification generation clock is invalid"))?
+            .as_nanos()
+    );
+    let scope = ProtectedInputScope::new(&checkout, &changed_paths)
+        .map_err(|_| change_batch_error("protected verification input scope is invalid"))?;
+    let scratch = VerificationScratch::create(workspace_root, &scratch_identity, 0)
+        .map_err(|_| change_batch_error("verification scratch cannot be allocated"))?;
+    let isolation = VerificationIsolation::open_with_cancellation(
+        scope,
+        scratch,
+        verification_helper_executable(),
+        cancellation.clone(),
+    )
+    .await
+    .map_err(|_| change_batch_error("verification isolation cannot be established"))?;
+    let isolation_binding = IsolationBinding::from(&isolation);
+    let mut checks = Vec::new();
+    let mut artifact_refs = Vec::new();
+    let mut duration_millis = 0_i64;
+    let mut infrastructure = false;
+    let mut failed = false;
+    let mut parser_failed = false;
+    let mut parsed_batches = Vec::new();
+    for (ordinal, command) in commands.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(change_batch_error("validation cancelled"));
+        }
+        let mut run = if isolation.capability().allows_strong_pass() {
+            run_validation_command(&isolation, command, ordinal, event, &artifacts).await?
+        } else {
+            ValidationCommandRun::capability_unavailable(
+                &command.id,
+                &isolation_binding,
+                match isolation.capability() {
+                    ProtectionCapability::Unavailable { reason, .. } => reason.clone(),
+                    ProtectionCapability::Available { .. } => unreachable!(),
+                },
+            )
+        };
+        if run.failed() && command.flaky_rerun_limit == Some(1) {
+            let retry = run_validation_command(
+                &isolation,
+                command,
+                commands.len().saturating_add(ordinal),
+                event,
+                &artifacts,
+            )
+            .await?;
+            run.reconcile_bounded_rerun(retry);
+        }
+        duration_millis = duration_millis.saturating_add(run.duration_millis);
+        artifact_refs.extend(run.artifact_refs.iter().cloned());
+        checks.push(run.check_summary());
+        infrastructure |= run.infrastructure_failure();
+        failed |= run.failed();
+        if let (Some(version), false) = (
+            command.diagnostic_parser_version.as_ref(),
+            run.infrastructure_failure(),
+        ) {
+            match parse_diagnostics(version.clone(), &run.output, &checkout) {
+                Ok(batch) => parsed_batches.push(batch),
+                Err(_) => parser_failed = true,
+            }
+        } else if command.diagnostic_parser_version.is_some() {
+            parser_failed = true;
+        }
+        // An infrastructure failure proves nothing about the remaining
+        // profile, so the run stops instead of recording an incomplete
+        // snapshot as if it were complete.
+        if run.infrastructure_failure() {
+            break;
+        }
+    }
+    let status = validation_receipt_status(infrastructure, failed);
+    let result_revision = receipt.result_revision.clone();
+    let result = if parsed_batches.is_empty() {
+        None
+    } else {
+        build_diagnostic_baseline(
+            result_revision
+                .clone()
+                .ok_or_else(|| change_batch_error("validated ChangeBatch has no result tree"))?,
+            &parsed_batches,
+        )
+        .ok()
+    };
+    let receipt = ValidationReceipt {
+        artifact_refs,
+        base_revision: receipt.base_revision.clone(),
+        checks,
+        duration_millis,
+        profile: selection.profile.clone(),
+        result_revision,
+        status,
+    };
+    Ok(ValidationOutcome {
+        selection,
+        receipt: Some(receipt),
+        parser_failed,
+        baseline,
+        result,
+    })
+}
+
 /// Bounded outcome of one validation pass over the applied result state.
+#[derive(Debug)]
 struct ValidationOutcome {
     selection: ValidationProfileSelection,
     receipt: Option<ValidationReceipt>,
@@ -3036,7 +3680,7 @@ async fn run_validation_command(
     command: &ValidationCommandSpec,
     ordinal: usize,
     event: &ChangeBatchProposalEvent,
-    artifacts: &mut dyn ValidationArtifactPort,
+    artifacts: &Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
 ) -> Result<ValidationCommandRun, JobWorkspaceError> {
     if command.network || !matches!(command.phase, ValidationCommandPhase::Validation) {
         return Err(change_batch_error(
@@ -3096,8 +3740,11 @@ async fn run_validation_command(
             "text/plain; charset=utf-8",
         ),
     ] {
+        let mut artifact_port = artifacts
+            .lock()
+            .map_err(|_| change_batch_error("validation Artifact store lock failed"))?;
         let reference = persist_validation_artifact(
-            artifacts,
+            artifact_port.as_mut(),
             event,
             ordinal,
             &command.id,
@@ -3469,6 +4116,13 @@ fn authority_error() -> JobWorkspaceError {
 
 fn change_batch_error(message: &'static str) -> JobWorkspaceError {
     JobWorkspaceError::new(JobWorkspaceErrorCode::ChangeBatch, message)
+}
+
+fn validation_cleanup_error() -> JobWorkspaceError {
+    let mut error = change_batch_error("validation cancellation cleanup is unconfirmed");
+    error.stage = "validation_cancel_cleanup";
+    error.cause_code = "VALIDATION_CLEANUP_UNCONFIRMED";
+    error
 }
 
 const fn validation_profile_text(profile: &ValidationProfileName) -> &'static str {

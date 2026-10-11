@@ -304,3 +304,19 @@ test('one row keeps its controls only while the decision is still decidable', ()
     '业务待处理',
   )
 })
+
+
+test('Other permission belongs only to an explicitly open single-choice input', () => {
+  for (const [mode, allowOther, expected] of [
+    ['single_choice', undefined, false],
+    ['single_choice', false, false],
+    ['single_choice', true, true],
+    ['confirmation', true, false],
+    ['text', true, false],
+  ]) {
+    const item = contextualDecisions(source({ inputs: [input({ mode, allowOther })] })).items[0]
+    assert.equal(item.allowOther, expected)
+  }
+  assert.equal(contextualDecisions(source({ approvals: [approval()] })).items[0].allowOther, false)
+  assert.equal(contextualDecisions(source({ attention: [attention()] })).items[0].allowOther, false)
+})

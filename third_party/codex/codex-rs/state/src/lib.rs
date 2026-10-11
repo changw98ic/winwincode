@@ -36,6 +36,9 @@ pub use model::QueuedUserSubmissionRecord;
 pub use model::RolloutMigrationCursor;
 pub use model::RolloutMigrationSkippedRollout;
 pub use model::RolloutMigrationState;
+pub use runtime::ControlInputRecovery;
+pub use runtime::ControlInputRecoveryHeader;
+pub use runtime::ControlInputResultPage;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
 pub use sqlite::SqliteConfig;

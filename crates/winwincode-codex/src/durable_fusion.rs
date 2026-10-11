@@ -178,6 +178,7 @@ pub(crate) fn candidate_context(
     }
     let inventory = git(&["ls-tree", "--full-tree", "-r", "-z", commit])?;
     let mut files = Vec::new();
+    let mut batch: Option<GitBlobBatch> = None;
     for row in inventory
         .split(|byte| *byte == 0)
         .filter(|row| !row.is_empty())
@@ -193,7 +194,13 @@ pub(crate) fn candidate_context(
         let mut file =
             serde_json::json!({"path":path,"mode":fields[0],"kind":fields[1],"objectId":fields[2]});
         if fields[1] == "blob" {
-            let bytes = git(&["cat-file", "blob", fields[2]])?;
+            if batch.is_none() {
+                batch = Some(GitBlobBatch::open(workspace)?);
+            }
+            let bytes = batch
+                .as_mut()
+                .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?
+                .read_blob(fields[2])?;
             let (encoding, content) = match String::from_utf8(bytes) {
                 Ok(text) => ("utf8", text),
                 Err(error) => (
@@ -206,7 +213,109 @@ pub(crate) fn candidate_context(
         }
         files.push(file);
     }
+    if let Some(batch) = batch {
+        batch.finish()?;
+    }
     Ok(serde_json::json!({"commit":commit,"tree":tree,"files":files}))
+}
+
+/// One owned Git process reads all blobs. The request/response pair is consumed
+/// before the next request, so neither pipe can fill behind an undrained peer.
+struct GitBlobBatch {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+impl GitBlobBatch {
+    fn open(workspace: &std::path::Path) -> Result<Self, FusionProviderError> {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["cat-file", "--batch"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        Ok(Self {
+            child,
+            input: Some(input),
+            output: std::io::BufReader::new(output),
+        })
+    }
+    fn read_blob(&mut self, object_id: &str) -> Result<Vec<u8>, FusionProviderError> {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        if object_id.len() != 40 || !object_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        writeln!(input, "{object_id}").map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        input
+            .flush()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let mut header = String::new();
+        self.output
+            .read_line(&mut header)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let fields = header.trim_end().split(' ').collect::<Vec<_>>();
+        if fields.len() != 3 || fields[0] != object_id || fields[1] != "blob" {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        let length = fields[2]
+            .parse::<usize>()
+            .map_err(|_| error("FUSION_CANDIDATE_INVALID"))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        bytes.resize(length, 0);
+        self.output
+            .read_exact(&mut bytes)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let mut end = [0_u8; 1];
+        self.output
+            .read_exact(&mut end)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        if end != [b'\n'] {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        Ok(bytes)
+    }
+    fn finish(mut self) -> Result<(), FusionProviderError> {
+        drop(self.input.take());
+        let status = self
+            .child
+            .wait()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        if !status.success() {
+            return Err(error("FUSION_CANDIDATE_UNAVAILABLE"));
+        }
+        #[cfg(test)]
+        mechanism_regression_tests::record_git_output("cat-file");
+        Ok(())
+    }
+}
+impl Drop for GitBlobBatch {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 // Claim is committed before polling any provider. A pending claim is never retried

@@ -24,7 +24,7 @@ use sandboxing::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 /// Version of the protected input and writable scratch contract.
 pub const PROTECTED_INPUT_SCOPE_VERSION: u8 = 1;
@@ -266,6 +266,60 @@ pub struct VerificationIsolation {
     scratch: VerificationScratch,
     helper_executable: Option<PathBuf>,
     capability: ProtectionCapability,
+    cancellation: VerificationCancellation,
+}
+
+/// Owned cancellation signal. Command completion waits for process-group kill
+/// and direct-child reap before the verification task returns.
+#[derive(Clone, Debug)]
+pub struct VerificationCancellation {
+    requested: tokio::sync::watch::Sender<bool>,
+    cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "test-support"))]
+    force_cleanup_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for VerificationCancellation {
+    fn default() -> Self {
+        Self {
+            requested: tokio::sync::watch::channel(false).0,
+            cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-support"))]
+            force_cleanup_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl VerificationCancellation {
+    pub fn cancel(&self) {
+        self.requested.send_replace(true);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.requested.borrow()
+    }
+
+    pub(crate) fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_cleanup_failure(&self) {
+        self.cleanup_failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn force_cleanup_failure_for_test(&self) {
+        self.force_cleanup_failure
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.requested.subscribe();
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
+    }
 }
 
 /// Complete output from an isolated test-only or capability command.
@@ -296,6 +350,21 @@ impl VerificationIsolation {
         scratch: VerificationScratch,
         helper_executable: Option<PathBuf>,
     ) -> Result<Self, IsolationError> {
+        Self::open_with_cancellation(
+            scope,
+            scratch,
+            helper_executable,
+            VerificationCancellation::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_cancellation(
+        scope: ProtectedInputScope,
+        scratch: VerificationScratch,
+        helper_executable: Option<PathBuf>,
+        cancellation: VerificationCancellation,
+    ) -> Result<Self, IsolationError> {
         let scratch_root = canonical_directory(&scratch.root, "verification scratch root")?;
         if paths_overlap(&scope.root, &scratch_root) {
             return Err(IsolationError::new(
@@ -315,6 +384,7 @@ impl VerificationIsolation {
             scope,
             scratch,
             helper_executable,
+            cancellation,
             capability: ProtectionCapability::Unavailable {
                 backend: platform_backend_name().to_owned(),
                 reason: "capability probe has not completed".to_owned(),
@@ -329,7 +399,15 @@ impl VerificationIsolation {
                 reason: error.to_string(),
             },
         };
+        if candidate.cancellation.is_cancelled() {
+            return Err(IsolationError::new("verification cancelled"));
+        }
         Ok(candidate)
+    }
+
+    #[must_use]
+    pub fn cancellation_handle(&self) -> VerificationCancellation {
+        self.cancellation.clone()
     }
 
     pub const fn capability(&self) -> &ProtectionCapability {
@@ -362,7 +440,13 @@ impl VerificationIsolation {
         output_limit_bytes: usize,
     ) -> Result<IsolatedOutput, IsolationError> {
         let command = self.command(argv, working_directory, environment)?;
-        Box::pin(run_isolated_command(command, timeout, output_limit_bytes)).await
+        Box::pin(run_isolated_command(
+            command,
+            timeout,
+            output_limit_bytes,
+            &self.cancellation,
+        ))
+        .await
     }
 
     /// Builds the exact production command wrapper used by validation execution.
@@ -594,6 +678,7 @@ test ! -e "$WWC_PROBE_GRANDCHILD"
             command,
             Duration::from_secs(10),
             1024 * 1024,
+            &self.cancellation,
         ))
         .await?;
         if !output.status.success() || output.timed_out || output.overflowed {
@@ -606,11 +691,25 @@ test ! -e "$WWC_PROBE_GRANDCHILD"
     }
 }
 
+struct ProcessGroupGuard(Option<i32>);
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.0 {
+            let _ = kill_process_group_by_id(process_group);
+        }
+    }
+}
+
 async fn run_isolated_command(
     mut command: Command,
     timeout: Duration,
     output_limit_bytes: usize,
+    cancellation: &VerificationCancellation,
 ) -> Result<IsolatedOutput, IsolationError> {
+    if cancellation.is_cancelled() {
+        return Err(IsolationError::new("verification cancelled"));
+    }
     // EOF can precede exit. Both waits share one deadline, including time
     // already spent spawning and draining the process's output.
     let deadline = tokio::time::Instant::now() + timeout;
@@ -621,55 +720,35 @@ async fn run_isolated_command(
         ))
     })?;
     let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| IsolationError::new("isolated command stdout cannot be captured"))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| IsolationError::new("isolated command stderr cannot be captured"))?;
+    let mut process_group_guard = ProcessGroupGuard(process_group);
+    let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
+    else {
+        terminate_process_group(&mut child, process_group, cancellation).await?;
+        process_group_guard.0 = None;
+        return Err(IsolationError::new(
+            "isolated command output cannot be captured",
+        ));
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut overflowed = false;
-    let read = async {
-        let mut stdout_open = true;
-        let mut stderr_open = true;
-        loop {
-            let mut out_chunk = [0_u8; 8192];
-            let mut err_chunk = [0_u8; 8192];
-            if !stdout_open && !stderr_open {
-                break;
-            }
-            tokio::select! {
-                left = stdout_pipe.read(&mut out_chunk), if stdout_open => {
-                    let left = left.map_err(|error| {
-                        IsolationError::new(format!("isolated command stdout failed: {error}"))
-                    })?;
-                    if left == 0 {
-                        stdout_open = false;
-                    } else {
-                        overflowed |= extend_bounded(&mut stdout, &out_chunk[..left], output_limit_bytes);
-                    }
-                }
-                right = stderr_pipe.read(&mut err_chunk), if stderr_open => {
-                    let right = right.map_err(|error| {
-                        IsolationError::new(format!("isolated command stderr failed: {error}"))
-                    })?;
-                    if right == 0 {
-                        stderr_open = false;
-                    } else {
-                        overflowed |= extend_bounded(&mut stderr, &err_chunk[..right], output_limit_bytes);
-                    }
-                }
-            }
-            if overflowed {
-                break;
-            }
+    let read = drain_isolated_output(
+        &mut stdout_pipe,
+        &mut stderr_pipe,
+        &mut stdout,
+        &mut stderr,
+        &mut overflowed,
+        output_limit_bytes,
+    );
+    let read_result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            terminate_process_group(&mut child, process_group, cancellation).await?;
+            process_group_guard.0 = None;
+            return Err(IsolationError::new("verification cancelled"));
         }
-        Ok::<(), IsolationError>(())
+        result = tokio::time::timeout_at(deadline, Box::pin(read)) => result,
     };
-    let read_result = tokio::time::timeout_at(deadline, Box::pin(read)).await;
     let mut timed_out = read_result.is_err();
     let read_error = if timed_out {
         None
@@ -680,22 +759,34 @@ async fn run_isolated_command(
         }
     };
     let status = if timed_out || overflowed || read_error.is_some() {
-        terminate_process_group(&mut child, process_group).await?
-    } else if let Ok(status) = tokio::time::timeout_at(deadline, child.wait()).await {
+        terminate_process_group(&mut child, process_group, cancellation).await?
+    } else if let Some(Ok(status)) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        result = tokio::time::timeout_at(deadline, child.wait()) => Some(result),
+    } {
         let status = status.map_err(|error| {
+            cancellation.record_cleanup_failure();
             IsolationError::new(format!("isolated command cannot be reaped: {error}"))
         })?;
         if let Some(process_group) = process_group {
-            kill_process_group_by_id(process_group)?;
+            kill_process_group_by_id(process_group).inspect_err(|_| {
+                cancellation.record_cleanup_failure();
+            })?;
         }
         status
     } else {
-        timed_out = true;
-        terminate_process_group(&mut child, process_group).await?
+        timed_out = !cancellation.is_cancelled();
+        terminate_process_group(&mut child, process_group, cancellation).await?
     };
+    if cancellation.is_cancelled() {
+        process_group_guard.0 = None;
+        return Err(IsolationError::new("verification cancelled"));
+    }
     if let Some(error) = read_error {
         return Err(error);
     }
+    process_group_guard.0 = None;
     Ok(IsolatedOutput {
         status,
         stdout,
@@ -703,6 +794,51 @@ async fn run_isolated_command(
         timed_out,
         overflowed,
     })
+}
+
+async fn drain_isolated_output(
+    stdout_pipe: &mut ChildStdout,
+    stderr_pipe: &mut ChildStderr,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    overflowed: &mut bool,
+    output_limit_bytes: usize,
+) -> Result<(), IsolationError> {
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    loop {
+        let mut out_chunk = [0_u8; 8192];
+        let mut err_chunk = [0_u8; 8192];
+        if !stdout_open && !stderr_open {
+            break;
+        }
+        tokio::select! {
+            left = stdout_pipe.read(&mut out_chunk), if stdout_open => {
+                let left = left.map_err(|error| {
+                    IsolationError::new(format!("isolated command stdout failed: {error}"))
+                })?;
+                if left == 0 {
+                    stdout_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stdout, &out_chunk[..left], output_limit_bytes);
+                }
+            }
+            right = stderr_pipe.read(&mut err_chunk), if stderr_open => {
+                let right = right.map_err(|error| {
+                    IsolationError::new(format!("isolated command stderr failed: {error}"))
+                })?;
+                if right == 0 {
+                    stderr_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stderr, &err_chunk[..right], output_limit_bytes);
+                }
+            }
+        }
+        if *overflowed {
+            break;
+        }
+    }
+    Ok::<(), IsolationError>(())
 }
 
 fn extend_bounded(target: &mut Vec<u8>, source: &[u8], output_limit_bytes: usize) -> bool {
@@ -715,14 +851,27 @@ fn extend_bounded(target: &mut Vec<u8>, source: &[u8], output_limit_bytes: usize
 async fn terminate_process_group(
     child: &mut Child,
     process_group: Option<i32>,
+    cancellation: &VerificationCancellation,
 ) -> Result<std::process::ExitStatus, IsolationError> {
-    if let Some(process_group) = process_group {
-        kill_process_group_by_id(process_group)?;
-    }
+    let group_result = process_group.map(kill_process_group_by_id).transpose();
     let _ = child.start_kill();
     let status = child.wait().await.map_err(|error| {
+        cancellation.record_cleanup_failure();
         IsolationError::new(format!("isolated command cannot be reaped: {error}"))
     })?;
+    group_result.inspect_err(|_| {
+        cancellation.record_cleanup_failure();
+    })?;
+    #[cfg(any(test, feature = "test-support"))]
+    if cancellation
+        .force_cleanup_failure
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        cancellation.record_cleanup_failure();
+        return Err(IsolationError::new(
+            "verification cleanup confirmation fault",
+        ));
+    }
     Ok(status)
 }
 
@@ -836,9 +985,14 @@ mod deadline_tests {
             .stderr(Stdio::piped())
             .process_group(0);
         let began = std::time::Instant::now();
-        let result = run_isolated_command(command, Duration::from_millis(100), 1024)
-            .await
-            .unwrap();
+        let result = run_isolated_command(
+            command,
+            Duration::from_millis(100),
+            1024,
+            &VerificationCancellation::default(),
+        )
+        .await
+        .unwrap();
         assert!(result.timed_out, "EOF is not proof of process termination");
         assert!(began.elapsed() < Duration::from_millis(800));
         let pid = fs::read_to_string(descendant).unwrap();
@@ -854,5 +1008,72 @@ mod deadline_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("descendant must be terminated with the verification process group");
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_reaps_the_command_before_returning() {
+        for close_output in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let leader = root.path().join("leader.pid");
+            let descendant = root.path().join("descendant.pid");
+            let mut command = Command::new("/bin/sh");
+            let script = format!(
+                "{}sleep 30 & printf '%s' \"$!\" > \"$2\"; printf '%s' \"$$\" > \"$1\"; wait",
+                if close_output { "exec 1>&- 2>&-; " } else { "" }
+            );
+            command
+                .args(["-c", &script, "fixture"])
+                .arg(&leader)
+                .arg(&descendant)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let cancellation = VerificationCancellation::default();
+            let task_cancellation = cancellation.clone();
+            let task = tokio::spawn(async move {
+                run_isolated_command(command, Duration::from_secs(40), 1024, &task_cancellation)
+                    .await
+            });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !leader.exists() || fs::read_to_string(&leader).unwrap_or_default().is_empty() {
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            cancellation.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "cancelled commands produce no accepted output"
+            );
+            let pid = fs::read_to_string(&leader).unwrap();
+            let leader_status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&leader_status.stdout)
+                    .trim()
+                    .is_empty(),
+                "direct child must already be reaped when cancellation returns"
+            );
+            let descendant_pid = fs::read_to_string(&descendant).unwrap();
+            let mut terminated = false;
+            for _ in 0..20 {
+                let status = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &descendant_pid])
+                    .output()
+                    .unwrap();
+                let state = String::from_utf8_lossy(&status.stdout);
+                if state.trim().is_empty() || state.trim().starts_with('Z') {
+                    terminated = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(terminated, "process-group descendants must be terminated");
+        }
     }
 }

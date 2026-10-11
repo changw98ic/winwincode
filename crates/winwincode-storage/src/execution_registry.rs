@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS execution_lease_request_receipts (
     response_json TEXT NOT NULL,
     PRIMARY KEY (operation, job_id, request_id)
 );
+CREATE INDEX IF NOT EXISTS execution_lease_accepted_period
+    ON execution_lease_request_receipts(job_id, json_extract(response_json, '$.lease.expires_at'))
+    WHERE operation IN ('claim', 'renew') AND json_extract(response_json, '$.status') = 'accepted';
 CREATE TABLE IF NOT EXISTS execution_dispatch_authorities (
     job_id TEXT PRIMARY KEY NOT NULL,
     lease_id TEXT UNIQUE NOT NULL,
@@ -1811,8 +1814,20 @@ impl<'storage> ExecutionRegistry<'storage> {
         if extended != current || period.expires_at.0 > current.expires_at.0 {
             return Ok(None);
         }
-        let history = accepted_lease_history(self.storage.connection()?, &period.job_id)?;
-        Ok((history.contains(period) && history.contains(&current)).then_some(current))
+        Ok((accepted_lease_period(self.storage.connection()?, period)?
+            && accepted_lease_period(self.storage.connection()?, &current)?)
+        .then_some(current))
+    }
+
+    /// Loads and validates all accepted claim/renewal evidence for an explicit audit.
+    ///
+    /// # Errors
+    /// Propagates storage or corrupt retained receipt errors.
+    pub fn accepted_lease_history(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Vec<ExecutionLeaseRecord>, StorageError> {
+        accepted_lease_history(self.storage.connection()?, job_id)
     }
 
     /// Loads the authenticated pool placement frozen beside the current lease.
@@ -2190,8 +2205,7 @@ pub(crate) fn record_dispatch_result_in_transaction(
 
     let mut period = current.clone();
     period.expires_at.clone_from(&request.expires_at);
-    if period != current && !accepted_lease_history(connection, &current.job_id)?.contains(&period)
-    {
+    if period != current && !accepted_lease_period(connection, &period)? {
         return Ok(dispatch_result_rejection(
             DispatchResultStatus::Conflict,
             DispatchResultErrorCode::JobDispatchConflict,
@@ -3640,13 +3654,12 @@ pub(crate) fn load_dispatch_authority_in_transaction(
     let current = load_lease_in_transaction(connection, job_id)?
         .ok_or_else(|| StorageError::adapter("dispatch authority lost its lease"))?;
     if current != authority.lease {
-        let history = accepted_lease_history(connection, job_id)?;
         let mut extended = authority.lease.clone();
         extended.expires_at.clone_from(&current.expires_at);
         if extended != current
             || current.expires_at.0 <= authority.lease.expires_at.0
-            || !history.contains(&authority.lease)
-            || !history.contains(&current)
+            || !accepted_lease_period(connection, &authority.lease)?
+            || !accepted_lease_period(connection, &current)?
         {
             return Err(StorageError::adapter(
                 "dispatch authority differs from the current lease",
@@ -3753,6 +3766,47 @@ fn less_decimal(left: &str, right: &str) -> bool {
 #[allow(clippy::needless_pass_by_value)]
 fn sql_error(error: rusqlite::Error) -> StorageError {
     StorageError::adapter(format!("execution registry SQLite error: {error}"))
+}
+
+pub(crate) fn accepted_lease_period(
+    connection: &rusqlite::Connection,
+    period: &ExecutionLeaseRecord,
+) -> Result<bool, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT response_json FROM execution_lease_request_receipts
+             WHERE job_id = ?1 AND operation IN ('claim', 'renew')
+               AND json_extract(response_json, '$.status') = 'accepted'
+               AND json_extract(response_json, '$.lease.expires_at') = ?2",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![period.job_id.0, period.expires_at.0], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sql_error)?;
+    let mut accepted = false;
+    for row in rows {
+        let encoded = row.map_err(sql_error)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::lease_receipt(encoded.len());
+        let receipt: ExecutionLeaseReceipt = serde_json::from_str(&encoded)
+            .map_err(|_| StorageError::adapter("invalid stored lease period receipt"))?;
+        let lease = receipt
+            .lease
+            .ok_or_else(|| StorageError::adapter("accepted period has no lease"))?;
+        validate_stored_lease(&lease)?;
+        if receipt.status != LeaseWriteStatus::Accepted {
+            return Err(StorageError::adapter("accepted period has invalid status"));
+        }
+        if lease.job_id != period.job_id {
+            return Err(StorageError::adapter(
+                "stored lease period receipt belongs to another job",
+            ));
+        }
+        accepted |= lease == *period;
+    }
+    Ok(accepted)
 }
 
 /// Reads only accepted, immutable claim/renewal receipts for one job.

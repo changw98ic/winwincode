@@ -2105,6 +2105,10 @@
         "allowEmpty": {
           "type": "boolean"
         },
+        "allowOther": {
+          "type": "boolean",
+          "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation."
+        },
         "expiresAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
         },

@@ -2909,6 +2909,10 @@
           "allowEmpty": {
             "type": "boolean"
           },
+          "allowOther": {
+            "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation.",
+            "type": "boolean"
+          },
           "binding": {
             "$ref": "#/components/schemas/ChatInteractionBindingProjection"
           },
@@ -15591,6 +15595,10 @@
         "description": "Requests one typed user input through the Control Plane product session.",
         "properties": {
           "allowEmpty": {
+            "type": "boolean"
+          },
+          "allowOther": {
+            "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation.",
             "type": "boolean"
           },
           "choices": {
@@ -29230,7 +29238,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:f1ca8ca96c4af8b1a654ac7b65dfa6322c3f8652f669f60552a8929e692438d9",
+  "x-source-digest": "sha256:0c2454a5c027fb0dbd7f2bdef66708ad77b00203f4d6386c0d29fa763d20776b",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

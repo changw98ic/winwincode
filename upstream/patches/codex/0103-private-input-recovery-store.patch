@@ -1,0 +1,885 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index b1ff25f6..61ec027e 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -4236,6 +4236,7 @@ dependencies = [
+  "scopeguard",
+  "serde",
+  "serde_json",
++ "sha2 0.10.9",
+  "sqlx",
+  "strum 0.27.2",
+  "tokio",
+diff --git a/codex-rs/state/Cargo.toml b/codex-rs/state/Cargo.toml
+index 0d781fbf..351bcc79 100644
+--- a/codex-rs/state/Cargo.toml
++++ b/codex-rs/state/Cargo.toml
+@@ -14,6 +14,7 @@ libsqlite3-sys = { workspace = true }
+ log = { workspace = true }
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true }
++sha2 = { workspace = true }
+ sqlx = { workspace = true }
+ strum = { workspace = true, features = ["derive"] }
+ tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+diff --git a/codex-rs/state/migrations/0056_tool_control_input_recovery.sql b/codex-rs/state/migrations/0056_tool_control_input_recovery.sql
+new file mode 100644
+index 00000000..6579a383
+--- /dev/null
++++ b/codex-rs/state/migrations/0056_tool_control_input_recovery.sql
+@@ -0,0 +1,61 @@
++CREATE TABLE tool_control_input_recoveries (
++    input_request_sequence INTEGER PRIMARY KEY REFERENCES tool_attempts(request_sequence) ON DELETE CASCADE,
++    parent_request_sequence INTEGER NOT NULL REFERENCES tool_attempts(request_sequence) ON DELETE CASCADE,
++    thread_id TEXT NOT NULL,
++    result_ref TEXT NOT NULL UNIQUE,
++    record_json TEXT NOT NULL,
++    metadata_json TEXT NOT NULL,
++    page_count INTEGER NOT NULL CHECK(page_count > 0),
++    sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0,1)),
++    invalidated INTEGER NOT NULL DEFAULT 0 CHECK(invalidated IN (0,1))
++);
++CREATE INDEX tool_control_input_recovery_parent
++    ON tool_control_input_recoveries(thread_id, parent_request_sequence);
++CREATE TABLE tool_control_input_result_pages (
++    input_request_sequence INTEGER NOT NULL REFERENCES tool_control_input_recoveries(input_request_sequence) ON DELETE CASCADE,
++    cursor TEXT NOT NULL,
++    page_json TEXT NOT NULL CHECK(length(CAST(page_json AS BLOB)) <= 8192),
++    page_digest TEXT NOT NULL,
++    PRIMARY KEY(input_request_sequence,cursor)
++);
++CREATE TRIGGER tool_control_input_binding_immutable
++BEFORE UPDATE OF input_request_sequence,parent_request_sequence,thread_id,result_ref,metadata_json,page_count
++ON tool_control_input_recoveries
++BEGIN SELECT RAISE(ABORT,'control input recovery binding is immutable'); END;
++CREATE TRIGGER tool_control_input_direct_delete_rejected
++BEFORE DELETE ON tool_control_input_recoveries
++WHEN EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence=OLD.input_request_sequence)
++ AND EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence=OLD.parent_request_sequence)
++BEGIN SELECT RAISE(ABORT,'control input recovery requires attempt cleanup'); END;
++CREATE TRIGGER tool_control_input_replace_rejected
++BEFORE INSERT ON tool_control_input_recoveries
++WHEN EXISTS(SELECT 1 FROM tool_control_input_recoveries
++ WHERE input_request_sequence=NEW.input_request_sequence OR result_ref=NEW.result_ref)
++BEGIN SELECT RAISE(ABORT,'control input recovery cannot be replaced'); END;
++CREATE TRIGGER tool_control_input_invalidation_irreversible
++BEFORE UPDATE OF invalidated ON tool_control_input_recoveries
++WHEN NEW.invalidated < OLD.invalidated
++BEGIN SELECT RAISE(ABORT,'control input recovery invalidation is irreversible'); END;
++CREATE TRIGGER tool_control_input_reseal_rejected
++BEFORE UPDATE OF sealed ON tool_control_input_recoveries
++WHEN NEW.sealed=1 AND NEW.invalidated=1
++BEGIN SELECT RAISE(ABORT,'control input recovery cannot be resealed'); END;
++CREATE TRIGGER tool_control_input_seal_revocation_invalidates
++AFTER UPDATE OF sealed ON tool_control_input_recoveries
++WHEN OLD.sealed=1 AND NEW.sealed=0
++BEGIN UPDATE tool_control_input_recoveries SET invalidated=1 WHERE input_request_sequence=NEW.input_request_sequence; END;
++CREATE TRIGGER tool_control_input_body_unseals
++AFTER UPDATE OF record_json ON tool_control_input_recoveries
++BEGIN UPDATE tool_control_input_recoveries SET invalidated=MAX(invalidated,sealed),sealed=0 WHERE input_request_sequence=NEW.input_request_sequence; END;
++CREATE TRIGGER tool_control_input_page_insert_unseals
++AFTER INSERT ON tool_control_input_result_pages
++BEGIN UPDATE tool_control_input_recoveries SET invalidated=MAX(invalidated,sealed),sealed=0 WHERE input_request_sequence=NEW.input_request_sequence; END;
++CREATE TRIGGER tool_control_input_page_update_unseals
++AFTER UPDATE ON tool_control_input_result_pages
++BEGIN
++    UPDATE tool_control_input_recoveries SET invalidated=MAX(invalidated,sealed),sealed=0 WHERE input_request_sequence=OLD.input_request_sequence;
++    UPDATE tool_control_input_recoveries SET invalidated=MAX(invalidated,sealed),sealed=0 WHERE input_request_sequence=NEW.input_request_sequence;
++END;
++CREATE TRIGGER tool_control_input_page_delete_unseals
++AFTER DELETE ON tool_control_input_result_pages
++BEGIN UPDATE tool_control_input_recoveries SET invalidated=MAX(invalidated,sealed),sealed=0 WHERE input_request_sequence=OLD.input_request_sequence; END;
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+index b2453756..43516241 100644
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -36,6 +36,9 @@ pub use model::QueuedUserSubmissionRecord;
+ pub use model::RolloutMigrationCursor;
+ pub use model::RolloutMigrationSkippedRollout;
+ pub use model::RolloutMigrationState;
++pub use runtime::ControlInputRecovery;
++pub use runtime::ControlInputRecoveryHeader;
++pub use runtime::ControlInputResultPage;
+ /// Preferred entrypoint: owns configuration and metrics.
+ pub use runtime::StateRuntime;
+ pub use sqlite::SqliteConfig;
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+index fc0707c7..bf30893e 100644
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -54,6 +54,7 @@ pub(crate) mod test_support;
+ mod thread_section_order;
+ mod thread_sections;
+ mod threads;
++mod tool_control_input_recovery;
+ mod tool_dependencies;
+ mod tool_diagnostic_responses;
+ mod tool_diagnostics;
+@@ -81,6 +82,9 @@ pub use recovery::sqlite_error_detail_is_corruption;
+ pub use recovery::sqlite_error_detail_is_lock;
+ pub use remote_control::RemoteControlEnrollmentRecord;
+ pub use threads::ThreadFilterOptions;
++pub use tool_control_input_recovery::ControlInputRecovery;
++pub use tool_control_input_recovery::ControlInputRecoveryHeader;
++pub use tool_control_input_recovery::ControlInputResultPage;
+ 
+ // "Partition" is the retained-log-content bucket we cap at 10 MiB:
+ // - one bucket per non-null thread_id
+diff --git a/codex-rs/state/src/runtime/tool_control_input_recovery.rs b/codex-rs/state/src/runtime/tool_control_input_recovery.rs
+new file mode 100644
+index 00000000..7df5e9f7
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_control_input_recovery.rs
+@@ -0,0 +1,282 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::StateRuntime;
++use super::tool_execution::FACT_SELECT;
++use super::tool_execution::decode_fact;
++use super::tool_execution::load_fact;
++use crate::ToolExecutionFact;
++use crate::ToolReconciliationFact;
++use crate::ToolRecoveryEvidence;
++use crate::ToolRuntimeFact;
++use anyhow::ensure;
++use serde::Deserialize;
++use serde::Serialize;
++use sha2::Digest;
++use sqlx::QueryBuilder;
++use sqlx::Sqlite;
++
++/// Private answer bytes are deliberately absent from Debug and runtime projections.
++#[derive(Clone, Deserialize, Serialize)]
++pub struct ControlInputRecovery {
++    pub result_ref: String,
++    pub parent: ToolExecutionFact,
++    pub input: ToolExecutionFact,
++    pub response_digest: String,
++    pub response_json: String,
++}
++
++#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ControlInputRecoveryHeader {
++    pub result_ref: String,
++    pub parent: ToolExecutionFact,
++    pub input: ToolExecutionFact,
++    pub response_digest: String,
++    pub total_bytes: usize,
++    pub page_count: usize,
++}
++
++/// One private page. It has no Debug implementation and no projection event.
++pub struct ControlInputResultPage {
++    pub cursor: String,
++    pub page_json: String,
++    pub page_digest: String,
++}
++
++fn private_string_digest(value: &str) -> anyhow::Result<String> {
++    Ok(format!(
++        "{:x}",
++        sha2::Sha256::digest(serde_json::to_vec(value)?)
++    ))
++}
++
++impl StateRuntime {
++    /// Select only the original pending control call in its exact original cell.
++    /// Multiple pending controls are ambiguous and are never guessed or replayed.
++    pub async fn pending_control_input_for_parent(
++        &self,
++        parent: &ToolExecutionFact,
++        parent_call_id: &str,
++    ) -> anyhow::Result<Option<ToolExecutionFact>> {
++        let Some(attempt) = &parent.attempt else {
++            return Ok(None);
++        };
++        let mut query = QueryBuilder::<Sqlite>::new(FACT_SELECT);
++        query.push(" JOIN tool_runtime_cells c ON c.thread_id=r.thread_id AND c.cell_id=json_extract(r.request_json,'$.cell_id') AND c.scope_id=json_extract(r.request_json,'$.scope_id') AND c.owner_id=a.owner_id WHERE c.parent_request_sequence=")
++            .push_bind(parent.request_sequence)
++            .push(" AND r.thread_id=").push_bind(&parent.request.thread_id)
++            .push(" AND json_extract(r.request_json,'$.turn_id')=").push_bind(&parent.request.turn_id)
++            .push(" AND json_extract(r.request_json,'$.parent_call_id')=").push_bind(parent_call_id)
++            .push(" AND json_extract(r.request_json,'$.tool_name')='request_user_input' AND json_extract(r.request_json,'$.source')='code_mode' AND a.owner_id=").push_bind(&attempt.owner_id)
++            .push(" AND a.execution IN ('running','uncertain') AND a.disposition='pending' LIMIT 2");
++        let rows = query.build().fetch_all(self.pool.as_ref()).await?;
++        ensure!(rows.len() <= 1, "control_input_recovery_ambiguous");
++        rows.first().map(decode_fact).transpose()
++    }
++
++    /// Caller authorizes both receipt reads before reading any private answer.
++    pub async fn control_input_recovery(
++        &self,
++        thread: &str,
++        result_ref: &str,
++    ) -> anyhow::Result<Option<ControlInputRecovery>> {
++        let encoded: Option<String> = sqlx::query_scalar("SELECT record_json FROM tool_control_input_recoveries WHERE thread_id=? AND result_ref=? AND sealed=1 AND invalidated=0")
++            .bind(thread).bind(result_ref).fetch_optional(self.pool.as_ref()).await?;
++        encoded
++            .map(|value| serde_json::from_str(&value).map_err(Into::into))
++            .transpose()
++    }
++
++    /// Payload-free metadata enables exact authorization before reading answer bytes.
++    pub async fn control_input_recovery_receipts(
++        &self,
++        thread: &str,
++        result_ref: &str,
++    ) -> anyhow::Result<Option<(ToolExecutionFact, ToolExecutionFact)>> {
++        let Some(header) = self
++            .control_input_recovery_header(thread, result_ref)
++            .await?
++        else {
++            return Ok(None);
++        };
++        Ok(Some((
++            self.tool_execution_fact(header.parent.request_sequence)
++                .await?,
++            self.tool_execution_fact(header.input.request_sequence)
++                .await?,
++        )))
++    }
++
++    /// Reads only the payload-free immutable header, never the full answer.
++    pub async fn control_input_recovery_header(
++        &self,
++        thread: &str,
++        result_ref: &str,
++    ) -> anyhow::Result<Option<ControlInputRecoveryHeader>> {
++        let row: Option<(String,i64,i64)> = sqlx::query_as("SELECT metadata_json,sealed,invalidated FROM tool_control_input_recoveries WHERE thread_id=? AND result_ref=?")
++            .bind(thread).bind(result_ref).fetch_optional(self.pool.as_ref()).await?;
++        let Some((encoded, sealed, invalidated)) = row else {
++            return Ok(None);
++        };
++        ensure!(
++            sealed == 1 && invalidated == 0,
++            "control_input_result_seal_invalid"
++        );
++        Ok(Some(serde_json::from_str(&encoded)?))
++    }
++
++    /// One indexed private page row is the entire answer read at this boundary.
++    pub async fn control_input_result_page(
++        &self,
++        thread: &str,
++        result_ref: &str,
++        cursor: &str,
++    ) -> anyhow::Result<Option<ControlInputResultPage>> {
++        let row: Option<(String,String)> = sqlx::query_as("SELECT p.page_json,p.page_digest FROM tool_control_input_result_pages p JOIN tool_control_input_recoveries r ON r.input_request_sequence=p.input_request_sequence WHERE r.thread_id=? AND r.result_ref=? AND r.sealed=1 AND r.invalidated=0 AND p.cursor=?")
++            .bind(thread).bind(result_ref).bind(cursor).fetch_optional(self.pool.as_ref()).await?;
++        Ok(row.map(|(page_json, page_digest)| ControlInputResultPage {
++            cursor: cursor.into(),
++            page_json,
++            page_digest,
++        }))
++    }
++
++    /// Full private answer and payload-free evidence commit in one transaction.
++    /// No attempt, original owner, output disposition or cell lifecycle is changed.
++    pub async fn record_control_input_recovery(
++        &self,
++        record: &ControlInputRecovery,
++        pages: &[ControlInputResultPage],
++        fact: &ToolReconciliationFact,
++    ) -> anyhow::Result<()> {
++        ensure!(
++            record.response_json.len() <= crate::MAX_TOOL_RESULT_BYTES,
++            "control input response exceeds private retention limit"
++        );
++        ensure!(
++            record.response_digest == private_string_digest(&record.response_json)?,
++            "control input response digest mismatch"
++        );
++        ensure!(
++            record.parent.request_sequence == fact.request_sequence
++                && record.parent.request.thread_id == fact.thread_id
++                && record.parent.attempt.as_ref() == Some(&fact.attempt)
++                && record.input.request.thread_id == fact.thread_id
++                && record.input.request.turn_id == record.parent.request.turn_id,
++            "control recovery parent mismatch"
++        );
++        ensure!(
++            matches!(&fact.evidence,ToolRecoveryEvidence::ControlInputResolved {
++            input_request_sequence,input_operation_digest,response_digest,result_ref,continuation_lost
++        } if *input_request_sequence==record.input.request_sequence
++            && record.input.attempt.as_ref().is_some_and(|attempt|&attempt.operation_digest==input_operation_digest)
++            && response_digest==&record.response_digest && result_ref==&record.result_ref && *continuation_lost),
++            "control recovery evidence binding mismatch"
++        );
++        let encoded = serde_json::to_string(record)?;
++        ensure!(!pages.is_empty(), "control input pages missing");
++        let mut reconstructed = String::new();
++        for (index, page) in pages.iter().enumerate() {
++            ensure!(
++                page.page_json.len() <= 8192,
++                "control input page exceeds limit"
++            );
++            ensure!(
++                page.page_digest == private_string_digest(&page.page_json)?,
++                "control input page digest mismatch"
++            );
++            let value: serde_json::Value = serde_json::from_str(&page.page_json)?;
++            ensure!(
++                value["resultRef"] == record.result_ref
++                    && value["responseDigest"] == record.response_digest
++                    && value["cursor"] == page.cursor
++                    && value["totalBytes"] == record.response_json.len(),
++                "control input page binding mismatch"
++            );
++            ensure!(
++                if index == 0 {
++                    page.cursor == "0"
++                } else {
++                    !page.cursor.is_empty()
++                },
++                "control input page cursor invalid"
++            );
++            ensure!(
++                value["nextCursor"].as_str()
++                    == pages.get(index + 1).map(|next| next.cursor.as_str()),
++                "control input page sequence invalid"
++            );
++            reconstructed.push_str(
++                value["content"]
++                    .as_str()
++                    .ok_or_else(|| anyhow::anyhow!("control input page content invalid"))?,
++            );
++        }
++        ensure!(
++            reconstructed == record.response_json,
++            "control input pages do not preserve full response"
++        );
++        let header = ControlInputRecoveryHeader {
++            result_ref: record.result_ref.clone(),
++            parent: record.parent.clone(),
++            input: record.input.clone(),
++            response_digest: record.response_digest.clone(),
++            total_bytes: record.response_json.len(),
++            page_count: pages.len(),
++        };
++        let metadata = serde_json::to_string(&header)?;
++        ensure!(
++            metadata.len() <= 16 * 1024,
++            "control input recovery header exceeds limit"
++        );
++        let evidence = serde_json::to_string(&ToolRuntimeFact::Reconciliation(fact.clone()))?;
++        ensure!(
++            evidence.len() <= 16 * 1024,
++            "control recovery metadata exceeds limit"
++        );
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        ensure!(
++            load_fact(&mut tx, record.parent.request_sequence).await? == record.parent
++                && load_fact(&mut tx, record.input.request_sequence).await? == record.input,
++            "control recovery receipt changed"
++        );
++        let previous: Option<(String,i64,i64)> = sqlx::query_as(
++            "SELECT record_json,sealed,invalidated FROM tool_control_input_recoveries WHERE input_request_sequence=?",
++        )
++        .bind(record.input.request_sequence)
++        .fetch_optional(&mut *tx)
++        .await?;
++        if let Some((previous, sealed, invalidated)) = previous {
++            ensure!(
++                previous == encoded && sealed == 1 && invalidated == 0,
++                "control recovery response conflict"
++            );
++        } else {
++            sqlx::query("INSERT INTO tool_control_input_recoveries(input_request_sequence,parent_request_sequence,thread_id,result_ref,record_json,metadata_json,page_count) VALUES(?,?,?,?,?,?,?)")
++                .bind(record.input.request_sequence).bind(record.parent.request_sequence).bind(&record.parent.request.thread_id).bind(&record.result_ref).bind(encoded).bind(metadata).bind(i64::try_from(pages.len())?).execute(&mut *tx).await?;
++            for page in pages {
++                sqlx::query("INSERT INTO tool_control_input_result_pages(input_request_sequence,cursor,page_json,page_digest) VALUES(?,?,?,?)")
++                    .bind(record.input.request_sequence).bind(&page.cursor).bind(&page.page_json).bind(&page.page_digest).execute(&mut *tx).await?;
++            }
++            let published=sqlx::query("UPDATE tool_control_input_recoveries SET sealed=1 WHERE input_request_sequence=? AND sealed=0 AND invalidated=0 AND (SELECT COUNT(*) FROM tool_control_input_result_pages WHERE input_request_sequence=?)=page_count")
++                .bind(record.input.request_sequence).bind(record.input.request_sequence).execute(&mut *tx).await?;
++            ensure!(
++                published.rows_affected() == 1,
++                "control input publication failed"
++            );
++            sqlx::query(
++                "INSERT INTO tool_fact_events(request_sequence,thread_id,fact_json) VALUES(?,?,?)",
++            )
++            .bind(fact.request_sequence)
++            .bind(&fact.thread_id)
++            .bind(evidence)
++            .execute(&mut *tx)
++            .await?;
++        }
++        tx.commit().await?;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "tool_control_input_recovery_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs b/codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs
+new file mode 100644
+index 00000000..58345851
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs
+@@ -0,0 +1,415 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::*;
++use crate::SqliteConfig;
++use crate::ToolAttemptClaim;
++use crate::ToolRecoveryEvidence;
++use crate::ToolRequestIdentity;
++use crate::ToolRequestObservation;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_utils_absolute_path::test_support::PathExt;
++use serde_json::json;
++
++async fn fixture() -> (
++    SqliteConfig,
++    std::sync::Arc<StateRuntime>,
++    ControlInputRecovery,
++    Vec<ControlInputResultPage>,
++    ToolReconciliationFact,
++) {
++    let home = unique_temp_dir();
++    let config = SqliteConfig::new_for_testing(home.as_path().abs());
++    let store = StateRuntime::init(config.clone(), "test".into())
++        .await
++        .unwrap();
++    let mut request = ToolRequestIdentity {
++        thread_id: "thread".into(),
++        logical_id: "parent".into(),
++        turn_id: "turn".into(),
++        scope_id: "turn".into(),
++        cell_id: None,
++        parent_call_id: None,
++        tool_name: "exec".into(),
++        source: "model".into(),
++        binding: "binding-parent".into(),
++    };
++    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    else {
++        panic!("new")
++    };
++    let ToolAttemptClaim::Claimed(parent) = store
++        .claim_tool_attempt(
++            observed.request_sequence,
++            "parent-attempt",
++            "original-owner",
++            "parent-digest",
++            "{}",
++        )
++        .await
++        .unwrap()
++    else {
++        panic!("claim")
++    };
++    store
++        .open_tool_cell("thread", "parent", "cell", "scope", "original-owner")
++        .await
++        .unwrap();
++    request.logical_id = "input".into();
++    request.scope_id = "scope".into();
++    request.cell_id = Some("cell".into());
++    request.parent_call_id = Some("parent-call".into());
++    request.tool_name = "request_user_input".into();
++    request.source = "code_mode".into();
++    request.binding = "binding-input".into();
++    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    else {
++        panic!("new")
++    };
++    let ToolAttemptClaim::Claimed(input) = store
++        .claim_tool_attempt(
++            observed.request_sequence,
++            "input-attempt",
++            "original-owner",
++            "input-digest",
++            "{}",
++        )
++        .await
++        .unwrap()
++    else {
++        panic!("claim")
++    };
++    assert_eq!(
++        store
++            .pending_control_input_for_parent(&parent, "parent-call")
++            .await
++            .unwrap(),
++        Some(input.clone())
++    );
++    assert!(
++        store
++            .pending_control_input_for_parent(&parent, "foreign-call")
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let response_json =
++        json!({"answers":{"same":{"answers":["汉🦀\n\u{0000}\\\"".repeat(2_000)]}}}).to_string();
++    let response_digest = private_string_digest(&response_json).unwrap();
++    let record = ControlInputRecovery {
++        result_ref: "input-result:test".into(),
++        parent,
++        input,
++        response_digest,
++        response_json,
++    };
++    let chars = record.response_json.chars().collect::<Vec<_>>();
++    let count = chars.len().div_ceil(512);
++    let pages=chars.chunks(512).enumerate().map(|(index,chunk)| {
++        let cursor=index.to_string();
++        let page_json=json!({"resultRef":record.result_ref,"responseDigest":record.response_digest,"cursor":cursor,
++            "nextCursor":(index+1<count).then(||(index+1).to_string()),"totalBytes":record.response_json.len(),"content":chunk.iter().collect::<String>()}).to_string();
++        let page_digest=private_string_digest(&page_json).unwrap();
++        ControlInputResultPage {cursor,page_json,page_digest}
++    }).collect::<Vec<_>>();
++    let fact = ToolReconciliationFact {
++        schema_version: 1,
++        request_sequence: record.parent.request_sequence,
++        thread_id: "thread".into(),
++        observer_id: "new-owner".into(),
++        attempt: record.parent.attempt.clone().unwrap(),
++        evidence: ToolRecoveryEvidence::ControlInputResolved {
++            input_request_sequence: record.input.request_sequence,
++            input_operation_digest: "input-digest".into(),
++            response_digest: record.response_digest.clone(),
++            result_ref: record.result_ref.clone(),
++            continuation_lost: true,
++        },
++    };
++    (config, store, record, pages, fact)
++}
++
++#[tokio::test]
++async fn control_input_recovery_preserves_full_body_and_reads_one_bounded_indexed_page_after_reopen()
++ {
++    let (config, store, record, pages, fact) = fixture().await;
++    store
++        .record_control_input_recovery(&record, &pages, &fact)
++        .await
++        .unwrap();
++    store
++        .record_control_input_recovery(&record, &pages, &fact)
++        .await
++        .unwrap();
++    let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
++    let full = reopened
++        .control_input_recovery("thread", &record.result_ref)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(full.response_json, record.response_json);
++    let header = reopened
++        .control_input_recovery_header("thread", &record.result_ref)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(header.page_count, pages.len());
++    assert_eq!(header.total_bytes, record.response_json.len());
++    let mut reconstructed = String::new();
++    let mut bytes = 0;
++    for expected in &pages {
++        let actual = reopened
++            .control_input_result_page("thread", &record.result_ref, &expected.cursor)
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(actual.page_json, expected.page_json);
++        assert!(actual.page_json.len() <= 8192);
++        bytes += actual.page_json.len();
++        let value: serde_json::Value = serde_json::from_str(&actual.page_json).unwrap();
++        reconstructed.push_str(value["content"].as_str().unwrap());
++    }
++    assert_eq!(reconstructed, record.response_json);
++    assert!(
++        reopened
++            .control_input_result_page("foreign-thread", &record.result_ref, "0")
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        reopened
++            .control_input_result_page("thread", &record.result_ref, "foreign-cursor")
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert_eq!(
++        reopened
++            .tool_execution_fact(record.parent.request_sequence)
++            .await
++            .unwrap(),
++        record.parent
++    );
++    assert_eq!(
++        reopened
++            .tool_execution_fact(record.input.request_sequence)
++            .await
++            .unwrap(),
++        record.input
++    );
++    eprintln!(
++        "CONTROL_INPUT_INDEXED_READ rows={} serializedBytes={} originalResponseBytes={}",
++        pages.len(),
++        bytes,
++        record.response_json.len()
++    );
++}
++
++#[tokio::test]
++async fn control_input_page_fault_rolls_back_full_body_pages_seal_and_evidence() {
++    let (config, store, record, pages, fact) = fixture().await;
++    sqlx::query("CREATE TRIGGER fail_input_page BEFORE INSERT ON tool_control_input_result_pages BEGIN SELECT RAISE(ABORT,'injected page failure'); END;").execute(store.pool.as_ref()).await.unwrap();
++    assert!(
++        store
++            .record_control_input_recovery(&record, &pages, &fact)
++            .await
++            .is_err()
++    );
++    let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
++    assert_private_publication_absent(&reopened).await;
++}
++
++#[tokio::test]
++async fn control_input_invalid_digests_never_publish_private_bytes_or_evidence() {
++    for corrupt_response in [true, false] {
++        let (_, store, mut record, mut pages, fact) = fixture().await;
++        if corrupt_response {
++            record.response_digest = "bad-response-sha".into();
++        } else {
++            pages[0].page_digest = "bad-page-sha".into();
++        }
++        assert!(
++            store
++                .record_control_input_recovery(&record, &pages, &fact)
++                .await
++                .is_err()
++        );
++        assert_private_publication_absent(&store).await;
++    }
++}
++
++async fn assert_private_publication_absent(store: &StateRuntime) {
++    let recoveries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_control_input_recoveries")
++        .fetch_one(store.pool.as_ref())
++        .await
++        .unwrap();
++    let pages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_control_input_result_pages")
++        .fetch_one(store.pool.as_ref())
++        .await
++        .unwrap();
++    assert_eq!((recoveries, pages), (0, 0));
++    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM tool_fact_events WHERE json_extract(fact_json,'$.kind')='reconciliation'").fetch_one(store.pool.as_ref()).await.unwrap();
++    assert_eq!(count, 0);
++}
++
++#[tokio::test]
++async fn control_input_ignored_publication_rolls_back_full_body_pages_seal_and_evidence() {
++    let (config, store, record, pages, fact) = fixture().await;
++    sqlx::query("CREATE TRIGGER ignore_input_publication BEFORE UPDATE OF sealed ON tool_control_input_recoveries WHEN NEW.sealed=1 BEGIN SELECT RAISE(IGNORE); END;").execute(store.pool.as_ref()).await.unwrap();
++    assert!(
++        store
++            .record_control_input_recovery(&record, &pages, &fact)
++            .await
++            .is_err()
++    );
++    let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
++    assert_private_publication_absent(&reopened).await;
++}
++
++#[tokio::test]
++async fn control_input_private_mutations_revoke_the_seal_and_header_mutations_are_rejected() {
++    for mutation in [
++        "UPDATE tool_control_input_result_pages SET page_json='{}' WHERE cursor='0'",
++        "DELETE FROM tool_control_input_result_pages WHERE cursor='0'",
++        "INSERT INTO tool_control_input_result_pages SELECT input_request_sequence,'foreign','{}','digest' FROM tool_control_input_recoveries",
++        "UPDATE tool_control_input_recoveries SET record_json='{}'",
++        "UPDATE tool_control_input_recoveries SET sealed=0",
++        "UPDATE tool_control_input_recoveries SET invalidated=1",
++    ] {
++        let (_, store, record, pages, fact) = fixture().await;
++        store
++            .record_control_input_recovery(&record, &pages, &fact)
++            .await
++            .unwrap();
++        assert!(
++            sqlx::query("UPDATE tool_control_input_recoveries SET metadata_json='{}'")
++                .execute(store.pool.as_ref())
++                .await
++                .is_err()
++        );
++        sqlx::query(mutation)
++            .execute(store.pool.as_ref())
++            .await
++            .unwrap();
++        assert!(
++            sqlx::query("UPDATE tool_control_input_recoveries SET sealed=1")
++                .execute(store.pool.as_ref())
++                .await
++                .is_err()
++        );
++        assert!(
++            sqlx::query("UPDATE tool_control_input_recoveries SET invalidated=0")
++                .execute(store.pool.as_ref())
++                .await
++                .is_err()
++        );
++        assert!(
++            store
++                .control_input_recovery_header("thread", &record.result_ref)
++                .await
++                .is_err()
++        );
++        assert!(
++            store
++                .control_input_result_page("thread", &record.result_ref, "0")
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
++}
++
++#[tokio::test]
++async fn control_input_matching_forged_page_digest_cannot_reseal_changed_answer() {
++    let (_, store, record, pages, fact) = fixture().await;
++    store
++        .record_control_input_recovery(&record, &pages, &fact)
++        .await
++        .unwrap();
++    let mut value: serde_json::Value = serde_json::from_str(&pages[0].page_json).unwrap();
++    value["content"] = json!("forged answer with valid page SHA");
++    let page_json = value.to_string();
++    let page_digest = private_string_digest(&page_json).unwrap();
++    sqlx::query(
++        "UPDATE tool_control_input_result_pages SET page_json=?,page_digest=? WHERE cursor='0'",
++    )
++    .bind(page_json)
++    .bind(page_digest)
++    .execute(store.pool.as_ref())
++    .await
++    .unwrap();
++    assert!(
++        sqlx::query("UPDATE tool_control_input_recoveries SET sealed=1")
++            .execute(store.pool.as_ref())
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .control_input_recovery_header("thread", &record.result_ref)
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .control_input_result_page("thread", &record.result_ref, "0")
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn control_input_direct_delete_and_reinsert_cannot_replace_sealed_binding() {
++    let (_, store, record, pages, fact) = fixture().await;
++    store
++        .record_control_input_recovery(&record, &pages, &fact)
++        .await
++        .unwrap();
++    assert!(
++        sqlx::query("DELETE FROM tool_control_input_recoveries")
++            .execute(store.pool.as_ref())
++            .await
++            .is_err()
++    );
++    assert!(sqlx::query("INSERT OR REPLACE INTO tool_control_input_recoveries SELECT input_request_sequence,parent_request_sequence,thread_id,result_ref,'{}',metadata_json,page_count,1,0 FROM tool_control_input_recoveries").execute(store.pool.as_ref()).await.is_err());
++    assert_eq!(
++        store
++            .control_input_recovery("thread", &record.result_ref)
++            .await
++            .unwrap()
++            .unwrap()
++            .response_json,
++        record.response_json
++    );
++}
++
++#[tokio::test]
++async fn control_input_legal_attempt_cleanup_cascades_all_private_answers_and_pages() {
++    for remove_parent in [true, false] {
++        let (_, store, record, pages, fact) = fixture().await;
++        store
++            .record_control_input_recovery(&record, &pages, &fact)
++            .await
++            .unwrap();
++        let sequence = if remove_parent {
++            record.parent.request_sequence
++        } else {
++            record.input.request_sequence
++        };
++        sqlx::query("DELETE FROM tool_attempts WHERE request_sequence=?")
++            .bind(sequence)
++            .execute(store.pool.as_ref())
++            .await
++            .unwrap();
++        let recoveries: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM tool_control_input_recoveries")
++                .fetch_one(store.pool.as_ref())
++                .await
++                .unwrap();
++        let pages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_control_input_result_pages")
++            .fetch_one(store.pool.as_ref())
++            .await
++            .unwrap();
++        assert_eq!((recoveries, pages), (0, 0));
++    }
++}
+diff --git a/codex-rs/state/src/runtime/tool_execution.rs b/codex-rs/state/src/runtime/tool_execution.rs
+index 6a2e463c..12a20c1f 100644
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -18,7 +18,7 @@ use sqlx::Row;
+ use sqlx::Sqlite;
+ use sqlx::SqliteConnection;
+ 
+-const FACT_SELECT: &str =
++pub(super) const FACT_SELECT: &str =
+     "SELECT r.sequence, r.request_json, r.resolution, a.attempt_id, a.owner_id,
+  a.operation_digest, a.execution, a.disposition, a.delivery, a.revision,
+  a.execution_result IS NOT NULL AS execution_result_retained,
+@@ -336,7 +336,7 @@ impl StateRuntime {
+     }
+ }
+ 
+-async fn load_fact(
++pub(super) async fn load_fact(
+     connection: &mut SqliteConnection,
+     sequence: i64,
+ ) -> anyhow::Result<ToolExecutionFact> {
+@@ -362,7 +362,7 @@ async fn append_event(
+     Ok(())
+ }
+ 
+-fn decode_fact(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ToolExecutionFact> {
++pub(super) fn decode_fact(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ToolExecutionFact> {
+     let attempt = if let Some(attempt_id) = row.try_get::<Option<String>, _>("attempt_id")? {
+         let execution: &str = row.try_get("execution")?;
+         let disposition: &str = row.try_get("disposition")?;
+diff --git a/codex-rs/state/src/tool_runtime.rs b/codex-rs/state/src/tool_runtime.rs
+index a41a9cda..adac7086 100644
+--- a/codex-rs/state/src/tool_runtime.rs
++++ b/codex-rs/state/src/tool_runtime.rs
+@@ -106,6 +106,13 @@ pub struct ToolRuntimeEvent {
+ pub enum ToolRecoveryEvidence {
+     Unavailable,
+     Unconfirmed,
++    ControlInputResolved {
++        input_request_sequence: i64,
++        input_operation_digest: String,
++        response_digest: String,
++        result_ref: String,
++        continuation_lost: bool,
++    },
+     Running {
+         business_id: String,
+     },

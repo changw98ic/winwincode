@@ -2893,3 +2893,723 @@ fn unchanged_or_cancelled_writer_produces_no_candidate() {
         .close_job(&active.job.job_id, WorkspaceCloseReason::Cancelled)
         .expect("remove cancelled workspace");
 }
+
+fn owned_validation_configuration() -> String {
+    VALIDATION_CONFIG.replace(
+        "from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"",
+        "import time; time.sleep(0.5)",
+    )
+}
+
+#[tokio::test]
+async fn owned_validation_restart_preserves_unconfirmed_cleanup_barrier() {
+    let fixture = Fixture::new("owned-validation-restart");
+    fixture.install_validation_config_text(&owned_validation_configuration());
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let now = Instant("2026-08-28T00:00:02.000Z".into());
+    let mut first = fixture.runtime();
+    first.open_for_job(&active, None).unwrap();
+    assert!(
+        first
+            .poll_change_batch(&active, &proposal, &now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(first);
+    tokio::task::yield_now().await;
+    let mut recovered = fixture.runtime();
+    assert_eq!(
+        recovered
+            .open_for_job(&active, None)
+            .unwrap_err()
+            .cause_code(),
+        "VALIDATION_CLEANUP_UNCONFIRMED"
+    );
+    assert_eq!(
+        recovered
+            .open_for_job_recovering(&active, None, &now)
+            .unwrap_err()
+            .cause_code(),
+        "VALIDATION_CLEANUP_UNCONFIRMED"
+    );
+    let store = ChangeBatchStore::open(&fixture.root).unwrap();
+    let pending = store
+        .validation_cleanup_record(&active.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.identity, proposal.identity);
+    assert_eq!(pending.cause_code, "VALIDATION_CLEANUP_PENDING");
+    let progress = store.progress_events(&proposal.identity.batch_id).unwrap();
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|event| event.state == ChangeBatchProgressState::ApplyStarted)
+            .count(),
+        1
+    );
+    assert!(
+        !progress
+            .iter()
+            .any(|event| event.state == ChangeBatchProgressState::Accepted)
+    );
+}
+
+fn validation_start_configuration() -> String {
+    VALIDATION_CONFIG.replace(
+        "from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"",
+        "import os; from pathlib import Path; Path(os.environ[\"WWC_OUTPUT_DIR\"]).joinpath(\"validation-started\").write_text(\"started\")",
+    )
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_start_keeps_elapsed_apply_time_in_its_original_clock() {
+    let fixture = Fixture::new("owned-validation-start-after-apply");
+    fixture.install_validation_config_text(&validation_start_configuration());
+    let mut active = active_job();
+    active.lease.expires_at = Instant("2026-08-28T00:00:02.300Z".into());
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    runtime.delay_next_change_batch_apply_return_for_test(std::time::Duration::from_millis(500));
+    let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+    let started = std::time::Instant::now();
+    let result = runtime
+        .poll_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".into()),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let store = ChangeBatchStore::open(&fixture.root).unwrap();
+    let task_count = runtime.pending_validation_task_count_for_test();
+    let start_marker = find_named_file(&fixture.workspaces, "validation-started");
+    let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+    println!(
+        "MECHANISM_RECEIPT {}",
+        serde_json::json!({"id":"VALIDATION-START-AFTER-APPLY","actualExecutor":"production deterministic apply_patch result retained unchanged; test-support decorator waits actual Tokio 500ms at its awaited return boundary","elapsedMillis":elapsed.as_millis(),"driverResult":format!("{result:?}"),"ownedValidationTaskCount":task_count,"validationStartMarkerCount":usize::from(start_marker.is_some()),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+    );
+    assert!(elapsed >= std::time::Duration::from_millis(500));
+    assert_eq!(
+        result.unwrap_err().code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert_eq!(task_count, 0);
+    assert!(start_marker.is_none());
+    assert_eq!(revision_after, revision_before);
+    assert!(
+        store
+            .validation_cleanup_record(&active.job.job_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_start_rechecks_deadline_after_actual_marker_writer_wait() {
+    for (renewed, clear_fault) in [(false, false), (true, false), (false, true)] {
+        let fixture = Fixture::new("owned-validation-start-marker-writer");
+        fixture.install_validation_config_text(&validation_start_configuration());
+        let mut active = active_job();
+        active.lease.expires_at = Instant("2026-08-28T00:00:03.000Z".into());
+        let proposal = batch_proposal(&active, source_revision(&fixture));
+        let mut runtime = fixture.runtime();
+        runtime.open_for_job(&active, None).unwrap();
+        if renewed {
+            active.lease.expires_at = Instant("2026-08-28T00:00:07.000Z".into());
+            runtime.renew_lease(&active).unwrap();
+        }
+        if clear_fault {
+            runtime.fail_validation_cleanup_clear_for_test().unwrap();
+        }
+        let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+        let (arrived, wait_for_marker) = std::sync::mpsc::channel();
+        let (writer_locked, ready) = std::sync::mpsc::channel();
+        runtime.validation_cleanup_pending_barrier_for_test(arrived, ready);
+        let database = fixture
+            .root
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let writer = std::thread::spawn(move || {
+            wait_for_marker
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let connection = Connection::open(database).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            writer_locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1300));
+            connection.execute_batch("COMMIT").unwrap();
+        });
+        let started = std::time::Instant::now();
+        let result = runtime
+            .poll_change_batch(
+                &active,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.000Z".into()),
+            )
+            .await;
+        let elapsed = started.elapsed();
+        writer.join().unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let store = ChangeBatchStore::open(&fixture.root).unwrap();
+        let marker = store.validation_cleanup_record(&active.job.job_id).unwrap();
+        let task_count = runtime.pending_validation_task_count_for_test();
+        let start_marker = find_named_file(&fixture.workspaces, "validation-started");
+        let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+        println!(
+            "MECHANISM_RECEIPT {}",
+            serde_json::json!({"id":"VALIDATION-START-AFTER-MARKER-WRITER","renewed":renewed,"cleanupClearWriteFault":clear_fault,"actualWait":"external SQLite BEGIN IMMEDIATE held 1300ms before pre-spawn pending INSERT transaction","elapsedMillis":elapsed.as_millis(),"driverResult":format!("{result:?}"),"ownedValidationTaskCount":task_count,"validationStartMarkerCount":usize::from(start_marker.is_some()),"durableCleanupCause":marker.as_ref().map(|record| &record.cause_code),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+        );
+        assert!(elapsed >= std::time::Duration::from_millis(1200));
+        assert_eq!(revision_after, revision_before);
+        if renewed {
+            assert!(result.unwrap().is_none());
+            assert_eq!(task_count, 1);
+            assert!(
+                start_marker.is_some(),
+                "legal renewed validation must really execute its start marker"
+            );
+        } else {
+            let error = result.unwrap_err();
+            if clear_fault {
+                assert_eq!(error.cause_code(), "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE");
+            } else {
+                assert_eq!(error.code(), JobWorkspaceErrorCode::AuthorityMismatch);
+            }
+            assert_eq!(task_count, 0);
+            assert!(start_marker.is_none());
+            if clear_fault {
+                assert_eq!(marker.unwrap().cause_code, "VALIDATION_CLEANUP_PENDING");
+                assert_eq!(
+                    runtime
+                        .open_for_job_recovering(&active, None, &active.lease.expires_at)
+                        .unwrap_err()
+                        .cause_code(),
+                    "VALIDATION_CLEANUP_UNCONFIRMED"
+                );
+            } else {
+                assert!(marker.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn owned_validation_acceptance_rechecks_fencing_and_allows_exact_renewal() {
+    let fixture = Fixture::new("owned-validation-fence-renewal");
+    fixture.install_validation_config_text(&owned_validation_configuration());
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let now = Instant("2026-08-28T00:00:02.000Z".into());
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    assert!(
+        runtime
+            .poll_change_batch(&active, &proposal, &now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut foreign = active.clone();
+    foreign.lease.fencing_token = FencingToken("99".into());
+    assert!(
+        runtime
+            .poll_change_batch(&foreign, &proposal, &now)
+            .await
+            .is_err()
+    );
+    let mut renewed = active.clone();
+    renewed.lease.expires_at = Instant("2026-08-28T01:30:00.000Z".into());
+    runtime.renew_lease(&renewed).unwrap();
+    let executed = runtime
+        .execute_change_batch(&renewed, &proposal, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        executed.progress.last().unwrap().state,
+        ChangeBatchProgressState::Accepted
+    );
+}
+
+#[tokio::test]
+async fn owned_validation_expiry_cannot_apply_acceptance() {
+    let fixture = Fixture::new("owned-validation-expiry");
+    fixture.install_validation_config_text(&owned_validation_configuration());
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let now = Instant("2026-08-28T00:00:02.000Z".into());
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+    assert!(
+        runtime
+            .poll_change_batch(&active, &proposal, &now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .poll_change_batch(&active, &proposal, &active.lease.expires_at)
+            .await
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert_eq!(
+        runtime.accepted_revision(&active.job.job_id).unwrap(),
+        revision_before
+    );
+    #[cfg(feature = "test-support")]
+    assert_eq!(runtime.pending_validation_task_count_for_test(), 0);
+    let store = ChangeBatchStore::open(&fixture.root).unwrap();
+    assert!(
+        store
+            .validation_cleanup_record(&active.job.job_id)
+            .unwrap()
+            .is_none()
+    );
+    let progress = store.progress_events(&proposal.identity.batch_id).unwrap();
+    assert!(
+        !progress
+            .iter()
+            .any(|entry| entry.state == ChangeBatchProgressState::Accepted)
+    );
+    let terminal = runtime
+        .prepare_terminal_job_close(
+            &active,
+            WorkspaceCloseReason::Failed,
+            &active.lease.expires_at,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.state,
+        ChangeBatchProgressState::InfrastructureFailed
+    );
+    assert_eq!(terminal.identity, proposal.identity);
+    assert!(!runtime.contains(&active.job.job_id));
+    let progress = store.progress_events(&proposal.identity.batch_id).unwrap();
+    assert_eq!(progress.last(), Some(&terminal));
+    assert!(
+        !progress
+            .iter()
+            .any(|entry| entry.state == ChangeBatchProgressState::Accepted)
+    );
+    let binding = store
+        .workspace_binding_for_batch(&proposal.identity.batch_id)
+        .unwrap();
+    assert_eq!(binding.state, BatchState::Quarantined);
+    assert_eq!(binding.accepted_revision, revision_before);
+    assert_eq!(
+        binding.active_batch_id.as_ref(),
+        Some(&proposal.identity.batch_id)
+    );
+    assert_eq!(
+        runtime
+            .open_for_job_recovering(&active, None, &active.lease.expires_at)
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::ChangeBatch
+    );
+    println!(
+        "MECHANISM_RECEIPT {}",
+        serde_json::json!({"id":"VALIDATION-EXPIRY-TERMINAL-CLOSE","expiryAdmission":"AuthorityMismatch","beforeTerminalCloseAccepted":false,"terminalState":terminal.state,"durableBatchState":format!("{:?}",binding.state),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":binding.accepted_revision.0,"liveOwnerAfterClose":runtime.contains(&active.job.job_id),"quarantinedReopenRejected":true})
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_last_acceptance_rechecks_deadline_after_actual_sqlite_wait() {
+    for renewed in [false, true] {
+        let fixture = Fixture::new("owned-validation-last-deadline");
+        fixture.install_validation_config_text(&owned_validation_configuration());
+        let mut active = active_job();
+        active.lease.expires_at = Instant("2026-08-28T00:00:03.000Z".into());
+        let proposal = batch_proposal(&active, source_revision(&fixture));
+        let mut runtime = fixture.runtime();
+        runtime.open_for_job(&active, None).unwrap();
+        let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+        assert!(
+            runtime
+                .poll_change_batch(
+                    &active,
+                    &proposal,
+                    &Instant("2026-08-28T00:00:02.000Z".into())
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if renewed {
+            active.lease.expires_at = Instant("2026-08-28T00:00:04.000Z".into());
+            runtime.renew_lease(&active).unwrap();
+        }
+        let database = fixture
+            .root
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let (arrived, wait_for_completion) = std::sync::mpsc::channel();
+        let (locked, ready) = std::sync::mpsc::channel();
+        runtime.validation_completion_writer_barrier_for_test(arrived, ready);
+        let lock = std::thread::spawn(move || {
+            wait_for_completion
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let connection = Connection::open(database).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            connection.execute_batch("COMMIT").unwrap();
+        });
+        let started = std::time::Instant::now();
+        let result = runtime
+            .poll_change_batch(
+                &active,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.900Z".into()),
+            )
+            .await;
+        let waited = started.elapsed();
+        lock.join().unwrap();
+        let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+        let store = ChangeBatchStore::open(&fixture.root).unwrap();
+        let marker = store.validation_cleanup_record(&active.job.job_id).unwrap();
+        println!(
+            "MECHANISM_RECEIPT {}",
+            serde_json::json!({"id":"VALIDATION-LAST-ACCEPTANCE-AFTER-CLEANUP-WRITER","renewed":renewed,"actualWriter":"external SQLite BEGIN IMMEDIATE at completion seam after real Deferred cleanup commit and initial completion admission; diagnostic autocommit INSERT waits on the actual writer before final checkpoint acceptance","elapsedMillis":waited.as_millis(),"driverResult":format!("{result:?}"),"ownedValidationTaskCount":runtime.pending_validation_task_count_for_test(),"durableCleanupCause":marker.as_ref().map(|record| &record.cause_code),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(200),
+            "the actual owner must wait on the SQLite writer before final acceptance"
+        );
+        assert_eq!(runtime.pending_validation_task_count_for_test(), 0);
+        assert!(
+            marker.is_none(),
+            "real Deferred cleanup must commit before the writer seam"
+        );
+        if renewed {
+            let accepted = result.unwrap().unwrap();
+            assert_eq!(
+                accepted.progress.last().unwrap().state,
+                ChangeBatchProgressState::Accepted
+            );
+            assert!(
+                accepted.progress.last().unwrap().occurred_at.0.as_str()
+                    >= "2026-08-28T00:00:03.100Z"
+            );
+            assert!(accepted.progress.last().unwrap().occurred_at.0 < active.lease.expires_at.0);
+            assert_ne!(revision_after, revision_before);
+        } else {
+            assert_eq!(
+                result.unwrap_err().code(),
+                JobWorkspaceErrorCode::AuthorityMismatch
+            );
+            assert_eq!(revision_after, revision_before);
+            assert_last_acceptance_expiry_sql_state(&fixture, &proposal);
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn assert_last_acceptance_expiry_sql_state(fixture: &Fixture, proposal: &ChangeBatchProposalEvent) {
+    let connection = Connection::open(
+        fixture
+            .root
+            .join(".workspaces-change-batches/change-batch.sqlite3"),
+    )
+    .unwrap();
+    let accepted: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM change_batch_workspace WHERE state = 'accepted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        accepted, 0,
+        "deadline expiry must leave the accepted revision unchanged"
+    );
+    let revision: String = connection
+        .query_row(
+            "SELECT accepted_revision FROM change_batch_workspace",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revision, proposal.identity.workspace_revision.0);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_completion_preserves_its_clock_across_controlled_cleanup_sql_delay() {
+    for renewed in [false, true] {
+        let fixture = Fixture::new("owned-validation-completion-sql-delay");
+        fixture.install_validation_config_text(&validation_start_configuration());
+        let mut active = active_job();
+        active.lease.expires_at = Instant("2026-08-28T00:00:03.000Z".into());
+        let proposal = batch_proposal(&active, source_revision(&fixture));
+        let mut runtime = fixture.runtime();
+        runtime.open_for_job(&active, None).unwrap();
+        let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+        assert!(
+            runtime
+                .poll_change_batch(
+                    &active,
+                    &proposal,
+                    &Instant("2026-08-28T00:00:02.000Z".into())
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(
+            find_named_file(&fixture.workspaces, "validation-started").is_some(),
+            "validation command must really run before completion is polled"
+        );
+        if renewed {
+            active.lease.expires_at = Instant("2026-08-28T00:00:04.000Z".into());
+            runtime.renew_lease(&active).unwrap();
+        }
+        let observations = runtime
+            .delay_next_validation_cleanup_clear_for_test(std::time::Duration::from_millis(250))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = runtime
+            .poll_change_batch(
+                &active,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.800Z".into()),
+            )
+            .await;
+        let elapsed = started.elapsed();
+        let hook_count = observations.load(std::sync::atomic::Ordering::Relaxed);
+        let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+        let store = ChangeBatchStore::open(&fixture.root).unwrap();
+        let marker = store.validation_cleanup_record(&active.job.job_id).unwrap();
+        println!(
+            "MECHANISM_RECEIPT {}",
+            serde_json::json!({"id":"VALIDATION-COMPLETION-CLEANUP-SQL-DELAY","renewed":renewed,"actualDelay":"test-support SQLite authorizer observes exact main cleanup DELETE preparation once and sleeps actual 250ms, then returns Allow; real Deferred DELETE and commit remain unchanged","elapsedMillis":elapsed.as_millis(),"exactDeleteAuthorizerObservations":hook_count,"driverResult":format!("{result:?}"),"ownedValidationTaskCount":runtime.pending_validation_task_count_for_test(),"durableCleanupCause":marker.as_ref().map(|record| &record.cause_code),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+        );
+        assert_eq!(hook_count, 1);
+        assert!(elapsed >= std::time::Duration::from_millis(250));
+        assert_eq!(runtime.pending_validation_task_count_for_test(), 0);
+        assert!(
+            marker.is_none(),
+            "successful real cleanup DELETE must commit before completion admission"
+        );
+        if renewed {
+            let accepted = result.unwrap().unwrap();
+            assert_eq!(
+                accepted.progress.last().unwrap().state,
+                ChangeBatchProgressState::Accepted
+            );
+            assert!(
+                accepted.progress.last().unwrap().occurred_at.0.as_str()
+                    >= "2026-08-28T00:00:03.000Z"
+            );
+            assert!(accepted.progress.last().unwrap().occurred_at.0 < active.lease.expires_at.0);
+            assert_ne!(revision_after, revision_before);
+        } else {
+            assert_eq!(
+                result.unwrap_err().code(),
+                JobWorkspaceErrorCode::AuthorityMismatch
+            );
+            assert_eq!(revision_after, revision_before);
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_completion_deferred_writer_conflict_preserves_the_pending_barrier() {
+    let fixture = Fixture::new("owned-validation-completion-writer-conflict");
+    fixture.install_validation_config_text(&validation_start_configuration());
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+    assert!(
+        runtime
+            .poll_change_batch(
+                &active,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.000Z".into())
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(find_named_file(&fixture.workspaces, "validation-started").is_some());
+    let (arrived, wait_for_clear) = std::sync::mpsc::channel();
+    let (writer_locked, ready) = std::sync::mpsc::channel();
+    runtime.validation_cleanup_clear_barrier_for_test(arrived, ready);
+    let database = fixture
+        .root
+        .join(".workspaces-change-batches/change-batch.sqlite3");
+    let writer = std::thread::spawn(move || {
+        wait_for_clear
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let connection = Connection::open(database).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer_locked.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    let started = std::time::Instant::now();
+    let result = runtime
+        .poll_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.800Z".into()),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    writer.join().unwrap();
+    let store = ChangeBatchStore::open(&fixture.root).unwrap();
+    let marker = store
+        .validation_cleanup_record(&active.job.job_id)
+        .unwrap()
+        .unwrap();
+    let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+    println!(
+        "MECHANISM_RECEIPT {}",
+        serde_json::json!({"id":"VALIDATION-COMPLETION-DEFERRED-WRITER-CONFLICT","actualWriter":"external SQLite BEGIN IMMEDIATE at exact cleanup seam; original Deferred SELECT to DELETE upgrade retained","elapsedMillis":elapsed.as_millis(),"driverResult":format!("{result:?}"),"ownedValidationTaskCount":runtime.pending_validation_task_count_for_test(),"durableCleanupCause":marker.cause_code,"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+    );
+    assert_eq!(
+        result.unwrap_err().cause_code(),
+        "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE"
+    );
+    assert_eq!(runtime.pending_validation_task_count_for_test(), 0);
+    assert_eq!(marker.cause_code, "VALIDATION_CLEANUP_PENDING");
+    assert_eq!(revision_after, revision_before);
+    assert_eq!(
+        runtime
+            .open_for_job_recovering(&active, None, &Instant("2026-08-28T00:00:02.800Z".into()))
+            .unwrap_err()
+            .cause_code(),
+        "VALIDATION_CLEANUP_UNCONFIRMED"
+    );
+}
+
+#[tokio::test]
+async fn owned_validation_artifact_failure_is_durable_and_does_not_restart_validation() {
+    let fixture = Fixture::new("owned-validation-artifact-failure");
+    fixture.install_validation_config_text(&owned_validation_configuration());
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let now = Instant("2026-08-28T00:00:02.000Z".into());
+    let mut runtime = JobWorkspaceRuntime::open(&fixture.workspaces, &fixture.sources).unwrap();
+    runtime.open_for_job(&active, None).unwrap();
+    let executed = runtime
+        .execute_change_batch(&active, &proposal, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        executed.progress.last().unwrap().state,
+        ChangeBatchProgressState::InfrastructureFailed
+    );
+    let replay = runtime
+        .poll_change_batch(&active, &proposal, &now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.progress, executed.progress);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn owned_validation_foreign_expiry_cannot_cancel_current_owner() {
+    let fixture = Fixture::new("owned-validation-foreign-expiry");
+    let configuration = owned_validation_configuration().replace(
+        "import time; time.sleep(0.5)",
+        "import os; import time; from pathlib import Path; Path(os.environ[\"WWC_OUTPUT_DIR\"]).joinpath(\"validation-started\").write_text(\"started\"); time.sleep(2)",
+    );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let now = Instant("2026-08-28T00:00:02.000Z".into());
+    let mut runtime = fixture.runtime();
+    runtime.open_for_job(&active, None).unwrap();
+    let revision_before = runtime.accepted_revision(&active.job.job_id).unwrap();
+    assert!(
+        runtime
+            .poll_change_batch(&active, &proposal, &now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while find_named_file(&fixture.workspaces, "validation-started").is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("original owned validation command really starts");
+    let store = ChangeBatchStore::open(&fixture.root).unwrap();
+    let marker_before = store
+        .validation_cleanup_record(&active.job.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker_before.identity, proposal.identity);
+    assert_eq!(marker_before.cause_code, "VALIDATION_CLEANUP_PENDING");
+    assert_eq!(runtime.pending_validation_task_count_for_test(), 1);
+    let mut foreign = active.clone();
+    foreign.lease.fencing_token = FencingToken("99".into());
+    foreign.lease.expires_at = Instant("2026-08-28T00:00:01.000Z".into());
+    let result = runtime.poll_change_batch(&foreign, &proposal, &now).await;
+    let tasks_after = runtime.pending_validation_task_count_for_test();
+    let marker_after = store.validation_cleanup_record(&active.job.job_id).unwrap();
+    let revision_after = runtime.accepted_revision(&active.job.job_id).unwrap();
+    println!(
+        "MECHANISM_RECEIPT {}",
+        serde_json::json!({"id":"VALIDATION-FOREIGN-EXPIRY-AUTHORITY","foreignFencing":"99","foreignClaimedExpiry":foreign.lease.expires_at.0,"originalOwnerExpiresAt":active.lease.expires_at.0,"driverResult":format!("{result:?}"),"ownedValidationTaskCountBefore":1,"ownedValidationTaskCountAfter":tasks_after,"pendingCleanupMarkerAfter":marker_after.as_ref().map(|record| &record.cause_code),"acceptedRevisionBefore":revision_before.0,"acceptedRevisionAfter":revision_after.0})
+    );
+    assert_eq!(
+        result.unwrap_err().code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert_eq!(
+        tasks_after, 1,
+        "foreign authority must not cancel the original owned validation"
+    );
+    assert_eq!(
+        marker_after,
+        Some(marker_before),
+        "foreign authority must not mutate its durable cleanup marker"
+    );
+    assert_eq!(revision_after, revision_before);
+    let completed = runtime
+        .execute_change_batch(&active, &proposal, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.progress.last().unwrap().state,
+        ChangeBatchProgressState::Accepted
+    );
+    assert_eq!(runtime.pending_validation_task_count_for_test(), 0);
+    assert!(
+        store
+            .validation_cleanup_record(&active.job.job_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_ne!(
+        runtime.accepted_revision(&active.job.job_id).unwrap(),
+        revision_before
+    );
+    println!(
+        "MECHANISM_RECEIPT {}",
+        serde_json::json!({"id":"VALIDATION-FOREIGN-EXPIRY-LEGAL-OWNER-COMPLETES","terminalState":completed.progress.last().unwrap().state,"ownedValidationTaskCountAfter":runtime.pending_validation_task_count_for_test(),"pendingCleanupMarkerAfter":null})
+    );
+}

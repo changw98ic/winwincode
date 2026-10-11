@@ -290,6 +290,8 @@ pub struct WorkerReconcileReport {
     pub pid: u32,
     pub process_start_identity: String,
     pub verdict: WorkerReconcileVerdict,
+    /// Registry state represented by this observation for exact report acknowledgement.
+    pub record: WorkerProcessRecord,
 }
 
 /// Failure of one supervision operation. Every variant is secret-free: the
@@ -550,7 +552,10 @@ impl SessionSupervisor {
     /// Returns the store failure when the read fails.
     pub fn running_worker_sessions(&self) -> Result<u32, SupervisorError> {
         self.reap()?;
-        self.reconcile()?;
+        let rows = self
+            .lock_store()
+            .worker_report_candidates("reconcile", None)?;
+        self.reconcile_rows(rows)?;
         let running = self.count_worker_processes_in_state(WORKER_STATE_RUNNING)?;
         Ok(u32::try_from(running).unwrap_or(u32::MAX))
     }
@@ -1053,13 +1058,33 @@ impl SessionSupervisor {
     ///
     /// Returns the store failure when a read or write fails.
     pub fn reconcile(&self) -> Result<Vec<WorkerReconcileReport>, SupervisorError> {
+        self.reconcile_rows(self.worker_processes()?)
+    }
+
+    /// Reconciles active processes and durable unreported changes for one lease.
+    ///
+    /// # Errors
+    /// Propagates process registry read/write failures.
+    pub fn reconcile_pending(
+        &self,
+        lease: &str,
+    ) -> Result<Vec<WorkerReconcileReport>, SupervisorError> {
+        let rows = self
+            .lock_store()
+            .worker_report_candidates("reconcile", Some(lease))?;
+        self.reconcile_rows(rows)
+    }
+
+    fn reconcile_rows(
+        &self,
+        rows: Vec<WorkerProcessRecord>,
+    ) -> Result<Vec<WorkerReconcileReport>, SupervisorError> {
         let stamp = now_rfc3339();
-        let rows = self.worker_processes()?;
         let mut reports = Vec::with_capacity(rows.len());
         let mut updates: Vec<(String, &'static str, Option<i64>)> = Vec::new();
         {
             let mut children = self.lock_children();
-            for row in rows {
+            for mut row in rows {
                 let verdict = if let Some(tracked) = children.get_mut(&row.worker_session_id) {
                     match tracked.child.try_wait() {
                         Ok(Some(status)) => {
@@ -1104,12 +1129,20 @@ impl SessionSupervisor {
                         },
                     }
                 };
+                if let Some((session, state, exit_code)) = updates.last()
+                    && *session == row.worker_session_id
+                {
+                    (*state).clone_into(&mut row.state);
+                    row.exit_code = *exit_code;
+                    row.last_observed_at.clone_from(&stamp);
+                }
                 reports.push(WorkerReconcileReport {
                     worker_session_id: row.worker_session_id.clone(),
                     worker_instance_id: row.worker_instance_id.clone(),
                     pid: row.pid,
                     process_start_identity: row.process_start_identity.clone(),
                     verdict,
+                    record: row,
                 });
             }
         }
@@ -1290,12 +1323,8 @@ impl SessionSupervisor {
         let Some(mirror) = store.occupancy_mirror()? else {
             return Ok(0);
         };
-        let running_for_lease = store
-            .worker_processes_for_lease(&mirror.occupancy_lease_id)?
-            .iter()
-            .filter(|row| row.state == WORKER_STATE_RUNNING)
-            .count();
-        Ok(u32::from(running_for_lease == 0))
+        let running_for_lease = store.has_running_worker_for_lease(&mirror.occupancy_lease_id)?;
+        Ok(u32::from(!running_for_lease))
     }
 }
 

@@ -75,9 +75,39 @@ where
         if self.transport_failure().is_some() {
             return Ok(None);
         }
+        let heartbeat_error = self.service_heartbeat(&mut clock).await?;
+        let response_controls = self.port.has_pending_controls();
+        self.drain_controls(source, &mut clock).await?;
+        if response_controls {
+            return Ok(heartbeat_error);
+        }
         let drive_error = self.poll_codex(clock()?).await.err();
         self.drain_controls(source, &mut clock).await?;
-        Ok(drive_error)
+        let final_heartbeat_error = self.service_heartbeat(&mut clock).await?;
+        self.drain_controls(source, &mut clock).await?;
+        Ok(drive_error.or(heartbeat_error).or(final_heartbeat_error))
+    }
+
+    async fn service_heartbeat<Clock>(
+        &mut self,
+        clock: &mut Clock,
+    ) -> Result<Option<WorkerError>, Box<dyn std::error::Error>>
+    where
+        Clock: FnMut() -> Result<Instant, Box<dyn std::error::Error>>,
+    {
+        if self.heartbeat_interval_ms.is_some()
+            && self
+                .next_heartbeat_due
+                .is_none_or(|due| std::time::Instant::now() >= due)
+        {
+            #[cfg(feature = "test-support")]
+            crate::mechanism_timing::record("heartbeat_entry", &serde_json::json!({}));
+            let result = self.heartbeat(clock()?).await;
+            #[cfg(feature = "test-support")]
+            crate::mechanism_timing::record("heartbeat_exit", &serde_json::json!({}));
+            return Ok(result.err());
+        }
+        Ok(None)
     }
 
     /// Drains validated controls and confirms only accepted durable effects.
@@ -93,7 +123,14 @@ where
         Source: WorkerControlSource,
         Clock: FnMut() -> Result<Instant, Box<dyn std::error::Error>>,
     {
-        while let Some((id, message)) = source.next_control()? {
+        let started = std::time::Instant::now();
+        for _ in 0..64 {
+            if started.elapsed() >= std::time::Duration::from_millis(25) {
+                break;
+            }
+            let Some((id, message)) = source.next_control()? else {
+                break;
+            };
             match self.accept_control(&message, clock()?).await {
                 Ok(()) => source.confirm(id)?,
                 Err(error) => {

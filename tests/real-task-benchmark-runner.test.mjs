@@ -1051,9 +1051,10 @@ test('parallel coordinator continues after a durable task stop and drains admitt
   let release
   let admitted = 0
   let drained = false
+  const states = []
   const pending = new Promise(resolve => { release = resolve })
   const storageFailure = Object.assign(new Error('evidence disk failure'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
-  const failed = runBenchmarkSchedule(cells, { concurrency: 2, executeCell: async (_cell, index) => {
+  const failed = runBenchmarkSchedule(cells, { concurrency: 2, onState: state => states.push(state), executeCell: async (_cell, index) => {
     admitted += 1
     if (index === 0) throw storageFailure
     await pending
@@ -1063,12 +1064,52 @@ test('parallel coordinator continues after a durable task stop and drains admitt
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(admitted, 2)
   assert.equal(drained, false)
+  assert.deepEqual(states.at(-1), {
+    total: 4, started: 2, settled: 1, active: 1, unstarted: 2, executionUnresolved: 0,
+    activeRunIds: ['task-1'], unresolvedRunIds: [], admissionStopped: true, draining: true,
+    firstFailure: { code: 'BENCHMARK_EVIDENCE_FAILED', runId: 'task-0' },
+  })
   const rejected = assert.rejects(failed, error => error === storageFailure && drained)
   release()
   await rejected
   assert.equal(admitted, 2)
+  assert.equal(states.at(-1).draining, false)
+  assert.equal(states.at(-1).active, 0)
   await assert.rejects(runBenchmarkSchedule(cells, { concurrency: 0, executeCell: () => assert.fail() }),
     { code: 'BENCHMARK_CONCURRENCY_INVALID' })
+})
+
+test('scheduler state persistence failure stops admission and drains the started task', async () => {
+  const cells = Array.from({ length: 3 }, (_, index) => ({ runId: `state-failure-${index}` }))
+  const failure = Object.assign(new Error('private state write failed'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+  await assert.rejects(runBenchmarkSchedule(cells, {
+    concurrency: 2,
+    onState: () => { throw failure },
+    executeCell: () => assert.fail('initial state must persist before task admission'),
+  }), error => error === failure)
+
+  let release
+  let admitted = 0
+  let drained = false
+  let settled = false
+  const blocked = new Promise(resolve => { release = resolve })
+  const schedule = runBenchmarkSchedule(cells, {
+    concurrency: 2,
+    onState: state => { if (state.started === 1) throw failure },
+    executeCell: async () => {
+      admitted += 1
+      await blocked
+      drained = true
+      return { status: 'completed' }
+    },
+  }).finally(() => { settled = true })
+  const rejected = assert.rejects(schedule, error => error === failure && drained)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(admitted, 1)
+  assert.equal(settled, false)
+  release()
+  await rejected
+  assert.equal(admitted, 1)
 })
 
 test('report aggregation accepts terminated zero scores but rejects surviving success markers', () => {

@@ -220,6 +220,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         orchestrator_mcp_enabled: false,
         include_environment_context: false,
         compact_prompt: None,
+        compact_context_max_tokens: None,
         notify: None,
         tui_notifications: TuiNotificationSettings::default(),
         animations: true,

@@ -406,7 +406,6 @@ fn ordinary_boundary(exact: &str, kind: &str, crash: bool) {
 }
 
 #[test]
-#[ignore = "mechanism audit: long subprocess control for resolved input before waiter consumption"]
 fn ra_c01_input_resolved_precedes_real_waiter_consumption() {
     ordinary_boundary(
         "mechanism_response_boundary::ra_c01_input_resolved_precedes_real_waiter_consumption",
@@ -424,7 +423,6 @@ fn ra_c01_approval_resolved_precedes_real_waiter_consumption() {
     );
 }
 #[test]
-#[ignore = "mechanism audit: conditional red; replacement input waiter was not reconstructed"]
 fn ra_c01_input_resolved_before_consumption_survives_crash() {
     ordinary_boundary(
         "mechanism_response_boundary::ra_c01_input_resolved_before_consumption_survives_crash",

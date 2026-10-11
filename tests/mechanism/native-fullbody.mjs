@@ -95,6 +95,7 @@ const provider = await startOwnedSseProvider({ key: readFileSync(certificate.key
   finalText: JSON.stringify({ acceptanceCriteriaIds: ['changed'], disposition: 'final',
     patch: '*** Begin Patch\n*** Update File: TASK.md\n@@\n-status: pending\n+status: complete\n*** End Patch\n',
     schemaVersion: 1, validationProfile: 'changed' }) })
+const gitHead = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
 const startedAtUtc = new Date().toISOString()
 const origin = performance.now()
 const snapshots = []
@@ -111,7 +112,8 @@ let workspaceManifestPath = null
 const modelStateSamples=[]
 const save = () => writeFileSync(join(directory, 'fullchain-observations.json'), JSON.stringify({
   schemaVersion: 1, startedAtUtc, capturedAtUtc: new Date().toISOString(),
-  baselineCommit: 'e994faa55ac2baad964bea5c43a23d919497a9de',
+  baselineCommit: gitHead, sourceSeal: existsSync(join(directory, 'product-source-seal.json'))
+    ? JSON.parse(readFileSync(join(directory, 'product-source-seal.json'), 'utf8')) : null,
   authority: 'owned offline Server/Device/Worker fixture', protocol, deltaCount, deltaBytes,
   leaseSeconds: 30, productionHeartbeatMillis: 5000, burstObservationMillis, heldControl, identity, releasedAt, observationReadFailures,
   providerRequests: provider.requests, providerEvents: provider.events, snapshots,
@@ -310,6 +312,8 @@ try {
         if (snapshots.length % 25 === 0) save()
         await delay(200)
       }
+      const sourceSeal = JSON.parse(readFileSync(join(directory, 'product-source-seal.json'), 'utf8'))
+      assert.equal(sourceSeal.gitHead, gitHead, 'native products must bind the actual source HEAD')
       const last = snapshots.at(-1)
       const timing = timingEvidence()
       const finalModelState=modelState()
@@ -318,10 +322,36 @@ try {
       const gaps = heartbeatChanges.slice(1).map((value, i) => value.elapsedMillis - heartbeatChanges[i].elapsedMillis)
       const expiredWhileUnterminal = snapshots.some(value => value.phase === 'complete_response_released'
         && value.terminal === null && Date.parse(value.observedBeforeQueryUtc) >= Date.parse(value.lease.expires_at))
-      return { identity, heldControl, expiredWhileUnterminal, maxObservedHeartbeatGapMillis: Math.max(0, ...gaps),
+      const expectedFrames = protocol === 'openai_responses' ? deltaCount + 5 : null
+      assert.equal(deltaCount, 2522, 'fullbody regression retains the original 2527-frame shape')
+      assert.equal(finalModelState?.provider?.exchange?.normalizedChunkCount, expectedFrames)
+      assert.equal(finalModelState?.frames?.frameCount, expectedFrames,
+        'the exact target Adapter must consume every complete Provider frame')
+      assert.equal(finalModelState?.ledger?.provider_final, 1)
+      assert.equal(finalModelState?.cursor?.confirmedSequence, expectedFrames)
+      assert.equal(finalModelState?.cursor?.termination, 'completed')
+      assert.equal(timing.finalCheckpoint?.details?.sequence, expectedFrames)
+      assert.equal(timing.finalCheckpoint?.details?.accepted, true)
+      assert.ok(timing.driverReturnedAfterFinal, 'the owned driver must return after its final frame')
+      const completedAt = Date.parse(timing.finalCheckpoint.details.suppliedDriverNow)
+      const currentDeadline = Date.parse(timing.finalCheckpoint.details.currentWorkerLeaseExpiresAt)
+      assert.ok(Number.isFinite(completedAt) && Number.isFinite(currentDeadline) && completedAt < currentDeadline,
+        'complete intake must be accepted before the current Server-renewed Worker deadline')
+      const observedCompletedAt = timing.finalCheckpoint.actualWallUnixMillis
+      assert.ok(Number.isFinite(observedCompletedAt) && observedCompletedAt < currentDeadline,
+        'post-acceptance checkpoint must precede the same renewed Worker deadline')
+      assert.equal(expiredWhileUnterminal, false, 'owned complete-response intake must preserve lease authority')
+      const maxObservedHeartbeatGapMillis = Math.max(0, ...gaps)
+      assert.ok(maxObservedHeartbeatGapMillis <= 6500,
+        `5-second heartbeats must continue within the 1500ms observation budget; actual gap=${maxObservedHeartbeatGapMillis}`)
+      assert.ok(timing.appliedRenewals.some(row => row.details?.accepted
+        && row.details?.currentWorkerLeaseExpiresAt === row.details?.renewedExpiresAt
+        && row.details?.currentWorkspaceLeaseExpiresAt === row.details?.renewedExpiresAt),
+        'at least one exact Server renewal must be applied by the actual owner')
+      assert.ok(last?.terminal, 'this fixture must record its natural exact Job terminal before cleanup')
+      return { identity, heldControl, expiredWhileUnterminal, maxObservedHeartbeatGapMillis,
         timing, finalModelState, complete2527CheckpointObserved: timing.finalCheckpoint?.details?.sequence === 2527, terminal: last?.terminal ?? null, jobState: last?.job.state ?? null,
-        behaviorStatus: expiredWhileUnterminal ? 'expired_during_complete_response_intake_observation'
-          : 'expiry_not_reproduced_at_this_scale', snapshotCount: snapshots.length }
+        behaviorStatus: 'complete_response_intake_preserves_lease_and_heartbeat', snapshotCount: snapshots.length }
     } },
   })
 } catch (error) {

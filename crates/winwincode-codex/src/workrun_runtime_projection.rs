@@ -10,6 +10,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
+    sync::Mutex,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,7 +30,9 @@ use winwincode_execution_port::{
         ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
         ExecutionJob, ExecutionLeaseStamp, RuntimeEventMessage, RuntimeEventMessageKind,
     },
-    replay::{ReplayAuthority, ReplayDecision, ReplaySnapshot, ReplayStore},
+    replay::{
+        ReplayAuthority, ReplayDecision, ReplayFrame, ReplayReadQuery, ReplaySnapshot, ReplayStore,
+    },
     runtime_replay::{RuntimeReplayError, RuntimeReplayIdentity, RuntimeReplayResponder},
 };
 
@@ -123,10 +126,22 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Stateless coordinator over the existing durable runtime replay authority.
+/// Coordinator over the existing durable runtime replay authority.
 #[derive(Debug, Default)]
 pub struct WorkRunRuntimeProjector {
     responder: RuntimeReplayResponder,
+    // Only the immutable policy row identity is cached. Every use reads and
+    // verifies that exact row against the current stream header and frozen Job.
+    policy_rows: Mutex<Option<HashMap<(String, String), CachedPolicyRow>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedPolicyRow {
+    event_id: String,
+    sequence: u64,
+    semantic_digest: String,
+    frame_digest: String,
+    observed_highest: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -141,6 +156,7 @@ impl WorkRunRuntimeProjector {
     pub const fn new() -> Self {
         Self {
             responder: RuntimeReplayResponder::new(),
+            policy_rows: Mutex::new(None),
         }
     }
 
@@ -238,7 +254,7 @@ impl WorkRunRuntimeProjector {
         validate_source_id(command_end.turn_id)?;
         validate_source_id(command_end.call_id)?;
         let identity = replay_identity(context);
-        let snapshot = load_snapshot(store, &identity)?;
+        let mut snapshot = self.policy_snapshot(store, &identity, job)?;
         if !snapshot_has_policy(&snapshot, job)? {
             return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
         }
@@ -253,13 +269,26 @@ impl WorkRunRuntimeProjector {
             command_end.artifact,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let source = source_key("evidence", command_end.turn_id, Some(command_end.call_id));
+        let event_id =
+            projected_event_id(job, &source).map_err(WorkRunRuntimeProjectionError::Product)?;
+        let exact = load_exact_snapshot(store, &identity, &event_id.0, 0)?;
+        snapshot.ack_sequence = exact.ack_sequence;
+        snapshot.highest_sequence = exact.highest_sequence;
+        if let Some(frame) = exact
+            .events
+            .into_iter()
+            .find(|frame| frame.event_id == event_id.0)
+        {
+            snapshot.events.push(frame);
+        }
         self.retain_product_with_snapshot(
             store,
             authority,
             context,
             Projection {
                 job,
-                source: &source_key("evidence", command_end.turn_id, Some(command_end.call_id)),
+                source: &source,
                 product: &product,
             },
             &snapshot,
@@ -381,7 +410,7 @@ impl WorkRunRuntimeProjector {
         S: ReplayStore,
         A: ReplayAuthority<Context = RuntimeReplayIdentity>,
     {
-        let snapshot = load_snapshot(store, &replay_identity(context))?;
+        let snapshot = self.policy_snapshot(store, &replay_identity(context), job)?;
         self.retain_product_with_snapshot(
             store,
             authority,
@@ -393,6 +422,114 @@ impl WorkRunRuntimeProjector {
             },
             &snapshot,
         )
+    }
+
+    fn policy_snapshot<S: ReplayStore, AuthorityError>(
+        &self,
+        store: &mut S,
+        identity: &RuntimeReplayIdentity,
+        job: &ExecutionJob,
+    ) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+        let key = (
+            identity.stream_key().as_str().to_owned(),
+            stage_product_job_digest(job)
+                .map_err(WorkRunRuntimeProjectionError::Product)?
+                .0,
+        );
+        let cached = self
+            .policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .as_ref()
+            .and_then(|rows| rows.get(&key))
+            .cloned();
+        if let Some(cached) = cached {
+            let snapshot = load_exact_snapshot(store, identity, &cached.event_id, cached.sequence)?;
+            let frame = snapshot
+                .events
+                .iter()
+                .find(|frame| frame.event_id == cached.event_id)
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if frame.sequence != cached.sequence
+                || frame.digest != cached.semantic_digest
+                || frame_digest(frame) != cached.frame_digest
+                || snapshot.highest_sequence < cached.observed_highest
+                || !snapshot_has_policy(&snapshot, job)?
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            if snapshot.highest_sequence > cached.observed_highest {
+                validate_policy_tail(
+                    store,
+                    identity,
+                    cached.observed_highest,
+                    snapshot.highest_sequence,
+                )?;
+            }
+            let mut rows = self
+                .policy_rows
+                .lock()
+                .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            let row = rows
+                .as_mut()
+                .and_then(|rows| rows.get_mut(&key))
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if snapshot.highest_sequence < row.observed_highest {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            row.observed_highest = snapshot.highest_sequence;
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let canonical = projected_event_id(job, VERIFICATION_POLICY_SOURCE)
+            .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let mut snapshot = load_exact_snapshot(store, identity, &canonical.0, 0)?;
+        if snapshot.highest_sequence > snapshot.events.len() as u64 {
+            // Resolve and validate existing policy history once after recovery.
+            // This also rejects canonical plus older turn-dependent duplicates.
+            snapshot = load_snapshot(store, identity)?;
+        }
+        let Some(policy) = retained_policy(&snapshot)? else {
+            if snapshot
+                .events
+                .iter()
+                .any(|frame| frame.event_id == canonical.0)
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            return Ok(ReplaySnapshot {
+                events: Vec::new(),
+                ..snapshot
+            });
+        };
+        let frame = snapshot
+            .events
+            .iter()
+            .find(|frame| frame.event_id == policy.event.event_id.0)
+            .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        validate_runtime_frame(frame, identity)?;
+        if !snapshot_has_policy(&snapshot, job)? {
+            // Turn start classifies a changed frozen candidate as a conflicting
+            // attestation. Command evidence rejects the same mismatch. Neither
+            // operation may cache a policy that belongs to another frozen Job.
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let cached = cached_policy_row(frame, snapshot.highest_sequence);
+        self.policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .get_or_insert_with(HashMap::new)
+            .insert(key, cached);
+        Ok(ReplaySnapshot {
+            events: vec![frame.clone()],
+            ..snapshot
+        })
     }
 
     fn retain_product_with_snapshot<S, A>(
@@ -527,6 +664,107 @@ fn replay_identity(context: WorkRunRuntimeContext<'_>) -> RuntimeReplayIdentity 
         session_identity: context.session_identity.clone(),
         codex_thread_id: context.session_identity.codex_thread_id.clone(),
     }
+}
+
+fn cached_policy_row(frame: &ReplayFrame, observed_highest: u64) -> CachedPolicyRow {
+    CachedPolicyRow {
+        event_id: frame.event_id.clone(),
+        sequence: frame.sequence,
+        semantic_digest: frame.digest.clone(),
+        frame_digest: frame_digest(frame),
+        observed_highest,
+    }
+}
+
+fn frame_digest(frame: &ReplayFrame) -> String {
+    format!("sha256:{:x}", Sha256::digest(&frame.frame))
+}
+
+fn validate_runtime_frame<AuthorityError, StoreError>(
+    frame: &ReplayFrame,
+    identity: &RuntimeReplayIdentity,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
+    let message: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let canonical =
+        serde_json::to_vec(&message).map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let event = serde_json::to_vec(&message.event)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    if canonical != frame.frame
+        || message.kind != RuntimeEventMessageKind::RuntimeEvent
+        || message.schema_version != SchemaVersion::WinwincodeV1
+        || message.event.event_id.0 != frame.event_id
+        || u64::try_from(message.event.sequence.0).ok() != Some(frame.sequence)
+        || format!("sha256:{:x}", Sha256::digest(event)) != frame.digest
+        || winwincode_execution_port::runtime_replay::runtime_event_stream_key(&message)
+            != identity.stream_key()
+    {
+        return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+    }
+    Ok(())
+}
+
+fn validate_policy_tail<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    mut after: u64,
+    through: u64,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    while after < through {
+        let limit = usize::try_from((through - after).min(256))
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let mut snapshot = if let Some(snapshot) = store
+            .load_indexed(
+                &identity.stream_key(),
+                ReplayReadQuery::After {
+                    sequence: after,
+                    max_events: limit,
+                },
+            )
+            .map_err(WorkRunRuntimeProjectionError::Store)?
+        {
+            snapshot
+        } else {
+            let mut snapshot = load_snapshot(store, identity)?;
+            snapshot
+                .events
+                .retain(|frame| frame.sequence > after && frame.sequence <= through);
+            snapshot
+        };
+        snapshot.events.retain(|frame| frame.sequence <= through);
+        if snapshot.highest_sequence < through
+            || snapshot.events.is_empty()
+            || retained_policy(&snapshot)?.is_some()
+        {
+            return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+        }
+        for frame in &snapshot.events {
+            if frame.sequence != after + 1 {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            after = frame.sequence;
+        }
+    }
+    Ok(())
+}
+
+fn load_exact_snapshot<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    event_id: &str,
+    sequence: u64,
+) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    if let Some(snapshot) = store
+        .load_indexed(
+            &identity.stream_key(),
+            ReplayReadQuery::Conflict { event_id, sequence },
+        )
+        .map_err(WorkRunRuntimeProjectionError::Store)?
+    {
+        return Ok(snapshot);
+    }
+    load_snapshot(store, identity)
 }
 
 fn load_snapshot<S, AuthorityError>(
@@ -2486,4 +2724,5 @@ mod tests {
             "command"
         );
     }
+    include!("storage_workrun_regression.rs");
 }

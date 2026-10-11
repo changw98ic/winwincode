@@ -72,6 +72,8 @@ export interface ContextualDecisionItem {
   readonly mode: InteractiveInputMode | null
   /** Input answers only: an empty text response is a valid answer. */
   readonly allowEmpty: boolean
+  /** Only a single-choice input with explicit producer permission offers Other. */
+  readonly allowOther: boolean
   readonly options: readonly ContextualDecisionOption[]
   /** True when the decision must carry a written reason or resolution. */
   readonly requiresNote: boolean
@@ -171,6 +173,7 @@ function inputDecision(
     deliveryId: null,
     mode: projection.mode,
     allowEmpty: projection.allowEmpty,
+    allowOther: projection.mode === 'single_choice' && projection.allowOther === true,
     options,
     requiresNote: false,
   }
@@ -199,6 +202,7 @@ function approvalDecision(
     deliveryId: null,
     mode: null,
     allowEmpty: false,
+    allowOther: false,
     options: Object.freeze([]),
     requiresNote: true,
   }
@@ -230,6 +234,7 @@ function attentionDecision(
     deliveryId: source.deliveryId,
     mode: null,
     allowEmpty: false,
+    allowOther: false,
     options,
     requiresNote: true,
   }

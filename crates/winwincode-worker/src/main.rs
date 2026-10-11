@@ -301,31 +301,12 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         }
     }
 
-    let heartbeat_interval_ms = worker
-        .heartbeat_interval_ms()
-        .ok_or("registered Worker heartbeat interval is unavailable")?;
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut drive = tokio::time::interval(Duration::from_millis(25));
+    drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
             () = interrupt.wait() => break,
-            _ = heartbeat.tick() => {
-                let step = async {
-                    Box::pin(drain_controls(&mut worker, &handle)).await?;
-                    #[cfg(feature = "test-support")]
-                    winwincode_worker::mechanism_timing::record("heartbeat_entry", &serde_json::json!({}));
-                    let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
-                    #[cfg(feature = "test-support")]
-                    winwincode_worker::mechanism_timing::record("heartbeat_exit", &serde_json::json!({}));
-                    // A refused upstream frame still carries valid controls.
-                    Box::pin(drain_controls(&mut worker, &handle)).await?;
-                    Ok::<_, Box<dyn std::error::Error>>(())
-                };
-                let Some(result) = interrupt.until_interrupt(step).await else { break; };
-                result?;
-            }
             _ = drive.tick() => {
                 let step = async {
                 if worker.transport_failure().is_some() { return Ok(true); }

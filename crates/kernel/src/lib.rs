@@ -650,7 +650,21 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
     "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
     "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+    "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+    "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+    "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+    "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+    "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+    "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+    "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+    "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
+    "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
     "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+    "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+    "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+    "upstream/patches/codex/0102-exact-input-call-routing.patch",
+    "upstream/patches/codex/0103-private-input-recovery-store.patch",
+    "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -1253,7 +1267,9 @@ impl Kernel {
                     )
                 })?;
             config.codex_self_exe = Some(self.options.helper_executable.clone());
-            config.codex_linux_sandbox_exe = self.options.linux_sandbox_executable.clone();
+            config
+                .codex_linux_sandbox_exe
+                .clone_from(&self.options.linux_sandbox_executable);
 
             let state_db = init_state_db(&config).await;
             let auth_manager =
@@ -1883,13 +1899,17 @@ impl Kernel {
         &self,
         session_id: &str,
         turn_id: String,
+        call_id: String,
         response: RequestUserInputResponse,
     ) -> KernelResult<String> {
         Self::guard(async {
-            if session_id.trim().is_empty() || turn_id.trim().is_empty() {
+            if session_id.trim().is_empty()
+                || turn_id.trim().is_empty()
+                || call_id.trim().is_empty()
+            {
                 return Err(KernelFailure::new(
                     "INVALID_INPUT_RESPONSE",
-                    "input response session and turn identities must be non-empty",
+                    "input response session, turn and call identities must be non-empty",
                 ));
             }
             let runtime = self.runtime().await?;
@@ -1899,6 +1919,7 @@ impl Kernel {
                 .thread
                 .submit(Op::UserInputAnswer {
                     id: turn_id,
+                    call_id,
                     response,
                 })
                 .await
@@ -2890,7 +2911,21 @@ mod tests {
         "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
         "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
         "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+        "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+        "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+        "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+        "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+        "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+        "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+        "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+        "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
+        "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
         "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+        "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+        "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+        "upstream/patches/codex/0102-exact-input-call-routing.patch",
+        "upstream/patches/codex/0103-private-input-recovery-store.patch",
+        "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
     ];
 
     #[test]

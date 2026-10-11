@@ -14,7 +14,7 @@ use winwincode_execution_port::{
         ExecutionEventCategory, ExecutionEventRecord, ExecutionPortMessage, RuntimeEventMessage,
         RuntimeEventMessageKind,
     },
-    replay::{ReplayAuthority, ReplayDecision, ReplayStore},
+    replay::{ReplayAuthority, ReplayDecision, ReplayReadQuery, ReplayStore},
     runtime_replay::{RuntimeReplayIdentity, RuntimeReplayResponder},
 };
 use winwincode_kernel::KernelToolRuntimeEvent;
@@ -153,10 +153,17 @@ impl ProductionCodexAdapter {
             .authority()
             .validate_active_lease(&identity.stream_key(), &identity)
             .map_err(|_| unavailable())?;
-        let prior = ReplayStore::load(&mut self.store, &identity.stream_key())
-            .map_err(map_store_error)?
-            .unwrap_or_default();
         let sequence = u64::try_from(message.event.sequence.0).map_err(|_| unavailable())?;
+        let prior = ReplayStore::load_indexed(
+            &mut self.store,
+            &identity.stream_key(),
+            ReplayReadQuery::Conflict {
+                event_id: &message.event.event_id.0,
+                sequence,
+            },
+        )
+        .map_err(map_store_error)?
+        .ok_or_else(unavailable)?;
         if prior.highest_sequence >= sequence {
             if prior.ack_sequence < sequence {
                 let encoded = serde_json::to_vec(&message).map_err(|_| unavailable())?;
@@ -190,9 +197,8 @@ impl ProductionCodexAdapter {
                 }
             }
         }
-        let snapshot = ReplayStore::load(&mut self.store, &identity.stream_key())
-            .map_err(map_store_error)?
-            .ok_or_else(unavailable)?;
+        let snapshot = ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+            .map_err(map_store_error)?;
         let acked = snapshot.ack_sequence
             >= u64::try_from(message.event.sequence.0).map_err(|_| unavailable())?;
         if !acked {
@@ -202,12 +208,7 @@ impl ProductionCodexAdapter {
                 .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
                 .map_err(map_store_error)?;
         }
-        let payload = message.event.payload.as_ref().ok_or_else(unavailable)?;
-        let bytes = STANDARD
-            .decode(&payload.data_base64)
-            .map_err(|_| unavailable())?;
-        let source: CoreToolRuntimeFactPayload =
-            serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+        let source = decode_tool_fact_payload(&message)?;
         let record = &mut self
             .runs
             .get_mut(run_key)
@@ -240,9 +241,8 @@ impl ProductionCodexAdapter {
             session_identity: run.binding.authority.session_identity.clone(),
             codex_thread_id: run.binding.canonical_thread_id.clone(),
         };
-        let sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
+        let sequence = ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
             .map_err(map_store_error)?
-            .unwrap_or_default()
             .highest_sequence
             .checked_add(1)
             .ok_or_else(unavailable)?;
@@ -286,6 +286,18 @@ impl ProductionCodexAdapter {
             },
         })
     }
+}
+
+fn decode_tool_fact_payload(
+    message: &RuntimeEventMessage,
+) -> Result<CoreToolRuntimeFactPayload, ProductionCodexError> {
+    let payload = message.event.payload.as_ref().ok_or_else(unavailable)?;
+    let bytes = STANDARD
+        .decode(&payload.data_base64)
+        .map_err(|_| unavailable())?;
+    let source: CoreToolRuntimeFactPayload =
+        serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    Ok(source)
 }
 
 #[cfg(test)]

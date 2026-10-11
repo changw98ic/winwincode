@@ -8,6 +8,9 @@ mod canonical_code_mode;
 #[path = "support/mechanism_interactions.rs"]
 mod mechanism_interactions;
 
+#[path = "support/mechanism_current_stamp.rs"]
+mod mechanism_current_stamp;
+
 #[path = "support/mechanism_multiquestion.rs"]
 mod mechanism_multiquestion;
 

@@ -3,6 +3,7 @@ mod approvals;
 mod authorization;
 mod execution_facts;
 pub(crate) use execution_facts::ExecutionFacts;
+mod control_input_recovery;
 mod result_recovery;
 mod tool_diagnostics;
 mod tool_reconciliation;

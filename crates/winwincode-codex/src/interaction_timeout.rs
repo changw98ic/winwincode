@@ -15,10 +15,8 @@ use super::{
     canonical_parts_id, conflict, kernel_error, load_stored_run, map_bridge_error, map_store_error,
     private_payload_digest, retained_lease_matches_current, unavailable, unknown_thread,
 };
-use codex_protocol::request_user_input::{RequestUserInputAnswer, RequestUserInputResponse};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use winwincode_domain::{ExecutionMessageId, Instant, SessionIdentity};
+use winwincode_domain::{ExecutionMessageId, Instant, InteractiveInputMode, SessionIdentity};
 use winwincode_execution_port::generated::{
     ApprovalDecisionMessage, ApprovalRequestMessage, ExecutionPortMessage, InputRequestMessage,
     InputResponseMessage,
@@ -56,15 +54,64 @@ fn request_identity(
     }
 }
 
+pub(super) fn validate_input_answer_value(
+    original: &InputRequestMessage,
+    value: &str,
+) -> Result<(), ProductionCodexError> {
+    if original.allow_other == Some(true) && original.mode != InteractiveInputMode::SingleChoice
+        || value.chars().take(20_001).count() > 20_000
+        || !original.allow_empty && value.trim().is_empty()
+    {
+        return Err(conflict());
+    }
+    match original.mode {
+        InteractiveInputMode::Text => Ok(()),
+        InteractiveInputMode::SingleChoice if original.allow_other == Some(true) => Ok(()),
+        InteractiveInputMode::SingleChoice | InteractiveInputMode::Confirmation => {
+            if original
+                .choices
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|choice| choice.value == value)
+            {
+                Ok(())
+            } else {
+                Err(conflict())
+            }
+        }
+    }
+}
+
+pub(super) fn validate_retained_input_answers(
+    original: &InputRequestMessage,
+    values: &[String],
+) -> Result<(), ProductionCodexError> {
+    if values.len() > 1
+        || original.allow_other == Some(true) && original.mode != InteractiveInputMode::SingleChoice
+    {
+        return Err(conflict());
+    }
+    if let Some(value) = values.first() {
+        validate_input_answer_value(original, value)?;
+    }
+    Ok(())
+}
+
 pub(super) fn input_response_value(
     response: &InputResponseMessage,
+    original: &InputRequestMessage,
 ) -> Result<Option<String>, ProductionCodexError> {
+    if original.allow_other == Some(true) && original.mode != InteractiveInputMode::SingleChoice {
+        return Err(conflict());
+    }
     match response.status {
         InputResponseMessageStatus::Provided => {
             let value = response.value.as_ref().ok_or_else(conflict)?;
-            if value.value.trim().is_empty() {
+            if value.mode != original.mode {
                 return Err(conflict());
             }
+            validate_input_answer_value(original, &value.value)?;
             Ok(Some(value.value.clone()))
         }
         InputResponseMessageStatus::Cancelled | InputResponseMessageStatus::Expired => {
@@ -208,12 +255,10 @@ impl ProductionCodexAdapter {
         Ok(())
     }
 
-    pub(super) async fn ensure_input_deadline(
-        &mut self,
+    pub(super) fn retained_input_request(
+        &self,
         operation: &StoredInputOperation,
-        response: &InputResponseMessage,
-        received_at: &Instant,
-    ) -> Result<(), ProductionCodexError> {
+    ) -> Result<InputRequestMessage, ProductionCodexError> {
         let message_id = canonical_parts_id(
             "xmsg",
             b"winwincode-kernel-input-message.v1",
@@ -226,6 +271,19 @@ impl ProductionCodexAdapter {
         else {
             return Err(conflict());
         };
+        if original.input_request_id.0 != operation.input_request_id {
+            return Err(conflict());
+        }
+        Ok(original)
+    }
+
+    pub(super) async fn ensure_input_deadline(
+        &mut self,
+        operation: &StoredInputOperation,
+        response: &InputResponseMessage,
+        received_at: &Instant,
+    ) -> Result<(), ProductionCodexError> {
+        let original = self.retained_input_request(operation)?;
         if received_at.0 >= original.expires_at.0
             || response.responded_at.0 >= original.expires_at.0
         {
@@ -709,28 +767,8 @@ impl ProductionCodexAdapter {
                 {
                     return Err(conflict());
                 }
-                let mut answers = HashMap::new();
-                answers.insert(
-                    operation.question_id,
-                    RequestUserInputAnswer {
-                        answers: Vec::new(),
-                    },
-                );
-                self.kernel
-                    .resolve_user_input(
-                        session,
-                        operation.turn_id,
-                        RequestUserInputResponse { answers },
-                    )
-                    .await
-                    .map_err(|_| kernel_error())?;
-                self.store
-                    .resolve_input_operation(
-                        &request.input_request_id.0,
-                        &operation.request_digest,
-                        &resolution,
-                    )
-                    .map_err(map_store_error)?;
+                self.apply_input_timeout_answer(&operation, &resolution)
+                    .await?;
             }
             _ => return Err(conflict()),
         }

@@ -6,8 +6,7 @@ use winwincode_execution_port::generated::{EncodedPayload, ModelOpenMessage};
 use winwincode_provider::{DeviceProviderStore, audit_model_replay_metrics, model_failure};
 
 #[test]
-#[ignore = "mechanism audit: measured empty recovery cost over 1/10 MiB synthetic history"]
-fn mechanism_actual_empty_worker_model_queue_reloads_foreign_history() {
+fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -70,15 +69,10 @@ fn mechanism_actual_empty_worker_model_queue_reloads_foreign_history() {
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let metrics = audit_model_replay_metrics::take();
         assert_eq!(
-            metrics.select_chunks_rows, 300,
-            "every actual empty turn rereads one owned plus two foreign responses"
+            metrics.select_chunks_rows, 0,
+            "empty turns read no completed response bodies"
         );
-        assert_eq!(metrics.chunks_json_bytes_deserialized, stored_bytes * 100);
-        assert_eq!(
-            models.logged_foreign.len(),
-            2,
-            "log deduplication does not suppress actual reads"
-        );
+        assert_eq!(metrics.chunks_json_bytes_deserialized, 0);
         assert!(
             models.pending.is_empty(),
             "no physical Provider thread is admitted"
@@ -87,7 +81,7 @@ fn mechanism_actual_empty_worker_model_queue_reloads_foreign_history() {
             "empty_next_chunk_calls":100,"elapsed_ms":elapsed_ms,"metrics":metrics,
             "owned_exchanges":1,"foreign_exchanges":2,"physical_provider_requests":0}));
     }
-    let value = serde_json::json!({"schema_version":1,"source_commit":"e994faa55ac2baad964bea5c43a23d919497a9de",
+    let value = serde_json::json!({"schema_version":1,"fixtureHistoricalSourceCommit":"e994faa55ac2baad964bea5c43a23d919497a9de",
         "method":"DeviceModels::next_chunk -> recover_from_durable_store -> DeviceProviderStore::replay_model", "cases":cases});
     println!("MODEL_MECHANISM_AUDIT {value}");
     if let Some(path) = std::env::var_os("WWC_MECHANISM_AUDIT_OUTPUT") {

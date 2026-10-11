@@ -1,3 +1,7 @@
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
+use std::alloc::System;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -6,6 +10,7 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::*;
 use codex_protocol::ToolName;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,21 +21,63 @@ use super::RuntimeEvent;
 use super::spawn_runtime;
 use crate::InProcessCodeModeSession;
 
-static PENDING_CLONE_CALLS: AtomicUsize = AtomicUsize::new(0);
-static PENDING_CLONE_STRING_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PENDING_CHECKS: AtomicUsize = AtomicUsize::new(0);
+static PENDING_ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-// Observe the already cloned production value. This does not replace the clone algorithm.
-pub(super) fn record_pending_clone(values: &HashMap<String, Value>) {
-    fn string_bytes(value: &Value) -> usize {
-        match value {
-            Value::String(value) => value.len(),
-            Value::Array(values) => values.iter().map(string_bytes).sum(),
-            Value::Object(values) => values.values().map(string_bytes).sum(),
-            Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-        }
+thread_local! {
+    static COMPLETION_ALLOCATION_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+struct ObservedAllocator;
+
+#[global_allocator]
+static ALLOCATOR: ObservedAllocator = ObservedAllocator;
+
+unsafe impl GlobalAlloc for ObservedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        COMPLETION_ALLOCATION_BYTES.with(|bytes| {
+            if let Some(count) = bytes.get() {
+                bytes.set(Some(count.saturating_add(layout.size())));
+            }
+        });
+        unsafe { System.alloc(layout) }
     }
-    PENDING_CLONE_CALLS.fetch_add(1, Ordering::SeqCst);
-    PENDING_CLONE_STRING_BYTES.fetch_add(values.values().map(string_bytes).sum(), Ordering::SeqCst);
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        COMPLETION_ALLOCATION_BYTES.with(|bytes| {
+            if let Some(count) = bytes.get() {
+                bytes.set(Some(count.saturating_add(size)));
+            }
+        });
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+// Measure the real Rust allocator only while completion_state executes on its V8 thread.
+pub(super) struct CompletionAllocationProbe;
+
+impl CompletionAllocationProbe {
+    pub(super) fn new() -> Self {
+        COMPLETION_ALLOCATION_BYTES.with(|bytes| bytes.set(Some(0)));
+        Self
+    }
+
+    pub(super) fn record_pending(&self) {
+        PENDING_CHECKS.fetch_add(1, Ordering::SeqCst);
+        COMPLETION_ALLOCATION_BYTES.with(|bytes| {
+            PENDING_ALLOCATED_BYTES.fetch_add(bytes.get().unwrap_or_default(), Ordering::SeqCst);
+        });
+    }
+}
+
+impl Drop for CompletionAllocationProbe {
+    fn drop(&mut self) {
+        COMPLETION_ALLOCATION_BYTES.with(|bytes| bytes.set(None));
+    }
 }
 
 fn request(source: &str) -> ExecuteRequest {
@@ -95,7 +142,6 @@ impl CodeModeSessionDelegate for CloseDelegate {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "mechanism audit: M16 selected prompt timer cleanup budget"]
 async fn mechanism_m16_cell_close_and_cancel_retire_timer_threads() {
     // Warm V8's process-wide thread pool before measuring timer resources.
     let warm = InProcessCodeModeSession::new();
@@ -170,8 +216,8 @@ async fn mechanism_m16_cell_close_and_cancel_retire_timer_threads() {
 }
 
 async fn pending_store(bytes: usize) -> (usize, usize, usize) {
-    PENDING_CLONE_CALLS.store(0, Ordering::SeqCst);
-    PENDING_CLONE_STRING_BYTES.store(0, Ordering::SeqCst);
+    PENDING_CHECKS.store(0, Ordering::SeqCst);
+    PENDING_ALLOCATED_BYTES.store(0, Ordering::SeqCst);
     let source = format!(
         "{} for (let i=0; i<32; i++) await tools.echo({{}});",
         if bytes == 0 {
@@ -240,23 +286,96 @@ async fn pending_store(bytes: usize) -> (usize, usize, usize) {
     assert_eq!(replies, 32);
     assert_eq!(final_bytes, bytes);
     (
-        PENDING_CLONE_CALLS.load(Ordering::SeqCst),
-        PENDING_CLONE_STRING_BYTES.load(Ordering::SeqCst),
+        PENDING_CHECKS.load(Ordering::SeqCst),
+        PENDING_ALLOCATED_BYTES.load(Ordering::SeqCst),
         replies,
     )
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "mechanism audit: M17 selected zero-copy Pending budget"]
 async fn mechanism_m17_pending_does_not_deep_clone_store() {
     let baseline = pending_store(0).await;
     let with_store = pending_store(1024 * 1024).await;
     for (label, sample) in [("baseline", baseline), ("store_1mib", with_store)] {
-        let row = serde_json::json!({"id":"M17","case":label,"pending_clone_calls":sample.0,"pending_cloned_string_bytes":sample.1,"actual_tool_replies":sample.2,"source":"actual spawn_runtime + completion_state clone observation"});
+        let row = serde_json::json!({"id":"M17","case":label,"pending_checks":sample.0,"pending_allocated_bytes":sample.1,"actual_tool_replies":sample.2,"source":"actual spawn_runtime + completion_state Rust allocator observation"});
         eprintln!("MECHANISM_RECEIPT {row}");
     }
     assert_eq!(
         with_store.1, 0,
         "Pending completion must avoid deep cloning unmodified stored values"
     );
+    assert!(
+        with_store.0 >= 32,
+        "the allocator probe must observe the actual Pending checks"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_clear_does_not_invoke_callback_and_new_timer_fires() {
+    let session = InProcessCodeModeSession::new();
+    let response = session.execute(request(
+        "const id = setTimeout(() => text('cancelled callback'), 20); clearTimeout(id); await new Promise(resolve => setTimeout(resolve, 40)); text('completed');"
+    )).await.unwrap().initial_response().await.unwrap();
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            cell_id: CellId::new("1".to_string()),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "completed".to_string()
+            }],
+            error_text: None,
+        }
+    );
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_store_writes_commit_on_error_and_are_discarded_on_cancel() {
+    let session = InProcessCodeModeSession::new();
+    let response = session
+        .execute(request(
+            "store('value', 'committed'); throw new Error('expected error');",
+        ))
+        .await
+        .unwrap()
+        .initial_response()
+        .await
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::Result {
+            error_text: Some(_),
+            ..
+        }
+    ));
+    let started = session
+        .execute(request(
+            "store('value', 'cancelled'); await new Promise(() => {});",
+        ))
+        .await
+        .unwrap();
+    let cell_id = started.cell_id.clone();
+    assert!(matches!(
+        started.initial_response().await.unwrap(),
+        RuntimeResponse::Yielded { .. }
+    ));
+    session.terminate(cell_id).await.unwrap();
+    let response = session
+        .execute(request("text(load('value')); "))
+        .await
+        .unwrap()
+        .initial_response()
+        .await
+        .unwrap();
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            cell_id: CellId::new("3".to_string()),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "committed".to_string()
+            }],
+            error_text: None,
+        }
+    );
+    session.shutdown().await.unwrap();
 }

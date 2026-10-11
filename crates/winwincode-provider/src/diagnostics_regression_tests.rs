@@ -101,14 +101,14 @@ fn version_10_migration_preserves_native_invocation_attempts_and_adds_no_evidenc
     let store = DeviceProviderStore::open(&directory.0).unwrap();
     store.connection.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; PRAGMA user_version=10;").unwrap();
     store.connection.execute("INSERT INTO exchanges (exchange_id,digest) VALUES ('migration-fixture','fixture-digest')", []).unwrap();
-    store.connection.execute("INSERT INTO model_invocation_attempts VALUES ('migration-fixture',1,'original-adapter-request','failed','original-failure','original-accounting',x'010203')", []).unwrap();
+    store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,failure_chunks,accounting_chunks,response_bytes) VALUES ('migration-fixture',1,'original-adapter-request','failed','original-failure','original-accounting',x'010203')", []).unwrap();
     drop(store);
     let store = DeviceProviderStore::open(&directory.0).unwrap();
     let version: i64 = store
         .connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     let original: (i64, String, String, String, String, Vec<u8>) = store.connection.query_row("SELECT attempt_number,adapter_request_id,state,failure_chunks,accounting_chunks,response_bytes FROM model_invocation_attempts WHERE exchange_id='migration-fixture'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap();
     assert_eq!(
         original,
@@ -154,7 +154,7 @@ fn legacy_version_12_migration_preserves_paid_rows_without_replaying_them() {
         .connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     let old: (i64,String,i64) = store.connection.query_row("SELECT attempt,outcome,http_status FROM model_open_attempts WHERE exchange_id='legacy-fixture'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
     assert_eq!(old, (1, "failed".into(), 503));
     let diagnostic: String = store

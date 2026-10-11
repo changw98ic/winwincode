@@ -1035,11 +1035,9 @@ impl ChatWidget {
         let request_thread_id = match request {
             ResolvedAppServerRequest::ExecApproval { thread_id, .. }
             | ResolvedAppServerRequest::FileChangeApproval { thread_id, .. }
-            | ResolvedAppServerRequest::PermissionsApproval { thread_id, .. } => {
-                Some(thread_id.as_str())
-            }
-            ResolvedAppServerRequest::UserInput { .. }
-            | ResolvedAppServerRequest::McpElicitation { .. } => None,
+            | ResolvedAppServerRequest::PermissionsApproval { thread_id, .. }
+            | ResolvedAppServerRequest::UserInput { thread_id, .. } => Some(thread_id.as_str()),
+            ResolvedAppServerRequest::McpElicitation { .. } => None,
         };
         let removed_deferred = request_thread_id.is_none_or(|request_thread_id| {
             self.thread_id

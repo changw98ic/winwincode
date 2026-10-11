@@ -33,6 +33,8 @@ pub(crate) enum DeviceModelSendOutcome {
 
 pub(crate) struct DeviceModels {
     directory: PathBuf,
+    recovery_store: DeviceProviderStore,
+    recovery_version: Option<i64>,
     pending: HashMap<String, String>,
     sender: mpsc::Sender<(String, Vec<ModelChunkMessage>)>,
     receiver: mpsc::Receiver<(String, Vec<ModelChunkMessage>)>,
@@ -50,8 +52,6 @@ pub(crate) struct DeviceModels {
     session_ids: HashSet<String>,
     /// Worker instance identities that may own Device frames for this process.
     instance_ids: HashSet<String>,
-    /// Foreign exchanges already logged once (avoid 25ms poll spam).
-    logged_foreign: HashSet<String>,
     /// Optional durable non-secret intake log shared with `model_bridge`.
     intake_log: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
@@ -73,7 +73,7 @@ pub(crate) struct IntakeLogLine<'a> {
 
 impl DeviceModels {
     pub(crate) fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
-        DeviceProviderStore::open(directory)?;
+        let recovery_store = DeviceProviderStore::open(directory)?;
         // Managed workers keep durable diagnostics beside Codex runtime. The
         // provider directory itself is shared across Worker sessions on one
         // Device, so only an explicit env path is honoured — no derived fallback.
@@ -81,6 +81,8 @@ impl DeviceModels {
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
             directory: directory.to_owned(),
+            recovery_store,
+            recovery_version: None,
             pending: HashMap::new(),
             sender,
             receiver,
@@ -89,7 +91,6 @@ impl DeviceModels {
             owned_exchanges: HashSet::new(),
             session_ids: HashSet::new(),
             instance_ids: HashSet::new(),
-            logged_foreign: HashSet::new(),
             intake_log,
             #[cfg(any(test, feature = "test-support"))]
             fail_next_start: false,
@@ -103,8 +104,9 @@ impl DeviceModels {
     }
 
     pub(crate) fn note_worker_instance_id(&mut self, worker_instance_id: &str) {
-        if !worker_instance_id.is_empty() {
-            self.instance_ids.insert(worker_instance_id.to_owned());
+        if !worker_instance_id.is_empty() && self.instance_ids.insert(worker_instance_id.to_owned())
+        {
+            self.recovery_version = None;
         }
     }
 
@@ -123,6 +125,7 @@ impl DeviceModels {
     ) {
         self.owned_exchanges
             .insert(open.model_exchange_id.0.clone());
+        self.recovery_version = None;
         let session = &open.session_identity;
         if !session.worker_session_id.0.is_empty() {
             self.session_ids.insert(session.worker_session_id.0.clone());
@@ -134,26 +137,6 @@ impl DeviceModels {
             self.instance_ids
                 .insert(open.lease.worker_instance_id.0.clone());
         }
-    }
-
-    fn exchange_is_recoverable(
-        &self,
-        store: &DeviceProviderStore,
-        exchange_id: &str,
-    ) -> Result<bool, DeviceProviderError> {
-        if self.owned_exchanges.contains(exchange_id) {
-            return Ok(true);
-        }
-        // After a process restart the live owned set is empty until ModelOpen
-        // is replayed. Durable Device frames still carry the session/instance
-        // identity of the Worker that opened the exchange; recover those.
-        let frames = store.replay_model(exchange_id, 1)?;
-        let Some(first) = frames.first() else {
-            return Ok(false);
-        };
-        let session = first.session_identity.worker_session_id.0.as_str();
-        let instance = first.lease.worker_instance_id.0.as_str();
-        Ok(self.session_ids.contains(session) || self.instance_ids.contains(instance))
     }
 
     pub(crate) fn send(
@@ -361,23 +344,25 @@ impl DeviceModels {
     /// verification exchange. Only owned / identity-matching exchanges are
     /// re-queued.
     fn recover_from_durable_store(&mut self) -> Result<(), DeviceProviderError> {
-        let store = DeviceProviderStore::open(&self.directory)?;
-        for exchange_id in store.list_stored_model_exchanges()? {
+        let version = self.recovery_store.model_data_version()?;
+        if self.recovery_version == Some(version) {
+            return Ok(());
+        }
+        let mut exchanges = self.owned_exchanges.clone();
+        for session in &self.session_ids {
+            exchanges.extend(
+                self.recovery_store
+                    .model_exchanges_for_owner(Some(session), None)?,
+            );
+        }
+        for instance in &self.instance_ids {
+            exchanges.extend(
+                self.recovery_store
+                    .model_exchanges_for_owner(None, Some(instance))?,
+            );
+        }
+        for exchange_id in exchanges {
             if self.pending.contains_key(&exchange_id) {
-                continue;
-            }
-            if !self.exchange_is_recoverable(&store, &exchange_id)? {
-                if self.logged_foreign.insert(exchange_id.clone()) {
-                    self.log_intake(IntakeLogLine {
-                        stage: "recover_skip",
-                        code: "FOREIGN_EXCHANGE",
-                        exchange_id: &exchange_id,
-                        sequence: 0,
-                        worker_session_id: "",
-                        thread_id: "",
-                        detail: "shared Device store exchange not owned by this Worker",
-                    });
-                }
                 continue;
             }
             let high_water = self
@@ -385,22 +370,16 @@ impl DeviceModels {
                 .get(&exchange_id)
                 .copied()
                 .unwrap_or(0);
-            let frames = store.replay_model(&exchange_id, high_water.saturating_add(1))?;
+            let frames = self
+                .recovery_store
+                .replay_model(&exchange_id, high_water.saturating_add(1))?;
             if frames.is_empty() {
                 continue;
             }
-            for frame in &frames {
-                let entry = self
-                    .delivered_high_water
-                    .entry(exchange_id.clone())
-                    .or_insert(0);
-                if frame.sequence.0 > *entry {
-                    *entry = frame.sequence.0;
-                }
-            }
-            self.owned_exchanges.insert(exchange_id.clone());
+            self.owned_exchanges.insert(exchange_id);
             self.chunks.extend(frames);
         }
+        self.recovery_version = Some(version);
         Ok(())
     }
 

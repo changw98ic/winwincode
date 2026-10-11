@@ -155,6 +155,29 @@ pub struct ModelCursorSnapshot {
     pub termination: Option<ModelTerminationReason>,
 }
 
+/// Constant-size cursor state used while receiving a live response. Fingerprints
+/// remain in the durable store and are read only for the exact replayed sequence.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelCursorHead {
+    #[serde(skip)]
+    pub(crate) corrupt: bool,
+    pub confirmed_sequence: u64,
+    pub cancellation: Option<ModelCancellationFingerprint>,
+    pub termination: Option<ModelTerminationReason>,
+}
+
+impl From<ModelCursorSnapshot> for ModelCursorHead {
+    fn from(snapshot: ModelCursorSnapshot) -> Self {
+        Self {
+            corrupt: snapshot.validate().is_err(),
+            confirmed_sequence: snapshot.confirmed_sequence,
+            cancellation: snapshot.cancellation,
+            termination: snapshot.termination,
+        }
+    }
+}
+
 /// Durable identity of the exact Worker cancellation written to the cursor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -296,6 +319,31 @@ pub trait ModelCursorStore {
         &mut self,
         stream: &ReplayStreamKey,
     ) -> Result<Option<ModelCursorSnapshot>, Self::Error>;
+
+    /// Loads only the current delivery boundary. Persistent implementations can
+    /// override this to avoid decoding previously delivered fingerprints.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter's read failure.
+    fn load_head(&mut self, stream: &ReplayStreamKey) -> Result<ModelCursorHead, Self::Error> {
+        Ok(self.load(stream)?.unwrap_or_default().into())
+    }
+
+    /// Reads the fingerprint for one exact duplicate, never the full history.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter's read failure.
+    fn load_fingerprint(
+        &mut self,
+        stream: &ReplayStreamKey,
+        sequence: u64,
+    ) -> Result<Option<ModelChunkFingerprint>, Self::Error> {
+        Ok(self
+            .load(stream)?
+            .and_then(|snapshot| snapshot.fingerprint(sequence).cloned()))
+    }
 
     /// Atomically advances one contiguous delivery.
     ///
@@ -566,7 +614,12 @@ where
             &message.model_exchange_id,
             &message.sent_at,
         )?;
-        let snapshot = self.load_cursor(&stream)?;
+        let snapshot = self
+            .store
+            .load(&stream)
+            .map_err(|_| cursor_store_error())?
+            .unwrap_or_default();
+        snapshot.validate().map_err(|_| cursor_corrupt_error())?;
         self.port
             .send(ExecutionPortMessage::ModelOpenMessage(message.clone()))
             .await
@@ -763,7 +816,13 @@ where
             replay_next_sequence: None,
             replay_through_sequence: snapshot.confirmed_sequence,
         };
-        if snapshot.fingerprint(sequence) != Some(&fingerprint) {
+        if self
+            .store
+            .load_fingerprint(&active.stream, sequence)
+            .map_err(|_| cursor_store_error())?
+            .as_ref()
+            != Some(&fingerprint)
+        {
             self.send_ack(
                 &active,
                 acknowledgement,
@@ -1044,25 +1103,32 @@ where
     fn load_cursor(
         &mut self,
         stream: &ReplayStreamKey,
-    ) -> Result<ModelCursorSnapshot, ModelPortClientError> {
-        let snapshot = self
+    ) -> Result<ModelCursorHead, ModelPortClientError> {
+        let head = self
             .store
-            .load(stream)
-            .map_err(|_| cursor_store_error())?
-            .unwrap_or_default();
-        snapshot.validate().map_err(|_| cursor_corrupt_error())?;
-        Ok(snapshot)
+            .load_head(stream)
+            .map_err(|_| cursor_store_error())?;
+        if head.corrupt {
+            return Err(cursor_corrupt_error());
+        }
+        Ok(head)
     }
 
     async fn handle_duplicate(
         &mut self,
         active: &ActiveModelExchange,
-        snapshot: &ModelCursorSnapshot,
+        snapshot: &ModelCursorHead,
         fingerprint: &ModelChunkFingerprint,
         chunk: &ModelChunkMessage,
         metadata: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
-        if snapshot.fingerprint(fingerprint.sequence) != Some(fingerprint) {
+        if self
+            .store
+            .load_fingerprint(&active.stream, fingerprint.sequence)
+            .map_err(|_| cursor_store_error())?
+            .as_ref()
+            != Some(fingerprint)
+        {
             if snapshot.termination.is_none() {
                 self.terminate_sink_once(active, ModelTerminationReason::MessageConflict)
                     .await?;
@@ -1348,7 +1414,7 @@ fn cancellation_fingerprint(
     })
 }
 
-fn valid_cancellation(
+pub(crate) fn valid_cancellation(
     cancellation: &ModelCancellationFingerprint,
     confirmed_sequence: u64,
 ) -> bool {

@@ -676,3 +676,82 @@ async fn failed_core_close_cannot_seal_or_publish_a_final_source_cursor() {
     drop(adapter);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn incremental_core_tool_projection_reads_only_current_fact_and_watermarks() {
+    use crate::storage_mechanism_regression as measure;
+    let mut samples = Vec::new();
+    for size in [100_i64, 200, 400] {
+        let root = std::env::temp_dir().join(format!(
+            "wwc-incremental-core-facts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        let key = binding.run_key.clone();
+        let session = record.kernel_session_id.clone();
+        let now = Instant("2026-08-28T00:00:02.000Z".into());
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        adapter
+            .install_active_run(&key, record, binding, false, false)
+            .unwrap();
+        adapter.bridge.authority().update_now(&now).unwrap();
+        measure::reset();
+        for sequence in 1..=size {
+            let message = adapter
+                .prepare_tool_fact(
+                    &key,
+                    &session,
+                    KernelToolRuntimeEvent {
+                        source_sequence: sequence,
+                        fact_json: format!("{{\"kind\":\"command\",\"fixture\":{sequence}}}"),
+                    },
+                    &now,
+                )
+                .unwrap();
+            adapter.runs.get_mut(&key).unwrap().record.core_tool_pending = Some(message.clone());
+            adapter.persist_run(&key).unwrap();
+            let Some(CodexPoll::RuntimeTrace(retained)) =
+                adapter.retain_pending_tool_fact(&key).unwrap()
+            else {
+                panic!("new Core fact must project")
+            };
+            assert_eq!(*retained, message);
+            assert_eq!(adapter.runs[&key].record.core_tool_cursor, sequence);
+        }
+        let metrics = measure::finish();
+        assert_eq!(metrics.replay_writes, u64::try_from(2 * size).unwrap());
+        assert!(metrics.replay_reads <= u64::try_from(6 * size).unwrap());
+        let identity = RuntimeReplayIdentity {
+            lease: adapter.runs[&key].binding.authority.lease.clone(),
+            worker_session_id: adapter.runs[&key]
+                .binding
+                .authority
+                .worker_session_id
+                .clone(),
+            session_identity: adapter.runs[&key]
+                .binding
+                .authority
+                .session_identity
+                .clone(),
+            codex_thread_id: adapter.runs[&key].binding.canonical_thread_id.clone(),
+        };
+        let history = adapter.store.load(&identity.stream_key()).unwrap().unwrap();
+        assert_eq!(history.events.len(), usize::try_from(size).unwrap());
+        assert_eq!(history.highest_sequence, u64::try_from(size).unwrap());
+        samples.push(metrics.replay_read_bytes);
+        eprintln!(
+            "STORAGE_MECHANISM {}",
+            serde_json::json!({"id":"core-tool-projection","size":size,"metrics":metrics,"retainedFacts":history.events.len()})
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    assert!(samples[1] < 3 * samples[0]);
+    assert!(samples[2] < 3 * samples[1]);
+}

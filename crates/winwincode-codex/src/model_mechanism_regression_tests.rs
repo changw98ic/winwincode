@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[tokio::test]
-#[ignore = "mechanism audit: measured intake and complete-cursor replay cost at 500/1000/2527 frames"]
 #[allow(
     clippy::too_many_lines,
     reason = "Keep actual bridge intake, durable cursor replay, and original growth assertions in one audit fixture"
 )]
 async fn mechanism_actual_model_intake_and_complete_cursor_restore() {
     let mut cases = Vec::new();
-    for count in [500_usize, 1000, 2527] {
+    for count in [100_usize, 200, 400, 2527] {
         let root =
             std::env::temp_dir().join(format!("wwc-model-mechanism-{}", uuid::Uuid::now_v7()));
         let store = AdapterStore::open(&root).unwrap();
@@ -96,15 +95,15 @@ async fn mechanism_actual_model_intake_and_complete_cursor_restore() {
         let intake = crate::audit_model_metrics::take();
         assert_eq!(
             intake.cursor_writes, count as u64,
-            "each actual live frame writes the full cursor"
+            "each actual live frame commits one durable cursor boundary"
         );
         assert!(
-            intake.full_frame_rows_read >= (count * (count - 1) / 2) as u64,
-            "actual accept must read each prior complete frame"
+            intake.full_frame_rows_read <= count as u64,
+            "new contiguous frames must not reread prior response bodies"
         );
         assert!(
-            intake.fingerprint_visits >= (count * (count - 1)) as u64,
-            "actual cursor validation repeatedly visits prior fingerprints"
+            intake.fingerprint_visits <= 8 * count as u64,
+            "delivery validates only constant-size cursor state and exact fingerprints"
         );
         assert_eq!(
             store.model_call_phase("run", "synthetic-call").unwrap(),
@@ -134,10 +133,13 @@ async fn mechanism_actual_model_intake_and_complete_cursor_restore() {
         let restore_ms = restored_at.elapsed().as_secs_f64() * 1000.0;
         let restore = crate::audit_model_metrics::take();
         assert!(
-            restore.cursor_reads >= count as u64,
-            "one detached final restores the whole cursor once per retained frame"
+            restore.cursor_reads <= 4,
+            "one detached final must read a constant-size cursor boundary"
         );
-        assert!(restore.fingerprint_visits >= (count * count) as u64);
+        assert!(restore.fingerprint_visits <= 8);
+        assert!(restore.full_frame_rows_read <= 1);
+        assert!(intake.cursor_json_bytes_written <= count as u64 * 1024);
+        assert!(intake.cursor_json_bytes_read <= count as u64 * 4096);
         let mut replay = bridge.model_port().stream(request).await.unwrap();
         for frame in &frames {
             let text = replay.next().await.unwrap().unwrap();
@@ -169,7 +171,7 @@ async fn mechanism_actual_model_intake_and_complete_cursor_restore() {
     crate::audit_model_metrics::report(
         "actual-model-intake",
         &json!({"schema_version":1,
-        "source_commit":"e994faa55ac2baad964bea5c43a23d919497a9de", "method":"ExecutionPortModelBridge::accept_chunk -> actual AdapterStore and WorkerModelPortClient", "cases":cases}),
+        "historical_formal_batch_baseline_commit":"e994faa55ac2baad964bea5c43a23d919497a9de", "method":"ExecutionPortModelBridge::accept_chunk -> actual AdapterStore and WorkerModelPortClient", "cases":cases}),
     );
 }
 

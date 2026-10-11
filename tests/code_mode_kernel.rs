@@ -860,6 +860,7 @@ fn native_cell_waits_for_user_input_and_rejects_direct_tool_calls() {
                 .resolve_user_input(
                     &session.session_id,
                     question["msg"]["turn_id"].as_str().unwrap().to_owned(),
+                    question["msg"]["call_id"].as_str().unwrap().to_owned(),
                     serde_json::from_value(json!({"answers":{"decision":{"answers":["Proceed"]}}}))
                         .unwrap(),
                 )

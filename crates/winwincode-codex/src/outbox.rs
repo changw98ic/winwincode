@@ -13,6 +13,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{ModelExchangeId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::{
+    execution_identity::retained_lease_matches_current,
     generated::{
         ExecutionPortErrorCode, ExecutionPortMessage, JobOutcomeAckMessageStatus,
         JobOutcomeMessage, LeaseWriteStatus, ModelAckMessage, ModelOpenMessage,
@@ -197,6 +198,9 @@ impl ExecutionOutbox {
                 ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+        if let ExecutionPortMessage::RuntimeEventMessage(event) = message {
+            transaction.execute("UPDATE execution_outbox SET runtime_stream_key=?2,runtime_sequence=?3 WHERE delivery_id=?1",params![metadata.delivery_id,runtime_event_stream_key(event).as_str(),event.event.sequence.0]).map_err(|_|AdapterStoreError::Unavailable)?;
+        }
         if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message {
             if heartbeat.heartbeat_sequence.0 <= 0 {
                 return Err(AdapterStoreError::Conflict);
@@ -306,14 +310,13 @@ impl ExecutionOutbox {
         let connection = self.store.lock()?;
         let mut statement = connection.prepare(
             "SELECT delivery_id, frame_json FROM execution_outbox
-             WHERE (state = ?1 OR acknowledgement_required = 1)
-               AND position > COALESCE((SELECT position FROM execution_outbox WHERE delivery_id = ?2), 0)
-             ORDER BY position LIMIT ?3",
+             WHERE (state = 'pending' OR acknowledgement_required = 1)
+               AND position > COALESCE((SELECT position FROM execution_outbox WHERE delivery_id = ?1), 0)
+             ORDER BY position LIMIT ?2",
         ).map_err(|_| AdapterStoreError::Unavailable)?;
         let rows = statement
             .query_map(
                 params![
-                    PENDING,
                     after_delivery,
                     i64::try_from(limit).map_err(|_| AdapterStoreError::Conflict)?
                 ],
@@ -508,24 +511,29 @@ impl ExecutionOutbox {
         let connection = store.lock()?;
         let mut statement = connection
             .prepare(
-                "SELECT frame_json FROM execution_outbox
-                 WHERE family = ?1 ORDER BY position",
+                "SELECT frame_digest,frame_json FROM execution_outbox
+                 WHERE family='model_open' AND json_extract(frame_json,'$.modelExchangeId')=?1 ORDER BY position",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let rows = statement
-            .query_map(params![Family::ModelOpen.as_str()], |row| {
-                row.get::<_, Vec<u8>>(0)
+            .query_map(params![model_exchange_id.0], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let mut retained = None;
         for row in rows {
-            let frame = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            let (expected_digest, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            #[cfg(test)]
+            crate::audit_model_metrics::record_model_open_read(frame.len());
+            if digest(&frame) != expected_digest {
+                return Err(AdapterStoreError::Corrupt);
+            }
             let message: ExecutionPortMessage =
                 serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
             let ExecutionPortMessage::ModelOpenMessage(open) = message else {
                 return Err(AdapterStoreError::Corrupt);
             };
-            if open.model_exchange_id == *model_exchange_id && retained.replace(open).is_some() {
+            if open.model_exchange_id != *model_exchange_id || retained.replace(open).is_some() {
                 return Err(AdapterStoreError::Corrupt);
             }
         }
@@ -584,25 +592,33 @@ impl ExecutionOutbox {
         let Some((family, correlation_key)) = response_target(acknowledgement)? else {
             return Err(AdapterStoreError::Conflict);
         };
-        let proof_key = response_proof_key(acknowledgement, &correlation_key);
         let response_digest = response_replay_digest(acknowledgement)?;
         self.store.transaction(|transaction| {
+            let original_key = interaction_response_source_key(transaction, acknowledgement, family, &correlation_key)?;
+            let source_key = original_key.as_deref().unwrap_or(&correlation_key);
+            let proof_key = response_proof_key(acknowledgement, source_key);
             let proof: Option<String> = transaction.query_row(
                 "SELECT response_digest FROM execution_response_receipt WHERE family = ?1 AND correlation_key = ?2",
                 params![family.as_str(), proof_key], |row| row.get(0))
                 .optional().map_err(|_| AdapterStoreError::Unavailable)?;
-            if proof.as_ref().is_some_and(|digest| digest != &response_digest) {
+            if proof.as_ref().is_some_and(|digest| digest != &response_digest)
+                || (source_key != correlation_key && proof.is_none()) {
+                // A source/request comparison does not authenticate renewal.
+                // Only exact durable domain-acceptance proof permits a newer stamp.
                 return Err(AdapterStoreError::Conflict);
             }
-            let changed = if matches!(family, Family::ModelOpen) {
+            // Input response acceptance consumes transport authority, while the
+            // complete immutable prompt remains authority for exact response
+            // replay and the remaining questions of the same Core input call.
+            let changed = if matches!(family, Family::ModelOpen | Family::InputRequest | Family::ApprovalRequest) {
                 transaction.execute(
                     "UPDATE execution_outbox SET acknowledgement_required = 0, state = ?3
                      WHERE family = ?1 AND correlation_key = ?2 AND acknowledgement_required = 1",
-                    params![family.as_str(), correlation_key, SENT_ATTEMPT])
+                    params![family.as_str(), source_key, SENT_ATTEMPT])
             } else {
                 transaction.execute(
                     "DELETE FROM execution_outbox WHERE family = ?1 AND correlation_key = ?2
-                     AND acknowledgement_required = 1", params![family.as_str(), correlation_key])
+                     AND acknowledgement_required = 1", params![family.as_str(), source_key])
             }.map_err(|_| AdapterStoreError::Unavailable)?;
             if changed == 1 {
                 save_response_proof(transaction, family, &proof_key, &response_digest)?;
@@ -645,10 +661,32 @@ impl ExecutionOutbox {
             return Err(AdapterStoreError::Conflict);
         }
         let (family, key) = response_target(response)?.ok_or(AdapterStoreError::Conflict)?;
-        let key = response_proof_key(response, &key);
         let digest = response_replay_digest(response)?;
-        self.store
-            .transaction(|transaction| save_response_proof(transaction, family, &key, &digest))
+        self.store.transaction(|transaction| {
+            let source = interaction_response_source_key(transaction, response, family, &key)?;
+            let canonical_key = response_proof_key(response, source.as_deref().unwrap_or(&key));
+            if matches!(family, Family::InputRequest | Family::ApprovalRequest) && source.is_none() {
+                // A historical compacted interaction can only reuse its existing
+                // exact proof. Missing original permission cannot create new proof.
+                let existing: Option<String> = transaction.query_row(
+                    "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                    params![family.as_str(), canonical_key], |row| row.get(0),
+                ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+                return if existing.as_deref() == Some(digest.as_str()) { Ok(()) } else { Err(AdapterStoreError::Conflict) };
+            }
+            if source.as_ref().is_some_and(|source| source != &key) {
+                let previous_raw: Option<String> = transaction.query_row(
+                    "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                    params![family.as_str(), key], |row| row.get(0),
+                ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+                if previous_raw.is_some() {
+                    // Existing newer-stamp legacy receipts need an explicit
+                    // migration; never invent a second receipt/source grant.
+                    return Err(AdapterStoreError::Conflict);
+                }
+            }
+            save_response_proof(transaction, family, &canonical_key, &digest)
+        })
     }
 
     /// Compacts accepted runtime rows or makes exact gap frames pending again.
@@ -665,8 +703,8 @@ impl ExecutionOutbox {
                 let ack_sequence = u64::try_from(receipt.ack_sequence.0)
                     .map_err(|_| AdapterStoreError::Corrupt)?;
                 self.store.transaction(|transaction| {
-                    let rows = runtime_rows(transaction)?;
                     let stream = runtime_ack_stream_key(acknowledgement);
+                    let rows = runtime_rows(transaction, &stream, Some(ack_sequence))?;
                     for row in rows {
                         if runtime_event_stream_key(&row.event) == stream
                             && event_sequence(&row.event)? <= ack_sequence
@@ -702,7 +740,7 @@ impl ExecutionOutbox {
                     &digest(&bytes),
                 )?;
                 let stream = runtime_ack_stream_key(acknowledgement);
-                for row in runtime_rows(transaction)? {
+                for row in runtime_rows(transaction, &stream, None)? {
                     if runtime_event_stream_key(&row.event) == stream {
                         record_rejected_in_transaction(transaction, &row.delivery_id)?;
                     }
@@ -1052,6 +1090,98 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
         .map_err(|_| AdapterStoreError::Corrupt)
 }
 
+/// Reads the first exact interaction source by canonical request message id.
+/// The full original lease remains in its correlation key; no expiry is dropped.
+fn interaction_response_source_key(
+    transaction: &Transaction<'_>,
+    response: &ExecutionPortMessage,
+    family: Family,
+    raw_key: &str,
+) -> Result<Option<String>, AdapterStoreError> {
+    let (id, namespace): (&str, &[u8]) = match response {
+        ExecutionPortMessage::InputResponseMessage(value) => (
+            &value.input_request_id.0,
+            b"winwincode-kernel-input-message.v1",
+        ),
+        ExecutionPortMessage::ApprovalDecisionMessage(value) => (
+            &value.approval_id.0,
+            b"winwincode-kernel-approval-message.v1",
+        ),
+        _ => return Ok(None),
+    };
+    let message_id = crate::adapter::canonical_parts_id("xmsg", namespace, &[id.as_bytes()]);
+    let canonical: Option<(String, String, String, String, Vec<u8>)> = transaction.query_row(
+        "SELECT family, delivery_id, correlation_key, frame_digest, frame_json FROM execution_outbox
+         WHERE delivery_id=?1",
+        params![message_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    // An existing canonical row is authoritative even if its family was
+    // corrupted. Never hide it with a family filter and fall back to a legacy row.
+    if canonical
+        .as_ref()
+        .is_some_and(|row| row.0 != family.as_str())
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    // Same-stamp legacy requests keep their exact full-lease identity. This
+    // lookup never authorizes an extended stamp for a noncanonical message id.
+    let exact: Option<(String, String, String, String, Vec<u8>)> = transaction.query_row(
+        "SELECT family, delivery_id, correlation_key, frame_digest, frame_json FROM execution_outbox
+         WHERE family=?1 AND correlation_key=?2",
+        params![family.as_str(), raw_key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    if canonical
+        .as_ref()
+        .zip(exact.as_ref())
+        .is_some_and(|(first, second)| first.1 != second.1)
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    let Some((source_family, delivery_id, source_key, frame_digest, frame)) = canonical.or(exact)
+    else {
+        return Ok(None);
+    };
+    if digest(&frame) != frame_digest {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let original = decode_delivery(delivery_id.clone(), &frame)?.message;
+    let metadata = metadata(&original, &frame)?;
+    if metadata.delivery_id != delivery_id
+        || metadata.family != source_family
+        || source_family != family.as_str()
+        || metadata.correlation_key != source_key
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let bound = match (&original, response) {
+        (
+            ExecutionPortMessage::InputRequestMessage(request),
+            ExecutionPortMessage::InputResponseMessage(response),
+        ) => {
+            request.input_request_id == response.input_request_id
+                && request.worker_session_id == response.worker_session_id
+                && request.session_identity == response.session_identity
+                && retained_lease_matches_current(&request.lease, &response.lease)
+        }
+        (
+            ExecutionPortMessage::ApprovalRequestMessage(request),
+            ExecutionPortMessage::ApprovalDecisionMessage(response),
+        ) => {
+            request.approval_id == response.approval_id
+                && request.worker_session_id == response.worker_session_id
+                && request.session_identity == response.session_identity
+                && retained_lease_matches_current(&request.lease, &response.lease)
+        }
+        _ => false,
+    };
+    if !bound {
+        return Err(AdapterStoreError::Conflict);
+    }
+    Ok(Some(source_key))
+}
+
 fn response_proof_key(message: &ExecutionPortMessage, correlation_key: &str) -> String {
     if matches!(message, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack))
     {
@@ -1295,27 +1425,54 @@ struct RuntimeRow {
     event: RuntimeEventMessage,
 }
 
-fn runtime_rows(transaction: &Transaction<'_>) -> Result<Vec<RuntimeRow>, AdapterStoreError> {
+fn runtime_rows(
+    transaction: &Transaction<'_>,
+    stream: &winwincode_execution_port::replay::ReplayStreamKey,
+    through: Option<u64>,
+) -> Result<Vec<RuntimeRow>, AdapterStoreError> {
+    let through = through
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| AdapterStoreError::Corrupt)?
+        .unwrap_or(i64::MAX);
     let mut statement = transaction
         .prepare(
-            "SELECT delivery_id, frame_json FROM execution_outbox
-             WHERE family = ?1 ORDER BY position",
+            "SELECT delivery_id,frame_digest,runtime_sequence,frame_json FROM execution_outbox
+             WHERE family = ?1 AND runtime_stream_key = ?2 AND runtime_sequence<=?3 ORDER BY runtime_sequence,position",
         )
         .map_err(|_| AdapterStoreError::Unavailable)?;
     let rows = statement
-        .query_map(params![Family::Runtime.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
+        .query_map(
+            params![Family::Runtime.as_str(), stream.as_str(), through],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
         .map_err(|_| AdapterStoreError::Unavailable)?;
     rows.map(|row| {
-        let (delivery_id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+        let (delivery_id, expected_digest, sequence, frame) =
+            row.map_err(|_| AdapterStoreError::Unavailable)?;
         #[cfg(test)]
         crate::storage_mechanism_regression::runtime_row(frame.len());
+        if digest(&frame) != expected_digest {
+            return Err(AdapterStoreError::Corrupt);
+        }
         let message: ExecutionPortMessage =
             serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
         let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
             return Err(AdapterStoreError::Corrupt);
         };
+        if runtime_event_stream_key(&event) != *stream
+            || event.event.sequence.0 != sequence
+            || sequence <= 0
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
         Ok(RuntimeRow { delivery_id, event })
     })
     .collect()
@@ -1500,6 +1657,377 @@ mod tests {
             }
             drop(outbox);
             std::fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn acknowledged_input_retains_original_prompt_without_replaying_transport() {
+        let root = test_root("input-original-prompt-after-ack");
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let original = fixture("input.request");
+        let retained = outbox.retain(&original).unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        outbox.record_sent(&retained.delivery_id).unwrap();
+        let response = fixture("input.response");
+        outbox.acknowledge_response(&response).unwrap();
+        assert!(outbox.pending().unwrap().is_empty());
+        let saved = outbox
+            .retained_interaction(&retained.delivery_id)
+            .unwrap()
+            .expect("ACK must retain the exact original input permission");
+        assert_eq!(serde_json::to_vec(&saved).unwrap(), original_bytes);
+        assert_eq!(
+            outbox.requeue(&retained.delivery_id),
+            Err(AdapterStoreError::Conflict)
+        );
+        outbox.acknowledge_response(&response).unwrap();
+        assert_eq!(
+            outbox
+                .store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM execution_response_receipt WHERE family='input_request'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(outbox);
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        assert!(outbox.pending().unwrap().is_empty());
+        assert!(outbox.pending_batch(None, 10).unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_vec(
+                &outbox
+                    .retained_interaction(&retained.delivery_id)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            original_bytes
+        );
+        outbox.acknowledge_response(&response).unwrap();
+        let mut changed = response.clone();
+        let ExecutionPortMessage::InputResponseMessage(value) = &mut changed else {
+            panic!("input response fixture")
+        };
+        value.value.as_mut().unwrap().value.push_str("-changed");
+        assert_eq!(
+            outbox.acknowledge_response(&changed),
+            Err(AdapterStoreError::Conflict)
+        );
+        let mut changed_request = original;
+        let ExecutionPortMessage::InputRequestMessage(value) = &mut changed_request else {
+            panic!("input request fixture")
+        };
+        value.prompt.push_str("-changed");
+        assert_eq!(
+            outbox.retain(&changed_request),
+            Err(AdapterStoreError::Conflict)
+        );
+        assert_eq!(
+            serde_json::to_vec(
+                &outbox
+                    .retained_interaction(&retained.delivery_id)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            original_bytes
+        );
+        assert!(outbox.pending().unwrap().is_empty());
+        drop(outbox);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // These store primitives do not authenticate a renewal themselves. The
+    // real Worker guards separately prove domain renew/accept before this proof.
+    fn renewed_interaction_pair(
+        request_kind: &str,
+        response_kind: &str,
+    ) -> (ExecutionPortMessage, ExecutionPortMessage) {
+        let mut request = serde_json::to_value(fixture(request_kind)).unwrap();
+        let (id_key, namespace): (&str, &[u8]) = if request_kind == "input.request" {
+            ("inputRequestId", b"winwincode-kernel-input-message.v1")
+        } else {
+            ("approvalId", b"winwincode-kernel-approval-message.v1")
+        };
+        request["messageId"] = serde_json::json!(crate::adapter::canonical_parts_id(
+            "xmsg",
+            namespace,
+            &[request[id_key].as_str().unwrap().as_bytes()],
+        ));
+        let mut response = serde_json::to_value(fixture(response_kind)).unwrap();
+        response["lease"]["expiresAt"] = serde_json::json!("2026-08-24T12:20:00.000Z");
+        (
+            serde_json::from_value(request).unwrap(),
+            serde_json::from_value(response).unwrap(),
+        )
+    }
+
+    fn interaction_receipt_count(outbox: &ExecutionOutbox) -> i64 {
+        outbox
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM execution_response_receipt",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn renewed_interaction_ack_requires_exact_proof_and_survives_real_reopen() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("renewed-interaction-exact-source-proof");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+            let original_bytes = serde_json::to_vec(&request).unwrap();
+            let delivery = outbox.retain(&request).unwrap();
+            let source_key: String = outbox
+                .store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT correlation_key FROM execution_outbox WHERE delivery_id=?1",
+                    [&delivery.delivery_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let (family, raw_key) = super::response_target(&response).unwrap().unwrap();
+            assert_ne!(
+                source_key, raw_key,
+                "renewed expiry remains part of full raw identity"
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(outbox.pending().unwrap(), vec![delivery.clone()]);
+            assert_eq!(interaction_receipt_count(&outbox), 0);
+            outbox.record_applied_response(&response).unwrap();
+            outbox.acknowledge_response(&response).unwrap();
+            assert_eq!(outbox.store.lock().unwrap().query_row(
+                "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                rusqlite::params![family.as_str(), source_key], |row| row.get::<_, String>(0),
+            ).unwrap(), super::response_replay_digest(&response).unwrap());
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert!(outbox.pending().unwrap().is_empty());
+            assert_eq!(
+                serde_json::to_vec(
+                    &outbox
+                        .retained_interaction(&delivery.delivery_id)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                original_bytes
+            );
+            drop(outbox);
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            assert!(outbox.pending().unwrap().is_empty());
+            assert!(outbox.pending_batch(None, 10).unwrap().is_empty());
+            assert_eq!(
+                outbox.requeue(&delivery.delivery_id),
+                Err(AdapterStoreError::Conflict)
+            );
+            outbox.record_applied_response(&response).unwrap();
+            outbox.acknowledge_response(&response).unwrap();
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert_eq!(
+                serde_json::to_vec(
+                    &outbox
+                        .retained_interaction(&delivery.delivery_id)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                original_bytes
+            );
+            let mut changed = serde_json::to_value(&response).unwrap();
+            if response_kind == "input.response" {
+                changed["value"]["value"] = serde_json::json!("changed-after-acceptance");
+            } else {
+                changed["decision"] = serde_json::json!("denied");
+            }
+            let changed: ExecutionPortMessage = serde_json::from_value(changed).unwrap();
+            assert_eq!(
+                outbox.record_applied_response(&changed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&changed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert!(outbox.pending().unwrap().is_empty());
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn renewed_interaction_source_rejects_foreign_attempt_fence_session_and_thread() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("renewed-interaction-foreign-identity");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+            let delivery = outbox.retain(&request).unwrap();
+            for field in 0..6 {
+                let mut foreign = serde_json::to_value(&response).unwrap();
+                match field {
+                    0 => foreign["lease"]["attempt"] = serde_json::json!(2),
+                    1 => foreign["lease"]["fencingToken"] = serde_json::json!("43"),
+                    2 => {
+                        foreign["workerSessionId"] =
+                            serde_json::json!(format!("wsn_{}", "Y".repeat(26)));
+                    }
+                    3 => {
+                        foreign["sessionIdentity"]["codexThreadId"] =
+                            serde_json::json!(format!("cdx_{}", "Y".repeat(26)));
+                    }
+                    4 => {
+                        foreign["lease"]["workerInstanceId"] =
+                            serde_json::json!(format!("wki_{}", "Y".repeat(26)));
+                    }
+                    _ => {
+                        foreign["lease"]["expiresAt"] =
+                            serde_json::json!("2026-08-24T12:09:00.000Z");
+                    }
+                }
+                let foreign: ExecutionPortMessage = serde_json::from_value(foreign).unwrap();
+                assert_eq!(
+                    outbox.record_applied_response(&foreign),
+                    Err(AdapterStoreError::Conflict)
+                );
+                assert_eq!(
+                    outbox.acknowledge_response(&foreign),
+                    Err(AdapterStoreError::Conflict)
+                );
+                assert_eq!(interaction_receipt_count(&outbox), 0);
+                assert_eq!(outbox.pending().unwrap(), vec![delivery.clone()]);
+            }
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn canonical_interaction_corruption_cannot_hide_behind_an_exact_legacy_source() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            for corruption in ["family", "frame_digest"] {
+                let root = test_root("interaction-canonical-corruption");
+                let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+                let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+                let canonical = outbox.retain(&request).unwrap();
+                let mut legacy = serde_json::to_value(&request).unwrap();
+                legacy["messageId"] = serde_json::json!(format!("xmsg_{}", "Z".repeat(26)));
+                legacy["lease"]["expiresAt"] = serde_json::json!("2026-08-24T12:20:00.000Z");
+                let legacy: ExecutionPortMessage = serde_json::from_value(legacy).unwrap();
+                outbox.retain(&legacy).unwrap();
+                let expected = if corruption == "family" {
+                    outbox
+                        .store
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE execution_outbox SET family='model_open' WHERE delivery_id=?1",
+                            [&canonical.delivery_id],
+                        )
+                        .unwrap();
+                    AdapterStoreError::Conflict
+                } else {
+                    outbox.store.lock().unwrap().execute(
+                        "UPDATE execution_outbox SET frame_digest='sha256:corrupt' WHERE delivery_id=?1",
+                        [&canonical.delivery_id],
+                    ).unwrap();
+                    // The distinct exact legacy row makes the source ambiguous
+                    // before frame-digest validation. Refuse it as Conflict.
+                    AdapterStoreError::Conflict
+                };
+                assert_eq!(outbox.record_applied_response(&response), Err(expected));
+                assert_eq!(outbox.acknowledge_response(&response), Err(expected));
+                assert_eq!(interaction_receipt_count(&outbox), 0);
+                assert_eq!(outbox.store.lock().unwrap().query_row(
+                    "SELECT COUNT(*) FROM execution_outbox WHERE acknowledgement_required=1",
+                    [], |row| row.get::<_, i64>(0),
+                ).unwrap(), 2);
+                drop(outbox);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn missing_interaction_source_can_only_reuse_an_existing_exact_receipt() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("interaction-missing-source-exact-legacy-proof");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, renewed) = renewed_interaction_pair(request_kind, response_kind);
+            let original_response = fixture(response_kind);
+            assert_eq!(
+                outbox.record_applied_response(&original_response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&original_response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 0);
+            let source = outbox.retain(&request).unwrap();
+            outbox.record_applied_response(&original_response).unwrap();
+            outbox.acknowledge_response(&original_response).unwrap();
+            outbox
+                .store
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM execution_outbox WHERE delivery_id=?1",
+                    [&source.delivery_id],
+                )
+                .unwrap();
+            drop(outbox);
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            outbox.record_applied_response(&original_response).unwrap();
+            outbox.acknowledge_response(&original_response).unwrap();
+            assert_eq!(
+                outbox.record_applied_response(&renewed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&renewed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert_eq!(
+                outbox
+                    .store
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM execution_outbox", [], |row| row
+                        .get::<_, i64>(0),)
+                    .unwrap(),
+                0,
+                "old compacted permission must not be reconstructed"
+            );
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 

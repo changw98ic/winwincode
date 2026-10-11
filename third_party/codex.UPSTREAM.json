@@ -105,6 +105,11 @@
     "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
     "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
     "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
-    "upstream/patches/codex/0099-task-state-compaction-budget.patch"
+    "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+    "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+    "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+    "upstream/patches/codex/0102-exact-input-call-routing.patch",
+    "upstream/patches/codex/0103-private-input-recovery-store.patch",
+    "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch"
   ]
 }

@@ -9,6 +9,7 @@ use crate::outbox::ExecutionOutbox;
 use crate::{
     WorkerExecutionPort,
     action_bridge::ExecutionPortActionGate,
+    authority_clock::{AuthorityClock, AuthorityClockError, canonical_instant},
     model_port_client::{
         ModelAuthorityRejection, ModelChunkDelivery, ModelChunkDisposition, ModelChunkSink,
         ModelCursorStore, ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
@@ -61,10 +62,8 @@ pub(crate) struct SharedAuthoritySource {
     /// Worker-owned durable backing for exact root/child lineage.  Tests that
     /// exercise only the protocol source can use the default in-memory mode.
     store: Option<AdapterStore>,
-    /// Latest Worker-observed trusted clock.  The open frame keeps its
-    /// original transport timestamp for replay, while this value prevents a
-    /// stale timestamp from being used to authorize a later Provider call.
-    trusted_now: Arc<RwLock<Option<Instant>>>,
+    /// Authority time keeps advancing when the owner has no new clock sample.
+    authority_clock: AuthorityClock,
 }
 
 impl SharedAuthoritySource {
@@ -74,24 +73,19 @@ impl SharedAuthoritySource {
     }
 
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), BridgeError> {
-        let mut trusted_now = self
-            .trusted_now
-            .write()
-            .map_err(|_| BridgeError::Unavailable)?;
-        if trusted_now
-            .as_ref()
-            .is_none_or(|current| current.0.as_str() < now.0.as_str())
-        {
-            *trusted_now = Some(now.clone());
-        }
-        Ok(())
+        self.authority_clock
+            .observe(now)
+            .map_err(|error| match error {
+                AuthorityClockError::Unavailable => BridgeError::Unavailable,
+                AuthorityClockError::InvalidTime => BridgeError::StaleAuthority,
+            })
     }
 
     pub(crate) fn observed_now(&self) -> Result<Option<Instant>, BridgeError> {
-        self.trusted_now
-            .read()
-            .map(|now| now.clone())
-            .map_err(|_| BridgeError::Unavailable)
+        self.authority_clock.now().map_err(|error| match error {
+            AuthorityClockError::Unavailable => BridgeError::Unavailable,
+            AuthorityClockError::InvalidTime => BridgeError::StaleAuthority,
+        })
     }
 
     pub(crate) fn install(
@@ -335,17 +329,7 @@ impl SharedAuthoritySource {
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection> {
         let expected = self.original_request_authority(authority, open)?;
-        let observed = self
-            .observed_now()
-            .map_err(|_| ModelAuthorityRejection::Unavailable)?;
-        let effective = observed
-            .as_ref()
-            .filter(|observed| observed.0 > now.0)
-            .unwrap_or(now);
-        if effective.0 < expected.lease.issued_at.0 || effective.0 >= expected.lease.expires_at.0 {
-            return Err(ModelAuthorityRejection::ExpiredLease);
-        }
-        self.validate_current(&expected, effective)
+        self.validate_current(&expected, now)
     }
 }
 
@@ -415,12 +399,14 @@ impl ModelLeaseAuthoritySource for SharedAuthoritySource {
         {
             return Err(ModelAuthorityRejection::StaleLease);
         }
+        self.update_now(now).map_err(|error| match error {
+            BridgeError::Unavailable => ModelAuthorityRejection::Unavailable,
+            _ => ModelAuthorityRejection::StaleLease,
+        })?;
         let trusted_now = self
-            .trusted_now
-            .read()
+            .observed_now()
             .map_err(|_| ModelAuthorityRejection::Unavailable)?
-            .clone()
-            .unwrap_or_else(|| now.clone());
+            .ok_or(ModelAuthorityRejection::Unavailable)?;
         if trusted_now.0 < authority.lease.issued_at.0
             || trusted_now.0 >= authority.lease.expires_at.0
         {
@@ -779,7 +765,7 @@ impl ExecutionPortModelBridge {
     ) -> Result<usize, ModelPortFailure> {
         let run = self
             .ordinal_store
-            .load_run::<serde_json::Value>(run_key)
+            .load_run_header::<serde_json::Value>(run_key)
             .map_err(model_store_failure)?
             .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
         crate::task_handoff::context_snapshot(&run)
@@ -860,7 +846,8 @@ impl ExecutionPortModelBridge {
         Ok(())
     }
 
-    /// Marks the model call provider-final in the durable ledger.
+    /// Closes the provider-side lifecycle in the durable ledger. A local
+    /// cancellation has a terminal cursor without a complete response seal.
     fn mark_provider_final(
         &self,
         owner: &ModelExchangeOwner,
@@ -877,21 +864,6 @@ impl ExecutionPortModelBridge {
                 crate::store::AdapterStoreError::Unavailable
                 | crate::store::AdapterStoreError::Corrupt => BridgeError::Unavailable,
             })
-    }
-
-    /// Classifies an incoming frame against the durable ledger: an exact
-    /// retained duplicate, the next contiguous Provider frame, or neither.
-    fn frame_position(
-        persisted_frames: &[ModelChunkMessage],
-        chunk: &ModelChunkMessage,
-    ) -> (bool, bool) {
-        let sequence = usize::try_from(chunk.sequence.0).ok();
-        let expected = persisted_frames.len().saturating_add(1);
-        let exact_duplicate = sequence
-            .and_then(|sequence| sequence.checked_sub(1))
-            .and_then(|index| persisted_frames.get(index))
-            .is_some_and(|existing| existing == chunk);
-        (exact_duplicate, sequence == Some(expected))
     }
 
     /// Retains a contiguous Provider frame and forwards any payload text to a
@@ -1002,12 +974,11 @@ impl ExecutionPortModelBridge {
         // the canonical Gap/Conflict acknowledgement instead of poisoning
         // the durable response sequence.
         let mut client = self.client.lock().await;
-        let persisted_frames = self
+        let (mut exact_duplicate, contiguous_new, provider_final) = self
             .ordinal_store
-            .load_model_call_frames(&owner.run_key, &owner.model_call_id)
+            .model_call_frame_position(&owner.run_key, &owner.model_call_id, chunk)
             .map_err(model_frame_store_error)?;
-        let (mut exact_duplicate, contiguous_new) = Self::frame_position(&persisted_frames, chunk);
-        if persisted_frames.last().is_some_and(|frame| frame.is_final) && !exact_duplicate {
+        if provider_final && !exact_duplicate {
             return Err(BridgeError::Conflict);
         }
         let detached_delivery = !process_exchange && contiguous_new && !exact_duplicate;
@@ -1128,42 +1099,41 @@ impl ExecutionPortModelBridge {
         self.ordinal_store
             .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
             .map_err(model_frame_store_error)?;
+        let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
+            .map_err(|_| BridgeError::InvalidPayload)?;
+        let mut store = self.ordinal_store.clone();
+        let head = ModelCursorStore::load_head(&mut store, &mapped.stream)
+            .map_err(model_frame_store_error)?;
         let frames = self
             .ordinal_store
-            .load_model_call_frames(&owner.run_key, &owner.model_call_id)
+            .load_model_call_frames_after(
+                &owner.run_key,
+                &owner.model_call_id,
+                head.confirmed_sequence,
+            )
             .map_err(model_frame_store_error)?;
-        let mut store = self.ordinal_store.clone();
+        let mut confirmed = head.confirmed_sequence;
         for frame in frames {
             let mapped =
                 frame_from_message(&ExecutionPortMessage::ModelChunkMessage(frame.clone()))
                     .map_err(|_| BridgeError::InvalidPayload)?;
-            let snapshot = ModelCursorStore::load(&mut store, &mapped.stream)
-                .map_err(model_frame_store_error)?
-                .unwrap_or_default();
-            snapshot.validate().map_err(|_| BridgeError::Conflict)?;
-            let sequence =
-                u64::try_from(frame.sequence.0).map_err(|_| BridgeError::InvalidPayload)?;
             let fingerprint = crate::model_port_client::ModelChunkFingerprint {
-                sequence,
+                sequence: u64::try_from(frame.sequence.0)
+                    .map_err(|_| BridgeError::InvalidPayload)?,
                 message_id: frame.message_id.clone(),
                 digest: winwincode_domain::Sha256Digest(mapped.frame.digest),
                 is_final: frame.is_final,
                 has_error: frame.error.is_some(),
             };
-            if sequence <= snapshot.confirmed_sequence {
-                if snapshot.fingerprint(sequence) != Some(&fingerprint) {
-                    return Err(BridgeError::Conflict);
-                }
-            } else {
-                ModelCursorStore::record_delivery(
-                    &mut store,
-                    &mapped.stream,
-                    snapshot.confirmed_sequence,
-                    &fingerprint,
-                    chunk_termination(&frame),
-                )
-                .map_err(model_frame_store_error)?;
-            }
+            ModelCursorStore::record_delivery(
+                &mut store,
+                &mapped.stream,
+                confirmed,
+                &fingerprint,
+                chunk_termination(&frame),
+            )
+            .map_err(model_frame_store_error)?;
+            confirmed = fingerprint.sequence;
         }
         Ok(())
     }
@@ -1175,6 +1145,9 @@ impl ExecutionPortModelBridge {
         received_at: &Instant,
     ) -> Result<(), BridgeError> {
         let jev_complete = self.record_primary_model_completion(owner, chunk, received_at);
+        self.ordinal_store
+            .seal_model_call_response(&owner.run_key, &owner.model_call_id)
+            .map_err(model_frame_store_error)?;
         self.mark_provider_final(owner, jev_complete)
     }
 
@@ -1628,6 +1601,14 @@ impl ExecutionPortModelBridge {
         self.prepare_member_stream(request, None)
     }
 
+    #[cfg(test)]
+    pub(crate) fn prepare_open_stream_for_storage_measurement(
+        &self,
+        request: &ModelPortRequest,
+    ) -> Result<(), ModelPortFailure> {
+        self.prepare_member_stream(request, None).map(drop)
+    }
+
     pub(crate) fn prepare_host_payload(
         &self,
         request: &ModelPortRequest,
@@ -1697,7 +1678,7 @@ impl ExecutionPortModelBridge {
         // default. Root and child requests use the same sealed run settings.
         let stored = self
             .ordinal_store
-            .load_run::<serde_json::Value>(&binding.run_key)
+            .load_run_header::<serde_json::Value>(&binding.run_key)
             .map_err(model_store_failure)?;
         if let Some(member) = fusion_member {
             validate_fusion_model_selection(&envelope, stored.as_ref(), member)?;
@@ -1764,10 +1745,16 @@ impl ExecutionPortModelBridge {
                 &self.authority,
             )?));
         }
+        // Retained ModelOpen identity includes the first frozen host context.
+        // The admission ledger above remains bound to the raw Core semantics.
+        let prepared_payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        let prepared_request_digest =
+            model_open_request_digest(&prepared_payload).map_err(model_failure)?;
         Ok(OpenStreamPreparation::Open(Box::new(OpenStreamExchange {
             binding,
             payload_bytes,
-            request_digest: model_call_digest(&envelope.request).map_err(model_failure)?,
+            request_digest: prepared_request_digest,
             model_call_id,
             exchange_identity,
             exchange,
@@ -2051,9 +2038,11 @@ fn model_call_digest(
 fn model_open_request_digest(
     payload: &serde_json::Value,
 ) -> Result<winwincode_domain::Sha256Digest, BridgeError> {
-    let envelope: KernelRequestEnvelope =
-        serde_json::from_value(payload.clone()).map_err(|_| BridgeError::InvalidPayload)?;
-    model_call_digest(&envelope.request)
+    let request = payload
+        .get("request")
+        .filter(|request| request.is_object())
+        .ok_or(BridgeError::InvalidPayload)?;
+    model_call_digest(request)
 }
 
 /// A same-root extension preserves child aliases and pending operations.
@@ -2444,7 +2433,7 @@ pub(crate) fn log_model_intake_failure(chunk: &ModelChunkMessage, stage: &str, e
     );
 }
 
-fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<(), BridgeError> {
+pub(crate) fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<(), BridgeError> {
     if chunk.sequence.0 <= 0 || (chunk.error.is_some() && !chunk.is_final) {
         return Err(BridgeError::InvalidPayload);
     }
@@ -2458,7 +2447,8 @@ fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<(), BridgeE
         if format!("sha256:{:x}", Sha256::digest(&bytes)) != payload.payload_digest.0 {
             return Err(BridgeError::InvalidPayload);
         }
-        String::from_utf8(bytes).map_err(|_| BridgeError::InvalidPayload)?;
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| BridgeError::InvalidPayload)?;
     } else if !chunk.is_final && chunk.error.is_none() {
         return Err(BridgeError::InvalidPayload);
     }
@@ -2472,35 +2462,6 @@ fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<(), BridgeE
     frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
         .map_err(|_| BridgeError::InvalidPayload)?;
     Ok(())
-}
-
-fn canonical_instant(instant: &Instant) -> bool {
-    let value = instant.0.as_bytes();
-    value.len() == 24
-        && value[4] == b'-'
-        && value[7] == b'-'
-        && value[10] == b'T'
-        && value[13] == b':'
-        && value[16] == b':'
-        && value[19] == b'.'
-        && value[23] == b'Z'
-        && value.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
-        })
-        && number(value, 5, 7).is_some_and(|month| (1..=12).contains(&month))
-        && number(value, 8, 10).is_some_and(|day| (1..=31).contains(&day))
-        && number(value, 11, 13).is_some_and(|hour| hour <= 23)
-        && number(value, 14, 16).is_some_and(|minute| minute <= 59)
-        && number(value, 17, 19).is_some_and(|second| second <= 59)
-}
-
-fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
-    value
-        .get(start..end)?
-        .iter()
-        .try_fold(0_u8, |number, byte| {
-            number.checked_mul(10)?.checked_add(byte - b'0')
-        })
 }
 
 fn encoded(bytes: &[u8]) -> EncodedPayload {
@@ -2572,6 +2533,8 @@ impl std::error::Error for BridgeError {}
 #[cfg(test)]
 mod tests {
     include!("model_mechanism_regression_tests.rs");
+    include!("model_local_cancellation_tests.rs");
+    include!("model_task_context_replay_tests.rs");
     use serde_json::json;
     use std::sync::Arc;
     use winwincode_domain::{
@@ -2585,8 +2548,8 @@ mod tests {
         model_call_digest, primary_model_usage,
     };
     use crate::model_port_client::{
-        ModelChunkDisposition, ModelChunkFingerprint, ModelCursorStore, ModelLeaseAuthoritySource,
-        ModelTerminationReason,
+        ModelAuthorityRejection, ModelChunkDisposition, ModelChunkFingerprint, ModelCursorStore,
+        ModelLeaseAuthoritySource, ModelTerminationReason,
     };
     use crate::outbox::ExecutionOutbox;
     use crate::store::{AdapterStore, ModelCallPhase};
@@ -3258,6 +3221,33 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn shared_model_authority_expires_without_an_owner_clock_refresh() {
+        let source = SharedAuthoritySource::default();
+        let mut lease = authority(&id("cdx", 'A'));
+        lease.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
+        lease.lease.expires_at = Instant("2030-01-01T00:00:00.200Z".into());
+        source.install("quiet-owner", lease.clone()).unwrap();
+        source
+            .validate_current(&lease, &lease.lease.issued_at)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert_eq!(
+            source.validate_current(&lease, &lease.lease.issued_at),
+            Err(ModelAuthorityRejection::ExpiredLease)
+        );
+        source.update_now(&lease.lease.issued_at).unwrap();
+        assert_eq!(
+            source.validate_current(&lease, &lease.lease.issued_at),
+            Err(ModelAuthorityRejection::ExpiredLease)
+        );
+        assert!(
+            source
+                .update_now(&Instant("2030-02-30T00:00:00.000Z".into()))
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -3379,11 +3369,59 @@ mod tests {
         ));
         assert!(restored.sink.streams.lock().unwrap().is_empty());
         drop(restored);
-        store
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM model_cursor", [])
-            .unwrap();
+        let consumer_stream = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(
+            final_frame.clone(),
+        ))
+        .unwrap()
+        .stream;
+        let retained_source = |connection: &rusqlite::Connection| {
+            let ledger: Vec<rusqlite::types::Value> = connection
+                .query_row(
+                    "SELECT * FROM model_call_ledger WHERE run_key=?1 AND model_call_id=?2",
+                    ["run", "expired-call"],
+                    |row| {
+                        (0..row.as_ref().column_count())
+                            .map(|column| row.get(column))
+                            .collect::<rusqlite::Result<_>>()
+                    },
+                )
+                .unwrap();
+            let frames: Vec<Vec<rusqlite::types::Value>> = connection
+                .prepare("SELECT * FROM model_call_frame WHERE run_key=?1 AND model_call_id=?2 ORDER BY sequence")
+                .unwrap()
+                .query_map(["run", "expired-call"], |row| (0..row.as_ref().column_count())
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<_>>())
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            (ledger, frames)
+        };
+        {
+            let mut connection = store.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            let source_before = retained_source(&transaction);
+            assert_eq!(
+                transaction
+                    .execute(
+                        "DELETE FROM model_cursor_frame WHERE stream_key=?1",
+                        [consumer_stream.as_str()],
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                transaction
+                    .execute(
+                        "DELETE FROM model_cursor WHERE stream_key=?1",
+                        [consumer_stream.as_str()],
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(retained_source(&transaction), source_before);
+            transaction.commit().unwrap();
+        }
         let restored = loopback_bridge(
             &store,
             SharedAuthoritySource::default(),
@@ -4621,23 +4659,31 @@ mod tests {
         route: &ModelGatewayRoute,
         request_a: &ModelPortRequest,
         request_b: &ModelPortRequest,
-    ) -> (ModelOpenMessage, ModelOpenMessage) {
+    ) -> (ModelOpenMessage, ModelOpenMessage, (Instant, Instant)) {
         let source = SharedAuthoritySource::default().with_store(store.clone());
         let bridge = Arc::new(ExecutionPortModelBridge::new(
             store.clone(),
             ExecutionOutbox::open(store.clone()).expect("open child model-call outbox"),
             route.clone(),
             "loopback".to_owned(),
-            source,
+            source.clone(),
         ));
         bridge
             .install_binding(root_binding.clone())
             .expect("install child model-call bridge root");
+        let before_open = source
+            .observed_now()
+            .expect("observe clock before child calls")
+            .expect("installed child authority clock");
         let model_port = bridge.model_port();
         let (stream_a, stream_b) = tokio::join!(
             model_port.stream(request_a.clone()),
             model_port.stream(request_b.clone()),
         );
+        let after_open = source
+            .observed_now()
+            .expect("observe clock after child calls")
+            .expect("installed child authority clock");
         drop(stream_a.expect("open first child model stream"));
         drop(stream_b.expect("open second child model stream"));
         let messages = bridge
@@ -4662,6 +4708,7 @@ mod tests {
         (
             primary.expect("first child ModelOpen"),
             secondary.expect("second child ModelOpen"),
+            (before_open, after_open),
         )
     }
 
@@ -4794,11 +4841,54 @@ mod tests {
         );
     }
 
+    fn observed_child_model_wait(
+        store: &AdapterStore,
+        before_open: &Instant,
+        after_open: &Instant,
+    ) -> (Vec<(String, String)>, i64) {
+        use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+        let started: Vec<(String, String)> = store
+            .lock()
+            .expect("read child model start observations")
+            .prepare("SELECT operation_id,started_at FROM performance_operation WHERE run_key='child-run' AND operation_kind='primary_model' ORDER BY operation_id")
+            .expect("prepare child model start observations")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query child model start observations")
+            .collect::<Result<_, _>>()
+            .expect("retain child model start observations");
+        assert_eq!(
+            started
+                .iter()
+                .map(|(call, _)| call.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child-call-a", "child-call-b"]
+        );
+        let completed_at = OffsetDateTime::parse("2030-01-01T00:01:00.000Z", &Rfc3339)
+            .expect("parse fixture terminal observation");
+        let expected_wait_ms: i64 = started
+            .iter()
+            .map(|(_, at)| {
+                assert!(
+                    before_open.0.as_str() <= at.as_str() && at.as_str() <= after_open.0.as_str()
+                );
+                let began = OffsetDateTime::parse(at, &Rfc3339)
+                    .expect("parse actual child model start observation");
+                assert!(began < completed_at);
+                i64::try_from((completed_at - began).whole_milliseconds())
+                    .expect("bounded child model duration")
+            })
+            .sum();
+        (started, expected_wait_ms)
+    }
+
     #[tokio::test]
     async fn child_model_calls_bind_independent_exchanges_and_replay_exactly_after_restart() {
         let (root, store, root_binding, route, request_a, request_b) = child_model_fixture();
-        let (primary_open, secondary_open) =
+        let (primary_open, secondary_open, (before_open, after_open)) =
             open_parallel_child_calls(&store, &root_binding, &route, &request_a, &request_b).await;
+        let (started, expected_wait_ms) =
+            observed_child_model_wait(&store, &before_open, &after_open);
         assert_ne!(
             primary_open.model_exchange_id,
             secondary_open.model_exchange_id
@@ -4837,6 +4927,11 @@ mod tests {
                 .expect("second child terminal phase"),
             Some(ModelCallPhase::ProviderFinal)
         );
+        let before_replay = store
+            .performance_report("child-run", 60_000)
+            .expect("child performance report before final replay");
+        assert_eq!(before_replay.primary_model_call_count, 2);
+        assert_eq!(before_replay.primary_model_wait_ms, expected_wait_ms);
         replay_final_child_calls(&store, &root_binding, &route).await;
         let report = store
             .performance_report("child-run", 60_000)
@@ -4844,7 +4939,24 @@ mod tests {
         assert_eq!(report.primary_model_call_count, 2);
         // These terminal frames carry no usage. Transport completion must not
         // turn either accounting row into a measured zero, even after replay.
-        assert_eq!(report.primary_model_wait_ms, 120_000);
+        assert_eq!(report.primary_model_wait_ms, expected_wait_ms);
+        assert_eq!(
+            report.primary_model_wait_ms,
+            before_replay.primary_model_wait_ms
+        );
+        eprintln!(
+            "MODEL_MECHANISM_AUDIT {}",
+            json!({
+                "actual_path":"advancing AuthorityClock -> child ModelOpen -> retained performance start/completion -> final replay",
+                "before_open":before_open.0,
+                "after_open":after_open.0,
+                "actual_call_start_observations":started,
+                "terminal_observation":"2030-01-01T00:01:00.000Z",
+                "expected_wait_ms":expected_wait_ms,
+                "actual_wait_ms":report.primary_model_wait_ms,
+                "replay_preserved_wait_ms":before_replay.primary_model_wait_ms,
+            })
+        );
         assert_eq!(
             store
                 .delegated_performance_totals("child-run")

@@ -377,11 +377,13 @@ pub struct WorkerMain<Port, Codex> {
     registration_request_namespace: Option<String>,
     heartbeat_interval_ms: Option<u64>,
     heartbeat_sequence: i64,
+    next_heartbeat_due: Option<std::time::Instant>,
     request_sequence: u64,
     message_sequence: u64,
     active: HashMap<String, ActiveJob>,
     dispatches: HashMap<String, DispatchRecord>,
     pending_candidates: HashMap<String, PendingCandidateCompletion>,
+    pending_delegated_proposals: HashMap<String, ChangeBatchProposalEvent>,
     delivery_failure: Option<WorkerErrorCode>,
     driver_clock: driver_clock::DriverClock,
     /// Delivery ids sent during the current Worker scheduling turn.  A
@@ -523,11 +525,13 @@ where
             registration_request_namespace: None,
             heartbeat_interval_ms: None,
             heartbeat_sequence,
+            next_heartbeat_due: None,
             request_sequence: 0,
             message_sequence,
             active: HashMap::new(),
             dispatches: HashMap::new(),
             pending_candidates: HashMap::new(),
+            pending_delegated_proposals: HashMap::new(),
             delivery_failure,
             driver_clock,
             sent_delivery_ids: HashSet::new(),
@@ -627,6 +631,12 @@ where
     #[must_use]
     pub const fn lifecycle(&self) -> WorkerLifecycleState {
         self.lifecycle
+    }
+
+    /// Reports owned read-only verification that still needs driver advancement.
+    #[must_use]
+    pub fn has_pending_workspace_validation(&self) -> bool {
+        !self.pending_delegated_proposals.is_empty()
     }
 
     /// Returns the negotiated heartbeat interval after registration.
@@ -889,7 +899,8 @@ where
         message: &ExecutionPortMessage,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        self.observe_driver_clock(now.clone());
+        self.observe_driver_clock(now);
+        let now = self.current_driver_time()?;
         let renewal_predicate = match message {
             ExecutionPortMessage::LeaseRenewMessage(renewal) => self
                 .active
@@ -1063,7 +1074,9 @@ where
     ///
     /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
-        self.observe_driver_clock(now.clone());
+        let started = std::time::Instant::now();
+        self.observe_driver_clock(now);
+        let now = self.current_driver_time()?;
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -1108,6 +1121,13 @@ where
         };
         let delivery = self
             .retain_execution_message(&ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat))?;
+        // Schedule from the attempt's start. A slow response must not add a
+        // second interval, and a retryable failure must not enqueue a fresh
+        // heartbeat on every 25 ms owner turn. Its retained delivery retries
+        // through the ordinary durable outbox.
+        self.next_heartbeat_due = self
+            .heartbeat_interval_ms
+            .and_then(|interval| started.checked_add(std::time::Duration::from_millis(interval)));
         self.dispatch_retained_effect(delivery).await
     }
 
@@ -1136,7 +1156,8 @@ where
         stage: &mut drive_diagnostics::DriveStage,
     ) -> Result<(), WorkerError> {
         use drive_diagnostics::DriveStage;
-        self.observe_driver_clock(now.clone());
+        self.observe_driver_clock(now);
+        self.current_driver_time()?;
         if self.port.has_pending_controls() {
             return Ok(());
         }
@@ -1173,7 +1194,14 @@ where
             return dispatch_error.map_or(Ok(()), Err);
         }
         let mut intake_error = None;
-        loop {
+        let intake_started = std::time::Instant::now();
+        let mut intake_frames = 0;
+        while intake_frames < 64 && intake_started.elapsed() < std::time::Duration::from_millis(25)
+        {
+            if self.port.has_pending_controls() {
+                break;
+            }
+            let now = self.current_driver_time()?;
             *stage = DriveStage::DeviceRead;
             let chunk = match &mut self.device_models {
                 Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
@@ -1183,6 +1211,7 @@ where
                 break;
             };
             *stage = DriveStage::DeviceIntake;
+            intake_frames += 1;
             let result = async {
                 if chunk.session_identity.work_run_id.is_none() {
                     let public = winwincode_provider::public_model_chunk(&chunk)
@@ -1200,7 +1229,7 @@ where
             if chunk.sequence.0 % 250 == 0 || chunk.is_final {
                 mechanism_timing::record(
                     "frame_intake_checkpoint",
-                    &serde_json::json!({"jobId":chunk.lease.job_id.0,"leaseId":chunk.lease.lease_id.0,"workerSessionId":chunk.worker_session_id.0,"modelExchangeId":chunk.model_exchange_id.0,"workerId":chunk.lease.worker_id.0,"workerInstanceId":chunk.lease.worker_instance_id.0,"attempt":chunk.lease.attempt,"fencingToken":chunk.lease.fencing_token.0,"sequence":chunk.sequence.0,"isFinal":chunk.is_final,"suppliedDriverNow":now.0,"leaseExpiresAt":chunk.lease.expires_at.0,"accepted":result.is_ok()}),
+                    &serde_json::json!({"jobId":chunk.lease.job_id.0,"leaseId":chunk.lease.lease_id.0,"workerSessionId":chunk.worker_session_id.0,"modelExchangeId":chunk.model_exchange_id.0,"workerId":chunk.lease.worker_id.0,"workerInstanceId":chunk.lease.worker_instance_id.0,"attempt":chunk.lease.attempt,"fencingToken":chunk.lease.fencing_token.0,"sequence":chunk.sequence.0,"isFinal":chunk.is_final,"suppliedDriverNow":now.0,"leaseExpiresAt":chunk.lease.expires_at.0,"currentWorkerLeaseExpiresAt":self.active.get(&chunk.lease.job_id.0).map(|active|&active.lease.expires_at.0),"accepted":result.is_ok()}),
                 );
             }
             if let Err(error) = result {
@@ -1262,13 +1291,15 @@ where
             .collect::<Vec<_>>();
         *stage = DriveStage::PreparedTurn;
         for active in pending {
-            self.start_bound_job(&active.job, &active.codex_thread_id, now.clone())
+            let now = self.current_driver_time()?;
+            self.start_bound_job(&active.job, &active.codex_thread_id, now)
                 .await?;
         }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
         *stage = DriveStage::DelegatedState;
         for job_id in &job_ids {
+            let now = self.current_driver_time()?;
             let Some(thread_id) = self
                 .active
                 .get(job_id)
@@ -1333,6 +1364,15 @@ where
         *stage = DriveStage::ObservationOpen;
         self.enqueue_pending_observation_opens().await?;
         for job_id in job_ids {
+            if self.port.has_pending_controls() {
+                break;
+            }
+            let now = self.current_driver_time()?;
+            if let Some(event) = self.pending_delegated_proposals.get(&job_id).cloned() {
+                self.execute_delegated_proposal(&job_id, event, &now)
+                    .await?;
+                continue;
+            }
             *stage = DriveStage::DelegatedState;
             if !self.pending_candidates.contains_key(&job_id) {
                 let recovered_final = self.active.get(&job_id).cloned().and_then(|active| {
@@ -1354,12 +1394,12 @@ where
                         })
                 });
                 if let Some((batch_id, Some(result_revision))) = recovered_final {
-                    self.complete_accepted_delegated_candidate(
+                    Box::pin(self.complete_accepted_delegated_candidate(
                         &job_id,
                         batch_id,
                         result_revision,
                         now.clone(),
-                    )
+                    ))
                     .await?;
                 }
             }
@@ -1650,8 +1690,9 @@ where
         &mut self,
         job_id: &str,
         event: ChangeBatchProposalEvent,
-        now: &Instant,
+        _now: &Instant,
     ) -> Result<(), WorkerError> {
+        let now = &self.current_driver_time()?;
         self.validate_delegated_proposal(job_id, &event)?;
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             worker_error(
@@ -1659,17 +1700,55 @@ where
                 "delegated ChangeBatch proposal has no active Job authority",
             )
         })?;
+        if active.lifecycle != ActiveJobLifecycle::Running || now.0 >= active.lease.expires_at.0 {
+            self.workspaces
+                .cancel_validation(&active.job.job_id, now)
+                .await
+                .map_err(|error| validation_cleanup_worker_error(&error))?;
+            self.pending_delegated_proposals.remove(job_id);
+            return self
+                .finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::InfrastructureError,
+                    "delegated execution lease expired before validation acceptance",
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::LeaseExpired,
+                        "delegated execution lease expired before validation acceptance",
+                        false,
+                    )),
+                    now.clone(),
+                )
+                .await;
+        }
         #[allow(clippy::large_futures)]
         let executed = self
             .workspaces
-            .execute_change_batch(&active, &event, now)
+            .poll_change_batch(&active, &event, now)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                if matches!(
+                    error.cause_code(),
+                    "VALIDATION_CLEANUP_UNCONFIRMED"
+                        | "VALIDATION_CLEANUP_RECORD_UNAVAILABLE"
+                        | "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE"
+                        | "VALIDATION_CLEANUP_PENDING_UNAVAILABLE"
+                ) {
+                    return validation_cleanup_worker_error(&error);
+                }
                 worker_error(
                     WorkerErrorCode::DelegatedPollMismatch,
                     "delegated ChangeBatch execution or replay was rejected",
                 )
             })?;
+        let Some(executed) = executed else {
+            self.pending_delegated_proposals
+                .insert(job_id.to_owned(), event);
+            return Ok(());
+        };
+        self.pending_delegated_proposals.remove(job_id);
+        let now = &self.current_driver_time()?;
         let accepted_final = event.proposal.disposition == ChangeBatchProposalDisposition::Final
             && executed
                 .progress
@@ -1749,12 +1828,12 @@ where
             self.enqueue_observation_open(open).await?;
         }
         if let Some(result_revision) = accepted_result_revision {
-            self.complete_accepted_delegated_candidate(
+            Box::pin(self.complete_accepted_delegated_candidate(
                 job_id,
                 accepted_batch_id,
                 result_revision,
                 now.clone(),
-            )
+            ))
             .await?;
         } else if let Some(
             state @ (ChangeBatchProgressState::Accepted
@@ -2507,13 +2586,21 @@ where
         }
         if !cancelling && (candidate_writer || verification_role) {
             if candidate_writer {
-                return self
-                    .complete_candidate_writer(job_id, completion, diagnostic_artifacts, now)
-                    .await;
-            }
-            return self
-                .complete_verification_job(job_id, completion, diagnostic_artifacts, now)
+                return Box::pin(self.complete_candidate_writer(
+                    job_id,
+                    completion,
+                    diagnostic_artifacts,
+                    now,
+                ))
                 .await;
+            }
+            return Box::pin(self.complete_verification_job(
+                job_id,
+                completion,
+                diagnostic_artifacts,
+                now,
+            ))
+            .await;
         }
         let (status, summary, error) = if cancelling {
             (
@@ -2822,6 +2909,13 @@ where
         let mut codex_failures = 0;
         let mut cancelled_jobs = Vec::with_capacity(job_ids.len());
         for job_id in job_ids {
+            if let Some(active) = self.active.get(&job_id) {
+                self.workspaces
+                    .cancel_validation(&active.job.job_id, &now)
+                    .await
+                    .map_err(|error| validation_cleanup_worker_error(&error))?;
+            }
+            self.pending_delegated_proposals.remove(&job_id);
             let Some(thread_id) = self
                 .active
                 .get(&job_id)
@@ -3897,36 +3991,27 @@ where
             }
             None => (JobCancelAckMessageStatus::AlreadyTerminal, None),
         };
-        if let Some(thread_id) = thread_id {
-            let candidate_authority = if let Some(authority) = self
-                .pending_candidates
-                .get(&key)
-                .map(|pending| pending.authority.clone())
+        if matches!(
+            status,
+            JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
+        ) && let Err(error) = self
+            .workspaces
+            .cancel_validation(&cancel.lease.job_id, &now)
+            .await
+        {
+            // Core cancellation remains effective even when process cleanup
+            // cannot be confirmed. The workspace and positive ACK stay gated.
+            if status == JobCancelAckMessageStatus::Accepted
+                && let Some(thread_id) = thread_id.as_ref()
             {
-                Some(authority)
-            } else {
-                self.active
-                    .get(&key)
-                    .filter(|active| candidate_artifact_role(&active.job.execution_profile))
-                    .map(|active| {
-                        candidate_artifact_authority(
-                            active,
-                            self.dispatches
-                                .get(&key)
-                                .and_then(|record| record.replacement_authority.clone()),
-                        )
-                    })
-                    .transpose()?
-            };
-            if let Some(authority) = candidate_authority {
-                self.codex
-                    .begin_candidate_artifact_cancel(&authority)
-                    .map_err(|_| codex_model_error())?;
-                self.codex
-                    .cancel_candidate_artifact(&authority)
-                    .map_err(|_| codex_model_error())?;
-                self.pending_candidates.remove(&key);
+                let _ = self.codex.interrupt(thread_id, &now).await;
+                self.enqueue_codex_effects()?;
             }
+            return Err(validation_cleanup_worker_error(&error));
+        }
+        if let Some(thread_id) = thread_id {
+            self.pending_delegated_proposals.remove(&key);
+            self.cancel_pending_candidate_artifact(&key)?;
             let _ = self.codex.interrupt(&thread_id, &now).await;
             self.enqueue_codex_effects()?;
         }
@@ -3950,6 +4035,39 @@ where
             worker_session_id: cancel.worker_session_id.clone(),
         };
         self.enqueue_effect(&ExecutionPortMessage::JobCancelAckMessage(ack))
+    }
+
+    fn cancel_pending_candidate_artifact(&mut self, key: &str) -> Result<(), WorkerError> {
+        let candidate_authority = if let Some(authority) = self
+            .pending_candidates
+            .get(key)
+            .map(|pending| pending.authority.clone())
+        {
+            Some(authority)
+        } else {
+            self.active
+                .get(key)
+                .filter(|active| candidate_artifact_role(&active.job.execution_profile))
+                .map(|active| {
+                    candidate_artifact_authority(
+                        active,
+                        self.dispatches
+                            .get(key)
+                            .and_then(|record| record.replacement_authority.clone()),
+                    )
+                })
+                .transpose()?
+        };
+        if let Some(authority) = candidate_authority {
+            self.codex
+                .begin_candidate_artifact_cancel(&authority)
+                .map_err(|_| codex_model_error())?;
+            self.codex
+                .cancel_candidate_artifact(&authority)
+                .map_err(|_| codex_model_error())?;
+            self.pending_candidates.remove(key);
+        }
+        Ok(())
     }
 
     fn cancel_observation_open(
@@ -4068,6 +4186,14 @@ where
         error: Option<ExecutionPortError>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        if let Some(active) = self.active.get(job_id) {
+            self.workspaces
+                .cancel_validation(&active.job.job_id, &now)
+                .await
+                .map_err(|error| validation_cleanup_worker_error(&error))?;
+        }
+        self.pending_delegated_proposals.remove(job_id);
+
         // Keep the terminal future bounded at every caller, including recovery.
         Box::pin(async move {
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
@@ -4323,18 +4449,26 @@ where
         response: &InputResponseMessage,
         received_at: &Instant,
     ) -> Result<(), WorkerError> {
-        if let Err(_error) = self
+        if let Err(error) = self
             .codex
             .accept_input_response(response, received_at)
             .await
         {
-            return Err(codex_model_error());
+            return Err(codex_input_error(
+                "response_acceptance",
+                self.codex.error_diagnostic(&error),
+            ));
         }
         self.codex
             .accept_execution_delivery_ack(&ExecutionPortMessage::InputResponseMessage(
                 response.clone(),
             ))
-            .map_err(|_| codex_model_error())
+            .map_err(|error| {
+                codex_input_error(
+                    "response_acknowledgement",
+                    self.codex.error_diagnostic(&error),
+                )
+            })
     }
 
     fn replay_runtime(&mut self, request: &RuntimeReplayRequestMessage) -> Result<(), WorkerError> {
@@ -4463,6 +4597,10 @@ where
                             | ExecutionPortMessage::ActionEnforcementRequestMessage(_)
                     )
             }))
+    }
+
+    fn current_driver_time(&self) -> Result<Instant, WorkerError> {
+        self.driver_clock.timestamp().ok_or_else(codex_model_error)
     }
 
     fn observe_driver_clock(&mut self, now: Instant) {
@@ -5267,11 +5405,31 @@ fn workspace_error() -> WorkerError {
     )
 }
 
+fn validation_cleanup_worker_error(error: &workspace_runtime::JobWorkspaceError) -> WorkerError {
+    worker_error(
+        WorkerErrorCode::Workspace,
+        &format!(
+            "validation cancellation cleanup is unconfirmed; stage={}; cause_code={}",
+            error.stage(),
+            error.cause_code()
+        ),
+    )
+}
+
 fn execution_port_error() -> WorkerError {
     worker_error(
         WorkerErrorCode::ExecutionPort,
         "ExecutionPort transport failed",
     )
+}
+
+fn codex_input_error(
+    operation: &'static str,
+    diagnostic: Option<winwincode_codex::CodexFailureDiagnostic>,
+) -> WorkerError {
+    let message = format!("embedded Codex rejected an input response at {operation}");
+    let reason = diagnostic.map_or(message.clone(), |value| value.append_to(&message));
+    worker_error(WorkerErrorCode::UnexpectedMessage, &reason)
 }
 
 fn codex_model_error() -> WorkerError {

@@ -123,9 +123,14 @@ impl RequestRetry {
     }
 
     pub fn state(self) -> RequestRetryState {
+        self.state_at(1)
+    }
+
+    /// Restores the next policy attempt saved by the owning durable queue.
+    pub fn state_at(self, attempt: u32) -> RequestRetryState {
         RequestRetryState {
             policy: self,
-            attempt: 1,
+            attempt: attempt.clamp(1, self.max_attempts),
             connections: 0,
         }
     }
@@ -175,8 +180,9 @@ impl RequestRetry {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             };
-            let Some(delay) = state.delay_after(&error) else {
-                return Err(error);
+            let delay = match state.decision_after(&error) {
+                RetryDecision::RetryAfter(delay) | RetryDecision::DeferredUntil(delay) => delay,
+                RetryDecision::Stop | RetryDecision::Reconcile => return Err(error),
             };
             let deadline = Instant::now() + delay;
             while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -248,8 +254,9 @@ impl RequestRetry {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             };
-            let Some(delay) = state.delay_after(&error) else {
-                return Err(error);
+            let delay = match state.decision_after(&error) {
+                RetryDecision::RetryAfter(delay) | RetryDecision::DeferredUntil(delay) => delay,
+                RetryDecision::Stop | RetryDecision::Reconcile => return Err(error),
             };
             if !Self::wait_async(delay, &can_start).await {
                 return Err(stopped());

@@ -65,10 +65,22 @@ impl AppEventSender {
         )));
     }
 
-    pub(crate) fn user_input_answer(&self, id: String, response: ToolRequestUserInputResponse) {
-        self.send(AppEvent::CodexOp(AppCommand::user_input_answer(
-            id, response,
-        )));
+    pub(crate) fn user_input_answer(
+        &self,
+        thread_id: &str,
+        id: String,
+        call_id: String,
+        response: ToolRequestUserInputResponse,
+    ) -> bool {
+        let Ok(thread_id) = ThreadId::from_string(thread_id) else {
+            tracing::warn!("request_user_input answer has an invalid source thread");
+            return false;
+        };
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::user_input_answer(id, call_id, response),
+        });
+        true
     }
 
     pub(crate) fn exec_approval(

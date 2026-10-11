@@ -71,7 +71,7 @@ pub(super) async fn reconcile(
         return Err(error("stored_result_scope_expired"));
     }
     let evidence = runtime.reconcile_execution(&original).await;
-    gate.revalidate_result_read(request, authorization)
+    gate.revalidate_result_read(request.clone(), authorization.clone())
         .await
         .map_err(|_| read_error(&replay, "result_read_denied"))?;
     let fact = ToolReconciliationFact {
@@ -87,6 +87,11 @@ pub(super) async fn reconcile(
         .record_tool_reconciliation(&fact)
         .await
         .map_err(storage_error)?;
+    // Publication may wait for SQLite writer ownership after the first read
+    // check. Retain the historical fact, but check its delivery authority again.
+    gate.revalidate_result_read(request, authorization)
+        .await
+        .map_err(|_| read_error(&replay, "result_read_denied"))?;
     Err(FunctionCallError::RespondToModel(serde_json::json!({
         "type": "tool_recovery", "schema_version": 1, "state": "reconciled_execution_evidence", "fact": fact,
     }).to_string()))

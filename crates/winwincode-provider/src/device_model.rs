@@ -93,6 +93,7 @@ enum ModelAttemptOutcome {
         chunk: Box<ModelChunkMessage>,
         retryable: bool,
         response: Option<Vec<u8>>,
+        response_bytes_received: u64,
         accounting: Option<Box<ModelChunkMessage>>,
         not_sent: bool,
         network: winwincode_network::NetworkFailure,
@@ -189,6 +190,7 @@ fn completion_outcome(
             chunk: Box::new(model_failure_metadata(open, code, retryable, &metadata)?),
             retryable,
             response: None,
+            response_bytes_received: 0,
             accounting: accounting.map(Box::new),
             not_sent: false,
             network,
@@ -273,7 +275,8 @@ fn model_failure_metadata(
 
 impl DeviceProviderStore {
     /// Executes a model request using this Device's configuration and secret.
-    /// A recovered unfinished request fails explicitly: it is never charged a second time.
+    /// Exact terminal responses replay locally. A durable retry decision resumes
+    /// a new physical attempt; an unfinished unknown invocation fails explicitly.
     ///
     /// # Errors
     /// Rejects conflicting exchange identities and unavailable durable storage.
@@ -393,19 +396,19 @@ impl DeviceProviderStore {
             "INSERT OR IGNORE INTO exchanges (exchange_id, digest, request_open) SELECT ?1, ?2, ?3 WHERE NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?4 AND attempt=?5)",
             params![open.model_exchange_id.0, digest, request_open,open.lease.job_id.0,open.lease.attempt],
         )?;
-        let (original, previous): (String, Option<String>) = self.connection.query_row(
-            "SELECT digest, chunks FROM exchanges WHERE exchange_id=?1",
+        let (original, previous): (String, bool) = self.connection.query_row(
+            "SELECT digest, chunks IS NOT NULL FROM exchanges WHERE exchange_id=?1",
             [&open.model_exchange_id.0],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if original != digest {
             return Err(DeviceProviderError);
         }
-        if let Some(chunks) = previous {
+        if previous {
             if !active.contains_key(&key) {
                 self.settle_interrupted_invocations(open)?;
             }
-            return Ok(serde_json::from_str(&chunks)?);
+            return self.replay_model(&open.model_exchange_id.0, 1);
         }
         if inserted == 0 {
             if active.contains_key(&key) {
@@ -413,10 +416,13 @@ impl DeviceProviderStore {
                 // detach its cancellation authority.
                 return Err(DeviceProviderError);
             }
-            let chunks = vec![model_failure(open, "DEVICE_MODEL_INTERRUPTED")];
+            if self.model_retry_state(open)?.is_none() {
+                let chunks = vec![model_failure(open, "DEVICE_MODEL_INTERRUPTED")];
+                self.settle_interrupted_invocations(open)?;
+                self.persist_model_response(&open.model_exchange_id.0, &chunks, false)?;
+                return Ok(chunks);
+            }
             self.settle_interrupted_invocations(open)?;
-            self.connection.execute("UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND chunks IS NULL AND cancelled=0",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
-            return Ok(chunks);
         }
         let cancellation =
             std::sync::Arc::new(crate::provider_transport::ExchangeCancellation::default());
@@ -433,12 +439,13 @@ impl DeviceProviderStore {
             Err(DeviceModelFailure::LeaseExpired)
         }
         .unwrap_or_else(|error| vec![model_failure(open, error.code())]);
+        self.connection.execute(
+            "DELETE FROM model_retry_state WHERE exchange_id=?1",
+            [&open.model_exchange_id.0],
+        )?;
         // Paid receipts survive cancellation even when runtime replay is fenced.
         self.connection.execute("UPDATE exchanges SET accounting_chunks=?1 WHERE exchange_id=?2 AND accounting_chunks IS NULL",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
-        self.connection.execute(
-            "UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND cancelled=0",
-            params![serde_json::to_string(&chunks)?, open.model_exchange_id.0],
-        )?;
+        self.persist_model_response(&open.model_exchange_id.0, &chunks, false)?;
         Ok(chunks)
     }
 
@@ -514,7 +521,12 @@ impl DeviceProviderStore {
         if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
             return Err(DeviceModelFailure::Unavailable);
         }
-        if request.get("winwincodeJevContext").is_some()
+        if let Some(prepared) = self.prepared_model_retry_payload(open)? {
+            // A deferred retry resumes the exact adapter input retained before
+            // its first request. Context preparation may itself perform paid
+            // work, so it must not run again after the durable retry decision.
+            payload = prepared;
+        } else if request.get("winwincodeJevContext").is_some()
             || request.get("winwincodeJevTask").is_some()
         {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -532,12 +544,16 @@ impl DeviceProviderStore {
                 return Ok(vec![model_failure(open, "DEVICE_JEV_UNAVAILABLE")]);
             }
             payload = serde_json::to_vec(&request)?;
+            self.retain_prepared_payload(open, &payload)?;
+        } else {
+            self.retain_prepared_payload(open, &payload)?;
         }
         let headers = self.custom_headers(&provider_id)?;
-        self.retain_prepared_payload(open, &payload)?;
-        let mut attempt_number = 0_i64;
+        let mut attempt_number: i64 = self.connection.query_row("SELECT COALESCE(MAX(attempt_number),0) FROM model_invocation_attempts WHERE exchange_id=?1",[&open.model_exchange_id.0],|row|row.get(0))?;
+        let next_policy_attempt = self.model_retry_state(open)?.map_or(1, |state| state.0);
         let mut retry =
-            winwincode_network::RequestRetry::new(4, open.model_exchange_id.0.as_bytes()).state();
+            winwincode_network::RequestRetry::new(4, open.model_exchange_id.0.as_bytes())
+                .state_at(next_policy_attempt);
         let sse_failure_log = self.sse_failure_log_directory()?;
         loop {
             if self.model_cancelled(&open.model_exchange_id.0)? {
@@ -547,6 +563,25 @@ impl DeviceProviderStore {
             if !can_start() {
                 self.retain_model_stop_reason(open, "authority_ended")?;
                 return Err(DeviceModelFailure::LeaseExpired);
+            }
+            if let Some((_, wake_ms)) = self.model_retry_state(open)? {
+                loop {
+                    if self.model_cancelled(&open.model_exchange_id.0)? {
+                        self.retain_model_stop_reason(open, "authority_ended")?;
+                        return Ok(Vec::new());
+                    }
+                    if !can_start() {
+                        self.retain_model_stop_reason(open, "authority_ended")?;
+                        return Err(DeviceModelFailure::LeaseExpired);
+                    }
+                    let now = winwincode_network::journal::now_millis();
+                    if now >= wake_ms {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        wake_ms.saturating_sub(now).min(50),
+                    ));
+                }
             }
             before_attempt()?;
             let release = AdmissionRelease(after_attempt);
@@ -600,7 +635,15 @@ impl DeviceProviderStore {
                 payload: &payload,
             };
             let diagnostic_sequence = self.begin_model_diagnostic(open, retry.attempt())?;
-            self.connection.execute("UPDATE model_invocation_attempts SET state='invoking' WHERE exchange_id=?1 AND attempt_number=?2 AND state='prepared'",params![open.model_exchange_id.0,attempt_number])?;
+            {
+                let transaction = self.connection.unchecked_transaction()?;
+                transaction.execute("UPDATE model_invocation_attempts SET state='invoking' WHERE exchange_id=?1 AND attempt_number=?2 AND state='prepared'",params![open.model_exchange_id.0,attempt_number])?;
+                transaction.execute(
+                    "DELETE FROM model_retry_state WHERE exchange_id=?1",
+                    [&open.model_exchange_id.0],
+                )?;
+                transaction.commit()?;
+            }
             let outcome = if let Err(error) = adapter.open(&invocation, &secret) {
                 ModelAttemptOutcome::Failed {
                     network: error.network_failure(),
@@ -612,6 +655,7 @@ impl DeviceProviderStore {
                     )?),
                     retryable: error.retryable(),
                     response: None,
+                    response_bytes_received: 0,
                     accounting: None,
                     not_sent: error.network_failure().acceptance
                         == winwincode_network::Acceptance::NotSent
@@ -651,6 +695,7 @@ impl DeviceProviderStore {
                         )?),
                         retryable: error.retryable(),
                         response: error.response().map(<[u8]>::to_vec),
+                        response_bytes_received: error.response_bytes_received(),
                         accounting: error
                             .observed_receipt()
                             .map(|(response_id, usage)| {
@@ -684,6 +729,7 @@ impl DeviceProviderStore {
                     chunk,
                     retryable,
                     response,
+                    response_bytes_received,
                     accounting,
                     not_sent,
                     network,
@@ -691,14 +737,23 @@ impl DeviceProviderStore {
                     let mut chunk = *chunk;
                     append_network_failure(&mut chunk, network);
                     let chunks = vec![chunk];
-                    self.connection.execute("UPDATE model_invocation_attempts SET state=?6,failure_chunks=?1,accounting_chunks=?2,response_bytes=?3 WHERE exchange_id=?4 AND attempt_number=?5 AND state='invoking'", params![serde_json::to_string(&chunks)?, accounting.map(|chunk| serde_json::to_string(&vec![chunk])).transpose()?, response, open.model_exchange_id.0, attempt_number,if not_sent {"not_sent"} else {"failed"}])?;
+                    self.connection.execute("UPDATE model_invocation_attempts SET state=?6,failure_chunks=?1,accounting_chunks=?2,response_bytes=?3,response_bytes_received=?7 WHERE exchange_id=?4 AND attempt_number=?5 AND state='invoking'", params![serde_json::to_string(&chunks)?, accounting.map(|chunk| serde_json::to_string(&vec![chunk])).transpose()?, response, open.model_exchange_id.0, attempt_number,if not_sent {"not_sent"} else {"failed"}, i64::try_from(response_bytes_received).map_err(|_|DeviceModelFailure::Unavailable)?])?;
                     (chunks, retryable, Some(network))
                 }
             };
             self.finish_model_diagnostic(open, diagnostic_sequence, network)?;
             drop(release);
-            let delay = network.and_then(|failure| retry.delay_after(&failure));
-            if !recover || !retryable || delay.is_none() {
+            let decision = network.map_or(winwincode_network::RetryDecision::Stop, |failure| {
+                retry.decision_after(&failure)
+            });
+            if !recover
+                || !retryable
+                || matches!(
+                    decision,
+                    winwincode_network::RetryDecision::Stop
+                        | winwincode_network::RetryDecision::Reconcile
+                )
+            {
                 let reason = if network.is_none() {
                     if chunks.last().is_some_and(|chunk| chunk.error.is_some()) {
                         "permanent_failure"
@@ -709,12 +764,12 @@ impl DeviceProviderStore {
                     "permanent_failure"
                 } else if !recover {
                     "recovery_disabled"
+                } else if decision == winwincode_network::RetryDecision::Reconcile {
+                    "reconcile_required"
                 } else {
                     "retry_budget_exhausted"
                 };
                 self.retain_model_stop_reason(open, reason)?;
-                // Runtime replay exposes the finite final failure, while every
-                // physical invocation retains its original accounting facts.
                 for chunk in &mut chunks {
                     if let Some(error) = &mut chunk.error {
                         error.retryable = false;
@@ -722,24 +777,42 @@ impl DeviceProviderStore {
                 }
                 return Ok(chunks);
             }
-            let duration = delay.expect("checked retry delay");
-            let started = std::time::Instant::now();
-            while started.elapsed() < duration {
-                if self.model_cancelled(&open.model_exchange_id.0)? {
-                    self.retain_model_stop_reason(open, "authority_ended")?;
-                    return Ok(Vec::new());
+            let (duration, action) = match decision {
+                winwincode_network::RetryDecision::RetryAfter(delay) => (delay, "retry_after"),
+                winwincode_network::RetryDecision::DeferredUntil(delay) => {
+                    (delay, "deferred_until")
                 }
-                if !can_start() {
-                    self.retain_model_stop_reason(open, "authority_ended")?;
-                    return Err(DeviceModelFailure::LeaseExpired);
+                winwincode_network::RetryDecision::Stop
+                | winwincode_network::RetryDecision::Reconcile => {
+                    unreachable!("terminal decision returned above")
                 }
-                std::thread::sleep(
-                    duration
-                        .saturating_sub(started.elapsed())
-                        .min(std::time::Duration::from_millis(50)),
-                );
-            }
+            };
+            let wake_ms = winwincode_network::journal::now_millis().saturating_add(
+                u64::try_from(duration.as_millis()).map_err(|_| DeviceModelFailure::Unavailable)?,
+            );
+            self.connection.execute("INSERT INTO model_retry_state(exchange_id,policy_attempt,wake_ms,decision) VALUES(?1,?2,?3,?4) ON CONFLICT(exchange_id) DO UPDATE SET policy_attempt=excluded.policy_attempt,wake_ms=excluded.wake_ms,decision=excluded.decision",params![open.model_exchange_id.0,retry.attempt(),i64::try_from(wake_ms).map_err(|_|DeviceModelFailure::Unavailable)?,action])?;
         }
+    }
+
+    fn model_retry_state(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<Option<(u32, u64)>, DeviceProviderError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT policy_attempt,wake_ms FROM model_retry_state WHERE exchange_id=?1",
+                [&open.model_exchange_id.0],
+                |row| {
+                    let wake: i64 = row.get(1)?;
+                    Ok((
+                        row.get(0)?,
+                        u64::try_from(wake)
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, wake))?,
+                    ))
+                },
+            )
+            .optional()?)
     }
 
     fn begin_model_diagnostic(
@@ -848,14 +921,40 @@ impl DeviceProviderStore {
         payload: &[u8],
     ) -> Result<(), DeviceProviderError> {
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(open)?));
+        let prepared_digest = crate::model_response_store::frame_digest(payload);
         let changed = self.connection.execute(
-            "UPDATE exchanges SET prepared_payload=?1 WHERE exchange_id=?2 AND digest=?3 AND request_open IS NOT NULL AND prepared_payload IS NULL AND chunks IS NULL AND cancelled=0",
-            params![payload, open.model_exchange_id.0, digest],
+            "UPDATE exchanges SET prepared_payload=?1,prepared_payload_digest=?4 WHERE exchange_id=?2 AND digest=?3 AND request_open IS NOT NULL AND prepared_payload IS NULL AND prepared_payload_digest IS NULL AND chunks IS NULL AND cancelled=0",
+            params![payload, open.model_exchange_id.0, digest,prepared_digest],
         )?;
         if changed != 1 {
             return Err(DeviceProviderError);
         }
         Ok(())
+    }
+
+    fn prepared_model_retry_payload(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<Option<Vec<u8>>, DeviceProviderError> {
+        if self.model_retry_state(open)?.is_none() {
+            return Ok(None);
+        }
+        let request_open = serde_json::to_string(open)?;
+        let digest = format!("{:x}", Sha256::digest(request_open.as_bytes()));
+        let prepared: Option<(Option<Vec<u8>>,Option<String>,String)> = self.connection.query_row(
+            "SELECT prepared_payload,prepared_payload_digest,request_open FROM exchanges WHERE exchange_id=?1 AND digest=?2 AND request_open IS NOT NULL AND chunks IS NULL AND cancelled=0 AND NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?3 AND attempt=?4)",
+            params![open.model_exchange_id.0,digest,open.lease.job_id.0,open.lease.attempt],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional()?;
+        let (payload, prepared_digest, original_request) = prepared.ok_or(DeviceProviderError)?;
+        let payload = payload.ok_or(DeviceProviderError)?;
+        if original_request != request_open
+            || prepared_digest.as_deref()
+                != Some(crate::model_response_store::frame_digest(&payload).as_str())
+        {
+            return Err(DeviceProviderError);
+        }
+        Ok(Some(payload))
     }
 
     /// Durably fences later opens and replay after Worker cancellation.
@@ -947,18 +1046,86 @@ impl DeviceProviderStore {
         exchange_id: &str,
         chunks: &[ModelChunkMessage],
     ) -> Result<(), DeviceProviderError> {
-        if exchange_id.trim().is_empty() {
-            return Err(DeviceProviderError);
+        if self.persist_model_response(exchange_id, chunks, true)? {
+            Ok(())
+        } else {
+            Err(DeviceProviderError)
         }
-        let payload = serde_json::to_string(chunks)?;
-        self.connection.execute(
-            "INSERT INTO exchanges (exchange_id, digest, chunks, cancelled)
-             VALUES (?1, 'retained', ?2, 0)
-             ON CONFLICT(exchange_id) DO UPDATE SET chunks = excluded.chunks
-             WHERE exchanges.cancelled = 0",
-            rusqlite::params![exchange_id, payload],
-        )?;
-        Ok(())
+    }
+
+    fn persist_model_response(
+        &self,
+        exchange_id: &str,
+        chunks: &[ModelChunkMessage],
+        allow_insert: bool,
+    ) -> Result<bool, DeviceProviderError> {
+        use crate::model_response_store::{insert_model_response_index, validate_model_response};
+        self.connection
+            .execute_batch("SAVEPOINT persist_model_response")?;
+        let result = (|| -> Result<bool, DeviceProviderError> {
+            let previous: Option<(Option<String>, Option<String>, bool)> = self
+                .connection
+                .query_row(
+                    "SELECT chunks,request_open,cancelled FROM exchanges WHERE exchange_id=?1",
+                    [exchange_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if previous.as_ref().is_some_and(|row| row.2) {
+                return Ok(false);
+            }
+            let request_open = previous.as_ref().and_then(|row| row.1.as_deref());
+            let validated = validate_model_response(exchange_id, chunks, request_open)?;
+            if let Some((Some(original), _, _)) = &previous {
+                let original: Vec<ModelChunkMessage> = serde_json::from_str(original)?;
+                let seal: Option<String> = self
+                    .connection
+                    .query_row(
+                        "SELECT response_digest FROM model_response_exchange WHERE exchange_id=?1",
+                        [exchange_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if original.as_slice() != chunks
+                    || seal.as_deref() != Some(validated.digest.as_str())
+                {
+                    return Err(DeviceProviderError);
+                }
+                return Ok(true);
+            }
+            let payload = serde_json::to_string(chunks)?;
+            if previous.is_some() {
+                let changed = self.connection.execute(
+                    "UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND chunks IS NULL AND cancelled=0",
+                    params![payload,exchange_id],
+                )?;
+                if changed != 1 {
+                    return Err(DeviceProviderError);
+                }
+            } else if allow_insert {
+                self.connection.execute(
+                    "INSERT INTO exchanges(exchange_id,digest,chunks,cancelled) VALUES(?1,'retained',?2,0)",
+                    params![exchange_id,payload],
+                )?;
+            } else {
+                return Err(DeviceProviderError);
+            }
+            insert_model_response_index(&self.connection, exchange_id, &validated)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("RELEASE persist_model_response")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch(
+                    "ROLLBACK TO persist_model_response; RELEASE persist_model_response",
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Lists exchange identities that currently store Provider response chunks.
@@ -977,6 +1144,42 @@ impl DeviceProviderStore {
         Ok(exchanges)
     }
 
+    /// Changes committed by another Device connection since the previous poll.
+    /// The Worker retains one connection so an empty poll reads no response data.
+    ///
+    /// # Errors
+    /// Rejects unavailable durable storage or unreadable query results.
+    pub fn model_data_version(&self) -> Result<i64, DeviceProviderError> {
+        Ok(self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?)
+    }
+
+    /// Lists only stored responses owned by the specified Worker identity.
+    ///
+    /// # Errors
+    /// Rejects unavailable durable storage or unreadable query results.
+    pub fn model_exchanges_for_owner(
+        &self,
+        worker_session_id: Option<&str>,
+        worker_instance_id: Option<&str>,
+    ) -> Result<Vec<String>, DeviceProviderError> {
+        let (column, identity) = if let Some(id) = worker_session_id {
+            ("worker_session_id", id)
+        } else if let Some(id) = worker_instance_id {
+            ("worker_instance_id", id)
+        } else {
+            return Ok(Vec::new());
+        };
+        let query = format!(
+            "SELECT r.exchange_id FROM model_response_exchange r JOIN exchanges e ON e.exchange_id=r.exchange_id WHERE r.{column}=?1 AND e.cancelled=0 AND r.highest_sequence>0 ORDER BY r.exchange_id"
+        );
+        let mut statement = self.connection.prepare(&query)?;
+        Ok(statement
+            .query_map([identity], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Reads a local replay from a requested sequence, without making a network request.
     ///
     /// # Errors
@@ -986,24 +1189,94 @@ impl DeviceProviderStore {
         exchange_id: &str,
         from: i64,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
-        let chunks: Option<Option<String>> = self
-            .connection
-            .query_row(
-                "SELECT chunks FROM exchanges WHERE exchange_id=?1 AND cancelled=0",
-                [exchange_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(Some(chunks)) = chunks else {
+        // A WAL writer may revoke a seal between the metadata and suffix
+        // queries. Keep both in one read snapshot. A savepoint also preserves
+        // an existing caller transaction instead of committing its work.
+        self.connection
+            .execute_batch("SAVEPOINT model_response_read")?;
+        let result = self.replay_model_in_read_snapshot(exchange_id, from);
+        if result.is_ok() {
+            if let Err(error) = self.connection.execute_batch("RELEASE model_response_read") {
+                let _ = self
+                    .connection
+                    .execute_batch("ROLLBACK TO model_response_read; RELEASE model_response_read");
+                return Err(error.into());
+            }
+        } else {
+            let _ = self
+                .connection
+                .execute_batch("ROLLBACK TO model_response_read; RELEASE model_response_read");
+        }
+        result
+    }
+
+    fn replay_model_in_read_snapshot(
+        &self,
+        exchange_id: &str,
+        from: i64,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        use crate::model_response_store::{
+            ModelResponseBinding, canonical_digest, frame_digest, validate_response_frame,
+        };
+        type ReplayMetadata = (bool, bool, Option<i64>, Option<String>, Option<String>);
+        let metadata: Option<ReplayMetadata> = self.connection.query_row(
+            "SELECT e.chunks IS NOT NULL,e.cancelled,r.highest_sequence,r.response_digest,r.binding_json FROM exchanges e LEFT JOIN model_response_exchange r ON r.exchange_id=e.exchange_id WHERE e.exchange_id=?1",
+            [exchange_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).optional()?;
+        let Some((has_chunks, cancelled, highest, digest, binding)) = metadata else {
             return Ok(Vec::new());
         };
-        #[cfg(any(test, feature = "test-support"))]
-        crate::audit_model_replay_metrics::record(chunks.len());
-        let chunks: Vec<ModelChunkMessage> = serde_json::from_str(&chunks)?;
-        Ok(chunks
-            .into_iter()
-            .filter(|chunk| chunk.sequence.0 >= from)
-            .collect())
+        if cancelled || !has_chunks {
+            return Ok(Vec::new());
+        }
+        let highest = highest
+            .filter(|sequence| *sequence > 0)
+            .ok_or(DeviceProviderError)?;
+        if !digest.as_deref().is_some_and(canonical_digest) {
+            return Err(DeviceProviderError);
+        }
+        let binding: ModelResponseBinding =
+            serde_json::from_str(&binding.ok_or(DeviceProviderError)?)?;
+        let from = from.max(1);
+        let mut statement = self.connection.prepare("SELECT sequence,frame_json,frame_digest FROM model_response_frame WHERE exchange_id=?1 AND sequence>=?2 ORDER BY sequence")?;
+        let rows = statement.query_map(params![exchange_id, from], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (sequence, bytes, digest) = row?;
+            #[cfg(any(test, feature = "test-support"))]
+            crate::audit_model_replay_metrics::record(bytes.len());
+            let chunk: ModelChunkMessage = serde_json::from_str(&bytes)?;
+            let expected = from
+                .checked_add(i64::try_from(chunks.len()).map_err(|_| DeviceProviderError)?)
+                .ok_or(DeviceProviderError)?;
+            if sequence != expected
+                || sequence > highest
+                || chunk.sequence.0 != sequence
+                || chunk.model_exchange_id.0 != exchange_id
+                || !binding.matches(&chunk)
+                || frame_digest(bytes.as_bytes()) != digest
+                || chunk.is_final != (sequence == highest)
+            {
+                return Err(DeviceProviderError);
+            }
+            validate_response_frame(&chunk)?;
+            chunks.push(chunk);
+        }
+        let expected_count = highest
+            .checked_sub(from)
+            .and_then(|value| value.checked_add(1))
+            .unwrap_or(0)
+            .max(0);
+        if i64::try_from(chunks.len()).map_err(|_| DeviceProviderError)? != expected_count {
+            return Err(DeviceProviderError);
+        }
+        Ok(chunks)
     }
 }
 
@@ -1656,6 +1929,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep exact payload identity, crash/reopen and durable fence assertions in one fixture"
+    )]
     fn prepared_payload_is_exact_single_write_and_fenced() {
         let directory =
             std::env::temp_dir().join(format!("wwc-prepared-model-{}", std::process::id()));
@@ -1689,6 +1966,7 @@ mod tests {
         let prepared = b"{\n  \"request\": {\"input\": []}\n}";
         store.retain_prepared_payload(&open, prepared).unwrap();
         assert!(store.retain_prepared_payload(&open, b"overwrite").is_err());
+        assert!(store.prepared_model_retry_payload(&open).unwrap().is_none());
         drop(store);
         let store = DeviceProviderStore::open(&directory).unwrap();
         let saved: Vec<u8> = store
@@ -1701,15 +1979,95 @@ mod tests {
             .unwrap();
         assert_eq!(saved, prepared);
         assert!(store.retain_prepared_payload(&open, prepared).is_err());
+        store.connection.execute(
+            "INSERT INTO model_retry_state(exchange_id,policy_attempt,wake_ms,decision) VALUES(?1,2,0,'deferred_until')",
+            [&open.model_exchange_id.0],
+        ).unwrap();
+        assert_eq!(
+            store
+                .prepared_model_retry_payload(&open)
+                .unwrap()
+                .as_deref(),
+            Some(prepared.as_slice())
+        );
+        assert!(store.prepared_model_retry_payload(&changed).is_err());
+        for mutation in [
+            "UPDATE exchanges SET prepared_payload=x'00'",
+            "UPDATE exchanges SET prepared_payload_digest='sha256:bad'",
+            "UPDATE exchanges SET prepared_payload=NULL,prepared_payload_digest=NULL",
+            "UPDATE exchanges SET exchange_id='mdl_rebound'",
+        ] {
+            assert!(store.connection.execute_batch(mutation).is_err());
+        }
+        let mut rebound = open.clone();
+        rebound.route.route = "changed-gateway".into();
+        let changed_request = serde_json::to_string(&rebound).unwrap();
+        let changed_digest = format!("{:x}", Sha256::digest(changed_request.as_bytes()));
+        assert!(
+            store
+                .connection
+                .execute(
+                    "UPDATE exchanges SET request_open=?1,digest=?2",
+                    params![changed_request, changed_digest],
+                )
+                .is_err()
+        );
+        store
+            .connection
+            .execute_batch(
+                "SAVEPOINT corrupt_prepared_fixture; DROP TRIGGER prepared_model_payload_immutable;
+             UPDATE exchanges SET prepared_payload_digest='sha256:bad';",
+            )
+            .unwrap();
+        assert!(store.prepared_model_retry_payload(&open).is_err());
+        store
+            .connection
+            .execute_batch(
+                "ROLLBACK TO corrupt_prepared_fixture; RELEASE corrupt_prepared_fixture;",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .prepared_model_retry_payload(&open)
+                .unwrap()
+                .as_deref(),
+            Some(prepared.as_slice())
+        );
+        store
+            .connection
+            .execute(
+                "INSERT INTO accounting_closed_attempts(job_id,attempt,lease_id) VALUES(?1,?2,?3)",
+                params![
+                    open.lease.job_id.0,
+                    open.lease.attempt,
+                    open.lease.lease_id.0
+                ],
+            )
+            .unwrap();
+        assert!(store.prepared_model_retry_payload(&open).is_err());
+        store
+            .connection
+            .execute("DELETE FROM accounting_closed_attempts", [])
+            .unwrap();
         for (cancelled, chunks) in [(1, None), (0, Some("[]"))] {
             store
                 .connection
                 .execute(
-                    "UPDATE exchanges SET prepared_payload=NULL, cancelled=?1, chunks=?2",
+                    "UPDATE exchanges SET cancelled=?1, chunks=?2",
                     params![cancelled, chunks],
                 )
                 .unwrap();
             assert!(store.retain_prepared_payload(&open, prepared).is_err());
+            assert!(store.prepared_model_retry_payload(&open).is_err());
+            let mut fenced = open.clone();
+            fenced.model_exchange_id.0 = format!("mdl_{cancelled:026}");
+            let request = serde_json::to_string(&fenced).unwrap();
+            let digest = format!("{:x}", Sha256::digest(request.as_bytes()));
+            store.connection.execute(
+                "INSERT INTO exchanges(exchange_id,digest,request_open,cancelled,chunks) VALUES(?1,?2,?3,?4,?5)",
+                params![fenced.model_exchange_id.0,digest,request,cancelled,chunks],
+            ).unwrap();
+            assert!(store.retain_prepared_payload(&fenced, prepared).is_err());
         }
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

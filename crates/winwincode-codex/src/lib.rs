@@ -9,6 +9,7 @@
 
 mod action_bridge;
 mod adapter;
+mod authority_clock;
 pub mod candidate_artifact_outbox;
 mod contract;
 pub mod diagnostic_artifact_outbox;

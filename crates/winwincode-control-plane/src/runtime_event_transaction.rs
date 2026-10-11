@@ -8,7 +8,7 @@
 //! Accepted events are kept in a dedicated Control Plane state stream so a
 //! runtime append never mutates a Delivery member.
 
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,9 +42,10 @@ use winwincode_execution_port::generated::{
     RuntimeAckMessage, RuntimeAckMessageKind, RuntimeEventMessage, RuntimeEventMessageKind,
 };
 use winwincode_storage::{
-    CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
-    ProjectionEventStream, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit,
-    StateRevisionGuard, StorageError, StorageErrorKind,
+    CommitReceipt, DurableOutboxEvent, ImmutableStateImport, NewOutboxEvent, PendingAuditEvent,
+    ProductStateStorage, ProjectionEventStream, PublicEventSource, ReceiptIdentity,
+    ReceiptScopeKey, StateCommit, StateMutation, StateRevisionGuard, StorageError,
+    StorageErrorKind,
 };
 
 use crate::delivery_transaction::{EXECUTION_JOB_TOPIC, delivery_stream_id};
@@ -62,7 +63,7 @@ const RUNTIME_PHASE: &str = "runtime-event";
 const RUNTIME_TOPIC: &str = "runtime.event.accepted.v1";
 const RUNTIME_INVALIDATED_TOPIC: &str = "runtime-projection.invalidated.v1";
 const RUNTIME_STREAM_PREFIX: &str = "runtime:";
-const RUNTIME_STATE_VERSION: u8 = 1;
+const RUNTIME_STATE_VERSION: u8 = 2;
 const RUNTIME_INVALIDATION_NAMESPACE: &[u8] = b"winwincode.runtime-event-runtime-invalidation.v1";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_SUMMARY_LENGTH: usize = 2_000;
@@ -272,7 +273,7 @@ pub(crate) fn execute_at(
     }
 
     let event_digest = event_digest(&message.event)?;
-    match ledger.classify(&message.event, &event_digest) {
+    match classify_indexed_event(storage, &ledger, &message.event, &event_digest)? {
         LedgerDecision::Duplicate => {
             return Ok(accepted_ack(
                 message,
@@ -302,7 +303,32 @@ pub(crate) fn execute_at(
         )))
     })?;
     let acknowledged_sequence = ledger.highest_sequence;
-    let next = ledger.append(message.event.clone(), event_digest.clone())?;
+    let retained_events = ledger.events.clone();
+    let legacy_source_digest = if ledger.schema_version == 1 && !retained_events.is_empty() {
+        let source = storage
+            .load_state(&stream_id)?
+            .ok_or_else(|| StorageError::invalid_input("legacy runtime source is missing"))?;
+        if decode_runtime_ledger_state(&source, &stream_id)? != ledger {
+            return Err(StorageError::invalid_input(
+                "legacy runtime source changed before migration",
+            )
+            .into());
+        }
+        Some(Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(&source.payload)
+        )))
+    } else {
+        None
+    };
+    let mut chain = if ledger.schema_version == 1 {
+        String::new()
+    } else {
+        ledger.event_chain_digest.clone()
+    };
+    let mut next = ledger.append(message.event.clone(), event_digest.clone())?;
+    next.schema_version = RUNTIME_STATE_VERSION;
+    next.events.clear();
     if next.revision() > MAX_SAFE_INTEGER {
         return Ok(rejection_ack(
             message,
@@ -350,6 +376,28 @@ pub(crate) fn execute_at(
         state,
         events,
     );
+    // Immutable event rows, identity markers, header, receipt and publication
+    // are committed together. Existing snapshot history moves once on append.
+    let mut legacy_rows = Vec::with_capacity(retained_events.len().saturating_mul(2));
+    for entry in &retained_events {
+        let indexed = IndexedRuntimeLedgerEvent::new(entry.clone(), std::mem::take(&mut chain));
+        chain.clone_from(&indexed.chain_digest);
+        legacy_rows.extend(runtime_event_mutations(&next.execution_job_id, &indexed)?);
+    }
+    if let Some(source_digest) = legacy_source_digest {
+        commit = commit
+            .with_immutable_state_import(ImmutableStateImport::new(source_digest, legacy_rows)?);
+    }
+    let indexed = IndexedRuntimeLedgerEvent::new(
+        RuntimeLedgerEvent {
+            event: message.event.clone(),
+            event_digest: event_digest.clone(),
+        },
+        chain,
+    );
+    for mutation in runtime_event_mutations(&next.execution_job_id, &indexed)? {
+        commit = commit.with_state_mutation(mutation);
+    }
     if let Some(pending_audit_event) = pending_audit_event {
         commit = commit.with_pending_audit_event(pending_audit_event);
     }
@@ -439,7 +487,7 @@ fn resolve_raced_append(
             Rejection::Conflict("runtime task changed during append"),
         ));
     }
-    match ledger.classify(&message.event, digest) {
+    match classify_indexed_event(storage, &ledger, &message.event, digest)? {
         LedgerDecision::Duplicate => Ok(accepted_ack(
             message,
             ledger.highest_sequence,
@@ -602,7 +650,10 @@ pub(crate) struct RuntimeLedgerState {
     #[serde(default)]
     pub(crate) sequence_offset: u64,
     pub(crate) highest_sequence: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) events: Vec<RuntimeLedgerEvent>,
+    #[serde(default)]
+    pub(crate) event_chain_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -610,6 +661,25 @@ pub(crate) struct RuntimeLedgerState {
 pub(crate) struct RuntimeLedgerEvent {
     pub(crate) event: ExecutionEventRecord,
     pub(crate) event_digest: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexedRuntimeLedgerEvent {
+    entry: RuntimeLedgerEvent,
+    previous_chain_digest: String,
+    chain_digest: String,
+}
+
+impl IndexedRuntimeLedgerEvent {
+    fn new(entry: RuntimeLedgerEvent, previous_chain_digest: String) -> Self {
+        let chain_digest = extend_event_chain(&previous_chain_digest, &entry.event_digest);
+        Self {
+            entry,
+            previous_chain_digest,
+            chain_digest,
+        }
+    }
 }
 
 impl RuntimeLedgerState {
@@ -639,6 +709,7 @@ impl RuntimeLedgerState {
             sequence_offset: 0,
             highest_sequence: 0,
             events: Vec::new(),
+            event_chain_digest: String::new(),
         }
     }
 
@@ -651,7 +722,7 @@ impl RuntimeLedgerState {
         let attempt = u64::try_from(lease.attempt).map_err(|_| {
             Rejection::Conflict("runtime lease attempt is outside the accepted range")
         })?;
-        if self.schema_version != RUNTIME_STATE_VERSION
+        if !matches!(self.schema_version, 1 | RUNTIME_STATE_VERSION)
             || (context.scope_kind == RuntimeScopeKind::WorkRun) != self.delivery_id.is_some()
             || (context.scope_kind == RuntimeScopeKind::WorkRun) != self.work_run_id.is_some()
             || self.delivery_id != context.delivery_id
@@ -728,6 +799,12 @@ impl RuntimeLedgerState {
                 "runtime ledger append is not contiguous",
             )));
         }
+        if self.schema_version == 1 {
+            self.event_chain_digest = self.events.iter().fold(String::new(), |chain, entry| {
+                extend_event_chain(&chain, &entry.event_digest)
+            });
+        }
+        self.event_chain_digest = extend_event_chain(&self.event_chain_digest, &event_digest);
         self.highest_sequence = sequence;
         self.events.push(RuntimeLedgerEvent {
             event,
@@ -1154,7 +1231,7 @@ fn validate_message_shape(message: &RuntimeEventMessage) -> Result<(), Rejection
     Ok(())
 }
 
-fn load_ledger(
+pub(crate) fn load_ledger(
     storage: &dyn ProductStateStorage,
     stream_id: &str,
 ) -> Result<Option<RuntimeLedgerState>, StorageError> {
@@ -1163,7 +1240,18 @@ fn load_ledger(
     };
     #[cfg(test)]
     crate::storage_mechanism_regression::ledger_read(state.payload.len());
-    decode_runtime_ledger_state(&state, stream_id).map(Some)
+    let ledger = decode_runtime_ledger_state(&state, stream_id)?;
+    if ledger.schema_version == RUNTIME_STATE_VERSION {
+        let tail =
+            load_indexed_runtime_event(storage, &ledger.execution_job_id, ledger.highest_sequence)?;
+        if tail.chain_digest != ledger.event_chain_digest {
+            return Err(StorageError::invalid_input(
+                "runtime header does not match its immutable tail",
+            ));
+        }
+        validate_indexed_runtime_marker(storage, &ledger.execution_job_id, &tail)?;
+    }
+    Ok(Some(ledger))
 }
 
 pub(crate) fn decode_runtime_ledger_state(
@@ -1178,7 +1266,12 @@ pub(crate) fn decode_runtime_ledger_state(
     let ledger: RuntimeLedgerState = serde_json::from_slice(&state.payload).map_err(|error| {
         StorageError::invalid_input(format!("runtime ledger state is invalid: {error}"))
     })?;
-    if ledger.highest_sequence != ledger.events.len() as u64
+    if !matches!(ledger.schema_version, 1 | RUNTIME_STATE_VERSION)
+        || (ledger.schema_version == 1 && ledger.highest_sequence != ledger.events.len() as u64)
+        || (ledger.schema_version == RUNTIME_STATE_VERSION
+            && (!ledger.events.is_empty()
+                || ledger.highest_sequence == 0
+                || !canonical_chain_digest(&ledger.event_chain_digest)))
         || ledger.revision() > MAX_SAFE_INTEGER
         || (ledger.work_run_id.is_some() && ledger.sequence_offset != 0)
         || state.revision != ledger.revision()
@@ -1187,6 +1280,7 @@ pub(crate) fn decode_runtime_ledger_state(
             "runtime ledger state sequence is not canonical",
         ));
     }
+    let mut identities = HashSet::new();
     for (index, entry) in ledger.events.iter().enumerate() {
         #[cfg(test)]
         crate::storage_mechanism_regression::event_validation();
@@ -1200,13 +1294,242 @@ pub(crate) fn decode_runtime_ledger_state(
             ))
         })?;
         let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(event_encoded)));
-        if sequence != expected_sequence || digest != entry.event_digest {
+        if sequence != expected_sequence
+            || digest != entry.event_digest
+            || !identities.insert(&entry.event.event_id.0)
+        {
             return Err(StorageError::invalid_input(
                 "runtime ledger event sequence or digest is not canonical",
             ));
         }
     }
     Ok(ledger)
+}
+
+fn runtime_event_prefix(job: &ExecutionJobId) -> String {
+    format!("runtime-ledger-record:{}:", job.0)
+}
+fn runtime_event_key(job: &ExecutionJobId, sequence: u64) -> String {
+    format!("{}{:020}", runtime_event_prefix(job), sequence)
+}
+fn runtime_event_identity_key(job: &ExecutionJobId, event_id: &str) -> String {
+    format!("runtime-ledger-identity:{}:{event_id}", job.0)
+}
+fn extend_event_chain(previous: &str, digest: &Sha256Digest) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"winwincode-runtime-event-chain-v2");
+    hash.update(previous.as_bytes());
+    hash.update(digest.0.as_bytes());
+    format!("sha256:{:x}", hash.finalize())
+}
+fn canonical_chain_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn runtime_event_mutations(
+    job: &ExecutionJobId,
+    indexed: &IndexedRuntimeLedgerEvent,
+) -> Result<Vec<StateMutation>, StorageError> {
+    let entry = &indexed.entry;
+    let sequence = u64::try_from(entry.event.sequence.0)
+        .map_err(|_| StorageError::invalid_input("runtime sequence is invalid"))?;
+    let bytes = serde_json::to_vec(indexed)
+        .map_err(|_| StorageError::adapter("runtime event encoding failed"))?;
+    let marker = serde_json::to_vec(&(sequence, &entry.event_digest))
+        .map_err(|_| StorageError::adapter("runtime identity encoding failed"))?;
+    Ok(vec![
+        StateMutation::new(runtime_event_key(job, sequence), 0, bytes)?,
+        StateMutation::new(
+            runtime_event_identity_key(job, &entry.event.event_id.0),
+            0,
+            marker,
+        )?,
+    ])
+}
+
+fn decode_indexed_runtime_event(
+    row: &winwincode_storage::StoredState,
+    job: &ExecutionJobId,
+    sequence: u64,
+) -> Result<IndexedRuntimeLedgerEvent, StorageError> {
+    let indexed: IndexedRuntimeLedgerEvent = serde_json::from_slice(&row.payload)
+        .map_err(|_| StorageError::invalid_input("runtime event row is corrupt"))?;
+    if sequence == 0
+        || row.revision != 1
+        || row.stream_id != runtime_event_key(job, sequence)
+        || u64::try_from(indexed.entry.event.sequence.0).ok() != Some(sequence)
+        || event_digest(&indexed.entry.event)? != indexed.entry.event_digest
+        || !canonical_chain_digest(&indexed.chain_digest)
+        || (sequence == 1 && !indexed.previous_chain_digest.is_empty())
+        || (sequence > 1 && !canonical_chain_digest(&indexed.previous_chain_digest))
+        || extend_event_chain(&indexed.previous_chain_digest, &indexed.entry.event_digest)
+            != indexed.chain_digest
+    {
+        return Err(StorageError::invalid_input(
+            "runtime immutable event is not canonical",
+        ));
+    }
+    Ok(indexed)
+}
+
+fn load_indexed_runtime_event(
+    storage: &dyn ProductStateStorage,
+    job: &ExecutionJobId,
+    sequence: u64,
+) -> Result<IndexedRuntimeLedgerEvent, StorageError> {
+    let row = storage
+        .load_state(&runtime_event_key(job, sequence))?
+        .ok_or_else(|| StorageError::invalid_input("runtime immutable event is missing"))?;
+    decode_indexed_runtime_event(&row, job, sequence)
+}
+
+fn decode_runtime_identity_marker(
+    stored: &winwincode_storage::StoredState,
+    job: &ExecutionJobId,
+    event_id: &str,
+) -> Result<(u64, Sha256Digest), StorageError> {
+    let marker: (u64, Sha256Digest) = serde_json::from_slice(&stored.payload)
+        .map_err(|_| StorageError::invalid_input("runtime identity marker is corrupt"))?;
+    if stored.stream_id != runtime_event_identity_key(job, event_id)
+        || stored.revision != 1
+        || marker.0 == 0
+    {
+        return Err(StorageError::invalid_input(
+            "runtime identity marker is not canonical",
+        ));
+    }
+    Ok(marker)
+}
+
+fn validate_indexed_runtime_marker(
+    storage: &dyn ProductStateStorage,
+    job: &ExecutionJobId,
+    indexed: &IndexedRuntimeLedgerEvent,
+) -> Result<(), StorageError> {
+    let event_id = &indexed.entry.event.event_id.0;
+    let stored = storage
+        .load_state(&runtime_event_identity_key(job, event_id))?
+        .ok_or_else(|| {
+            StorageError::invalid_input("runtime immutable event has no identity marker")
+        })?;
+    let (sequence, digest) = decode_runtime_identity_marker(&stored, job, event_id)?;
+    if u64::try_from(indexed.entry.event.sequence.0).ok() != Some(sequence)
+        || indexed.entry.event_digest != digest
+    {
+        return Err(StorageError::invalid_input(
+            "runtime identity marker does not match immutable event",
+        ));
+    }
+    Ok(())
+}
+
+fn classify_indexed_event(
+    storage: &dyn ProductStateStorage,
+    ledger: &RuntimeLedgerState,
+    event: &ExecutionEventRecord,
+    digest: &Sha256Digest,
+) -> Result<LedgerDecision, StorageError> {
+    if ledger.schema_version == 1 {
+        return Ok(ledger.classify(event, digest));
+    }
+    let key = runtime_event_identity_key(&ledger.execution_job_id, &event.event_id.0);
+    if let Some(stored) = storage.load_state(&key)? {
+        let (sequence, accepted_digest) =
+            decode_runtime_identity_marker(&stored, &ledger.execution_job_id, &event.event_id.0)?;
+        if sequence > ledger.highest_sequence {
+            return Err(StorageError::invalid_input(
+                "runtime identity marker is outside its header",
+            ));
+        }
+        let accepted = load_indexed_runtime_event(storage, &ledger.execution_job_id, sequence)?;
+        if accepted.entry.event.event_id != event.event_id
+            || accepted.entry.event_digest != accepted_digest
+        {
+            return Err(StorageError::invalid_input(
+                "runtime identity marker does not match immutable event",
+            ));
+        }
+        return Ok(
+            if u64::try_from(event.sequence.0).ok() == Some(sequence) && accepted_digest == *digest
+            {
+                LedgerDecision::Duplicate
+            } else {
+                LedgerDecision::Conflict(Rejection::Conflict(
+                    "runtime event identity was reused with different content",
+                ))
+            },
+        );
+    }
+    if let Ok(sequence) = u64::try_from(event.sequence.0)
+        && sequence > 0
+        && sequence <= ledger.highest_sequence
+    {
+        let accepted = load_indexed_runtime_event(storage, &ledger.execution_job_id, sequence)?;
+        validate_indexed_runtime_marker(storage, &ledger.execution_job_id, &accepted)?;
+        return Ok(LedgerDecision::Conflict(Rejection::Conflict(
+            if accepted.entry.event_digest == *digest {
+                "runtime sequence was already accepted with another event identity"
+            } else {
+                "runtime sequence was already accepted with different content"
+            },
+        )));
+    }
+    Ok(ledger.classify(event, digest))
+}
+
+/// Reconstructs and verifies the immutable history for an explicit projection
+/// or evidence read. New appends read only their header and exact identity row.
+pub(crate) fn hydrate_runtime_ledger(
+    storage: &dyn ProductStateStorage,
+    ledger: &mut RuntimeLedgerState,
+) -> Result<(), StorageError> {
+    if ledger.schema_version == 1 {
+        return Ok(());
+    }
+    let prefix = runtime_event_prefix(&ledger.execution_job_id);
+    let upper = runtime_event_key(&ledger.execution_job_id, ledger.highest_sequence);
+    let mut after = prefix.clone();
+    let mut chain = String::new();
+    let mut expected = 1_u64;
+    let mut events = Vec::new();
+    let mut identities = HashSet::new();
+    loop {
+        let rows = storage.scan_state_streams(&prefix, &after, &upper, 256)?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let indexed = decode_indexed_runtime_event(&row, &ledger.execution_job_id, expected)?;
+            validate_indexed_runtime_marker(storage, &ledger.execution_job_id, &indexed)?;
+            if indexed.previous_chain_digest != chain
+                || !identities.insert(indexed.entry.event.event_id.0.clone())
+            {
+                return Err(StorageError::invalid_input(
+                    "runtime immutable chain is not contiguous",
+                ));
+            }
+            #[cfg(test)]
+            crate::storage_mechanism_regression::event_validation();
+            chain = indexed.chain_digest;
+            after = row.stream_id;
+            events.push(indexed.entry);
+            expected = expected
+                .checked_add(1)
+                .ok_or_else(|| StorageError::invalid_input("runtime sequence overflow"))?;
+        }
+    }
+    if events.len() as u64 != ledger.highest_sequence || chain != ledger.event_chain_digest {
+        return Err(StorageError::invalid_input(
+            "runtime history does not match its header",
+        ));
+    }
+    ledger.events = events;
+    Ok(())
 }
 
 fn event_digest(event: &ExecutionEventRecord) -> Result<Sha256Digest, StorageError> {

@@ -322,7 +322,7 @@ test('a text input submits the exact interactive value the input asked for', () 
   assert.deepEqual(actions, [[
     'provideInput',
     'inp_00000000000000000000000001',
-    { mode: 'text', value: 'candidate workspace' },
+    { mode: 'text', value: '  candidate workspace  ' },
   ]])
 })
 
@@ -505,5 +505,82 @@ test('the card suite is registered once and its modules are inventoried', () => 
     'apps/client/src/contextual-decision-view-model.ts',
   ]) {
     assert.equal(listed.filter(entry => entry === path).length, 1, `${path} is inventoried once`)
+  }
+})
+
+
+function otherButton(row) {
+  return findAllByClass(row, 'wwc-contextual-decision-option')
+    .find(button => button.dataset.wwcInputOther === 'true')
+}
+
+function otherInput(overrides = {}) {
+  return input({ mode: 'single_choice', allowOther: true,
+    options: [{ id: 'ich_00000000000000000000000001', value: 'other', label: 'A canonical option named other' }],
+    ...overrides,
+  })
+}
+
+test('Other uses its own selection and submits the unchanged single-choice draft', () => {
+  const { root, actions } = mount({ view: view({ inputs: [otherInput()] }) })
+  const row = rows(root)[0]
+  const buttons = findAllByClass(row, 'wwc-contextual-decision-option')
+  buttons[0].click()
+  assert.deepEqual(actions.at(-1), ['provideInput', 'inp_00000000000000000000000001', { mode: 'single_choice', value: 'other' }])
+  otherButton(row).click()
+  assert.equal(otherButton(row).getAttribute('aria-pressed'), 'true')
+  const draft = findByClass(row, 'wwc-contextual-decision-response')
+  draft.value = '  用户的其他选择 🦀  '
+  findByClass(row, 'wwc-contextual-decision-submit').click()
+  assert.deepEqual(actions.at(-1), ['provideInput', 'inp_00000000000000000000000001', { mode: 'single_choice', value: draft.value }])
+  assert.equal(draft.value, '  用户的其他选择 🦀  ')
+})
+
+test('Other validation counts Unicode codepoints and keeps rejected drafts', () => {
+  const { root, actions } = mount({ view: view({ inputs: [otherInput()] }) })
+  const row = rows(root)[0]
+  otherButton(row).click()
+  const draft = findByClass(row, 'wwc-contextual-decision-response')
+  const submit = findByClass(row, 'wwc-contextual-decision-submit')
+  for (const value of [' \n\t ', '🦀'.repeat(20_001)]) {
+    draft.value = value
+    submit.click()
+    assert.deepEqual(actions, [])
+    assert.equal(draft.value, value)
+    assert.equal(findByClass(row, 'wwc-contextual-decision-rejected').hidden, false)
+  }
+  draft.value = '🦀'.repeat(20_000)
+  submit.click()
+  assert.equal(actions.length, 1)
+  assert.deepEqual(actions[0][2], { mode: 'single_choice', value: draft.value })
+})
+
+test('Other loses submission authority after expiry, invalid binding or permission revocation', () => {
+  for (const changed of [
+    { allowOther: false },
+    { allowOther: undefined },
+    { state: 'resolved' },
+    { expiresAt: '2026-09-04T11:00:00.000Z' },
+    { binding: binding({ productSessionId: 'psn_00000000000000000000000002' }) },
+  ]) {
+    const { root, actions, card } = mount({ view: view({ inputs: [otherInput()] }) })
+    const row = rows(root)[0]
+    otherButton(row).click()
+    const draft = findByClass(row, 'wwc-contextual-decision-response')
+    draft.value = '  retained draft 🦀  '
+    const current = view({ inputs: [otherInput(changed)] })
+    card.update({ view: current, presentation: contextualDecisionPresentation(current), note: null })
+    findByClass(row, 'wwc-contextual-decision-submit').click()
+    assert.deepEqual(actions, [])
+    assert.equal(draft.value, '  retained draft 🦀  ')
+  }
+  for (const projection of [otherInput({ allowOther: false }), otherInput({ allowOther: undefined }), otherInput({ mode: 'confirmation' })]) {
+    const { root, actions } = mount({ view: view({ inputs: [projection] }) })
+    const row = rows(root)[0]
+    assert.equal(otherButton(row).hidden, true)
+    otherButton(row).click()
+    findByClass(row, 'wwc-contextual-decision-response').value = 'forged draft'
+    findByClass(row, 'wwc-contextual-decision-submit').click()
+    assert.deepEqual(actions, [])
   }
 })

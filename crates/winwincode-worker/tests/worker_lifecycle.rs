@@ -1646,7 +1646,19 @@ impl WorkerTestAccess for WorkerMain<RecordingPort, FakeCodex> {
     }
 
     fn poll_codex_boxed(&mut self) -> TestFuture<'_, Result<(), winwincode_worker::WorkerError>> {
-        Box::pin(WorkerMain::poll_codex(self, now()))
+        Box::pin(async move {
+            WorkerMain::poll_codex(self, now()).await?;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.has_pending_workspace_validation() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "owned validation must finish before fixture deadline"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                WorkerMain::poll_codex(self, now()).await?;
+            }
+            Ok(())
+        })
     }
 }
 

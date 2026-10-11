@@ -1125,6 +1125,7 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
 
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(

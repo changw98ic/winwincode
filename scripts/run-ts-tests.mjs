@@ -106,6 +106,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/real-task-benchmark.test.mjs',
   'tests/benchmark-public-smoke.test.mjs',
   'tests/benchmark-device-adapter.test.mjs',
+  'tests/benchmark-mechanism-repair.test.mjs',
   'tests/real-task-benchmark-runner.test.mjs',
   'tests/publish-benchmark-submission.test.mjs',
   'tests/release-artifact-contract.test.mjs',

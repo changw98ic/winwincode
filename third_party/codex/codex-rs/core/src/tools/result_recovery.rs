@@ -118,6 +118,11 @@ pub(super) async fn recover(
             ToolExecutionStatus::Running | ToolExecutionStatus::Uncertain
         )
     }) {
+        if let Some(response) =
+            super::control_input_recovery::recover(&replay, invocation, runtime.as_deref()).await?
+        {
+            return Err(response);
+        }
         return super::tool_reconciliation::reconcile(replay, invocation, runtime).await;
     }
     let attempt = replay.fact.attempt.as_ref();

@@ -1390,6 +1390,67 @@ pub const MAX_STATE_MUTATION_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum combined secondary canonical-state payload bytes in one receipt.
 pub const MAX_STATE_MUTATION_BYTES_PER_COMMIT: usize = 16 * 1024 * 1024;
 
+/// Maximum immutable rows imported while replacing one legacy snapshot.
+pub const MAX_IMMUTABLE_STATE_IMPORT_ROWS: usize = 65_536;
+/// Maximum combined payload bytes in one atomic legacy-state import.
+pub const MAX_IMMUTABLE_STATE_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+
+/// A bounded, insert-only migration of a validated legacy primary snapshot.
+/// The source digest is checked in the receipt transaction before any write.
+/// Ordinary secondary writes retain their separate sixteen-mutation limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImmutableStateImport {
+    source_digest: Sha256Digest,
+    rows: Vec<StateMutation>,
+}
+
+impl ImmutableStateImport {
+    /// Creates an insert-only migration bound to the exact legacy source bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid digests, non-insert mutations, or imports above the
+    /// explicit row and payload limits.
+    pub fn new(
+        source_digest: Sha256Digest,
+        rows: Vec<StateMutation>,
+    ) -> Result<Self, StorageError> {
+        let import = Self {
+            source_digest,
+            rows,
+        };
+        import.validate()?;
+        Ok(import)
+    }
+
+    fn validate(&self) -> Result<(), StorageError> {
+        validate_sha256_digest(&self.source_digest)?;
+        if self.rows.is_empty() || self.rows.len() > MAX_IMMUTABLE_STATE_IMPORT_ROWS {
+            return Err(StorageError::invalid(
+                "immutable state import exceeds its row limit",
+            ));
+        }
+        let mut bytes = 0_usize;
+        for row in &self.rows {
+            row.validate()?;
+            if row.expected_revision != 0 || row.state.len() > MAX_STATE_MUTATION_PAYLOAD_BYTES {
+                return Err(StorageError::invalid(
+                    "immutable state import rows must be bounded inserts",
+                ));
+            }
+            bytes = bytes.checked_add(row.state.len()).ok_or_else(|| {
+                StorageError::invalid("immutable state import payload size overflow")
+            })?;
+        }
+        if bytes > MAX_IMMUTABLE_STATE_IMPORT_BYTES {
+            return Err(StorageError::invalid(
+                "immutable state import exceeds its payload limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// One atomic canonical-state and outbox commit at the storage port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateCommit {
@@ -1401,6 +1462,7 @@ pub struct StateCommit {
     pub events: Vec<NewOutboxEvent>,
     state_guards: Vec<StateRevisionGuard>,
     state_mutations: Vec<StateMutation>,
+    immutable_state_import: Option<ImmutableStateImport>,
     journal_publication: Option<AggregateJournalPublication>,
     pending_audit_event: Option<PendingAuditEvent>,
     receipt_replay_required: bool,
@@ -1425,6 +1487,7 @@ impl StateCommit {
             events,
             state_guards: Vec::new(),
             state_mutations: Vec::new(),
+            immutable_state_import: None,
             journal_publication: None,
             pending_audit_event: None,
             receipt_replay_required: false,
@@ -1478,6 +1541,21 @@ impl StateCommit {
     #[must_use]
     pub fn state_mutations(&self) -> &[StateMutation] {
         &self.state_mutations
+    }
+
+    /// Adds one bounded immutable import to the same receipt transaction.
+    #[must_use]
+    pub fn with_immutable_state_import(mut self, import: ImmutableStateImport) -> Self {
+        self.immutable_state_import = Some(import);
+        self
+    }
+
+    fn all_state_mutations(&self) -> impl Iterator<Item = &StateMutation> {
+        self.state_mutations.iter().chain(
+            self.immutable_state_import
+                .iter()
+                .flat_map(|import| import.rows.iter()),
+        )
     }
 
     /// Returns whether this commit may only replay an already durable receipt.
@@ -1561,9 +1639,17 @@ impl StateCommit {
                 "a state commit must contain at most {MAX_STATE_MUTATIONS_PER_COMMIT} secondary mutations"
             )));
         }
+        if let Some(import) = &self.immutable_state_import {
+            import.validate()?;
+            if self.expected_revision == 0 {
+                return Err(StorageError::invalid(
+                    "immutable state import requires an existing primary snapshot",
+                ));
+            }
+        }
         let mut mutation_bytes = 0_usize;
         let mut mutation_streams = HashSet::with_capacity(self.state_mutations.len());
-        for mutation in &self.state_mutations {
+        for mutation in self.all_state_mutations() {
             mutation.validate()?;
             if mutation.stream_id == self.stream_id {
                 return Err(StorageError::invalid(
@@ -1585,6 +1671,8 @@ impl StateCommit {
                     "a state mutation payload must contain at most {MAX_STATE_MUTATION_PAYLOAD_BYTES} bytes"
                 )));
             }
+        }
+        for mutation in &self.state_mutations {
             mutation_bytes = mutation_bytes
                 .checked_add(mutation.state.len())
                 .ok_or_else(|| StorageError::invalid("state mutation payload size overflow"))?;
@@ -2154,7 +2242,7 @@ pub trait ProductStateStorage: Send {
     /// request idempotency, or the adapter transaction fails.
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         commit.validate()?;
-        if !commit.state_mutations().is_empty() {
+        if !commit.state_mutations().is_empty() || commit.immutable_state_import.is_some() {
             return Err(StorageError::adapter(
                 "secondary state mutations require an atomic storage adapter",
             ));
@@ -4050,7 +4138,29 @@ fn check_state_mutation_revisions(
     transaction: &rusqlite::Transaction<'_>,
     commit: &StateCommit,
 ) -> Result<(), StorageError> {
-    for mutation in &commit.state_mutations {
+    if let Some(import) = &commit.immutable_state_import {
+        let source: Option<(i64, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT revision,payload FROM product_state WHERE stream_id=?1",
+                [&commit.stream_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some((revision, payload)) = source else {
+            return Err(StorageError::invalid(
+                "immutable state import source is missing",
+            ));
+        };
+        if u64::try_from(revision).ok() != Some(commit.expected_revision)
+            || format!("sha256:{:x}", Sha256::digest(payload)) != import.source_digest.0
+        {
+            return Err(StorageError::invalid(
+                "immutable state import source changed before commit",
+            ));
+        }
+    }
+    for mutation in commit.all_state_mutations() {
         let actual_revision = stored_state_revision(transaction, &mutation.stream_id)?;
         if actual_revision != mutation.expected_revision {
             return Err(StorageError::state_mutation_revision_conflict(
@@ -4238,7 +4348,7 @@ fn append_state_mutations(
     transaction: &rusqlite::Transaction<'_>,
     commit: &StateCommit,
 ) -> Result<(), StorageError> {
-    for mutation in &commit.state_mutations {
+    for mutation in commit.all_state_mutations() {
         let expected_revision = i64::try_from(mutation.expected_revision)
             .map_err(|_| StorageError::invalid("state mutation revision is out of range"))?;
         let revision = expected_revision
@@ -4840,7 +4950,9 @@ fn create_pending_audit_event_schema(
                  FOREIGN KEY (actor_key, scope_key, request_id)
                      REFERENCES command_receipts (actor_key, scope_key, request_id)
                      DEFERRABLE INITIALLY DEFERRED
-             );",
+             );
+             CREATE INDEX IF NOT EXISTS audit_outbox_unpersisted
+                 ON audit_outbox(event_id) WHERE persisted = 0;",
         )
         .map_err(sql_error)
 }
@@ -4914,7 +5026,9 @@ fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
                      DEFERRABLE INITIALLY DEFERRED
              );
              CREATE INDEX IF NOT EXISTS outbox_pending_sequence
-                 ON outbox (published, sequence);",
+                 ON outbox (published, sequence);
+             CREATE INDEX IF NOT EXISTS outbox_receipt_sequence
+                 ON outbox(receipt_actor_key, receipt_scope_key, request_id, sequence);",
         )
         .map_err(sql_error)
 }
@@ -5005,7 +5119,9 @@ fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
             "DROP TABLE outbox_v1;
              DROP TABLE command_receipts_v1;
              CREATE INDEX IF NOT EXISTS outbox_pending_sequence
-                 ON outbox (published, sequence);",
+                 ON outbox (published, sequence);
+             CREATE INDEX IF NOT EXISTS outbox_receipt_sequence
+                 ON outbox(receipt_actor_key, receipt_scope_key, request_id, sequence);",
         )
         .map_err(sql_error)?;
     Ok(())

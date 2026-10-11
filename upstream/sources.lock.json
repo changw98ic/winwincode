@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-10-02",
+  "recordedAt": "2026-10-10",
   "project": {
     "license": "Apache-2.0",
     "node": "24.x",
@@ -1398,12 +1398,115 @@
       "id": "codex-task-state-compaction-budget",
       "file": "upstream/patches/codex/0099-task-state-compaction-budget.patch",
       "planned": false,
-      "patchSha256": "4e290218c2bb03d8701647610943034fbce82ae44303d3f393e84a64c1007745",
+      "patchSha256": "1dccb49d35f156e1c41683ac69dc4aa63eade67d3182200fce7d192c4cfe2a94",
       "targets": [
         "codex-rs/core/src/client.rs",
         "codex-rs/core/src/compact.rs",
         "codex-rs/core/src/compact_tests.rs",
-        "codex-rs/core/src/config/mod.rs"
+        "codex-rs/core/src/config/mod.rs",
+        "codex-rs/thread-manager-sample/src/main.rs"
+      ]
+    },
+    {
+      "id": "codex-runtime-timer-and-pending-cost",
+      "file": "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+      "planned": false,
+      "patchSha256": "2afac57a821aa5b971b239143830413aa3a73352258c0e56366177ca817d2e16",
+      "targets": [
+        "codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs",
+        "codex-rs/code-mode-runtime/src/runtime/mod.rs",
+        "codex-rs/code-mode-runtime/src/runtime/module_loader.rs",
+        "codex-rs/code-mode-runtime/src/runtime/timer_scheduler.rs",
+        "codex-rs/code-mode-runtime/src/runtime/timers.rs"
+      ]
+    },
+    {
+      "id": "codex-stdio-lifecycle-deadlines",
+      "file": "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+      "planned": false,
+      "patchSha256": "0eab8e6439b68a4a14625dec9c9fbf68c922c3f9ddeafaa1660f7b80402d8375",
+      "targets": [
+        "codex-rs/code-mode/src/remote_session.rs",
+        "codex-rs/code-mode/src/remote_session/connection.rs",
+        "codex-rs/code-mode/src/remote_session/connection/deadline.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/commands.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/delegate_runtime.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/request_tracker.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/responses.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs",
+        "codex-rs/code-mode/src/remote_session/connection/driver/types.rs",
+        "codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-exact-input-call-routing",
+      "file": "upstream/patches/codex/0102-exact-input-call-routing.patch",
+      "planned": false,
+      "patchSha256": "9630a52aaa413bf02ffc45abce5925a7c616f621b0760d12fa2ddfd09a9ce309",
+      "targets": [
+        "codex-rs/app-server/src/bespoke_event_handling.rs",
+        "codex-rs/core/src/mcp_skill_dependencies.rs",
+        "codex-rs/core/src/session/elicitation_holders_tests.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/session/mod.rs",
+        "codex-rs/core/src/session/session.rs",
+        "codex-rs/core/src/session/tests.rs",
+        "codex-rs/core/src/state/turn.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input_tests.rs",
+        "codex-rs/core/tests/suite/mcp_tool_exposure.rs",
+        "codex-rs/core/tests/suite/mcp_turn_metadata.rs",
+        "codex-rs/core/tests/suite/model_switching.rs",
+        "codex-rs/core/tests/suite/remote_env.rs",
+        "codex-rs/protocol/src/protocol.rs",
+        "codex-rs/tui/src/app/app_server_requests.rs",
+        "codex-rs/tui/src/app/pending_interactive_replay.rs",
+        "codex-rs/tui/src/app/tests/startup.rs",
+        "codex-rs/tui/src/app_command.rs",
+        "codex-rs/tui/src/app_event_sender.rs",
+        "codex-rs/tui/src/bottom_pane/request_user_input/mod.rs",
+        "codex-rs/tui/src/chatwidget.rs",
+        "codex-rs/tui/src/chatwidget/interrupts.rs"
+      ]
+    },
+    {
+      "id": "codex-private-input-recovery-store",
+      "file": "upstream/patches/codex/0103-private-input-recovery-store.patch",
+      "planned": false,
+      "patchSha256": "b907be22a402d67a7bcead6a5090159642470d0b831d7c809bdce36f35296963",
+      "targets": [
+        "codex-rs/Cargo.lock",
+        "codex-rs/state/Cargo.toml",
+        "codex-rs/state/migrations/0056_tool_control_input_recovery.sql",
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/runtime/tool_control_input_recovery.rs",
+        "codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs",
+        "codex-rs/state/src/tool_runtime.rs"
+      ]
+    },
+    {
+      "id": "codex-input-recovery-dispatch-and-pages",
+      "file": "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+      "planned": false,
+      "patchSha256": "23b87a5c3320348a8739cabc91e5355446600706fef12a929ef362189b3b6053",
+      "targets": [
+        "codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs",
+        "codex-rs/core/src/tools/control_input_recovery.rs",
+        "codex-rs/core/src/tools/control_input_recovery_tests.rs",
+        "codex-rs/core/src/tools/handlers/mod.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input_result.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input_result_tests.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input_spec.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/result_recovery.rs",
+        "codex-rs/core/src/tools/spec_plan.rs",
+        "codex-rs/core/src/tools/tool_reconciliation.rs",
+        "codex-rs/core/src/tools/tool_reconciliation_tests.rs",
+        "codex-rs/core/tests/suite/prompt_caching.rs",
+        "codex-rs/core/tests/suite/request_user_input.rs"
       ]
     }
   ],

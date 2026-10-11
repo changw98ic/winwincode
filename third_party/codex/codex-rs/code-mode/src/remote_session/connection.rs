@@ -50,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
 
+use self::deadline::TransportDeadline;
 use self::driver::ConnectionDriver;
 use self::driver::DriverCommand;
 use self::driver::DriverEvent;
@@ -60,6 +61,7 @@ use self::reader::drive_reader;
 use self::transport::ConnectionReader;
 use self::transport::ConnectionWriter;
 
+mod deadline;
 mod driver;
 mod reader;
 mod transport;
@@ -491,6 +493,7 @@ impl Connection {
         session: RemoteSession,
         delegate: Arc<dyn CodeModeSessionDelegate>,
         limits: CodeModeSessionCellExecutionLimits,
+        opening_cancellation: CancellationToken,
     ) -> Result<SessionCleanup, String> {
         if limits != CodeModeSessionCellExecutionLimits::default()
             && !self
@@ -503,18 +506,29 @@ impl Connection {
             ));
         }
         let cleanup = SessionCleanup::new();
-        let cancellation = CallerCancellation::new();
+        let cancellation = CallerCancellation {
+            token: opening_cancellation,
+            armed: true,
+        };
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(DriverCommand::OpenSession {
-            session,
-            delegate,
-            limits,
-            cleanup: cleanup.clone(),
-            caller_cancellation: cancellation.token(),
-            response_tx,
-        })
-        .await?;
-        let result = self.receive(response_rx).await;
+        let result = self
+            .with_transport_deadline(Duration::ZERO, "open", async {
+                self.send(DriverCommand::OpenSession {
+                    session,
+                    delegate,
+                    limits,
+                    cleanup: cleanup.clone(),
+                    caller_cancellation: cancellation.token(),
+                    response_tx,
+                })
+                .await?;
+                let result = self.receive(response_rx).await;
+                if result.is_err() {
+                    cleanup.wait().await;
+                }
+                result
+            })
+            .await;
         cancellation.disarm();
         result?;
         Ok(cleanup)
@@ -527,14 +541,19 @@ impl Connection {
     ) -> Result<StartedCell, String> {
         let cancellation = CallerCancellation::new();
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(DriverCommand::Execute {
-            session,
-            request,
-            caller_cancellation: cancellation.token(),
-            response_tx,
-        })
-        .await?;
-        let delivered = match self.receive(response_rx).await {
+        let delivered = match self
+            .with_transport_deadline(Duration::ZERO, "execute start", async {
+                self.send(DriverCommand::Execute {
+                    session,
+                    request,
+                    caller_cancellation: cancellation.token(),
+                    response_tx,
+                })
+                .await?;
+                self.receive(response_rx).await
+            })
+            .await
+        {
             Ok(delivered) => delivered,
             Err(err) => {
                 cancellation.disarm();
@@ -594,12 +613,15 @@ impl Connection {
 
     pub(super) async fn shutdown_session(&self, session: RemoteSession) -> Result<(), String> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(DriverCommand::ShutdownSession {
-            session,
-            response_tx,
+        self.with_transport_deadline(Duration::ZERO, "shutdown", async {
+            self.send(DriverCommand::ShutdownSession {
+                session,
+                response_tx,
+            })
+            .await?;
+            self.receive(response_rx).await
         })
-        .await?;
-        self.receive(response_rx).await
+        .await
     }
 
     async fn with_transport_deadline<T>(
@@ -608,17 +630,16 @@ impl Connection {
         request_type: &str,
         request: impl Future<Output = Result<T, String>>,
     ) -> Result<T, String> {
-        let deadline = runtime_timeout.saturating_add(DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT);
-        match tokio::time::timeout(deadline, request).await {
-            Ok(result) => result,
-            Err(_) => {
-                warn!(request_type, "code-mode host request exceeded its deadline");
-                let reason =
-                    format!("code-mode host timed out waiting for {request_type} response");
-                mark_connection_dead(&self.alive, &self.failure, reason.clone());
-                self.cancellation.cancel();
-                Err(reason)
-            }
+        self.transport_deadline()
+            .run(runtime_timeout, request_type, request)
+            .await
+    }
+
+    fn transport_deadline(&self) -> TransportDeadline {
+        TransportDeadline {
+            alive: Arc::clone(&self.alive),
+            failure: Arc::clone(&self.failure),
+            cancellation: self.cancellation.clone(),
         }
     }
 

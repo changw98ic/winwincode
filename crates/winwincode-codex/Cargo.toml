@@ -34,5 +34,8 @@ winwincode-kernel = { path = "../kernel" }
 [build-dependencies]
 sha2.workspace = true
 
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks"] }
+
 [lints]
 workspace = true

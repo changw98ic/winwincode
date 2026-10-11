@@ -31,6 +31,7 @@ use winwincode_kernel::{
 
 use crate::{
     ActionRequestTransport,
+    authority_clock::{AuthorityClock, AuthorityClockError, canonical_instant},
     model_bridge::{ModelRunBinding, extend_binding_lineage},
 };
 
@@ -57,7 +58,7 @@ pub(super) struct ActionGateState {
     pub(super) read_only_runs: RwLock<HashMap<String, PathBuf>>,
     trusted_read_programs: HashMap<String, TrustedReadProgram>,
     session_generations: Mutex<HashMap<String, u64>>,
-    trusted_now: Mutex<Option<Instant>>,
+    authority_clock: AuthorityClock,
     pending: Mutex<HashMap<String, PendingAction>>,
     completed: Mutex<HashMap<String, CompletedAction>>,
     messages: Mutex<VecDeque<ExecutionPortMessage>>,
@@ -132,7 +133,7 @@ impl ExecutionPortActionGate {
                 read_only_runs: RwLock::new(HashMap::new()),
                 trusted_read_programs: resolve_trusted_read_programs(),
                 session_generations: Mutex::new(HashMap::new()),
-                trusted_now: Mutex::new(None),
+                authority_clock: AuthorityClock::default(),
                 pending: Mutex::new(HashMap::new()),
                 completed: Mutex::new(HashMap::new()),
                 messages: Mutex::new(VecDeque::new()),
@@ -336,21 +337,7 @@ impl ExecutionPortActionGate {
     }
 
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), ActionBridgeError> {
-        let mut trusted_now = self
-            .state
-            .trusted_now
-            .lock()
-            .map_err(|_| ActionBridgeError::Unavailable)?;
-        // Control-plane responses can arrive out of order.  Treat the clock
-        // as a high-water mark so an older receipt cannot move trusted time
-        // backwards and reopen an expired lease or permit.
-        if trusted_now
-            .as_ref()
-            .is_none_or(|current| current.0.as_str() < now.0.as_str())
-        {
-            *trusted_now = Some(now.clone());
-        }
-        Ok(())
+        self.state.authority_clock.observe(now).map_err(clock_error)
     }
 
     pub(crate) fn accept_receipt(
@@ -966,10 +953,9 @@ pub(super) fn current_binding_and_time(
         .cloned()
         .ok_or(ActionBridgeError::StaleAuthority)?;
     let now = state
-        .trusted_now
-        .lock()
-        .map_err(|_| ActionBridgeError::Unavailable)?
-        .clone()
+        .authority_clock
+        .now()
+        .map_err(clock_error)?
         .ok_or(ActionBridgeError::StaleAuthority)?;
     if !canonical_instant(&now)
         || !canonical_instant(&binding.authority.lease.issued_at)
@@ -1609,33 +1595,11 @@ fn update_digest_part(digest: &mut Sha256, part: &[u8]) {
     digest.update(part);
 }
 
-fn canonical_instant(instant: &Instant) -> bool {
-    let value = instant.0.as_bytes();
-    value.len() == 24
-        && value[4] == b'-'
-        && value[7] == b'-'
-        && value[10] == b'T'
-        && value[13] == b':'
-        && value[16] == b':'
-        && value[19] == b'.'
-        && value[23] == b'Z'
-        && value.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
-        })
-        && number(value, 5, 7).is_some_and(|month| (1..=12).contains(&month))
-        && number(value, 8, 10).is_some_and(|day| (1..=31).contains(&day))
-        && number(value, 11, 13).is_some_and(|hour| hour <= 23)
-        && number(value, 14, 16).is_some_and(|minute| minute <= 59)
-        && number(value, 17, 19).is_some_and(|second| second <= 59)
-}
-
-fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
-    value
-        .get(start..end)?
-        .iter()
-        .try_fold(0_u8, |number, byte| {
-            number.checked_mul(10)?.checked_add(byte - b'0')
-        })
+fn clock_error(error: AuthorityClockError) -> ActionBridgeError {
+    match error {
+        AuthorityClockError::Unavailable => ActionBridgeError::Unavailable,
+        AuthorityClockError::InvalidTime => ActionBridgeError::StaleAuthority,
+    }
 }
 
 fn canonical_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
@@ -1913,13 +1877,15 @@ mod tests {
         );
         gate.update_now(now)
             .expect("ignore an out-of-order older trusted time");
-        assert_eq!(
+        assert!(
             gate.state
-                .trusted_now
-                .lock()
+                .authority_clock
+                .now()
                 .expect("trusted action time")
-                .as_ref(),
-            Some(&Instant("2030-01-01T01:00:00.000Z".to_owned()))
+                .expect("observed time")
+                .0
+                .as_str()
+                >= "2030-01-01T01:00:00.000Z"
         );
         gate.remove_binding(&binding())
             .expect("cancel exact binding");
@@ -2129,6 +2095,79 @@ mod tests {
     async fn kernel_action_round_trips_through_signed_execution_port_receipt() {
         action_receipt_round_trip(false).await;
         action_receipt_round_trip(true).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_reads_and_core_controls_expire_without_owner_clock_refresh() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-codex-action-elapsed-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "unchanged").unwrap();
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+        )
+        .unwrap();
+        let mut authority = binding();
+        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.150Z".into());
+        gate.install_binding(authority.clone(), Some(&root))
+            .unwrap();
+        let initial = Instant("2030-01-01T00:00:02.000Z".into());
+        gate.update_now(&initial).unwrap();
+        let read = shell_request("elapsed-read", "cat", &["marker.txt"], &root);
+        let control = KernelActionRequest {
+            session_id: "kernel-session-action".into(),
+            turn_id: "elapsed-control".into(),
+            operation_id: "elapsed-plan".into(),
+            namespace: Some("functions".into()),
+            tool_name: "update_plan".into(),
+            payload: KernelActionPayload::CoreControl { input: "{}".into() },
+        };
+        let poll = KernelActionRequest {
+            tool_name: "write_stdin".into(),
+            operation_id: "elapsed-poll".into(),
+            payload: KernelActionPayload::ProcessInteraction {
+                process_id: 123,
+                origin_call_id: "elapsed-read".into(),
+                input: String::new(),
+            },
+            ..control.clone()
+        };
+        let mut permitted = Vec::new();
+        for request in [read, control, poll] {
+            let authorization = gate.authorize(request.clone()).await.unwrap();
+            gate.revalidate(request.clone(), authorization.clone())
+                .await
+                .unwrap();
+            permitted.push((request, authorization));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        gate.update_now(&initial).unwrap();
+        for (request, authorization) in &permitted {
+            assert!(gate.authorize(request.clone()).await.is_err());
+            assert!(
+                gate.revalidate(request.clone(), authorization.clone())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(gate.take_messages().unwrap().is_empty());
+        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:03.000Z".into());
+        gate.install_binding(authority.clone(), Some(&root))
+            .unwrap();
+        for (request, authorization) in permitted {
+            gate.revalidate(request, authorization).await.unwrap();
+        }
+        gate.cancel_session("kernel-session-action").unwrap();
+        gate.remove_binding(&authority).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     async fn action_receipt_round_trip(renew: bool) {

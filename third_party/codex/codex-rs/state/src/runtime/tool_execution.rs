@@ -18,7 +18,7 @@ use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::SqliteConnection;
 
-const FACT_SELECT: &str =
+pub(super) const FACT_SELECT: &str =
     "SELECT r.sequence, r.request_json, r.resolution, a.attempt_id, a.owner_id,
  a.operation_digest, a.execution, a.disposition, a.delivery, a.revision,
  a.execution_result IS NOT NULL AS execution_result_retained,
@@ -336,7 +336,7 @@ impl StateRuntime {
     }
 }
 
-async fn load_fact(
+pub(super) async fn load_fact(
     connection: &mut SqliteConnection,
     sequence: i64,
 ) -> anyhow::Result<ToolExecutionFact> {
@@ -362,7 +362,7 @@ async fn append_event(
     Ok(())
 }
 
-fn decode_fact(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ToolExecutionFact> {
+pub(super) fn decode_fact(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ToolExecutionFact> {
     let attempt = if let Some(attempt_id) = row.try_get::<Option<String>, _>("attempt_id")? {
         let execution: &str = row.try_get("execution")?;
         let disposition: &str = row.try_get("disposition")?;

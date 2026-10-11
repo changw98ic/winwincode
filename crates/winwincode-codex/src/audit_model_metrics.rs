@@ -12,6 +12,8 @@ pub(crate) struct Metrics {
     pub(crate) cursor_writes: u64,
     pub(crate) cursor_json_bytes_written: u64,
     pub(crate) fingerprint_visits: u64,
+    pub(crate) model_open_rows_read: u64,
+    pub(crate) model_open_json_bytes_read: u64,
 }
 thread_local! { static METRICS: RefCell<Metrics> = RefCell::new(Metrics::default()); }
 pub(crate) fn reset() {
@@ -43,6 +45,14 @@ pub(crate) fn record_cursor_write(bytes: usize) {
 }
 pub(crate) fn record_fingerprint_visit() {
     METRICS.with(|x| x.borrow_mut().fingerprint_visits += 1);
+}
+
+pub(crate) fn record_model_open_read(bytes: usize) {
+    METRICS.with(|value| {
+        let mut metrics = value.borrow_mut();
+        metrics.model_open_rows_read += 1;
+        metrics.model_open_json_bytes_read += bytes as u64;
+    });
 }
 
 pub(crate) fn report(name: &str, value: &serde_json::Value) {

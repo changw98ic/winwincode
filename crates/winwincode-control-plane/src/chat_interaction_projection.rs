@@ -192,6 +192,7 @@ impl ChatInteractionProjectionLedger {
         let revision = Revision(self.next_revision()?);
         let projection = ChatInputInteractionProjection {
             allow_empty: request.allow_empty,
+            allow_other: request.allow_other,
             binding: binding_from_request(
                 &request.lease.job_id,
                 &request.worker_session_id,
@@ -671,8 +672,12 @@ impl ChatInteractionProjectionLedger {
                     projection,
                 } => {
                     register_source(&mut source_messages, source_message_id, "input")?;
-                    validate_projection_choices(&projection.mode, &projection.options)
-                        .map_err(|_| ChatInteractionProjectionError::SnapshotConflict)?;
+                    validate_projection_choices(
+                        &projection.mode,
+                        &projection.options,
+                        projection.allow_other,
+                    )
+                    .map_err(|_| ChatInteractionProjectionError::SnapshotConflict)?;
                     if projection.revision.0 <= result.revision
                         || result
                             .inputs
@@ -934,12 +939,14 @@ fn validate_input_payload(
             if value.mode != projection.mode {
                 return Err(ChatInteractionProjectionError::InvalidField("value.mode"));
             }
+            if value.value.chars().take(20_001).count() > 20_000
+                || !projection.allow_empty && value.value.trim().is_empty()
+            {
+                return Err(ChatInteractionProjectionError::InvalidField("value.value"));
+            }
             match &projection.mode {
-                InteractiveInputMode::Text => {
-                    if !projection.allow_empty && value.value.is_empty() {
-                        return Err(ChatInteractionProjectionError::InvalidField("value.value"));
-                    }
-                }
+                InteractiveInputMode::Text => {}
+                InteractiveInputMode::SingleChoice if projection.allow_other == Some(true) => {}
                 InteractiveInputMode::Confirmation | InteractiveInputMode::SingleChoice => {
                     if !projection
                         .options
@@ -971,13 +978,17 @@ fn validate_request_choices(
             value: choice.value.clone(),
         })
         .collect::<Vec<_>>();
-    validate_projection_choices(&request.mode, &projected)
+    validate_projection_choices(&request.mode, &projected, request.allow_other)
 }
 
 fn validate_projection_choices(
     mode: &InteractiveInputMode,
     choices: &[ChatInteractionOptionProjection],
+    allow_other: Option<bool>,
 ) -> Result<(), ChatInteractionProjectionError> {
+    if allow_other == Some(true) && *mode != InteractiveInputMode::SingleChoice {
+        return Err(ChatInteractionProjectionError::InvalidField("allowOther"));
+    }
     if matches!(mode, InteractiveInputMode::Text) && !choices.is_empty()
         || !matches!(mode, InteractiveInputMode::Text) && choices.is_empty()
     {

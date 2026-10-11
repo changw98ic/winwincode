@@ -67,6 +67,7 @@ pub use device_jev_context::{DeviceJevReceipt, StoredJevContext};
 
 mod device_accounting;
 mod device_model;
+mod model_response_store;
 pub use device_model::{model_failure, public_model_chunk};
 
 mod device_model_concurrency;

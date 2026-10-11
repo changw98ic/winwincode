@@ -106,6 +106,13 @@ pub struct ToolRuntimeEvent {
 pub enum ToolRecoveryEvidence {
     Unavailable,
     Unconfirmed,
+    ControlInputResolved {
+        input_request_sequence: i64,
+        input_operation_digest: String,
+        response_digest: String,
+        result_ref: String,
+        continuation_lost: bool,
+    },
     Running {
         business_id: String,
     },

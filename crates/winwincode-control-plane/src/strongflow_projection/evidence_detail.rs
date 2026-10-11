@@ -456,11 +456,18 @@ fn resolve_artifacts(
             "Evidence runtime ledger is missing".to_owned(),
         ));
     };
-    let ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
+    let mut ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "Evidence runtime ledger is not canonical".to_owned(),
         )
     })?;
+    crate::runtime_event_transaction::hydrate_runtime_ledger(storage, &mut ledger).map_err(
+        |_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "Evidence runtime history is not canonical".to_owned(),
+            )
+        },
+    )?;
     let terminal = load_successful_terminal_authority(storage, delivery, &binding.execution_job_id)
         .map_err(|_| {
             StrongFlowProjectionError::TrustedFactsUnavailable(
@@ -1432,6 +1439,7 @@ mod tests {
         ));
         let ledger = crate::runtime_event_transaction::RuntimeLedgerState {
             schema_version: 1,
+            event_chain_digest: String::new(),
             delivery_id: Some(delivery.id().clone()),
             work_item_id: None,
             work_run_id: Some(binding.work_run_id.clone()),

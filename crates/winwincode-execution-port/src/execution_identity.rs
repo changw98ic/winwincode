@@ -130,6 +130,16 @@ pub fn canonical_instant(instant: &Instant) -> bool {
         && number(value, 11, 13).is_some_and(|hour| hour <= 23)
         && number(value, 14, 16).is_some_and(|minute| minute <= 59)
         && number(value, 17, 19).is_some_and(|second| second <= 59)
+        && calendar_date(value).is_some()
+}
+
+fn calendar_date(value: &[u8]) -> Option<time::Date> {
+    let year = std::str::from_utf8(value.get(..4)?)
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    let month = time::Month::try_from(number(value, 5, 7)?).ok()?;
+    time::Date::from_calendar_date(year, month, number(value, 8, 10)?).ok()
 }
 
 fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
@@ -217,4 +227,32 @@ pub fn lease_renewal_rejection(
         return Some("prior_expiry_mismatch");
     }
     None
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::canonical_instant;
+    use winwincode_domain::Instant;
+
+    #[test]
+    fn canonical_execution_time_requires_exact_utc_and_a_real_calendar_date() {
+        for value in [
+            "2030-02-30T00:00:00.000Z",
+            "2030-04-31T00:00:00.000Z",
+            "1900-02-29T00:00:00.000Z",
+            "2030-01-01T00:00:60.000Z",
+            "2030-01-01T00:00:00Z",
+            "2030-01-01T00:00:00.000+00:00",
+        ] {
+            assert!(!canonical_instant(&Instant(value.to_owned())), "{value}");
+        }
+        for value in [
+            "2000-02-29T00:00:00.000Z",
+            "2032-02-29T23:59:59.999Z",
+            "0000-01-01T00:00:00.000Z",
+            "9999-12-31T23:59:59.999Z",
+        ] {
+            assert!(canonical_instant(&Instant(value.to_owned())), "{value}");
+        }
+    }
 }

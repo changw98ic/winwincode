@@ -370,16 +370,46 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
 // Coordinate independent durable task runners. Their returned task outcomes
 // never stop admission; a thrown ledger/evidence error stops new admission and
 // waits for already running tasks to retain their results before propagating.
-export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell }) {
+export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell, onState = () => {} }) {
   validateBenchmarkConcurrency(concurrency)
   const results = Array(cells.length)
   let cursor = 0
   let failure = null
+  let settled = 0
+  const active = new Set()
+  const unresolved = new Set()
+  const publish = () => {
+    const state = {
+      total: cells.length, started: cursor, settled, active: active.size,
+      unstarted: cells.length - cursor, executionUnresolved: unresolved.size,
+      activeRunIds: [...active].map(index => cells[index].runId),
+      unresolvedRunIds: [...unresolved].map(index => cells[index].runId),
+      admissionStopped: failure !== null,
+      draining: failure !== null && active.size > 0,
+      firstFailure: failure === null ? null : {
+        code: runnerFailureCode(failure.error),
+        runId: failure.index === undefined ? null : cells[failure.index].runId,
+      },
+    }
+    try { onState(state) } catch (error) { failure ??= { error } }
+  }
+  publish()
   const worker = async () => {
     while (cursor < cells.length && !failure) {
       const index = cursor++
-      try { results[index] = await executeCell(cells[index], index) }
-      catch (error) { failure ??= { error } }
+      active.add(index)
+      try {
+        const execution = executeCell(cells[index], index)
+        publish()
+        results[index] = await execution
+      } catch (error) {
+        failure ??= { error, index }
+        if (error?.unresolvedDeviceExecution === true) unresolved.add(index)
+      } finally {
+        active.delete(index)
+        settled += 1
+        publish()
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, cells.length) }, worker))
@@ -419,6 +449,7 @@ export function verifyBenchmarkLedgerIdentity(plan, options) {
 export async function runBenchmarkPlan(plan, {
   executeCell,
   onRecord = () => {},
+  onState,
   ledgerPath,
   experimentBinding,
   recoverCell,
@@ -524,7 +555,7 @@ export async function runBenchmarkPlan(plan, {
       await onRecord(record, index)
       return record
     }
-    await runBenchmarkSchedule(plan.cells, { concurrency, executeCell: execute })
+    await runBenchmarkSchedule(plan.cells, { concurrency, executeCell: execute, onState })
   } finally {
     store?.close()
   }

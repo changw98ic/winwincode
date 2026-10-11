@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-test-support = ["winwincode-codex/test-support", "winwincode-provider/test-support"]
+test-support = ["rusqlite/hooks", "winwincode-codex/test-support", "winwincode-provider/test-support"]
 
 [lib]
 path = "src/lib.rs"
@@ -55,6 +55,7 @@ winwincode-control-plane = { path = "../winwincode-control-plane", features = ["
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
 winwincode-kernel = { path = "../kernel" }
 winwincode-server = { path = "../winwincode-server", default-features = false }
+winwincode-session.workspace = true
 winwincode-storage.workspace = true
 
 [lints]

@@ -138,8 +138,28 @@ export function readDevicePendingApprovalIds(directory, runs) {
   if (active.length === 0 || !existsSync(join(directory, 'device-data'))) return []
   const deviceDirectory = realpathSync(join(directory, 'device-data'))
   const pending = new Set()
-  for (const path of globSync('**/worker-codex.sqlite3', { cwd: deviceDirectory }).sort()) {
-    const database = new DatabaseSync(join(deviceDirectory, path), { readOnly: true })
+  const paths = new Set()
+  const registryPath = join(deviceDirectory, 'device-client.sqlite3')
+  if (existsSync(registryPath)) {
+    const registry = new DatabaseSync(registryPath, { readOnly: true })
+    try {
+      registry.exec('PRAGMA busy_timeout=5000')
+      for (const run of active) {
+        const row = registry.prepare(`SELECT data_directory FROM worker_process_registry
+          WHERE worker_session_id = ?`).get(run.workerSessionId)
+        if (!row || !existsSync(row.data_directory)) continue
+        const data = realpathSync(row.data_directory)
+        assert.ok(data.startsWith(`${deviceDirectory}/`), 'Worker data must belong to this Device')
+        paths.add(join(data, 'codex-runtime', 'worker-codex.sqlite3'))
+      }
+    } finally { registry.close() }
+  } else {
+    // A directly hosted Worker has a single canonical runtime directory.
+    paths.add(join(deviceDirectory, 'codex-runtime', 'worker-codex.sqlite3'))
+  }
+  for (const path of [...paths].sort()) {
+    if (!existsSync(path)) continue
+    const database = new DatabaseSync(path, { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
       for (const row of database.prepare(`SELECT a.approval_id, r.record_json

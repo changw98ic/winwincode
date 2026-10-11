@@ -2,7 +2,10 @@
 
 use super::*;
 
-async fn renew_at_ten_minutes(worker: &mut NativeWorker, original: &wire::ExecutionLeaseStamp) {
+pub(super) async fn renew_at_ten_minutes(
+    worker: &mut NativeWorker,
+    original: &wire::ExecutionLeaseStamp,
+) {
     let mut value = template("lease.renew");
     let mut lease = original.clone();
     lease.expires_at = at("00:30:00");
@@ -27,7 +30,7 @@ fn input_receipts(root: &Fixture) -> i64 {
         .unwrap()
 }
 
-fn tool_output_count(value: &serde_json::Value, call: &str) -> usize {
+pub(super) fn tool_output_count(value: &serde_json::Value, call: &str) -> usize {
     let here = usize::from(
         matches!(
             value["type"].as_str(),
@@ -111,7 +114,6 @@ fn m12_unrenewed_provided_response_consumes_original_waiter_once() {
 }
 
 #[test]
-#[ignore = "mechanism audit: known red; renewed input must reach the original waiter"]
 fn m12_legal_renewal_provided_at_eleven_minutes_reaches_original_waiter_once() {
     run_native(async {
         let root = Fixture::new();
@@ -133,7 +135,15 @@ fn m12_legal_renewal_provided_at_eleven_minutes_reaches_original_waiter_once() {
 #[test]
 fn m12_changed_owner_fence_and_late_answers_do_not_settle_original_waiter() {
     run_native(async {
-        for change in ["owner", "fence", "late"] {
+        for change in [
+            "owner",
+            "fence",
+            "attempt",
+            "session",
+            "thread",
+            "unproven_expiry",
+            "late",
+        ] {
             let root = Fixture::new();
             let (mut worker, port, _, request) = start_pending_input(&root).await;
             renew_at_ten_minutes(&mut worker, &request.lease).await;
@@ -151,6 +161,15 @@ fn m12_changed_owner_fence_and_late_answers_do_not_settle_original_waiter() {
                         value.lease.worker_instance_id.0 = "wki_00000000000000000000000999".into();
                     }
                     "fence" => value.lease.fencing_token.0 = "999".into(),
+                    "attempt" => value.lease.attempt += 1,
+                    "session" => {
+                        value.worker_session_id.0 = "wsn_00000000000000000000000999".into();
+                    }
+                    "thread" => {
+                        value.session_identity.codex_thread_id.0 =
+                            "cth_00000000000000000000000999".into();
+                    }
+                    "unproven_expiry" => value.lease.expires_at = at("00:45:00"),
                     "late" => {}
                     _ => unreachable!(),
                 }
@@ -194,5 +213,44 @@ fn m12_changed_owner_fence_and_late_answers_do_not_settle_original_waiter() {
             }
             Box::pin(worker.shutdown(clock)).await.unwrap();
         }
+    });
+}
+
+#[test]
+fn input_response_rejection_preserves_safe_adapter_cause_and_original_waiter() {
+    run_native(async {
+        let root = Fixture::new();
+        let (mut worker, port, _, request) = start_pending_input(&root).await;
+        let mut invalid = input_response_at(&request, at("00:11:00"));
+        let wire::ExecutionPortMessage::InputResponseMessage(response) = &mut invalid else {
+            panic!("input response fixture")
+        };
+        let private_value = "input-private-answer-must-never-enter-diagnostic";
+        let value = response.value.as_mut().unwrap();
+        value.mode = winwincode_domain::InteractiveInputMode::Confirmation;
+        value.value = private_value.into();
+        let error = worker
+            .accept_control(&invalid, at("00:11:00"))
+            .await
+            .expect_err("a mode different from the immutable original prompt is rejected");
+        assert_eq!(
+            error.code,
+            winwincode_worker::WorkerErrorCode::UnexpectedMessage
+        );
+        assert_eq!(
+            error.reason,
+            "embedded Codex rejected an input response at response_acceptance [stage=adapter_operation; cause=ADAPTER_CONFLICT]"
+        );
+        assert!(!format!("{error:?}").contains(private_value));
+        assert_eq!(input_receipts(&root), 0);
+        assert_eq!(
+            input_operation_state(&root, &request.input_request_id.0).0,
+            "pending"
+        );
+        worker
+            .accept_control(&input_response_at(&request, at("00:11:00")), at("00:11:00"))
+            .await
+            .unwrap();
+        assert_original_input_consumed_once(&root, &mut worker, &port, &request).await;
     });
 }

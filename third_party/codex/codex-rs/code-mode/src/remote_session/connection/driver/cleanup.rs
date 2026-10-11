@@ -27,6 +27,10 @@ impl SessionCleanup {
         for owner in cells {
             notify_cell_closed(&owner.delegate, &owner.cell_id);
         }
+        self.complete();
+    }
+
+    pub(super) fn complete(&self) {
         self.inner.complete.cancel();
     }
 

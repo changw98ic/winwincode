@@ -403,3 +403,85 @@ fn mcp_permission_is_visible_with_single_use_decision() {
         ApprovalEffectiveDecisionScope::Once
     );
 }
+
+#[test]
+fn optional_other_requires_explicit_single_choice_permission_and_preserves_legacy_snapshot() {
+    use winwincode_domain::InteractiveInputMode;
+    let (original, _) = worker_messages();
+    let clock = Instant("2026-08-24T12:01:00.000Z".into());
+    for (allow_other, value, accepted) in [
+        (None, "unlisted".to_owned(), false),
+        (Some(false), "unlisted".to_owned(), false),
+        (Some(true), "  用户的其他选择 🦀  ".to_owned(), true),
+        (Some(true), "🦀".repeat(20_000), true),
+        (Some(true), "🦀".repeat(20_001), false),
+        (Some(true), " \n\t ".to_owned(), false),
+    ] {
+        let mut request = original.clone();
+        request.allow_other = allow_other;
+        request.mode = InteractiveInputMode::SingleChoice;
+        let mut ledger = ChatInteractionProjectionLedger::default();
+        let receipt = ledger.record_input_request(&request).unwrap();
+        let before = ledger.snapshot();
+        let mut payload = InputRespondPayload {
+            execution_job_id: request.lease.job_id.clone(),
+            input_request_id: request.input_request_id.clone(),
+            product_session_id: request.session_identity.product_session_id.clone(),
+            session_identity: request.session_identity.clone(),
+            status: "provided".into(),
+            value: Some(InteractiveInputValue {
+                mode: request.mode.clone(),
+                value,
+            }),
+            worker_session_id: request.worker_session_id.clone(),
+        };
+        assert_eq!(
+            ledger
+                .apply_input_response(&receipt.revision, &payload, &clock)
+                .is_ok(),
+            accepted
+        );
+        if !accepted {
+            assert_eq!(ledger.snapshot(), before);
+        }
+        if allow_other.is_none() {
+            let raw = serde_json::to_string(&before).unwrap();
+            assert!(!raw.contains("allowOther"));
+            let restored = ChatInteractionProjectionLedger::restore(before.clone()).unwrap();
+            assert_eq!(restored.snapshot(), before);
+        }
+        let mut mismatch = ChatInteractionProjectionLedger::default();
+        let revision = mismatch.record_input_request(&request).unwrap().revision;
+        payload.value.as_mut().unwrap().mode = InteractiveInputMode::Text;
+        assert!(
+            mismatch
+                .apply_input_response(&revision, &payload, &clock)
+                .is_err()
+        );
+        assert_eq!(mismatch.snapshot().events.len(), 1);
+    }
+    for mode in [
+        InteractiveInputMode::Text,
+        InteractiveInputMode::Confirmation,
+    ] {
+        let mut request = original.clone();
+        request.mode = mode.clone();
+        if mode == InteractiveInputMode::Text {
+            request.choices = None;
+        }
+        let mut ledger = ChatInteractionProjectionLedger::default();
+        ledger.record_input_request(&request).unwrap();
+        let mut snapshot = ledger.snapshot();
+        let winwincode_control_plane::chat_interaction_projection::ChatInteractionProjectionEvent::InputRecorded { projection, .. } = &mut snapshot.events[0] else { panic!("input projection"); };
+        projection.allow_other = Some(true);
+        assert!(matches!(
+            ChatInteractionProjectionLedger::restore(snapshot),
+            Err(ChatInteractionProjectionError::SnapshotConflict)
+        ));
+        request.allow_other = Some(true);
+        assert_eq!(
+            ChatInteractionProjectionLedger::default().record_input_request(&request),
+            Err(ChatInteractionProjectionError::InvalidField("allowOther"))
+        );
+    }
+}

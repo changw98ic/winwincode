@@ -8,7 +8,7 @@
 //! may only publish the reference returned after the final Artifact ACK.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rusqlite::{OptionalExtension as _, Transaction, params};
+use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
@@ -373,18 +373,7 @@ pub(crate) struct DiagnosticArtifactOutbox {
 
 impl DiagnosticArtifactOutbox {
     pub(crate) fn open(store: AdapterStore) -> Result<Self, AdapterStoreError> {
-        store
-            .lock()?
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS diagnostic_artifact_upload (
-               artifact_id TEXT PRIMARY KEY NOT NULL,
-               authority_key TEXT NOT NULL,
-               record_json BLOB NOT NULL
-             );
-             CREATE UNIQUE INDEX IF NOT EXISTS diagnostic_artifact_authority_idx
-               ON diagnostic_artifact_upload(authority_key);",
-            )
-            .map_err(|_| AdapterStoreError::Unavailable)?;
+        prepare_diagnostic_job_route(&store)?;
         Ok(Self { store })
     }
 
@@ -396,7 +385,7 @@ impl DiagnosticArtifactOutbox {
         self.store.transaction(|tx| {
             if let Some(existing) = load_by_authority(tx, &record.authority_key)? {
                 existing.validate()?;
-                if existing != record {
+                if !existing.same_upload(&record) {
                     return Err(AdapterStoreError::Conflict);
                 }
                 return Ok(RetainedDiagnosticArtifact {
@@ -507,22 +496,28 @@ impl DiagnosticArtifactOutbox {
     ) -> Result<Vec<ArtifactReference>, AdapterStoreError> {
         let conn = self.store.lock()?;
         let mut stmt = conn
-            .prepare("SELECT record_json FROM diagnostic_artifact_upload ORDER BY artifact_id ASC")
+            .prepare("SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE job_id = ?1 ORDER BY artifact_id ASC")
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let records = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .query_map([&authority.job.job_id.0], diagnostic_envelope_row)
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut result = Vec::new();
-        for row in records {
-            let bytes = row.map_err(|_| AdapterStoreError::Unavailable)?;
-            let record: StoredDiagnosticArtifact =
-                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
-            record.validate()?;
-            if record.authority().matches_current(authority) && record.final_ack.is_some() {
-                result.push(record.reference());
+        let outcome = (|| {
+            let mut result = Vec::new();
+            for row in records {
+                let record =
+                    decode_diagnostic_envelope(row.map_err(|_| AdapterStoreError::Unavailable)?)?;
+                record.validate()?;
+                if record.authority().matches_current(authority) && record.final_ack.is_some() {
+                    result.push(record.reference());
+                }
             }
-        }
-        Ok(result)
+            Ok(result)
+        })();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_query(
+            stmt.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        outcome
     }
 
     pub(crate) fn has_pending(
@@ -531,22 +526,202 @@ impl DiagnosticArtifactOutbox {
     ) -> Result<bool, AdapterStoreError> {
         let conn = self.store.lock()?;
         let mut stmt = conn
-            .prepare("SELECT record_json FROM diagnostic_artifact_upload")
+            .prepare("SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE job_id = ?1 ORDER BY artifact_id ASC")
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let records = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .query_map([&authority.job.job_id.0], diagnostic_envelope_row)
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        for row in records {
-            let record: StoredDiagnosticArtifact =
-                serde_json::from_slice(&row.map_err(|_| AdapterStoreError::Unavailable)?)
-                    .map_err(|_| AdapterStoreError::Corrupt)?;
-            record.validate()?;
-            if record.authority().matches_current(authority) && record.final_ack.is_none() {
-                return Ok(true);
+        let outcome = (|| {
+            let mut pending = false;
+            for row in records {
+                let record =
+                    decode_diagnostic_envelope(row.map_err(|_| AdapterStoreError::Unavailable)?)?;
+                record.validate()?;
+                pending |=
+                    record.authority().matches_current(authority) && record.final_ack.is_none();
+            }
+            Ok(pending)
+        })();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_query(
+            stmt.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        outcome
+    }
+}
+
+const DIAGNOSTIC_JOB_ROUTE_MIGRATION: &str = "diagnostic-artifact-job-route-v1";
+const DIAGNOSTIC_UPLOAD_SCHEMA: &str = r"CREATE TABLE diagnostic_artifact_upload (
+  artifact_id TEXT PRIMARY KEY NOT NULL,
+  authority_key TEXT NOT NULL,
+  job_id TEXT NOT NULL CHECK(length(job_id) > 0),
+  record_json BLOB NOT NULL
+);";
+const DIAGNOSTIC_AUTHORITY_INDEX: &str = r"CREATE UNIQUE INDEX diagnostic_artifact_authority_idx
+  ON diagnostic_artifact_upload(authority_key);";
+const DIAGNOSTIC_JOB_INDEX: &str = r"CREATE INDEX diagnostic_artifact_job_idx
+  ON diagnostic_artifact_upload(job_id, artifact_id);";
+const DIAGNOSTIC_ROUTE_GUARD: &str = r"CREATE TRIGGER diagnostic_artifact_route_immutable
+  BEFORE UPDATE OF artifact_id, authority_key, job_id ON diagnostic_artifact_upload
+  WHEN NEW.artifact_id IS NOT OLD.artifact_id
+    OR NEW.authority_key IS NOT OLD.authority_key
+    OR NEW.job_id IS NOT OLD.job_id
+  BEGIN SELECT RAISE(ABORT, 'diagnostic artifact route is immutable'); END;";
+
+fn diagnostic_schema_definition(
+    tx: &Transaction<'_>,
+    kind: &str,
+    name: &str,
+) -> Result<Option<String>, AdapterStoreError> {
+    tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+        params![kind, name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)
+}
+
+fn validate_diagnostic_route_layout(tx: &Transaction<'_>) -> Result<(), AdapterStoreError> {
+    for (kind, name, definition) in [
+        (
+            "table",
+            "diagnostic_artifact_upload",
+            DIAGNOSTIC_UPLOAD_SCHEMA,
+        ),
+        (
+            "index",
+            "diagnostic_artifact_authority_idx",
+            DIAGNOSTIC_AUTHORITY_INDEX,
+        ),
+        ("index", "diagnostic_artifact_job_idx", DIAGNOSTIC_JOB_INDEX),
+        (
+            "trigger",
+            "diagnostic_artifact_route_immutable",
+            DIAGNOSTIC_ROUTE_GUARD,
+        ),
+    ] {
+        if diagnostic_schema_definition(tx, kind, name)?.as_deref()
+            != Some(definition.trim().trim_end_matches(';'))
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+fn validate_legacy_diagnostic_columns(tx: &Transaction<'_>) -> Result<(), AdapterStoreError> {
+    let mut statement = tx
+        .prepare("PRAGMA table_info(diagnostic_artifact_upload)")
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let expected = [
+        ("artifact_id".to_owned(), "TEXT".to_owned(), true, None, 1),
+        ("authority_key".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("record_json".to_owned(), "BLOB".to_owned(), true, None, 0),
+    ];
+    if columns != expected {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+/// Builds a stable Job route once. Later opens verify only its schema contract.
+/// All retained bytes and the migration marker commit in one immediate transaction.
+fn prepare_diagnostic_job_route(store: &AdapterStore) -> Result<(), AdapterStoreError> {
+    let mut connection = store.lock()?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let applied = tx
+        .query_row(
+            "SELECT 1 FROM codex_store_migration WHERE migration_key=?1",
+            [DIAGNOSTIC_JOB_ROUTE_MIGRATION],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .is_some();
+    if applied {
+        validate_diagnostic_route_layout(&tx)?;
+        tx.commit().map_err(|_| AdapterStoreError::Unavailable)?;
+        return Ok(());
+    }
+    if diagnostic_schema_definition(&tx, "table", "diagnostic_artifact_upload_route_legacy_v1")?
+        .is_some()
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    if diagnostic_schema_definition(&tx, "table", "diagnostic_artifact_upload")?.is_some() {
+        validate_legacy_diagnostic_columns(&tx)?;
+        tx.execute_batch("ALTER TABLE diagnostic_artifact_upload RENAME TO diagnostic_artifact_upload_route_legacy_v1;")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        tx.execute_batch(DIAGNOSTIC_UPLOAD_SCHEMA)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        {
+            let mut statement = tx.prepare(
+                "SELECT artifact_id, authority_key, record_json FROM diagnostic_artifact_upload_route_legacy_v1 ORDER BY artifact_id",
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            for row in rows {
+                let (artifact_id, authority_key, bytes) =
+                    row.map_err(|_| AdapterStoreError::Unavailable)?;
+                let record: StoredDiagnosticArtifact =
+                    serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+                if record.descriptor.artifact_id.0 != artifact_id
+                    || record.authority_key != authority_key
+                {
+                    return Err(AdapterStoreError::Corrupt);
+                }
+                record.validate()?;
+                tx.execute(
+                    "INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, job_id, record_json) VALUES (?1, ?2, ?3, ?4)",
+                    params![artifact_id, authority_key, record.job.job_id.0, bytes],
+                ).map_err(|_| AdapterStoreError::Unavailable)?;
             }
         }
-        Ok(false)
+        tx.execute_batch("DROP TABLE diagnostic_artifact_upload_route_legacy_v1;")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    } else {
+        tx.execute_batch(DIAGNOSTIC_UPLOAD_SCHEMA)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
     }
+    for definition in [
+        DIAGNOSTIC_AUTHORITY_INDEX,
+        DIAGNOSTIC_JOB_INDEX,
+        DIAGNOSTIC_ROUTE_GUARD,
+    ] {
+        tx.execute_batch(definition)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    validate_diagnostic_route_layout(&tx)?;
+    tx.execute(
+        "INSERT INTO codex_store_migration(migration_key) VALUES (?1)",
+        [DIAGNOSTIC_JOB_ROUTE_MIGRATION],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    tx.commit().map_err(|_| AdapterStoreError::Unavailable)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -675,6 +850,19 @@ impl StoredDiagnosticArtifact {
         };
         record.validate()?;
         Ok(record)
+    }
+
+    /// ACK progress is mutable; the complete original upload remains immutable.
+    fn same_upload(&self, other: &Self) -> bool {
+        self.authority_key == other.authority_key
+            && self.run_key == other.run_key
+            && self.job == other.job
+            && self.scope == other.scope
+            && self.source_id == other.source_id
+            && self.bytes == other.bytes
+            && self.descriptor == other.descriptor
+            && self.open == other.open
+            && self.chunks == other.chunks
     }
 
     fn validate(&self) -> Result<(), AdapterStoreError> {
@@ -867,43 +1055,72 @@ fn canonical_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
         &format!("{:x}", digest.finalize())[..26].to_ascii_uppercase()
     )
 }
+type DiagnosticEnvelope = (String, String, String, Vec<u8>);
+
+fn diagnostic_envelope_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiagnosticEnvelope> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn decode_diagnostic_envelope(
+    (artifact_id, authority_key, job_id, bytes): DiagnosticEnvelope,
+) -> Result<StoredDiagnosticArtifact, AdapterStoreError> {
+    let record: StoredDiagnosticArtifact =
+        serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+    if record.descriptor.artifact_id.0 != artifact_id
+        || record.authority_key != authority_key
+        || record.job.job_id.0 != job_id
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(record)
+}
+
 fn load_by_authority(
     tx: &Transaction<'_>,
     key: &str,
 ) -> Result<Option<StoredDiagnosticArtifact>, AdapterStoreError> {
-    let bytes = tx
-        .query_row(
-            "SELECT record_json FROM diagnostic_artifact_upload WHERE authority_key = ?1",
-            params![key],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    bytes
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
-        .transpose()
+    tx.query_row(
+        "SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE authority_key = ?1",
+        params![key],
+        diagnostic_envelope_row,
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)?
+    .map(decode_diagnostic_envelope)
+    .transpose()
 }
+
 fn load_by_artifact(
     tx: &Transaction<'_>,
     id: &ArtifactId,
 ) -> Result<Option<StoredDiagnosticArtifact>, AdapterStoreError> {
-    let bytes = tx
-        .query_row(
-            "SELECT record_json FROM diagnostic_artifact_upload WHERE artifact_id = ?1",
-            params![id.0],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    bytes
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
-        .transpose()
+    tx.query_row(
+        "SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE artifact_id = ?1",
+        params![id.0],
+        diagnostic_envelope_row,
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)?
+    .map(decode_diagnostic_envelope)
+    .transpose()
 }
+
 fn save(tx: &Transaction<'_>, record: &StoredDiagnosticArtifact) -> Result<(), AdapterStoreError> {
     let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
-    tx.execute("INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, record_json) VALUES (?1, ?2, ?3) ON CONFLICT(artifact_id) DO UPDATE SET record_json=excluded.record_json", params![record.descriptor.artifact_id.0, record.authority_key, bytes]).map_err(|_| AdapterStoreError::Unavailable)?;
+    let changed = tx.execute(
+        "INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, job_id, record_json)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(artifact_id) DO UPDATE SET record_json=excluded.record_json
+         WHERE diagnostic_artifact_upload.authority_key=excluded.authority_key
+           AND diagnostic_artifact_upload.job_id=excluded.job_id",
+        params![record.descriptor.artifact_id.0, record.authority_key, record.job.job_id.0, bytes],
+    ).map_err(|_| AdapterStoreError::Unavailable)?;
+    if changed != 1 {
+        return Err(AdapterStoreError::Conflict);
+    }
     Ok(())
 }
+
 fn compact(
     tx: &Transaction<'_>,
     record: &StoredDiagnosticArtifact,
@@ -982,6 +1199,7 @@ fn is_final_ack_status(status: &LeaseWriteStatus) -> bool {
 #[cfg(test)]
 mod tests {
     include!("storage_diagnostic_regression.rs");
+    include!("storage_diagnostic_migration_tests.rs");
     use std::path::PathBuf;
 
     use winwincode_domain::{ExecutionAckSequence, ExecutionSequence};

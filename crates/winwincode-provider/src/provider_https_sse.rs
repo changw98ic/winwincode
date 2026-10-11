@@ -28,9 +28,10 @@ use crate::{
     CanonicalModelStreamFrame, ModelAttemptFailureFact, ModelExecutionCertainty,
     ProviderAdapterError, ProviderAdapterInvocation, ProviderAdapterOpenReceipt,
     ProviderAdapterPort, ProviderFailureDiagnostic, ProviderFailureMetadata, ProviderFinishReason,
-    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderStreamControlAction,
-    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
-    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
+    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderGatewayTerminalCharge,
+    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent,
+    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
+    ProviderToolKind, ResolvedSecret,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -39,6 +40,8 @@ const MAX_PROVIDER_ID_BYTES: usize = 128;
 /// must accept exactly the endpoints this adapter accepts.
 pub const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ADAPTER_REQUEST_ID_BYTES: usize = 200;
+const MAX_CACHED_RESPONSE_ID_BYTES: usize = 200;
+const MAX_CACHED_TERMINAL_IDENTITY_JSON_BYTES: usize = 2_048;
 const AUTHORIZATION_PREFIX: &[u8] = b"Bearer ";
 const CONTROL_PAUSE: u8 = 1;
 const CONTROL_RESUME: u8 = 2;
@@ -135,6 +138,156 @@ enum HttpsSseProviderProtocol {
     },
     AnthropicMessages(AnthropicMessagesOptions),
     OpenAiChatCompletions(AnthropicMessagesOptions),
+}
+
+/// Detects a protocol terminal only at a complete SSE event boundary. This is
+/// a transport stop candidate; the existing codec still validates the full
+/// received response once before it can become model output.
+struct SseTerminalScanner {
+    protocol: HttpsSseProviderProtocol,
+    max_event_bytes: usize,
+    max_events: usize,
+    line: Vec<u8>,
+    data: Vec<u8>,
+    data_seen: bool,
+    first_line: bool,
+    previous_cr: bool,
+    events: usize,
+}
+
+impl SseTerminalScanner {
+    fn new(config: &HttpsSseProviderConfig) -> Self {
+        Self {
+            protocol: config.protocol,
+            max_event_bytes: config.max_event_bytes,
+            max_events: config.max_events,
+            line: Vec::new(),
+            data: Vec::new(),
+            data_seen: false,
+            first_line: true,
+            previous_cr: false,
+            events: 0,
+        }
+    }
+
+    fn inspect_fresh(&mut self, bytes: &[u8]) -> Result<bool, HttpsSseProviderErrorKind> {
+        for &byte in bytes {
+            if self.previous_cr && byte == b'\n' {
+                self.previous_cr = false;
+                continue;
+            }
+            self.previous_cr = false;
+            if byte == b'\r' || byte == b'\n' {
+                self.previous_cr = byte == b'\r';
+                if self.finish_line()? {
+                    return Ok(true);
+                }
+            } else {
+                self.line.push(byte);
+                // The representation parser removes an initial UTF-8 BOM
+                // before its line bound. It may straddle transport reads.
+                let allowance = usize::from(self.first_line) * 3;
+                if self.line.len() > self.max_event_bytes.saturating_add(allowance) {
+                    return Err(HttpsSseProviderErrorKind::SizeLimit);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn finish_line(&mut self) -> Result<bool, HttpsSseProviderErrorKind> {
+        let line = if self.first_line {
+            self.line
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.line)
+        } else {
+            &self.line
+        };
+        self.first_line = false;
+        if line.len() > self.max_event_bytes {
+            return Err(HttpsSseProviderErrorKind::SizeLimit);
+        }
+        if line.is_empty() {
+            self.line.clear();
+            return self.finish_event();
+        }
+        if line.first() != Some(&b':') {
+            let (field, value) = line
+                .iter()
+                .position(|byte| *byte == b':')
+                .map_or((line, &[][..]), |index| {
+                    (&line[..index], &line[index + 1..])
+                });
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            if field == b"data" {
+                let length = self
+                    .data
+                    .len()
+                    .saturating_add(usize::from(self.data_seen))
+                    .saturating_add(value.len());
+                if length > self.max_event_bytes {
+                    return Err(HttpsSseProviderErrorKind::SizeLimit);
+                }
+                if self.data_seen {
+                    self.data.push(b'\n');
+                }
+                self.data.extend_from_slice(value);
+                self.data_seen = true;
+            }
+        }
+        self.line.clear();
+        Ok(false)
+    }
+
+    fn finish_event(&mut self) -> Result<bool, HttpsSseProviderErrorKind> {
+        if !self.data_seen {
+            return Ok(false);
+        }
+        if self.events >= self.max_events {
+            return Err(HttpsSseProviderErrorKind::SizeLimit);
+        }
+        self.events += 1;
+        self.data_seen = false;
+        let terminal = self.terminal_candidate();
+        self.data.clear();
+        Ok(terminal)
+    }
+
+    fn terminal_candidate(&self) -> bool {
+        if matches!(
+            self.protocol,
+            HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+        ) {
+            // finish_reason can precede a later usage chunk. Only the explicit
+            // transport terminal is an early-stop candidate for this codec.
+            return self.data == b"[DONE]";
+        }
+        let Ok(event) = serde_json::from_slice::<serde_json::Value>(&self.data) else {
+            return false;
+        };
+        let kind = event.get("type").and_then(serde_json::Value::as_str);
+        match self.protocol {
+            HttpsSseProviderProtocol::Canonical => matches!(
+                kind,
+                Some(
+                    "response.finished"
+                        | "response.failed"
+                        | "response.cancelled"
+                        | "response.disconnected"
+                )
+            ),
+            HttpsSseProviderProtocol::AnthropicMessages(_) => {
+                matches!(kind, Some("message_stop" | "error"))
+            }
+            HttpsSseProviderProtocol::OpenAiResponses { .. }
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => matches!(
+                kind,
+                Some("response.completed" | "response.failed" | "response.incomplete" | "error")
+            ),
+            HttpsSseProviderProtocol::OpenAiChatCompletions(_) => unreachable!(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -490,7 +643,9 @@ pub struct HttpsSseProviderError {
     kind: HttpsSseProviderErrorKind,
     metadata: Box<ProviderFailureMetadata>,
     response: Option<Vec<u8>>,
+    response_bytes_received: u64,
     observed_receipt: Option<Box<(String, ProviderTokenUsage)>>,
+    cached_charge: Option<Box<ProviderGatewayTerminalCharge>>,
     network: Option<Box<winwincode_network::NetworkFailure>>,
 }
 
@@ -506,7 +661,7 @@ impl fmt::Debug for HttpsSseProviderError {
                 "observed_receipt",
                 &self.observed_receipt.as_deref().map(|(_, usage)| usage),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -516,7 +671,9 @@ impl HttpsSseProviderError {
             kind,
             metadata: Box::default(),
             response: None,
+            response_bytes_received: 0,
             observed_receipt: None,
+            cached_charge: None,
             network: None,
         }
     }
@@ -555,8 +712,7 @@ impl HttpsSseProviderError {
                     HttpsSseProviderErrorKind::RateLimited => ErrorKind::RateLimited,
                     HttpsSseProviderErrorKind::SseFraming
                     | HttpsSseProviderErrorKind::SseEvent
-                    | HttpsSseProviderErrorKind::StreamConversion
-                    | HttpsSseProviderErrorKind::SizeLimit => ErrorKind::ProtocolInvalid,
+                    | HttpsSseProviderErrorKind::StreamConversion => ErrorKind::ProtocolInvalid,
                     HttpsSseProviderErrorKind::CredentialLeak
                     | HttpsSseProviderErrorKind::IdentityConflict => ErrorKind::IntegrityInvalid,
                     HttpsSseProviderErrorKind::Paused => ErrorKind::Cancelled,
@@ -600,7 +756,12 @@ impl HttpsSseProviderError {
         self.observed_receipt.as_deref()
     }
 
+    pub(crate) const fn response_bytes_received(&self) -> u64 {
+        self.response_bytes_received
+    }
+
     fn with_response(mut self, response: Vec<u8>) -> Self {
+        self.response_bytes_received = response.len() as u64;
         self.response = Some(response);
         self
     }
@@ -637,7 +798,10 @@ impl HttpsSseProviderError {
         };
         ProviderGatewayTerminal::Failed {
             failure: failure_kind,
-            charge: None,
+            charge: match &self.cached_charge {
+                Some(charge) => Some(**charge),
+                None => None,
+            },
         }
     }
 }
@@ -697,6 +861,21 @@ struct StreamRecord {
     state: StreamState,
     io: Arc<crate::provider_transport::ExchangeIo>,
     metadata: ProviderFailureMetadata,
+    cached_receipt: Option<CachedCompletionReceipt>,
+}
+
+#[derive(Clone)]
+struct CachedCompletionReceipt {
+    observed_receipt: Option<Box<(String, ProviderTokenUsage)>>,
+    charge: Option<ProviderGatewayTerminalCharge>,
+}
+
+#[derive(Deserialize)]
+struct CachedTerminalIdentity<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    #[serde(rename = "responseId", borrow)]
+    response_id: Option<std::borrow::Cow<'a, str>>,
 }
 
 #[derive(Clone, Copy)]
@@ -855,6 +1034,44 @@ impl HttpsSseProviderAdapter {
                     {
                         *actual_cost_micros = None;
                     }
+                    #[cfg(test)]
+                    tests::audit_before_cached_publication();
+                    let retained = Self::cached_completion_receipt(receipt, &completion);
+                    let cancellation = self
+                        .shared
+                        .cancellation
+                        .lock()
+                        .map_err(|_| storage())?
+                        .clone();
+                    let mut streams = self.shared.streams.lock().map_err(|_| storage())?;
+                    let record = streams
+                        .get_mut(invocation.adapter_request_id())
+                        .ok_or_else(ProviderAdapterError::identity_conflict)?;
+                    if record.model_exchange_id != *invocation.model_exchange_id()
+                        || record.invocation_digest != operation
+                    {
+                        return Err(ProviderAdapterError::identity_conflict());
+                    }
+                    record.cached_receipt = Some(retained);
+                    if matches!(
+                        record.state,
+                        StreamState::Cancelled | StreamState::Released | StreamState::Fenced
+                    ) || record.io.is_cancelled()
+                        || cancellation
+                            .as_ref()
+                            .is_some_and(|value| value.is_cancelled())
+                    {
+                        record.io.cancel();
+                        if !matches!(record.state, StreamState::Released | StreamState::Fenced) {
+                            record.state = StreamState::Cancelled;
+                        }
+                        return Err(ProviderAdapterError::from_network(NetworkFailure::new(
+                            ErrorKind::Cancelled,
+                            Acceptance::ResponseReceived,
+                            Phase::Stream,
+                        )));
+                    }
+                    // Publication and terminal controls share streams -> completions.
                     self.shared
                         .completions
                         .lock()
@@ -1030,14 +1247,44 @@ impl HttpsSseProviderAdapter {
                 HttpsSseProviderErrorKind::IdentityConflict,
             ));
         }
-        if let Some(completion) = self
-            .shared
-            .completions
-            .lock()
-            .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?
-            .remove(&receipt.adapter_request_id)
-        {
+        let (completion, metadata, retained, terminal_control) = {
+            let streams =
+                self.shared.streams.lock().map_err(|_| {
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable)
+                })?;
+            let record = streams.get(&receipt.adapter_request_id).ok_or_else(|| {
+                HttpsSseProviderError::new(HttpsSseProviderErrorKind::IdentityConflict)
+            })?;
+            if record.model_exchange_id != receipt.model_exchange_id {
+                return Err(HttpsSseProviderError::new(
+                    HttpsSseProviderErrorKind::IdentityConflict,
+                ));
+            }
+            let completion = self
+                .shared
+                .completions
+                .lock()
+                .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?
+                .remove(&receipt.adapter_request_id);
+            (
+                completion,
+                record.metadata.clone(),
+                record.cached_receipt.clone(),
+                matches!(
+                    record.state,
+                    StreamState::Cancelled | StreamState::Released | StreamState::Fenced
+                ),
+            )
+        };
+        // Neither mutex remains held during cancellation and delivery checks.
+        if let Some(completion) = completion {
+            if self.response_read_cancelled(receipt)? {
+                return Err(Self::cached_completion_failure(metadata, retained));
+            }
             return Ok(completion);
+        }
+        if retained.is_some() && (terminal_control || self.response_read_cancelled(receipt)?) {
+            return Err(Self::cached_completion_failure(metadata, retained));
         }
         self.drain_attempt(receipt)
     }
@@ -1107,11 +1354,6 @@ impl HttpsSseProviderAdapter {
             Err(mut error) => {
                 if let Some(bytes) = error.response.as_deref() {
                     error.observed_receipt = self.observed_receipt(bytes, receipt).map(Box::new);
-                    let cancelled = self.shared.cancellation.lock().map_or(true, |value| {
-                        value
-                            .as_ref()
-                            .is_some_and(|cancellation| cancellation.is_cancelled())
-                    });
                     if matches!(
                         self.shared.config.protocol,
                         HttpsSseProviderProtocol::OpenAiChatCompletions(_)
@@ -1119,10 +1361,8 @@ impl HttpsSseProviderAdapter {
                             | HttpsSseProviderProtocol::CodexChatgpt
                             | HttpsSseProviderProtocol::ChatgptPlan
                     ) && error.kind == HttpsSseProviderErrorKind::Transport
-                        && !cancelled
-                        && !self.drain_interrupted(receipt)?
                         && let Ok(completion) =
-                            self.convert_bytes(receipt, tool_bindings, bytes, schema)
+                            self.convert_authorized_bytes(receipt, tool_bindings, bytes, schema)
                         && matches!(
                             completion.terminal,
                             ProviderGatewayTerminal::Completed { .. }
@@ -1135,11 +1375,104 @@ impl HttpsSseProviderAdapter {
                 return Err(error);
             }
         };
-        self.convert_bytes(receipt, tool_bindings, &bytes, schema)
+        self.convert_authorized_bytes(receipt, tool_bindings, &bytes, schema)
             .map_err(|mut error| {
                 error.observed_receipt = self.observed_receipt(&bytes, receipt).map(Box::new);
                 error.with_response(bytes)
             })
+    }
+
+    fn response_read_cancelled(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Result<bool, HttpsSseProviderError> {
+        let cancelled = self.shared.cancellation.lock().map_or(true, |value| {
+            value
+                .as_ref()
+                .is_some_and(|cancellation| cancellation.is_cancelled())
+        });
+        // Drop the cancellation guard before reading streams. Even a cancelled
+        // caller must still match this exact stream before observing its facts.
+        let interrupted = self.drain_interrupted(receipt)?;
+        Ok(cancelled || interrupted)
+    }
+
+    fn convert_authorized_bytes(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+        tool_bindings: &AnthropicToolBindings,
+        bytes: &[u8],
+        schema: Option<&crate::provider_response_schema::ResponseSchema>,
+    ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
+        if self.response_read_cancelled(receipt)? {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::Transport,
+            ));
+        }
+        let result = self.convert_bytes(receipt, tool_bindings, bytes, schema);
+        if self.response_read_cancelled(receipt)? {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::Transport,
+            ));
+        }
+        result
+    }
+
+    fn cached_completion_receipt(
+        receipt: &ProviderGatewayOpenReceipt,
+        completion: &HttpsSseProviderCompletion,
+    ) -> CachedCompletionReceipt {
+        let charge = completion.terminal.charge();
+        let observed_receipt = charge.and_then(|charge| {
+            let frame = completion
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| frame.is_terminal())?;
+            if frame.payload_json().len() > MAX_CACHED_TERMINAL_IDENTITY_JSON_BYTES {
+                return None;
+            }
+            let identity: CachedTerminalIdentity<'_> =
+                serde_json::from_str(frame.payload_json()).ok()?;
+            if identity.kind != "completed" {
+                return None;
+            }
+            let response_id = identity.response_id.as_deref()?;
+            if !valid_token(response_id, MAX_CACHED_RESPONSE_ID_BYTES) {
+                return None;
+            }
+            receipt
+                .stream_leak_gate
+                .inspect_bytes(
+                    crate::CredentialOutputBoundary::Persistence,
+                    response_id.as_bytes(),
+                )
+                .ok()?;
+            Some(Box::new((response_id.to_owned(), charge.usage)))
+        });
+        CachedCompletionReceipt {
+            observed_receipt,
+            charge,
+        }
+    }
+
+    fn cached_completion_failure(
+        metadata: ProviderFailureMetadata,
+        retained: Option<CachedCompletionReceipt>,
+    ) -> HttpsSseProviderError {
+        let mut error = HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport);
+        error.metadata = Box::new(metadata);
+        if let Some(retained) = retained {
+            error.observed_receipt = retained.observed_receipt;
+            error.cached_charge = retained.charge.map(Box::new);
+        }
+        error.network = Some(Box::new(winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::Cancelled,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Stream,
+        )));
+        // A cached result has canonical facts, never raw HTTP bytes.
+        error
     }
 
     fn convert_bytes(
@@ -1324,6 +1657,7 @@ impl HttpsSseProviderAdapter {
         let mut reader = body.as_reader();
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 8 * 1024];
+        let mut terminal = SseTerminalScanner::new(&self.shared.config);
         loop {
             if self.drain_interrupted(receipt)? {
                 return Err(
@@ -1358,11 +1692,29 @@ impl HttpsSseProviderAdapter {
             #[cfg(test)]
             tests::audit_record_reader_read(bytes.len(), read);
             if bytes.len().saturating_add(read) > self.shared.config.max_response_bytes {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::SizeLimit,
-                ));
+                let received = bytes.len().saturating_add(read) as u64;
+                let retained = self
+                    .shared
+                    .config
+                    .max_response_bytes
+                    .saturating_sub(bytes.len());
+                bytes.extend_from_slice(&buffer[..retained.min(read)]);
+                let mut error = HttpsSseProviderError::new(HttpsSseProviderErrorKind::SizeLimit)
+                    .with_response(bytes);
+                error.response_bytes_received = received;
+                return Err(error);
             }
             bytes.extend_from_slice(&buffer[..read]);
+            // Scan only this fresh read. Keep the entire received read in the
+            // codec input, including any suffix already delivered with its
+            // terminal, so terminal ordering and leakage checks still apply.
+            match terminal.inspect_fresh(&buffer[..read]) {
+                Ok(true) => return Ok(bytes),
+                Ok(false) => {}
+                Err(kind) => {
+                    return Err(HttpsSseProviderError::new(kind).with_response(bytes));
+                }
+            }
         }
     }
 
@@ -1519,6 +1871,7 @@ impl HttpsSseProviderAdapter {
                 state: StreamState::Pending,
                 io: self.exchange_io(),
                 metadata: ProviderFailureMetadata::default(),
+                cached_receipt: None,
             },
         );
         Ok(())
@@ -1975,6 +2328,7 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 state: StreamState::Fenced,
                 io: self.exchange_io(),
                 metadata: ProviderFailureMetadata::default(),
+                cached_receipt: None,
             });
         if record.model_exchange_id != *model_exchange_id {
             return Err(ProviderAdapterError::identity_conflict());
@@ -2000,11 +2354,21 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 record.io.cancel();
                 record.state = StreamState::Cancelled;
                 record.controls |= CONTROL_CANCEL;
+                self.shared
+                    .completions
+                    .lock()
+                    .map_err(|_| ProviderAdapterError::unavailable())?
+                    .remove(adapter_request_id);
             }
             ProviderStreamControlAction::Release => {
                 record.io.cancel();
                 record.state = StreamState::Released;
                 record.controls |= CONTROL_RELEASE;
+                self.shared
+                    .completions
+                    .lock()
+                    .map_err(|_| ProviderAdapterError::unavailable())?
+                    .remove(adapter_request_id);
             }
         }
         Ok(())
@@ -4780,11 +5144,14 @@ mod tests {
                 assert_eq!(fixture.finish().len(), 1);
                 let error =
                     result.expect_err("invalid response cannot become canonical completion");
-                assert_eq!(
-                    error.kind(),
-                    HttpsSseProviderErrorKind::Transport,
-                    "{fault}, plan={plan}"
-                );
+                // The complete protocol terminal ends receive before a later HTTP
+                // length mismatch. Preserve the converter's exact rejection kind.
+                let expected_kind = if fault == "credential" {
+                    HttpsSseProviderErrorKind::CredentialLeak
+                } else {
+                    HttpsSseProviderErrorKind::SseEvent
+                };
+                assert_eq!(error.kind(), expected_kind, "{fault}, plan={plan}");
                 assert!(!format!("{error:?}").contains(std::str::from_utf8(SECRET).unwrap()));
             }
         }

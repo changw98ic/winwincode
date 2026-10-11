@@ -353,21 +353,19 @@ async fn run_compact_task_inner_impl(
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
 
-    let prepared_initial_context = if turn_context.config.compact_context_max_tokens.is_some() {
-        Some(build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await)
-    } else {
-        None
+    let prepared_initial_context = match turn_context.config.compact_context_max_tokens {
+        Some(max_tokens) => Some((
+            max_tokens,
+            build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await,
+        )),
+        None => None,
     };
-    let prepared_history = if let Some(max_tokens) = turn_context.config.compact_context_max_tokens
-    {
+    let prepared_history = if let Some((max_tokens, context)) = prepared_initial_context.as_ref() {
         match compaction_context_overhead_tokens(
             &sess,
             &turn_context,
             &initial_context_injection,
-            &prepared_initial_context
-                .as_ref()
-                .expect("budgeted context")
-                .0,
+            &context.0,
         )
         .await
         {
@@ -375,7 +373,7 @@ async fn run_compact_task_inner_impl(
                 &user_messages,
                 &summary_text,
                 overhead,
-                max_tokens,
+                *max_tokens,
             ),
             Err(error) => Err(error),
         }
@@ -403,7 +401,7 @@ async fn run_compact_task_inner_impl(
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
     let (initial_context, world_state_baseline) = match prepared_initial_context {
-        Some(context) => context,
+        Some((_, context)) => context,
         None => build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await,
     };
     if !initial_context.is_empty() {

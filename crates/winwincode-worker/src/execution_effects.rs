@@ -59,6 +59,17 @@ where
         &mut self,
         message: ExecutionPortMessage,
     ) -> Result<EffectDispatchOutcome, WorkerError> {
+        // Remote model intents use the same current authority gate as the local
+        // Device lane. Exact local started exchanges below may only restore data.
+        if self.device_models.is_none()
+            && let ExecutionPortMessage::ModelOpenMessage(open) = &message
+            && self.local_model_start_deadline(open)?.is_none()
+        {
+            return Err(worker_error(
+                WorkerErrorCode::ExecutionMessageRejected,
+                "new model request has no current execution authority",
+            ));
+        }
         let (start_deadline, start_guard) = if self.device_models.is_some()
             && let ExecutionPortMessage::ModelOpenMessage(open) = &message
         {

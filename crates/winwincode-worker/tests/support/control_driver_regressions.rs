@@ -264,6 +264,112 @@ async fn runtime_ack_from_send_response_is_consumed_before_next_send() {
 }
 
 #[tokio::test]
+async fn heartbeat_backpressure_retries_retained_delivery_without_new_heartbeat_per_turn() {
+    let (mut worker, port, codex) = started_worker().await;
+    port.recorded.backpressured.set(true);
+    for _ in 0..8 {
+        let error = drive(&mut worker, &port)
+            .await
+            .expect("retryable heartbeat backpressure");
+        assert_eq!(error.code, WorkerErrorCode::ExecutionBackpressure);
+    }
+    let retained_heartbeats = codex
+        .state
+        .lock()
+        .unwrap()
+        .durable_deliveries
+        .iter()
+        .filter(|delivery| {
+            matches!(
+                delivery.message,
+                ExecutionPortMessage::WorkerHeartbeatMessage(_)
+            )
+        })
+        .count();
+    assert_eq!(
+        retained_heartbeats, 1,
+        "one retained heartbeat retries across owner turns"
+    );
+    port.recorded.backpressured.set(false);
+    assert!(drive(&mut worker, &port).await.is_none());
+    assert_eq!(
+        port.recorded
+            .messages
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, ExecutionPortMessage::WorkerHeartbeatMessage(_)))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn finite_control_backlog_is_bounded_keeps_heartbeat_and_then_allows_core_poll() {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    for sequence in 1..=2048 {
+        let acknowledgement = serde_json::from_value(serde_json::json!({
+            "kind":"runtime.ack", "schemaVersion":SchemaVersion::WinwincodeV1,
+            "messageId":format!("xmsg_{:026}",5000+sequence), "sentAt":now(),
+            "lease":active.lease, "workerSessionId":active.worker_session_id,
+            "sessionIdentity":active.session_identity,"status":"accepted","ackSequence":sequence
+        }))
+        .unwrap();
+        port.controls.queued.borrow_mut().push_back((
+            ExecutionMessageId(format!("xmsg_{:026}", 5000 + sequence)),
+            acknowledgement,
+        ));
+    }
+    worker
+        .drain_controls(&port.controls, || Ok(now()))
+        .await
+        .unwrap();
+    let consumed = 2048 - port.controls.queued.borrow().len();
+    assert!(
+        (1..=64).contains(&consumed),
+        "one control drain must obey its frame budget"
+    );
+    let mut max_drive = std::time::Duration::ZERO;
+    for _ in 0..2048 {
+        let started = std::time::Instant::now();
+        assert!(drive(&mut worker, &port).await.is_none());
+        max_drive = max_drive.max(started.elapsed());
+        if port.controls.queued.borrow().is_empty() {
+            break;
+        }
+    }
+    assert!(
+        port.controls.queued.borrow().is_empty(),
+        "finite valid controls must drain"
+    );
+    assert!(
+        max_drive < std::time::Duration::from_millis(300),
+        "a control backlog must yield the owner"
+    );
+    assert!(
+        port.recorded
+            .messages
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, ExecutionPortMessage::WorkerHeartbeatMessage(_)))
+    );
+    assert!(drive(&mut worker, &port).await.is_none());
+    assert!(
+        codex.calls().iter().any(|call| call.starts_with("poll:")),
+        "Core progresses after the finite validated control queue is empty"
+    );
+    assert_eq!(
+        port.controls
+            .trace
+            .borrow()
+            .iter()
+            .filter(|entry| entry.starts_with("confirmed:"))
+            .count(),
+        2048
+    );
+}
+
+#[tokio::test]
 async fn late_exact_renewal_settles_its_job_without_renewing_or_stopping_another() {
     let (mut worker, port, codex) = started_worker().await;
     worker

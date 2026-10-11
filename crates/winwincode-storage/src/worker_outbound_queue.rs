@@ -17,7 +17,8 @@ use winwincode_domain::{
 };
 
 use crate::execution_registry::{
-    accepted_lease_history, load_lease_in_transaction, renew_execution_lease_in_transaction,
+    accepted_lease_history, accepted_lease_period, load_lease_in_transaction,
+    renew_execution_lease_in_transaction,
 };
 use crate::worker_session_slots::{
     load_slot_in_transaction, require_retained_slot_authority, require_terminal_slot_authority,
@@ -72,12 +73,97 @@ CREATE INDEX IF NOT EXISTS internal_worker_outbound_route
     ON internal_worker_outbound_messages (
         authority_digest, sequence, message_id
     );
+CREATE INDEX IF NOT EXISTS internal_worker_outbound_capacity_route
+    ON internal_worker_outbound_messages (
+        worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token
+    );
 ";
 
 const MAX_QUEUE_CAPACITY: usize = 100_000;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAGE_SIZE: usize = 200;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+const OUTBOUND_CAPACITY_HEAD_SCHEMA: &str = r"
+CREATE TABLE internal_worker_outbound_capacity_head (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    layout_version INTEGER NOT NULL CHECK (layout_version = 1),
+    pending_messages INTEGER NOT NULL CHECK (typeof(pending_messages) = 'integer' AND pending_messages >= 0),
+    retained_bytes INTEGER NOT NULL CHECK (typeof(retained_bytes) = 'integer' AND retained_bytes >= 0)
+);
+";
+
+pub(crate) const OUTBOUND_CAPACITY_SLOTS_SCHEMA: &str = r"
+CREATE TABLE internal_worker_outbound_capacity_slots (
+    worker_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    worker_session_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    fencing_token TEXT NOT NULL,
+    pending_messages INTEGER NOT NULL CHECK (typeof(pending_messages) = 'integer' AND pending_messages >= 0),
+    PRIMARY KEY (worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token)
+);
+";
+
+const OUTBOUND_CAPACITY_TRIGGERS: &str = r"
+CREATE TRIGGER internal_worker_outbound_capacity_insert AFTER INSERT ON internal_worker_outbound_messages
+BEGIN
+    UPDATE internal_worker_outbound_capacity_head
+    SET pending_messages = pending_messages + 1, retained_bytes = retained_bytes + length(NEW.payload)
+    WHERE singleton = 1 AND layout_version = 1;
+    SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'outbound capacity head missing') END;
+    INSERT INTO internal_worker_outbound_capacity_slots
+    (worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token, pending_messages)
+    VALUES (NEW.worker_id, NEW.worker_instance_id, NEW.worker_session_id, NEW.job_id, NEW.lease_id, NEW.attempt, NEW.fencing_token, 1)
+    ON CONFLICT (worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token)
+    DO UPDATE SET pending_messages = pending_messages + 1;
+END;
+CREATE TRIGGER internal_worker_outbound_capacity_delete AFTER DELETE ON internal_worker_outbound_messages
+BEGIN
+    UPDATE internal_worker_outbound_capacity_head
+    SET pending_messages = pending_messages - 1, retained_bytes = retained_bytes - length(OLD.payload)
+    WHERE singleton = 1 AND layout_version = 1;
+    SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'outbound capacity head missing') END;
+    UPDATE internal_worker_outbound_capacity_slots SET pending_messages = pending_messages - 1
+    WHERE worker_id = OLD.worker_id AND worker_instance_id = OLD.worker_instance_id
+      AND worker_session_id = OLD.worker_session_id AND job_id = OLD.job_id AND lease_id = OLD.lease_id
+      AND attempt = OLD.attempt AND fencing_token = OLD.fencing_token;
+    SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'outbound capacity slot missing') END;
+    DELETE FROM internal_worker_outbound_capacity_slots
+    WHERE worker_id = OLD.worker_id AND worker_instance_id = OLD.worker_instance_id
+      AND worker_session_id = OLD.worker_session_id AND job_id = OLD.job_id AND lease_id = OLD.lease_id
+      AND attempt = OLD.attempt AND fencing_token = OLD.fencing_token AND pending_messages = 0;
+END;
+CREATE TRIGGER internal_worker_outbound_capacity_update
+AFTER UPDATE OF worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token, payload
+ON internal_worker_outbound_messages
+WHEN NEW.worker_id != OLD.worker_id OR NEW.worker_instance_id != OLD.worker_instance_id
+  OR NEW.worker_session_id != OLD.worker_session_id OR NEW.job_id != OLD.job_id
+  OR NEW.lease_id != OLD.lease_id OR NEW.attempt != OLD.attempt OR NEW.fencing_token != OLD.fencing_token
+  OR length(NEW.payload) != length(OLD.payload)
+BEGIN
+    UPDATE internal_worker_outbound_capacity_head
+    SET retained_bytes = retained_bytes + length(NEW.payload) - length(OLD.payload)
+    WHERE singleton = 1 AND layout_version = 1;
+    SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'outbound capacity head missing') END;
+    UPDATE internal_worker_outbound_capacity_slots SET pending_messages = pending_messages - 1
+    WHERE worker_id = OLD.worker_id AND worker_instance_id = OLD.worker_instance_id
+      AND worker_session_id = OLD.worker_session_id AND job_id = OLD.job_id AND lease_id = OLD.lease_id
+      AND attempt = OLD.attempt AND fencing_token = OLD.fencing_token;
+    SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'outbound capacity slot missing') END;
+    DELETE FROM internal_worker_outbound_capacity_slots
+    WHERE worker_id = OLD.worker_id AND worker_instance_id = OLD.worker_instance_id
+      AND worker_session_id = OLD.worker_session_id AND job_id = OLD.job_id AND lease_id = OLD.lease_id
+      AND attempt = OLD.attempt AND fencing_token = OLD.fencing_token AND pending_messages = 0;
+    INSERT INTO internal_worker_outbound_capacity_slots
+    (worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token, pending_messages)
+    VALUES (NEW.worker_id, NEW.worker_instance_id, NEW.worker_session_id, NEW.job_id, NEW.lease_id, NEW.attempt, NEW.fencing_token, 1)
+    ON CONFLICT (worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token)
+    DO UPDATE SET pending_messages = pending_messages + 1;
+END;
+";
 
 /// Bounded queue settings owned by the host composition root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,6 +546,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
                 "PRAGMA secure_delete = ON;{WORKER_OUTBOUND_SCHEMA}"
             ))
             .map_err(|_| WorkerOutboundQueueError::storage())?;
+        prepare_capacity_counters(storage)?;
         Ok(Self { storage, config })
     }
 
@@ -1331,22 +1418,32 @@ fn delete_message(
     connection: &Connection,
     message_id: &ExecutionMessageId,
 ) -> Result<(), WorkerOutboundQueueError> {
-    let overwritten = connection
-        .execute(
+    let mut overwrite = connection
+        .prepare(
             "UPDATE internal_worker_outbound_messages
              SET payload = zeroblob(length(payload)) WHERE message_id = ?1",
-            [&message_id.0],
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let overwritten = overwrite
+        .execute([&message_id.0])
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_mutation(
+        overwrite.get_status(rusqlite::StatementStatus::VmStep),
+    );
     if overwritten != 1 {
         return Err(WorkerOutboundQueueError::storage());
     }
-    let changed = connection
-        .execute(
-            "DELETE FROM internal_worker_outbound_messages WHERE message_id = ?1",
-            [&message_id.0],
-        )
+    let mut delete = connection
+        .prepare("DELETE FROM internal_worker_outbound_messages WHERE message_id = ?1")
         .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let changed = delete
+        .execute([&message_id.0])
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_mutation(
+        delete.get_status(rusqlite::StatementStatus::VmStep),
+    );
     if changed == 1 {
         Ok(())
     } else {
@@ -1432,7 +1529,6 @@ fn enqueue_in_transaction(
     if let Some(receipt) = replay_active(connection, request, &request_authority_digest)? {
         return Ok(receipt);
     }
-    let history = authority_history(connection, &request.authority)?;
     let current = load_lease_in_transaction(connection, &request.authority.slot.job_id)
         .map_err(|_| WorkerOutboundQueueError::storage())?
         .ok_or_else(WorkerOutboundQueueError::authority)?;
@@ -1440,34 +1536,29 @@ fn enqueue_in_transaction(
     current_authority
         .lease_expires_at
         .clone_from(&current.expires_at);
-    if current.expires_at.0 < request.authority.lease_expires_at.0
-        || !history.contains_key(&authority_digest(&current_authority)?)
+    let slot = &request.authority.slot;
+    let mut requested_period = current.clone();
+    requested_period
+        .expires_at
+        .clone_from(&request.authority.lease_expires_at);
+    if current.job_id != slot.job_id
+        || current.lease_id != slot.lease_id
+        || current.worker_id != slot.worker_id
+        || current.worker_instance_id != slot.worker_instance_id
+        || current.attempt != slot.attempt
+        || current.fencing_token != slot.fencing_token
+        || current.issued_at != request.authority.lease_issued_at
+        || current.expires_at.0 < requested_period.expires_at.0
+        || !accepted_lease_period(connection, &requested_period)
+            .map_err(|_| WorkerOutboundQueueError::storage())?
+        || (requested_period != current
+            && !accepted_lease_period(connection, &current)
+                .map_err(|_| WorkerOutboundQueueError::storage())?)
     {
         return Err(WorkerOutboundQueueError::authority());
     }
     require_retained_slot_authority(connection, &current_authority.slot)?;
-    let digests = history_digests(&history)?;
-    let mut capacity_statement = connection
-        .prepare(
-            "SELECT
-            COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
-            COALESCE(SUM(length(payload)), 0)
-         FROM internal_worker_outbound_messages",
-        )
-        .map_err(|_| WorkerOutboundQueueError::storage())?;
-    let (authority_pending, retained_bytes) = capacity_statement
-        .query_row([&digests], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })
-        .map_err(|_| WorkerOutboundQueueError::storage())?;
-    #[cfg(test)]
-    crate::storage_mechanism_regression::capacity_query(
-        capacity_statement.get_status(rusqlite::StatementStatus::VmStep),
-    );
-    let authority_pending =
-        usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?;
-    let retained_bytes =
-        usize::try_from(retained_bytes).map_err(|_| WorkerOutboundQueueError::storage())?;
+    let (authority_pending, retained_bytes) = load_enqueue_capacity(connection, slot)?;
     let next_retained_bytes = retained_bytes
         .checked_add(request.frame_bytes.len())
         .ok_or_else(WorkerOutboundQueueError::capacity)?;
@@ -1476,30 +1567,36 @@ fn enqueue_in_transaction(
     {
         return Err(WorkerOutboundQueueError::capacity());
     }
-    connection
-        .execute(
+    let mut insert = connection
+        .prepare(
             "INSERT INTO internal_worker_outbound_messages
                 (message_id, authority_digest, worker_id, worker_instance_id,
                  worker_session_id, job_id, lease_id, attempt, fencing_token,
                  sent_at, payload_digest, payload, state, delivery_attempts, claimed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                      'pending', 0, NULL)",
-            params![
-                request.message_id.0,
-                request_authority_digest,
-                request.authority.slot.worker_id.0,
-                request.authority.slot.worker_instance_id.0,
-                request.authority.slot.worker_session_id.0,
-                request.authority.slot.job_id.0,
-                request.authority.slot.lease_id.0,
-                to_sql(request.authority.slot.attempt)?,
-                request.authority.slot.fencing_token.0,
-                request.sent_at.0,
-                request.payload_digest.0,
-                request.frame_bytes,
-            ],
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
+    insert
+        .execute(params![
+            request.message_id.0,
+            request_authority_digest,
+            request.authority.slot.worker_id.0,
+            request.authority.slot.worker_instance_id.0,
+            request.authority.slot.worker_session_id.0,
+            request.authority.slot.job_id.0,
+            request.authority.slot.lease_id.0,
+            to_sql(request.authority.slot.attempt)?,
+            request.authority.slot.fencing_token.0,
+            request.sent_at.0,
+            request.payload_digest.0,
+            request.frame_bytes,
+        ])
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_mutation(
+        insert.get_status(rusqlite::StatementStatus::VmStep),
+    );
     Ok(WorkerOutboundEnqueueReceipt {
         message_id: request.message_id.clone(),
         payload_digest: request.payload_digest.clone(),
@@ -1507,6 +1604,187 @@ fn enqueue_in_transaction(
         settlement: None,
         replayed: false,
     })
+}
+
+fn load_enqueue_capacity(
+    connection: &Connection,
+    slot: &WorkerSlotAuthority,
+) -> Result<(usize, usize), WorkerOutboundQueueError> {
+    let mut capacity_statement = connection
+        .prepare(
+            "SELECT slot.pending_messages, head.retained_bytes
+             FROM internal_worker_outbound_capacity_head AS head
+             LEFT JOIN internal_worker_outbound_capacity_slots AS slot
+               ON slot.worker_id = ?1 AND slot.worker_instance_id = ?2 AND slot.worker_session_id = ?3
+              AND slot.job_id = ?4 AND slot.lease_id = ?5 AND slot.attempt = ?6 AND slot.fencing_token = ?7
+             WHERE head.singleton = 1 AND head.layout_version = 1",
+        )
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let (authority_pending, retained_bytes) = capacity_statement
+        .query_row(
+            params![
+                slot.worker_id.0,
+                slot.worker_instance_id.0,
+                slot.worker_session_id.0,
+                slot.job_id.0,
+                slot.lease_id.0,
+                to_sql(slot.attempt)?,
+                slot.fencing_token.0
+            ],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    #[cfg(test)]
+    crate::storage_mechanism_regression::capacity_query(
+        capacity_statement.get_status(rusqlite::StatementStatus::VmStep),
+    );
+    let authority_pending = if let Some(authority_pending) = authority_pending {
+        usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?
+    } else {
+        // A missing counter is valid only for a new slot. Retained raw rows
+        // must never let a lost counter reset that slot's capacity to zero.
+        let mut retained_slot = connection
+            .prepare(
+                "SELECT 1 FROM internal_worker_outbound_messages
+                 WHERE worker_id = ?1 AND worker_instance_id = ?2 AND worker_session_id = ?3
+                   AND job_id = ?4 AND lease_id = ?5 AND attempt = ?6 AND fencing_token = ?7
+                 LIMIT 1",
+            )
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        let retained = retained_slot
+            .query_row(
+                params![
+                    slot.worker_id.0,
+                    slot.worker_instance_id.0,
+                    slot.worker_session_id.0,
+                    slot.job_id.0,
+                    slot.lease_id.0,
+                    to_sql(slot.attempt)?,
+                    slot.fencing_token.0,
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| WorkerOutboundQueueError::storage())?
+            .is_some();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::capacity_query(
+            retained_slot.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        if retained {
+            return Err(WorkerOutboundQueueError::storage());
+        }
+        0
+    };
+    let retained_bytes =
+        usize::try_from(retained_bytes).map_err(|_| WorkerOutboundQueueError::storage())?;
+    Ok((authority_pending, retained_bytes))
+}
+
+fn prepare_capacity_counters(storage: &mut SqliteStorage) -> Result<(), WorkerOutboundQueueError> {
+    let transaction = storage
+        .connection_mut()
+        .map_err(|_| WorkerOutboundQueueError::storage())?
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let head_layout =
+        capacity_table_layout(&transaction, "internal_worker_outbound_capacity_head")?;
+    let slots_layout =
+        capacity_table_layout(&transaction, "internal_worker_outbound_capacity_slots")?;
+    if head_layout.is_some() && slots_layout.is_none() {
+        // A completed head must never cause a lost slot table to be replaced by
+        // empty counters. The original retained rows remain authoritative.
+        return Err(WorkerOutboundQueueError::storage());
+    }
+    for (stored, definition) in [
+        (head_layout.as_deref(), OUTBOUND_CAPACITY_HEAD_SCHEMA),
+        (slots_layout.as_deref(), OUTBOUND_CAPACITY_SLOTS_SCHEMA),
+    ] {
+        if let Some(stored) = stored {
+            if stored != definition.trim().trim_end_matches(';') {
+                return Err(WorkerOutboundQueueError::storage());
+            }
+        } else {
+            transaction
+                .execute_batch(definition)
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+        }
+    }
+    let head: Option<(i64, i64, i64)> = transaction
+        .query_row(
+            "SELECT layout_version, pending_messages, retained_bytes
+             FROM internal_worker_outbound_capacity_head WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    if let Some((version, pending, bytes)) = head {
+        if version != 1 || pending < 0 || bytes < 0 {
+            return Err(WorkerOutboundQueueError::storage());
+        }
+        for definition in OUTBOUND_CAPACITY_TRIGGERS.split("CREATE TRIGGER ").skip(1) {
+            let name = definition
+                .split_whitespace()
+                .next()
+                .ok_or_else(WorkerOutboundQueueError::storage)?;
+            let stored: Option<String> = transaction
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| WorkerOutboundQueueError::storage())?;
+            let expected = format!("CREATE TRIGGER {}", definition.trim().trim_end_matches(';'));
+            if stored.as_deref() != Some(expected.as_str()) {
+                return Err(WorkerOutboundQueueError::storage());
+            }
+        }
+    } else {
+        let prior_slots: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM internal_worker_outbound_capacity_slots",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        if prior_slots != 0 {
+            return Err(WorkerOutboundQueueError::storage());
+        }
+        transaction
+            .execute_batch(
+                "INSERT INTO internal_worker_outbound_capacity_head
+                 SELECT 1, 1, COUNT(*), COALESCE(SUM(length(payload)), 0)
+                 FROM internal_worker_outbound_messages;
+                 INSERT INTO internal_worker_outbound_capacity_slots
+                 SELECT worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt,
+                        fencing_token, COUNT(*)
+                 FROM internal_worker_outbound_messages
+                 GROUP BY worker_id, worker_instance_id, worker_session_id, job_id, lease_id, attempt, fencing_token;",
+            )
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        transaction
+            .execute_batch(OUTBOUND_CAPACITY_TRIGGERS)
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+    }
+    transaction
+        .commit()
+        .map_err(|_| WorkerOutboundQueueError::storage())
+}
+
+fn capacity_table_layout(
+    connection: &Connection,
+    name: &str,
+) -> Result<Option<String>, WorkerOutboundQueueError> {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| WorkerOutboundQueueError::storage())
 }
 
 fn authority_history(

@@ -19,6 +19,7 @@ use codex_code_mode_protocol::host::WireResult;
 use codex_code_mode_protocol::host::WireRuntimeResponse;
 use codex_code_mode_protocol::host::WireWaitOutcome;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use super::Connection;
 use super::RemoteSession;
@@ -110,10 +111,13 @@ impl Drop for FakeHost {
 
 // Fault-injection peer only. All client operation/timeout/cancellation behavior is actual Rust.
 const FAKE_HOST_BODY: &str = r#"
-import copy, json, os, pathlib, struct, sys
+import copy, json, os, pathlib, struct, sys, threading, time
 root = pathlib.Path(ROOT)
 (root / 'pid').write_text(str(os.getpid()))
 blocked_once = False
+write_lock = threading.Lock()
+opening_id = None
+opening_session = None
 def read_exact(length):
     result = b''
     while len(result) < length:
@@ -128,8 +132,12 @@ def send(template, request_id=None, session_id=None):
         if 'sessionId' in message: message['sessionId'] = session_id
         if 'result' in message and 'sessionId' in message['result'].get('value', {}): message['result']['value']['sessionId'] = session_id
     payload = json.dumps(message, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(struct.pack('<I', len(payload)) + payload)
-    sys.stdout.buffer.flush()
+    with write_lock:
+        sys.stdout.buffer.write(struct.pack('<I', len(payload)) + payload)
+        sys.stdout.buffer.flush()
+def release_later(template, request_id, session_id=None):
+    while not (root / 'release').exists(): time.sleep(0.005)
+    send(template, request_id, session_id)
 while True:
     prefix = read_exact(4)
     if prefix is None: break
@@ -141,21 +149,31 @@ while True:
     if kind == 'connection/hello':
         send('hello'); (root / 'handshake').touch(); continue
     if kind == 'operation/cancel':
-        (root / 'cancel').touch(); send('cancel', message['id']); continue
+        (root / 'cancel').touch()
+        if MODE in ('opening_ignore_cancel', 'wait_ignore_cancel'): continue
+        if MODE == 'opening_commit_race': send('open', opening_id, opening_session)
+        else: send('cancel', message['id'])
+        continue
     if kind != 'operation/request': continue
     request = message['request']; method = request['method']; request_id = message['id']; session_id = request['sessionId']
-    block = {'open':'session/open', 'start':'session/execute', 'close':'session/shutdown', 'wait':'session/wait', 'terminate':'session/terminate', 'opening_outer_cancel':'session/open'}.get(MODE)
+    block = {'open':'session/open', 'start':'session/execute', 'close':'session/shutdown', 'wait':'session/wait', 'terminate':'session/terminate', 'opening_outer_cancel':'session/open', 'opening_ignore_cancel':'session/open', 'opening_commit_race':'session/open', 'wait_ignore_cancel':'session/wait'}.get(MODE)
     if method == block and not blocked_once:
+        opening_id = request_id; opening_session = session_id
         blocked_once = True; (root / ('withheld-' + MODE)).touch(); continue
     if method == 'session/open': send('open', request_id, session_id)
     elif method == 'session/execute':
         send('start', request_id)
-        if MODE == 'initial' and not blocked_once:
-            blocked_once = True; (root / 'withheld-initial').touch()
+        if MODE in ('initial', 'long_initial') and not blocked_once:
+            blocked_once = True; (root / ('withheld-' + MODE)).touch()
+            if MODE == 'long_initial': threading.Thread(target=release_later, args=('initial', request_id), daemon=True).start()
         else: send('initial', request_id)
     elif method == 'session/wait': send('wait', request_id)
     elif method == 'session/terminate': send('terminate', request_id); send('closed', session_id=session_id)
-    elif method == 'session/shutdown': send('close', request_id, session_id)
+    elif method == 'session/shutdown':
+        if MODE == 'opening_commit_race':
+            (root / 'withheld-abandoned-close').touch()
+            threading.Thread(target=release_later, args=('close', request_id, session_id), daemon=True).start()
+        else: send('close', request_id, session_id)
 "#;
 
 fn remote() -> RemoteSession {
@@ -183,7 +201,6 @@ async fn advance_transport_interval() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "mechanism audit: FC-R01 known transport-deadline defect"]
 async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
     let mut missing = Vec::new();
     for mode in ["open", "start", "initial", "close", "wait", "terminate"] {
@@ -201,6 +218,7 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
                         remote(),
                         Arc::new(NoopCodeModeSessionDelegate),
                         CodeModeSessionCellExecutionLimits::default(),
+                        CancellationToken::new(),
                     )
                     .await
                     .unwrap(),
@@ -233,6 +251,7 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
                     remote(),
                     Arc::new(NoopCodeModeSessionDelegate),
                     CodeModeSessionCellExecutionLimits::default(),
+                    CancellationToken::new(),
                 )
                 .await
                 .map(|_| ())
@@ -288,14 +307,13 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
         fake.assert_reaped().await;
         let row = json!({"id":"FC-R01","phase":mode,"legal_handshake":true,"virtual_elapsed_s":70,"future_finished":finished_after_70s,"connection_alive_before_fixture_cleanup":alive_after_70s,"outer_cancel_frames":cancel_frames,"result":result,"owned_process_reaped":true,"source":"actual Connection::spawn and stdio driver"});
         eprintln!("MECHANISM_RECEIPT {row}");
-        if matches!(mode, "wait" | "terminate") {
-            assert!(
-                finished_after_70s && !alive_after_70s,
-                "actual transport-deadline positive control failed"
-            );
-        } else if !finished_after_70s {
+        if !finished_after_70s {
             missing.push(mode);
         }
+        assert!(
+            !alive_after_70s,
+            "IPC deadline must retire the failed connection: {mode}"
+        );
     }
     assert!(
         missing.is_empty(),
@@ -304,7 +322,6 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "mechanism audit: FC-R01 known Opening cancellation defect"]
 async fn mechanism_fcr01_opening_outer_cancel_retires_shutdown() {
     use super::super::OwnedCodeModeHost;
     use super::super::ProcessOwnedCodeModeSession;
@@ -323,27 +340,184 @@ async fn mechanism_fcr01_opening_outer_cancel_retires_shutdown() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
-    advance_transport_interval().await;
-    let opening_pending = !execute_task.is_finished();
-    let shutdown_pending = !shutdown_task.is_finished();
-    execute_task.abort();
-    let _ = execute_task.await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let shutdown_after_outer_cancel = !shutdown_task.is_finished();
-    let cancel_frames = fake.cancellations();
-    let connection = host.live_connection().unwrap();
-    connection.cancellation.cancel();
+    fake.observed("cancel").await;
+    let opening_result = tokio::time::timeout(Duration::from_secs(2), execute_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(opening_result.is_err());
     let shutdown_result = tokio::time::timeout(Duration::from_secs(2), shutdown_task)
         .await
         .unwrap()
         .unwrap();
-    fake.assert_reaped().await;
-    let row = json!({"id":"FC-R01","phase":"Opening + actual SessionInner::drive_shutdown","virtual_elapsed_s":70,"open_pending":opening_pending,"shutdown_pending":shutdown_pending,"shutdown_pending_after_outer_execute_abort":shutdown_after_outer_cancel,"cancel_frames_after_outer_abort":cancel_frames,"shutdown_result_after_owned_connection_cancel":format!("{shutdown_result:?}"),"owned_process_reaped":true});
-    eprintln!("MECHANISM_RECEIPT {row}");
+    assert!(shutdown_result.is_ok());
+    let cancel_frames = fake.cancellations();
+    let connection = host.live_connection().unwrap();
     assert!(
-        !shutdown_after_outer_cancel,
-        "outer execute cancellation must retire Opening and pending shutdown"
+        connection.is_alive(),
+        "acknowledged opening cancellation preserves the shared host"
     );
+    connection.cancellation.cancel();
+    fake.assert_reaped().await;
+    let row = json!({"id":"FC-R01","phase":"Opening + actual SessionInner::drive_shutdown","open_returned_error":true,"shutdown_returned":true,"cancel_frames":cancel_frames,"shutdown_result":format!("{shutdown_result:?}"),"owned_process_reaped":true});
+    eprintln!("MECHANISM_RECEIPT {row}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opening_shutdown_waits_for_committed_session_cleanup() {
+    use super::super::OwnedCodeModeHost;
+    use super::super::ProcessOwnedCodeModeSession;
+    let fake = FakeHost::new("opening_commit_race");
+    let host = Arc::new(OwnedCodeModeHost::new(fake.program.clone()));
+    let session = Arc::new(ProcessOwnedCodeModeSession::with_host(
+        Arc::new(NoopCodeModeSessionDelegate),
+        Arc::clone(&host),
+        CodeModeSessionCellExecutionLimits::default(),
+    ));
+    let executing = Arc::clone(&session);
+    let execute_task = tokio::spawn(async move { executing.execute(request()).await.map(|_| ()) });
+    fake.observed("withheld-opening_commit_race").await;
+    let shutting_down = Arc::clone(&session);
+    let shutdown_task = tokio::spawn(async move { shutting_down.shutdown().await });
+    fake.observed("withheld-abandoned-close").await;
+    assert!(
+        !shutdown_task.is_finished(),
+        "shutdown must await the exact committed session close acknowledgement"
+    );
+    std::fs::write(fake.root.join("release"), "release").unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), shutdown_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), execute_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    host.live_connection().unwrap().cancellation.cancel();
+    fake.assert_reaped().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_stdio_caller_requires_bounded_cancel_acknowledgement() {
+    let fake = FakeHost::new("wait_ignore_cancel");
+    let connection = Arc::new(
+        Connection::spawn(&fake.program)
+            .await
+            .map_err(|err| err.to_string())
+            .unwrap(),
+    );
+    let cleanup = connection
+        .open_session(
+            remote(),
+            Arc::new(NoopCodeModeSessionDelegate),
+            CodeModeSessionCellExecutionLimits::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let started = connection.execute(remote(), request()).await.unwrap();
+    let cell_id = started.cell_id.clone();
+    assert!(matches!(
+        started.initial_response().await.unwrap(),
+        RuntimeResponse::Yielded { .. }
+    ));
+    let waiting = Arc::clone(&connection);
+    let wait_task = tokio::spawn(async move {
+        waiting
+            .wait(
+                remote(),
+                WaitRequest {
+                    cell_id,
+                    yield_time_ms: 600_001,
+                },
+            )
+            .await
+    });
+    fake.observed("withheld-wait_ignore_cancel").await;
+    wait_task.abort();
+    let _ = wait_task.await;
+    fake.observed("cancel").await;
+    advance_transport_interval().await;
+    assert!(!connection.is_alive());
+    tokio::time::timeout(Duration::from_secs(2), cleanup.wait())
+        .await
+        .unwrap();
+    fake.assert_reaped().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opening_shutdown_retires_an_unacknowledged_cancel() {
+    use super::super::OwnedCodeModeHost;
+    use super::super::ProcessOwnedCodeModeSession;
+    let fake = FakeHost::new("opening_ignore_cancel");
+    let host = Arc::new(OwnedCodeModeHost::new(fake.program.clone()));
+    let session = Arc::new(ProcessOwnedCodeModeSession::with_host(
+        Arc::new(NoopCodeModeSessionDelegate),
+        Arc::clone(&host),
+        CodeModeSessionCellExecutionLimits::default(),
+    ));
+    let executing = Arc::clone(&session);
+    let execute_task = tokio::spawn(async move { executing.execute(request()).await.map(|_| ()) });
+    fake.observed("withheld-opening_ignore_cancel").await;
+    let shutting_down = Arc::clone(&session);
+    let shutdown_task = tokio::spawn(async move { shutting_down.shutdown().await });
+    fake.observed("cancel").await;
+    advance_transport_interval().await;
+    assert!(execute_task.is_finished());
+    assert!(shutdown_task.is_finished());
+    assert!(execute_task.await.unwrap().is_err());
+    assert!(shutdown_task.await.unwrap().is_ok());
+    assert!(host.live_connection().is_none());
+    fake.assert_reaped().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stdio_initial_deadline_allows_the_requested_long_yield() {
+    let fake = FakeHost::new("long_initial");
+    let connection = Arc::new(
+        Connection::spawn(&fake.program)
+            .await
+            .map_err(|err| err.to_string())
+            .unwrap(),
+    );
+    let cleanup = connection
+        .open_session(
+            remote(),
+            Arc::new(NoopCodeModeSessionDelegate),
+            CodeModeSessionCellExecutionLimits::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut execute = request();
+    execute.yield_time_ms = Some(600_001);
+    let started = connection.execute(remote(), execute).await.unwrap();
+    let initial = tokio::spawn(started.initial_response());
+    fake.observed("withheld-long_initial").await;
+    advance_transport_interval().await;
+    assert!(!initial.is_finished());
+    assert!(connection.is_alive());
+    std::fs::write(fake.root.join("release"), "release").unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), initial)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        RuntimeResponse::Yielded { .. }
+    ));
+    connection.shutdown_session(remote()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), cleanup.wait())
+        .await
+        .unwrap();
+    connection.cancellation.cancel();
+    fake.assert_reaped().await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -358,6 +532,7 @@ async fn mechanism_fcr01_stdio_long_yield_request_is_accepted() {
             remote(),
             Arc::new(NoopCodeModeSessionDelegate),
             CodeModeSessionCellExecutionLimits::default(),
+            CancellationToken::new(),
         )
         .await
         .unwrap();

@@ -1806,6 +1806,12 @@ export async function driveDelivery(
   let terminalCommand = null
   let idlePolls = 0
   const stuckPollLimit = 80
+  const pollIntervalMillis = hooks.pollIntervalMillis ?? POLL_INTERVAL_MILLIS
+  assert.ok(Number.isSafeInteger(pollIntervalMillis) && pollIntervalMillis > 0)
+  let priorCursor = null
+  let priorAggregate = null
+  let priorStatus = null
+  let priorDeliveryRevision = null
   for (;;) {
     await hooks.assertRunning?.()
     // A failed cursor-bound query invalidates the entire observation. Re-read
@@ -1813,15 +1819,27 @@ export async function driveDelivery(
     // attention, status or revision facts.
     detail = null
     workRunAggregate = null
+    let projectionChanged = false
     let query = 'delivery.get'
     try {
       detail = (await client.query(query, { deliveryId })).result
       query = 'workrun.get'
-      workRunAggregate = (await client.query('workrun.get', {
-        deliveryId,
-        workItemId: null,
-        atCursor: detail.readCursor,
-      })).result
+      if (detail.readCursor?.token && priorAggregate !== null
+          && JSON.stringify(detail.readCursor) === priorCursor
+          && detail.status === priorStatus && detail.deliveryRevision === priorDeliveryRevision) {
+        workRunAggregate = priorAggregate
+      } else {
+        workRunAggregate = (await client.query('workrun.get', {
+          deliveryId,
+          workItemId: null,
+          atCursor: detail.readCursor,
+        })).result
+        projectionChanged = true
+        priorCursor = detail.readCursor?.token ? JSON.stringify(detail.readCursor) : null
+        priorAggregate = workRunAggregate
+        priorStatus = detail.status
+        priorDeliveryRevision = detail.deliveryRevision
+      }
     } catch (error) {
       if (query === 'workrun.get'
           && (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED')) continue
@@ -1835,12 +1853,12 @@ export async function driveDelivery(
           error.unresolvedDeviceExecution = true
           throw error
         }
-        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
         continue
       }
       throw error
     }
-    await hooks.onProjection?.({ detail, workRunAggregate })
+    if (projectionChanged) await hooks.onProjection?.({ detail, workRunAggregate })
     const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
     const activeWorkRuns = workRuns
       .filter(run => ['queued', 'leased', 'running'].includes(run.state))
@@ -1887,7 +1905,7 @@ export async function driveDelivery(
         }
       }
       idlePolls = 0
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     }
     if (typeof hooks.onPendingDeviceWorkRuns === 'function') {
@@ -1937,7 +1955,7 @@ export async function driveDelivery(
       // register and lease before the aggregate can append the run. Wait out
       // the caller timeout instead of the short local-stall budget.
       idlePolls = 0
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     } else {
       // No active WorkRun and no open Attention while the Delivery is not
@@ -1953,7 +1971,7 @@ export async function driveDelivery(
           transientErrors: transientDeliveryErrorSummary(transientErrors),
         })}`)
       }
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     }
 
@@ -1979,7 +1997,7 @@ export async function driveDelivery(
             message: error.message,
           })
         }
-        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
         continue
       }
       let failureDetail = detail

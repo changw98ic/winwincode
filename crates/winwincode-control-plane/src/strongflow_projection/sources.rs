@@ -750,7 +750,8 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
         let cut = storage
             .load_projection_read_cut(&state_stream_ids, &event_key, request.event_cursor())
             .map_err(|error| map_storage_read_error(&error))?;
-        let runtime = delivery_runtime_read(request, delivery, &scope_key, &cut, &bindings)?;
+        let runtime =
+            delivery_runtime_read(storage, request, delivery, &scope_key, &cut, &bindings)?;
         if runtime.accepted_sequence() > 0 && cut.projection_event_cursor().sequence() == 0 {
             return Err(TrustedProjectionReadError::Invalid);
         }
@@ -805,7 +806,9 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
                 cut.projection_event_cursor().clone(),
             ));
         };
-        let ledger = decode_runtime_ledger_state(state, &state_stream_id)
+        let mut ledger = decode_runtime_ledger_state(state, &state_stream_id)
+            .map_err(|error| map_storage_read_error(&error))?;
+        crate::runtime_event_transaction::hydrate_runtime_ledger(storage, &mut ledger)
             .map_err(|error| map_storage_read_error(&error))?;
         if ledger.product_session_id != *request.product_session_id()
             || ledger.delivery_id.is_some()
@@ -862,6 +865,7 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
 }
 
 fn delivery_runtime_read(
+    storage: &dyn ProductStateStorage,
     request: &DeliveryRuntimeReadRequest,
     delivery: &Delivery,
     scope_key: &winwincode_storage::ReceiptScopeKey,
@@ -884,7 +888,7 @@ fn delivery_runtime_read(
     let mut accepted_sequence = 0_u64;
     let mut rebuilt_at = Instant("1970-01-01T00:00:00.000Z".to_owned());
     for binding in bindings {
-        let loaded = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
+        let loaded = load_delivery_runtime_state(storage, delivery, binding, scope_key, cut)?;
         let work_run_settled = matches!(
             delivery
                 .snapshot()
@@ -966,6 +970,7 @@ struct LoadedDeliveryRuntimeState {
 }
 
 fn load_delivery_runtime_state(
+    storage: &dyn ProductStateStorage,
     delivery: &Delivery,
     binding: &winwincode_delivery::domain::SessionBinding,
     scope_key: &winwincode_storage::ReceiptScopeKey,
@@ -979,13 +984,15 @@ fn load_delivery_runtime_state(
         .map(|state| decode_runtime_ledger_state(state, &stream_id))
         .transpose()
         .map_err(|error| map_storage_read_error(&error))?;
-    let Some(ledger) = ledger else {
+    let Some(mut ledger) = ledger else {
         return Ok(LoadedDeliveryRuntimeState {
             events: Vec::new(),
             accepted_sequence: 0,
             rebuilt_at: Instant("1970-01-01T00:00:00.000Z".to_owned()),
         });
     };
+    crate::runtime_event_transaction::hydrate_runtime_ledger(storage, &mut ledger)
+        .map_err(|error| map_storage_read_error(&error))?;
     let (
         Some(worker_session_id),
         Some(codex_thread_id),
@@ -1836,6 +1843,7 @@ mod tests {
         };
         let ledger = RuntimeLedgerState {
             schema_version: 1,
+            event_chain_digest: String::new(),
             delivery_id: None,
             work_item_id: None,
             work_run_id: None,
@@ -1991,6 +1999,13 @@ mod tests {
         std::fs::remove_dir_all(root).expect("temporary source directory");
     }
 
+    fn source_delivery_fixture() -> Delivery {
+        Delivery::decode_json(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical fixture")
+    }
+
     #[test]
     fn sqlite_storage_delivery_read_cut_rebuilds_runtime_projection() {
         let root = std::env::temp_dir().join(format!(
@@ -2000,10 +2015,7 @@ mod tests {
         let mut storage = winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage");
         let scope = canonical_source_scope();
         let scope_key = crate::repository_scope_key(&scope).expect("scope key");
-        let delivery = Delivery::decode_json(include_bytes!(
-            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
-        ))
-        .expect("canonical fixture");
+        let delivery = source_delivery_fixture();
         let binding = &delivery.snapshot().session_bindings[0];
         let worker_session_id = binding
             .worker_session_id
@@ -2028,6 +2040,7 @@ mod tests {
             source_runtime_trace_event("xevt_delivery_01J00000000000000000000000");
         let ledger = RuntimeLedgerState {
             schema_version: 1,
+            event_chain_digest: String::new(),
             delivery_id: Some(delivery.id().clone()),
             work_item_id: None,
             work_run_id: Some(binding.work_run_id.clone()),

@@ -557,13 +557,20 @@ impl DeviceStore {
         read_connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
+
+        #[cfg(test)]
+        worker_report_pending_migration_tests::before_pending_report_prepare_for_test(
+            open_deadline,
+        );
+
+        set_open_busy_deadline(&connection, open_deadline)?;
+        prepare_worker_report_pending(&mut connection)?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(sql_error)?;
         read_connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(sql_error)?;
-
         Ok(Self {
             connection: Some(connection),
             read_connection: Mutex::new(read_connection),
@@ -1438,6 +1445,61 @@ impl DeviceStore {
             .query_map([], row_to_worker_process)
             .map_err(sql_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Loads active workers and unreported terminal changes for one report family.
+    ///
+    /// # Errors
+    /// Returns a storage read error or invalid report family.
+    pub fn worker_report_candidates(
+        &self,
+        family: &str,
+        lease: Option<&str>,
+    ) -> Result<Vec<WorkerProcessRecord>, DeviceStoreError> {
+        if !matches!(family, "reconcile" | "exit") {
+            return Err(DeviceStoreError::adapter("unknown worker report family"));
+        }
+        let active = if family == "reconcile" {
+            "SELECT worker_session_id FROM worker_process_registry WHERE state NOT IN ('exited','crashed','missing') AND (?2 IS NULL OR occupancy_lease_id=?2) UNION "
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT worker_session_id,worker_id,worker_instance_id,pid,process_start_identity,repository_binding_id,occupancy_lease_id,launch_grant_id,data_directory,state,exit_code,last_observed_at FROM worker_process_registry WHERE worker_session_id IN ({active}SELECT worker_session_id FROM worker_report_pending WHERE family=?1) AND (?2 IS NULL OR occupancy_lease_id=?2) ORDER BY worker_session_id"
+        );
+        let mut stmt = self.connection()?.prepare(&sql).map_err(sql_error)?;
+        stmt.query_map(params![family, lease], row_to_worker_process)
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+
+    /// Marks a report after its envelope is durably queued.
+    ///
+    /// # Errors
+    /// Returns a storage write error.
+    pub fn worker_report_queued(
+        &mut self,
+        family: &str,
+        record: &WorkerProcessRecord,
+    ) -> Result<(), DeviceStoreError> {
+        if !matches!(family, "reconcile" | "exit") {
+            return Err(DeviceStoreError::adapter("unknown worker report family"));
+        }
+        // A state change between durable enqueue and this mark must remain pending.
+        self.connection_mut()?.execute("DELETE FROM worker_report_pending WHERE family=?1 AND worker_session_id=?2 AND EXISTS (
+            SELECT 1 FROM worker_process_registry WHERE worker_session_id=?2 AND worker_instance_id=?3 AND pid=?4 AND process_start_identity=?5 AND occupancy_lease_id=?6 AND state=?7 AND exit_code IS ?8)",
+            params![family, record.worker_session_id, record.worker_instance_id, i64::from(record.pid), record.process_start_identity, record.occupancy_lease_id, record.state, record.exit_code]).map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Answers whether one occupancy lease has a running Worker.
+    ///
+    /// # Errors
+    /// Returns a storage read error or invalid lease identity.
+    pub fn has_running_worker_for_lease(&self, lease: &str) -> Result<bool, DeviceStoreError> {
+        require_non_empty(lease, "occupancy lease id", MAX_ID_BYTES)?;
+        self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM worker_process_registry WHERE state='running' AND occupancy_lease_id=?1)", [lease], |row| row.get(0)).map_err(sql_error)
     }
 
     /// Loads every worker-process registry row bound to one occupancy lease,
@@ -3166,6 +3228,155 @@ CREATE TABLE client_connection_policy (
 );
 ";
 
+const WORKER_REPORT_PENDING_MARKER: &str = "worker-report-pending-v1";
+const WORKER_LAUNCH_REPORT_PENDING_MARKER: &str = "worker-launch-report-pending-v1";
+const WORKER_REPORT_MIGRATION_SCHEMA: &str =
+    "CREATE TABLE worker_report_migration (migration_key TEXT PRIMARY KEY NOT NULL)";
+type WorkerReportSchemaDefinition = (&'static str, &'static str, &'static str);
+const WORKER_REPORT_SCHEMA: &[WorkerReportSchemaDefinition] = &[
+    ("index", "worker_process_registry_state_lease", "CREATE INDEX worker_process_registry_state_lease ON worker_process_registry(state,occupancy_lease_id)"),
+    ("index", "worker_process_registry_active", "CREATE INDEX worker_process_registry_active ON worker_process_registry(occupancy_lease_id,worker_session_id) WHERE state NOT IN ('exited','crashed','missing')"),
+    ("table", "worker_report_pending", "CREATE TABLE worker_report_pending (worker_session_id TEXT NOT NULL, family TEXT NOT NULL, PRIMARY KEY(family,worker_session_id))"),
+    ("trigger", "worker_report_after_insert", "CREATE TRIGGER worker_report_after_insert AFTER INSERT ON worker_process_registry BEGIN
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'reconcile' WHERE NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='reconcile' AND worker_session_id=NEW.worker_session_id);
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'exit' WHERE NEW.state IN ('exited','crashed','missing') AND NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='exit' AND worker_session_id=NEW.worker_session_id); END"),
+    ("trigger", "worker_report_after_update", "CREATE TRIGGER worker_report_after_update AFTER UPDATE ON worker_process_registry WHEN OLD.worker_instance_id != NEW.worker_instance_id OR OLD.state != NEW.state OR OLD.exit_code IS NOT NEW.exit_code BEGIN
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'reconcile' WHERE NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='reconcile' AND worker_session_id=NEW.worker_session_id);
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'exit' WHERE NEW.state IN ('exited','crashed','missing') AND NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='exit' AND worker_session_id=NEW.worker_session_id); END"),
+];
+const WORKER_LAUNCH_REPORT_SCHEMA: &[WorkerReportSchemaDefinition] = &[
+    ("table", "worker_launch_report_pending", "CREATE TABLE worker_launch_report_pending (launch_grant_id TEXT PRIMARY KEY NOT NULL)"),
+    ("trigger", "worker_launch_report_after_insert", "CREATE TRIGGER worker_launch_report_after_insert AFTER INSERT ON worker_launch_receipts BEGIN
+            INSERT OR IGNORE INTO worker_launch_report_pending VALUES (NEW.launch_grant_id); END"),
+];
+
+fn worker_report_schema_sql(
+    transaction: &rusqlite::Transaction<'_>,
+    kind: &str,
+    name: &str,
+) -> Result<Option<String>, DeviceStoreError> {
+    transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+            params![kind, name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn normalized_worker_report_sql(sql: &str) -> String {
+    sql.trim()
+        .trim_end_matches(';')
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" IF NOT EXISTS", "")
+}
+
+fn validate_worker_report_schema(
+    transaction: &rusqlite::Transaction<'_>,
+    definitions: &[WorkerReportSchemaDefinition],
+) -> Result<(), DeviceStoreError> {
+    for (kind, name, expected) in definitions {
+        if worker_report_schema_sql(transaction, kind, name)?
+            .as_deref()
+            .map(normalized_worker_report_sql)
+            != Some(normalized_worker_report_sql(expected))
+        {
+            return Err(DeviceStoreError::adapter(format!(
+                "worker report schema {name} is not canonical"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn install_worker_report_schema(
+    transaction: &rusqlite::Transaction<'_>,
+    definitions: &[WorkerReportSchemaDefinition],
+) -> Result<(), DeviceStoreError> {
+    for (kind, name, definition) in definitions {
+        if worker_report_schema_sql(transaction, kind, name)?.is_none() {
+            transaction.execute_batch(definition).map_err(sql_error)?;
+        }
+    }
+    validate_worker_report_schema(transaction, definitions)
+}
+
+fn worker_report_marker_present(
+    transaction: &rusqlite::Transaction<'_>,
+    marker: &str,
+) -> Result<bool, DeviceStoreError> {
+    transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM worker_report_migration WHERE migration_key=?1)",
+            [marker],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)
+}
+
+/// Existing markers authorize validation of their exact layout, never rebuilding it.
+/// First-migration schema, pending backfill and markers commit in one writer transaction.
+fn prepare_worker_report_pending(connection: &mut Connection) -> Result<(), DeviceStoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let marker_table =
+        worker_report_schema_sql(&transaction, "table", "worker_report_migration")?.is_some();
+    let (report_applied, launch_applied) = if marker_table {
+        validate_worker_report_schema(
+            &transaction,
+            &[(
+                "table",
+                "worker_report_migration",
+                WORKER_REPORT_MIGRATION_SCHEMA,
+            )],
+        )?;
+        (
+            worker_report_marker_present(&transaction, WORKER_REPORT_PENDING_MARKER)?,
+            worker_report_marker_present(&transaction, WORKER_LAUNCH_REPORT_PENDING_MARKER)?,
+        )
+    } else {
+        (false, false)
+    };
+    // Check every applied family before any migration DDL can hide a missing object.
+    if report_applied {
+        validate_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
+    }
+    if launch_applied {
+        validate_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
+    }
+    if !marker_table {
+        transaction
+            .execute_batch(WORKER_REPORT_MIGRATION_SCHEMA)
+            .map_err(sql_error)?;
+    }
+    if !report_applied {
+        install_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
+        transaction.execute_batch("INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'reconcile' FROM worker_process_registry;
+            INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'exit' FROM worker_process_registry WHERE state IN ('exited','crashed','missing');").map_err(sql_error)?;
+        transaction
+            .execute(
+                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
+                [WORKER_REPORT_PENDING_MARKER],
+            )
+            .map_err(sql_error)?;
+    }
+    if !launch_applied {
+        install_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
+        transaction.execute_batch("INSERT OR IGNORE INTO worker_launch_report_pending SELECT launch_grant_id FROM worker_launch_receipts;").map_err(sql_error)?;
+        transaction
+            .execute(
+                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
+                [WORKER_LAUNCH_REPORT_PENDING_MARKER],
+            )
+            .map_err(sql_error)?;
+    }
+    transaction.commit().map_err(sql_error)
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError> {
     // Other processes may finish initialization while this connection waits.
     // Read the version only after taking the same lock that protects schema writes.
@@ -3560,6 +3771,35 @@ impl DeviceStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(sql_error)
     }
+    /// Loads launch decisions that have not reached a durable closure-report decision.
+    ///
+    /// # Errors
+    /// Returns a storage read error.
+    pub fn pending_worker_launch_receipts(
+        &self,
+    ) -> Result<Vec<(String, Vec<u8>)>, DeviceStoreError> {
+        let mut statement = self.connection()?.prepare("SELECT r.launch_grant_id,r.receipt_payload FROM worker_launch_report_pending p JOIN worker_launch_receipts r ON r.launch_grant_id=p.launch_grant_id ORDER BY r.launch_grant_id").map_err(sql_error)?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+
+    /// Marks an immutable launch decision after its closure is durably queued or inapplicable.
+    ///
+    /// # Errors
+    /// Returns a storage write error.
+    pub fn worker_launch_report_queued(&mut self, grant: &str) -> Result<(), DeviceStoreError> {
+        self.connection_mut()?
+            .execute(
+                "DELETE FROM worker_launch_report_pending WHERE launch_grant_id=?1",
+                [grant],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
     /// Retains the launch decision before its ACK and downlink cursor advance.
     /// # Errors
     /// Rejects a changed receipt under the same launch identity.
@@ -3882,3 +4122,7 @@ mod outbox_read_cut_tests {
         assert!(later.frames.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "worker_report_pending_migration_tests.rs"]
+mod worker_report_pending_migration_tests;

@@ -103,7 +103,7 @@ let vertical = null
 let failure = null
 const save = () => writeFileSync(join(directory, 'slotwait-observations.json'), JSON.stringify({
   schemaVersion: 1, startedAtUtc, capturedAtUtc: new Date().toISOString(),
-  baselineCommit: 'e994faa55ac2baad964bea5c43a23d919497a9de',
+  baselineCommit: execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding:'utf8'}).trim(),
   authority: 'owned offline Server/Device/Worker fixture', protocol, deltaCount, deltaBytes, normalizedFramesPerReleasedResponse,
   leaseSeconds: 30, productionHeartbeatMillis: 5000, heldControl, identity, releasedAt,
   purpose: 'Three actual OS invocation slots held; fourth original exchange pending with heartbeats and renewal',

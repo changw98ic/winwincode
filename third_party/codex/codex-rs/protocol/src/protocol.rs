@@ -633,6 +633,8 @@ pub enum Op {
     UserInputAnswer {
         /// Turn id for the in-flight request.
         id: String,
+        /// Exact call id from the original RequestUserInput event.
+        call_id: String,
         /// User-provided answers.
         response: RequestUserInputResponse,
     },
