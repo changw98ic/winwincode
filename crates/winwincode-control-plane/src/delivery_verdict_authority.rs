@@ -25,7 +25,9 @@ use winwincode_storage::{
     StorageError, ValidatedGitSourceArtifact,
 };
 
-use crate::runtime_event_transaction::{RuntimeLedgerState, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection};
+use crate::runtime_event_transaction::{
+    RuntimeLedgerState, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection,
+};
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     DeliveryAuthorityError, DeliveryVerdictAuthority, repository_scope_key,

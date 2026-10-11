@@ -88,7 +88,11 @@ impl HttpsFixture {
 
     fn start_truncated(body: String) -> Self {
         let declared_length = body.len().saturating_add(64);
-        Self::start_with_declared_length(body, Some(declared_length))
+        let terminal_start = body
+            .trim_end_matches('\n')
+            .rfind("\n\n")
+            .map_or(0, |index| index + 2);
+        Self::start_with_declared_length(body[..terminal_start].to_owned(), Some(declared_length))
     }
 
     fn start_with_declared_length(body: String, declared_length: Option<usize>) -> Self {

@@ -1411,7 +1411,7 @@
       "id": "codex-runtime-timer-and-pending-cost",
       "file": "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
       "planned": false,
-      "patchSha256": "2afac57a821aa5b971b239143830413aa3a73352258c0e56366177ca817d2e16",
+      "patchSha256": "d63f02cd4fc80613ac815260dc422dcbf37ea03750038de83c78b3477312a82b",
       "targets": [
         "codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs",
         "codex-rs/code-mode-runtime/src/runtime/mod.rs",

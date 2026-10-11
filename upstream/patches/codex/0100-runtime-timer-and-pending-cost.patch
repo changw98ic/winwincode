@@ -114,7 +114,7 @@ index 13a45de5..97b918b9 100644
      let source = format!(
          "{} for (let i=0; i<32; i++) await tools.echo({{}});",
          if bytes == 0 {
-@@ -240,23 +286,96 @@ async fn pending_store(bytes: usize) -> (usize, usize, usize) {
+@@ -240,23 +286,99 @@ async fn pending_store(bytes: usize) -> (usize, usize, usize) {
      assert_eq!(replies, 32);
      assert_eq!(final_bytes, bytes);
      (
@@ -149,9 +149,12 @@ index 13a45de5..97b918b9 100644
 +#[tokio::test(flavor = "current_thread")]
 +async fn timer_clear_does_not_invoke_callback_and_new_timer_fires() {
 +    let session = InProcessCodeModeSession::new();
-+    let response = session.execute(request(
-+        "const id = setTimeout(() => text('cancelled callback'), 20); clearTimeout(id); await new Promise(resolve => setTimeout(resolve, 40)); text('completed');"
-+    )).await.unwrap().initial_response().await.unwrap();
++    let response = session.execute(ExecuteRequest {
++        yield_time_ms: Some(60_000),
++        ..request(
++            "const id = setTimeout(() => text('cancelled callback'), 20); clearTimeout(id); await new Promise(resolve => setTimeout(resolve, 40)); text('completed');"
++        )
++    }).await.unwrap().initial_response().await.unwrap();
 +    assert_eq!(
 +        response,
 +        RuntimeResponse::Result {
