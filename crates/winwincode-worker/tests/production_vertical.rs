@@ -4156,35 +4156,31 @@ fn simulate_terminal_persisted_before_stopped_trace(root: &TestDirectory) {
         )
         .expect("persist terminal-before-trace crash phase");
 
-    let (stream_key, replay_json): (String, Vec<u8>) = connection
+    let stream_key: String = connection
         .query_row(
-            "SELECT stream_key, snapshot_json FROM runtime_replay LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT stream_key FROM runtime_replay_frame WHERE event_id = ?1",
+            [&terminal_event_id],
+            |row| row.get(0),
         )
-        .expect("load runtime replay snapshot");
-    let mut replay: serde_json::Value =
-        serde_json::from_slice(&replay_json).expect("decode runtime replay snapshot");
-    let events = replay["events"]
-        .as_array_mut()
-        .expect("runtime replay events");
-    let before = events.len();
-    events.retain(|event| event["eventId"].as_str() != Some(terminal_event_id.as_str()));
-    assert_eq!(events.len(), before.saturating_sub(1));
-    let highest_sequence = events
-        .iter()
-        .filter_map(|event| event["sequence"].as_u64())
-        .max()
-        .unwrap_or(0);
-    replay["highestSequence"] = serde_json::Value::from(highest_sequence);
-    replay["ackSequence"] = serde_json::Value::from(1_u64);
+        .expect("load runtime replay stream");
+    let removed = connection
+        .execute(
+            "DELETE FROM runtime_replay_frame WHERE stream_key = ?1 AND event_id = ?2",
+            rusqlite::params![stream_key, terminal_event_id],
+        )
+        .expect("drop terminal replay frame");
+    assert_eq!(removed, 1);
+    let highest_sequence: i64 = connection
+        .query_row(
+            "SELECT coalesce(max(sequence), 0) FROM runtime_replay_frame WHERE stream_key = ?1",
+            [&stream_key],
+            |row| row.get(0),
+        )
+        .expect("load replay boundary");
     connection
         .execute(
-            "UPDATE runtime_replay SET snapshot_json = ?2 WHERE stream_key = ?1",
-            rusqlite::params![
-                stream_key,
-                serde_json::to_vec(&replay).expect("encode crash replay")
-            ],
+            "UPDATE runtime_replay_head SET ack_sequence = 1, highest_sequence = ?2 WHERE stream_key = ?1",
+            rusqlite::params![stream_key, highest_sequence],
         )
         .expect("persist terminal-before-trace replay boundary");
 }
