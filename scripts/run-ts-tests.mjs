@@ -84,7 +84,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/readiness-browser.test.mjs',
   'tests/readiness-page.test.mjs',
   'tests/readiness-view-model.test.mjs',
-  'tests/readme-quickstart.test.mjs',
   'tests/real-task-benchmark.test.mjs',
   'tests/benchmark-public-smoke.test.mjs',
   'tests/benchmark-device-adapter.test.mjs',

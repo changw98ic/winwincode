@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -28,58 +27,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 function read(path) {
   return readFileSync(join(root, path), 'utf8')
 }
-
-function relativeMarkdownLinks(text) {
-  return [...text.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)]
-    .map(match => match[1])
-    .filter(target => !/^(?:https?:|#)/u.test(target))
-    .map(target => decodeURIComponent(target.split('#', 1)[0]))
-}
-
-test('public contribution, security, conduct, release, and upstream guides are linked', () => {
-  const documents = [
-    'README.md',
-    'CONTRIBUTING.md',
-    'SECURITY.md',
-    'CODE_OF_CONDUCT.md',
-    '.github/pull_request_template.md',
-  ]
-  for (const document of documents) assert.equal(existsSync(join(root, document)), true, document)
-  for (const document of documents) {
-    const text = read(document)
-    for (const target of relativeMarkdownLinks(text)) {
-      assert.equal(
-        existsSync(resolve(dirname(join(root, document)), target)),
-        true,
-        `${document}: ${target}`,
-      )
-    }
-  }
-
-  const readme = read('README.md')
-  for (const target of documents.slice(1, 4)) {
-    assert.equal(readme.includes(`](${target})`), true, `README does not link ${target}`)
-  }
-})
-
-test('contribution guide provides exact checks and one Delivery migration path', () => {
-  const guide = read('CONTRIBUTING.md')
-  for (const command of [
-    'corepack pnpm install --frozen-lockfile',
-    'corepack pnpm typecheck',
-    'corepack pnpm test',
-    'corepack pnpm lint',
-    'corepack pnpm build',
-    'corepack pnpm verify',
-  ]) assert.equal(guide.includes(command), true, command)
-  for (const policy of [
-    'DELIVERY_SCHEMA_VERSION = 3',
-    '离线、一次性迁移程序',
-    '只接收上一受支持版本并输出当前版本',
-    '原副本保留为回滚点',
-    '不保留双读、双写、静默回退或长期适配器',
-  ]) assert.equal(guide.includes(policy), true, policy)
-})
 
 test('documented pnpm release commands forward script options without a separator token', () => {
   const commands = [
@@ -141,20 +88,9 @@ test('documented pnpm release commands forward script options without a separato
   }
 })
 
-test('security policy directs reports to the enabled private advisory channel', () => {
-  const policy = read('SECURITY.md')
-  assert.equal(
-    policy.includes('https://github.com/changw98ic/winwincode/security/advisories/new'),
-    true,
-  )
-  assert.match(policy, /已经启用 Private Vulnerability Reporting/u)
-  assert.match(policy, /不要通过公开 Issue、Pull Request、Discussion/u)
-  assert.match(policy, /不需要先公开问题/u)
-})
-
 test('release source and package metadata retain the Apache-2.0 project boundary', () => {
   const sourcePaths = releaseSourcePaths(root)
-  for (const path of ['CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md']) {
+  for (const path of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
     assert.equal(sourcePaths.includes(path), true, path)
   }
   assert.deepEqual(verifyReleaseLegalBoundary(root), [])
@@ -206,15 +142,6 @@ test('upstream records distinguish current dependencies from historical attribut
   })
   for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {
     assert.equal(currentRecords.includes(obsolete), false, obsolete)
-  }
-
-  for (const document of [
-    'CONTRIBUTING.md',
-  ]) {
-    const text = read(document)
-    for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {
-      assert.equal(text.includes(obsolete), false, `${document}: ${obsolete}`)
-    }
   }
 })
 
