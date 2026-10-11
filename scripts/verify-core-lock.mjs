@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+
 
 import { createHash } from 'node:crypto'
 import { readFileSync, existsSync, statSync } from 'node:fs'

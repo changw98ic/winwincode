@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export function formatInstant(at: string): string {
   const moment = new Date(at)
   if (Number.isNaN(moment.getTime())) return at

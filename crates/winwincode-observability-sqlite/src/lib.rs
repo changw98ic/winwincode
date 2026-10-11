@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{fs, path::Path, time::Duration};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};

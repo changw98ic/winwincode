@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { redactPublicText } from './public-redaction.js'
 import type {

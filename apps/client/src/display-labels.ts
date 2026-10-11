@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const REPOSITORY_NAMES_KEY = 'winwincode.repository-names'
 export const REPOSITORY_NAME_CHANGED_EVENT = 'wwc:repository-name-changed'
 

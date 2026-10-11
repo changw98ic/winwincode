@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{fmt, path::Path};
 
 use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest, WorkerId, WorkerInstanceId};

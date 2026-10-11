@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::analysis::{FusionCandidateClaims, FusionClaimPosition};
 use serde::Serialize;
 use serde_json::{Value, json};

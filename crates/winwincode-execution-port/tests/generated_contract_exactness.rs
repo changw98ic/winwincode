@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{Value, from_value};
 use winwincode_domain::WorkspaceRevision;
 use winwincode_execution_port::generated::{

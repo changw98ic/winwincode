@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { readPreferences, savePreferences, isThemePreference } from './preferences.js'
 import type { ControlPlaneClientError, ControlPlaneClientTransport } from './community-control-plane-client.js'
 import {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::error::Error;
 use std::fmt;
 use std::fs;

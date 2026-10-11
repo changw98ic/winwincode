@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod chatgpt_oauth;
 mod codex_login;
 pub mod credential_leak_gate;

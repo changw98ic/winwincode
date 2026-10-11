@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use sha2::{Digest, Sha256};
 use winwincode_domain::{SchemaVersion, Sha256Digest, is_canonical_prefixed_id};
 

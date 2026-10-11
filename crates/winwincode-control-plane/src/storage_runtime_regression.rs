@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[test]
 #[ignore = "mechanism audit: runtime ledger revalidation and serialization baseline"]
 fn m03_real_runtime_ingress_revalidates_old_events_and_serializes_whole_ledger() {

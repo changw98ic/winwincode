@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub type Sequence = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

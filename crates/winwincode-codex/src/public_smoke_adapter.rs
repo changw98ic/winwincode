@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use crate::tool_input_source::source_digest;
 use serde::Deserialize;
 use serde_json::{Value, json};

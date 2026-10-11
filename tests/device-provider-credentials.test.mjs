@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import assert from 'node:assert/strict'
 import { createDecipheriv, createECDH, hkdfSync } from 'node:crypto'
 import test from 'node:test'

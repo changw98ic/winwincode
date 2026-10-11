@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod action_bridge;
 mod adapter;
 pub mod candidate_artifact_outbox;

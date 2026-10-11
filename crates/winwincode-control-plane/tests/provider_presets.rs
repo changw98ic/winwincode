@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_control_plane::{
     ModelCapabilityOrigin, ModelCapabilitySnapshot, ModelCapabilitySource, ModelCatalogResolution,
     ModelCatalogService, ModelToolSupport, ProviderPresetsErrorKind, ResolvedEndpoint,

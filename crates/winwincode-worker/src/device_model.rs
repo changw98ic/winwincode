@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 #[path = "device_model_concurrency_tests.rs"]
 mod concurrency_tests;

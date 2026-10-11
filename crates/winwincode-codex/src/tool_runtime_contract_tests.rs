@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::*;
 use crate::adapter::tests::{delegated_record_and_binding, diagnostic_adapter_config};
 

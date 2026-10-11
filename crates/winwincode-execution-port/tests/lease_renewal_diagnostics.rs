@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::Instant;
 use winwincode_execution_port::execution_identity::{lease_renewal_rejection, valid_lease_renewal};
 use winwincode_execution_port::generated::{ExecutionLeaseStamp, LeaseRenewMessage};

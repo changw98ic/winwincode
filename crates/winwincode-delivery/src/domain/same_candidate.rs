@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{
     Delivery, DeliverySnapshot, DeliveryStatus, DeliveryValidationError,
     DeliveryValidationErrorCode, SessionBinding, validation_error,

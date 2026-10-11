@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::{
     CandidateId, CanonicalSnapshot, Snapshot, SnapshotBindingError, SnapshotId,
     SnapshotVerificationBinding, VerificationSessionId, WorkRunId, seal_snapshot,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::*;
 use crate::identity::{DeviceIdentitySeed, ensure_device_identity};
 use crate::store::WorkerProcessRecord;

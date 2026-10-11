@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::{

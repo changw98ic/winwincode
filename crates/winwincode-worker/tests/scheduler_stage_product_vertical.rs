@@ -1,4 +1,6 @@
 #![allow(
+// SPDX-License-Identifier: Apache-2.0
+
     clippy::doc_markdown,
     clippy::large_futures,
     clippy::manual_inspect,

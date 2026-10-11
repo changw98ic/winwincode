@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 
 fn isolated_case(exact: &str, kind: &str, crash: bool) {

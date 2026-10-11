@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use base64::{
     Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
 };

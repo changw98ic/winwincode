@@ -1,4 +1,5 @@
 #![allow(clippy::doc_markdown)]
+// SPDX-License-Identifier: Apache-2.0
 
 pub mod domain;
 pub mod exchange;

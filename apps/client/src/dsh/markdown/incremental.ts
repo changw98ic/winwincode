@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { Root, RootContent } from 'mdast'
 
 const UNSTABLE_TAIL_BLOCKS = 2

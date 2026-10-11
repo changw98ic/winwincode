@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{ActionBridgeError, ActionGateState, current_binding_and_time, current_generation};
 use sha2::{Digest, Sha256};
 use winwincode_kernel::{KernelActionAuthorization, KernelToolResultReadRequest};

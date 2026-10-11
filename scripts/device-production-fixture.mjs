@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import assert from 'node:assert/strict'
 import { withResponseFailure } from '../packages/network-request/src/index.mjs'
 import {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { parseBoundedWinWinCodeExportJson } from './parse-bounded.js'
 
 const utf8Encoder = new TextEncoder()

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { executeFetch, wait, withResponseFailure, policy as networkPolicy } from '@winwincode/network-request'
 
 import type {

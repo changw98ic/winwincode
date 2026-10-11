@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{fmt, future::Future, path::Path, sync::Arc};
 
 use sha2::{Digest as _, Sha256};

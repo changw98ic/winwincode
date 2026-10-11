@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { formatInstant } from './format-instant.js'
 
 import type {

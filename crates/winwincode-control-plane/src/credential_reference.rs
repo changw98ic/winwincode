@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_provider::{ResolvedSecret, SecretStoreError};
 
 use std::{collections::BTreeMap, fmt};

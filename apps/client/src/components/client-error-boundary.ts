@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ClientFailure } from '../core/connection-state.js'
 import {
   assertMounted,

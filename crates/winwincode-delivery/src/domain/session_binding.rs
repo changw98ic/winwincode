@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "test-support"))]
 use sha2::{Digest, Sha256};

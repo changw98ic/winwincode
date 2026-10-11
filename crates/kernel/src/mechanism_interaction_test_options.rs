@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub(super) fn apply(
     mut request: codex_core_api::TurnInputRequest,
 ) -> codex_core_api::TurnInputRequest {

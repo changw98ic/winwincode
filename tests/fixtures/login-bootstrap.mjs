@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const bootstrapOwnerUsername = 'owner'
 export const bootstrapOwnerPassword = 'browser-owner-password-1'
 

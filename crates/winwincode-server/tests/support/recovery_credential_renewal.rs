@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use std::sync::RwLock;
 use winwincode_control_plane::{

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{TlsStream, WAIT, member_open, read_request, write_answer};
 use crate::device_model::{DeviceModelSendOutcome, DeviceModels};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

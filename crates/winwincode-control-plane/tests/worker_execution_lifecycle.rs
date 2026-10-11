@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{
     fs,
     sync::atomic::{AtomicU64, Ordering},

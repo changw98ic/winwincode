@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]

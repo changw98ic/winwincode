@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ChatAttachment } from './generated/contracts.js'
 import { mountAttachmentRail } from './dsh-ui.js'
 

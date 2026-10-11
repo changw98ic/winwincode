@@ -1,4 +1,6 @@
 #![allow(
+// SPDX-License-Identifier: Apache-2.0
+
     clippy::too_many_lines,
     reason = "the live gate keeps its secret boundary, canonical path assembly, and evidence checks together"
 )]

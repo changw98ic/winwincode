@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { memo, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { IncrementalMarkdownParser } from './incremental.js'

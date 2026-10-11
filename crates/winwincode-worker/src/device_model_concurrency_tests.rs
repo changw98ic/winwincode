@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[path = "device_model_recovery_tests.rs"]
 mod recovery_tests;
 

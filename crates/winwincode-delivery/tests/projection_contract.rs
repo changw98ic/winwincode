@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_delivery::{
     domain::Delivery,
     projection::{ProjectionInput, project_delivery_detail},

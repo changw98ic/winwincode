@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { assertMounted, removeNode, type MountedView } from '@winwincode/browser-ui'
 
 export interface TabItem {

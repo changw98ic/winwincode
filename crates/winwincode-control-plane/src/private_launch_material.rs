@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},

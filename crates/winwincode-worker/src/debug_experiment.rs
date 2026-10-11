@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::{DebugExperimentId, Instant, WorkspaceRevision};
 use winwincode_execution_port::{
     debug_experiment::{

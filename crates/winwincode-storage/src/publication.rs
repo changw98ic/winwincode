@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::{PublicationId, Sha256Digest};
 use winwincode_publication::{
     PublicationError, PublicationJournalMutation, PublicationJournalRecord,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::action_bridge::{ActionGateState, current_binding_and_time, current_generation};
 use winwincode_kernel::{
     ToolDependencySnapshot, ToolInputContext, ToolInputProof, ToolInputProofRequest,

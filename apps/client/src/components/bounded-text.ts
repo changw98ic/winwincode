@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const APPROVAL_TEXT_LIMIT = 200
 
 const ELLIPSIS = '…'

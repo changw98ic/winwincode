@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const LARGE_DELIVERY_COUNT = 5000
 
 export const LARGE_DATA_CORPUS = Object.freeze({

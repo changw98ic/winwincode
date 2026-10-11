@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export interface MountedView<Props> {
   readonly root: HTMLElement
   update(props: Readonly<Props>): void

@@ -1,4 +1,5 @@
 #![allow(clippy::large_futures, clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 #[path = "support/production_code_mode.rs"]
 mod production_code_mode;

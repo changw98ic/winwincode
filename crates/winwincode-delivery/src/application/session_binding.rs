@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::domain::{
     Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance, SessionRuntimeContext,
 };

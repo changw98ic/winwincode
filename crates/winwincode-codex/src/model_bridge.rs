@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -1344,13 +1346,12 @@ impl ExecutionPortModelBridge {
                 .or_else(|| bindings.get(&envelope.session_id))
                 .cloned()
         };
-        if let Some(binding) = binding {
-            if envelope.session_id == binding.kernel_session_id
-                && (envelope.thread_id == binding.kernel_session_id
-                    || envelope.thread_id == binding.canonical_thread_id.0)
-            {
-                return Ok(binding);
-            }
+        if let Some(binding) = binding
+            && envelope.session_id == binding.kernel_session_id
+            && (envelope.thread_id == binding.kernel_session_id
+                || envelope.thread_id == binding.canonical_thread_id.0)
+        {
+            return Ok(binding);
         }
         if let Some((run_key, authority)) =
             self.authority.load_lineage_binding(&envelope.thread_id)?

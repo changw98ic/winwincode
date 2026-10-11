@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::json;
 use winwincode_control_plane::fusion_compose::{
     ComposedFusionAnswer, compose_independent_answers, extract_claims_from_answer,

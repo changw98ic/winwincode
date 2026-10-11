@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { createQueryCacheLifecycle } from '@winwincode/browser-core/query-cache'
 import {
   ControlPlaneClientError,

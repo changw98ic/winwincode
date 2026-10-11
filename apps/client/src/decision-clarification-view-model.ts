@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ControlPlaneClient } from './community-control-plane-client.js'
 import { queryDeliveryDetail } from './community-control-plane-client.js'
 import { createEditableDraft, type DraftFieldConflict } from './editable-draft.js'

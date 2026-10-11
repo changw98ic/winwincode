@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use time::OffsetDateTime;
 use winwincode_client_port::domain::{
     ClientControlError, ClientControlErrorCode, ClientControlMessageKind, CommandAckStatus,

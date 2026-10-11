@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::evidence::{ClaimTargetLike, EvidenceLedger};
@@ -280,15 +281,15 @@ pub fn is_high_risk_absence(node: &ClaimNode) -> bool {
 
 #[must_use]
 pub fn needs_investigation(node: &ClaimNode) -> bool {
-    match node.state {
+    matches!(
+        node.state,
         ClaimState::Disputed
-        | ClaimState::Investigating
-        | ClaimState::Escalated
-        | ClaimState::UnverifiedAbsence
-        | ClaimState::Supported
-        | ClaimState::Discovered => true,
-        _ => false,
-    }
+            | ClaimState::Investigating
+            | ClaimState::Escalated
+            | ClaimState::UnverifiedAbsence
+            | ClaimState::Supported
+            | ClaimState::Discovered
+    )
 }
 
 pub fn confirm_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {

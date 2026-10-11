@@ -1,4 +1,5 @@
 #![allow(clippy::struct_field_names)]
+// SPDX-License-Identifier: Apache-2.0
 
 use serde::Deserialize;
 use serde::Serialize;

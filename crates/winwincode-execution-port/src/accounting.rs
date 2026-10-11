@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{action_enforcement::ActionEnforcementSigningKey, generated::ExecutionLeaseStamp};
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{ModelExchangeId, Sha256Digest};

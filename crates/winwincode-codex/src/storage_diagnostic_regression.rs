@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[test]
 #[ignore = "mechanism audit: retained diagnostic artifact validation cost baseline"]
 fn m08_real_diagnostic_queries_validate_acked_artifacts_of_other_jobs() {

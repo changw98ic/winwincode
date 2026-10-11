@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
 .wwc-shell {
   display: grid;
   grid-template-columns: var(--wwc-sidebar-width) minmax(0, 1fr);

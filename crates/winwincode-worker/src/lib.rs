@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod action_enforcement;
 pub mod candidate_ref;
 pub mod change_batch_store;
@@ -3370,10 +3372,10 @@ where
                 {
                     return Ok(());
                 }
-                if acknowledgement.retained_artifact.as_ref() == Some(&artifact) {
-                    if let Some(pending) = self.pending_candidates.get_mut(&job_id) {
-                        pending.artifact = Some(artifact.clone());
-                    }
+                if acknowledgement.retained_artifact.as_ref() == Some(&artifact)
+                    && let Some(pending) = self.pending_candidates.get_mut(&job_id)
+                {
+                    pending.artifact = Some(artifact.clone());
                 }
                 self.finish_candidate_job(&job_id, artifact, now).await
             }

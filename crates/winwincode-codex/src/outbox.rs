@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::Serialize;
 use serde_json::Value;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #[must_use]
 pub fn sanitize_source(content: &str) -> String {
     let mut text = content.replace("\r\n", "\n");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::{
     CodexPoll, ProductionCodexAdapter, ProductionCodexError, canonical_id, map_store_error,
     unavailable, unknown_thread,

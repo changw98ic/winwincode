@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[tokio::test]
 #[ignore = "mechanism audit: measured intake and complete-cursor replay cost at 500/1000/2527 frames"]
 #[allow(

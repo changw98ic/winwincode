@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 const PRIVATE_KEY = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gu
 const JWT = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu
 const BEARER = /\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/=-]+/giu

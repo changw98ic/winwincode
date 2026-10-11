@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { execFile, spawn } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{

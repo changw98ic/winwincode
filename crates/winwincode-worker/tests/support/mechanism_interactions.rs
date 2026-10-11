@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 
 async fn renew_at_ten_minutes(worker: &mut NativeWorker, original: &wire::ExecutionLeaseStamp) {

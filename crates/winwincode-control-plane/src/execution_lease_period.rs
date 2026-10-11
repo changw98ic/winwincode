@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
 use winwincode_domain::{Instant, Sha256Digest};
 use winwincode_execution_port::generated::ExecutionLeaseStamp;

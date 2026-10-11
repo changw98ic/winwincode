@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use std::io::Write as _;
 use std::sync::OnceLock;
 static DESTINATION: OnceLock<std::path::PathBuf> = OnceLock::new();

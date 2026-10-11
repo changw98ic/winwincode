@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::super::load_stored_run;
 use super::super::tests::{delegated_record_and_binding, diagnostic_adapter_config};
 use super::*;

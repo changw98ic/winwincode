@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{Value, json};
 use winwincode_fusion::{analysis::analyze_fusion, claims::extract_claims_from_answer};
 

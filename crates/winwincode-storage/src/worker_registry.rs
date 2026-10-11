@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{
     Instant, OrganizationId, ProjectId, RepositoryId, Sha256Digest, WorkerId, WorkerInstanceId,

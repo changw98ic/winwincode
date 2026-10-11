@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::analysis::{
     FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence, validate_candidates,
 };

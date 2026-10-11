@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     ParallelModelAttempt, ParallelModelBudget, ParallelModelRunner, ParallelModelStatus,
     ParallelModelTarget, parallel_model_cancellation,

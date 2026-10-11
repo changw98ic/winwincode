@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ControlPlaneLoginFailure } from './community-control-plane-client.js'
 import type {
   LoginSubmissionSource,

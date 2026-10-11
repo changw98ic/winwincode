@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     ConnectorAuthority, ConnectorCallErrorKind, ConnectorPort, ConnectorRegistration,
     ConnectorRegistrationReceipt, InboundNormalizationContext, InboundReceipt,

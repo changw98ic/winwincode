@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{collections::HashSet, fmt};
 
 use sha2::{Digest as _, Sha256};

@@ -1,4 +1,6 @@
 #![allow(
+// SPDX-License-Identifier: Apache-2.0
+
     dead_code,
     reason = "D2 defines the closed process seam; D9 supplies its only production host adapter"
 )]

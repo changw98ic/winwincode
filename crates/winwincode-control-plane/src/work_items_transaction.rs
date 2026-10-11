@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use winwincode_api::generated::{CommandEnvelope, CommandName, Scope, WorkItemsCreatePayload};

@@ -1,4 +1,5 @@
 #![allow(clippy::drop_non_drop)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::{
     fs,

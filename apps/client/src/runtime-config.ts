@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { parseControlPlaneServerUrl } from './community-control-plane-client.js'
 
 const RUNTIME_CONFIG_KEY = '__WINWINCODE_CLIENT_CONFIG__'

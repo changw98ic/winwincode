@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHighlighterCoreSync, createCssVariablesTheme } from 'shiki/core'
 import { createJavaScriptRegexEngine, defaultJavaScriptRegexConstructor } from 'shiki/engine/javascript'
 import langTs from '@shikijs/langs/typescript'

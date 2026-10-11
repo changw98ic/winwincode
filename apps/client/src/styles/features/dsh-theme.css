@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
 .wwc-chat-messages, .wwc-chat-composer {
   --dsw-font-family: var(--wwc-font-family);
   --dsw-shadow-lv2: 0 4px 12px rgb(0 0 0 / 2%), 0 2px 8px rgb(0 0 0 / 4%);

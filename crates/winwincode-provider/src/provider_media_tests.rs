@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use crate::provider_anthropic::AnthropicCodecDiagnostic;
 use crate::provider_anthropic::prepare_anthropic_request;

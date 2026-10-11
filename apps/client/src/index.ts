@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export * from './community-control-plane-client.js'
 export * from './auth-view-model.js'
 export * from './auth-page.js'

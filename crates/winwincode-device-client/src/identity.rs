@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{collections::BTreeMap, fmt, fs};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};

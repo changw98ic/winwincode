@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { attention } from 'micromark-core-commonmark'
 import { unicodePunctuation } from 'micromark-util-character'
 import { classifyCharacter } from 'micromark-util-classify-character'

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::ops::Deref;
 
 use winwincode_domain::{AttentionItemId, WorkRunId};

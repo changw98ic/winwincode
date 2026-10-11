@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::tests::{delegated_record_and_binding, diagnostic_adapter_config};
 use super::*;
 use futures::future::BoxFuture;

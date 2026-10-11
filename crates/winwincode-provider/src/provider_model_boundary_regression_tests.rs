@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 thread_local! {
     static AUDIT_READER_READS: std::cell::RefCell<Vec<(usize,usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }

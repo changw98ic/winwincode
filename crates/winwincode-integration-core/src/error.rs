@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

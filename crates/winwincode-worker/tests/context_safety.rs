@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_execution_port::generated::DebugContextSafetyScannerVersion;
 use winwincode_worker::context_safety::{
     ContextSafetyError, MAX_SAFE_SNIPPET_CHARS, MAX_SAFE_SUMMARY_CHARS, ValidatedSafeText,

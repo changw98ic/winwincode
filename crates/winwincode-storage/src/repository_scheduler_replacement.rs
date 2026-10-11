@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{Sha256Digest, WorkRunId, is_canonical_prefixed_id};

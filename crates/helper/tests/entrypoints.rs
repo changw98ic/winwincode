@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};

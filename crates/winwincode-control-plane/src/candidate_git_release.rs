@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use winwincode_delivery::domain::{Delivery, DeliveryStatus};

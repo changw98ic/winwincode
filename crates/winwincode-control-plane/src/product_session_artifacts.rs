@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     ControlPlane, ProductSessionPersistence, ProductSessionService, ProductSessionServiceError,
     ProductSessionServiceErrorCode, repository_scope_key,

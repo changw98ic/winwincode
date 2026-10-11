@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use codex_protocol::protocol::CodexErrorInfo;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 

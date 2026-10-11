@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { mountPreferences } from './preferences.js'
 import { REPOSITORY_NAME_CHANGED_EVENT } from './display-labels.js'
 

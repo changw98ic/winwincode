@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};

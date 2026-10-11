@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(unix)]
 pub(crate) struct WorkerInterrupt {
     interrupt: tokio::signal::unix::Signal,

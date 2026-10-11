@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type ErrorStateHeadingLevel = 2 | 3 | 4

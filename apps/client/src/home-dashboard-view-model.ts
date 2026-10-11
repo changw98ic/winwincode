@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import {
   DEFAULT_HOME_VISIT_LIMIT,

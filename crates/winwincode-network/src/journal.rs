@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{Acceptance, ErrorKind, NetworkFailure, Phase, Replay, RetryDecision};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};

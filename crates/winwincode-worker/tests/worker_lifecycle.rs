@@ -1,4 +1,5 @@
 #![allow(clippy::large_futures, clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};

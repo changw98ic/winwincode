@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod binding;
 mod interaction_routing;
 mod product_session;

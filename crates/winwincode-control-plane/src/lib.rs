@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub use winwincode_provider::{
     CanonicalModelStreamFrame, CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate,
     CredentialOutputBoundary, DeviceProviderError, DeviceProviderStore, HttpsSseProviderAdapter,
@@ -1550,12 +1552,11 @@ impl ControlPlane {
         if matches!(
             job.execution_profile.as_str(),
             "reviewer" | "verifier" | "adversarial-verifier"
-        ) {
-            if chunk.snapshot_id.is_none() {
-                return Err(CandidateResolutionError::Storage(
-                    StorageError::invalid_input("verification frame has no snapshotId"),
-                ));
-            }
+        ) && chunk.snapshot_id.is_none()
+        {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input("verification frame has no snapshotId"),
+            ));
         }
         let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
             return Ok(None);

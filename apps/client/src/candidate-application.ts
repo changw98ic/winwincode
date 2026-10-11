@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { ControlPlaneClientCandidates, ControlPlaneClientDirectory, ControlPlaneCandidateSummary, ControlPlaneCandidateApplyReceipt, ControlPlaneRepositorySummary } from './community-control-plane-client.js'
 import type { StrongFlowReviewViewModel, StrongFlowReviewState } from './strongflow-review-view-model.js'
 import { repositoryDisplayName } from './display-labels.js'

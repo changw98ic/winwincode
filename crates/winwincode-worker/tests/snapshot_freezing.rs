@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::process::Command;
 
 fn git(root: &std::path::Path, args: &[&str]) -> String {

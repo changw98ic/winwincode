@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -205,10 +206,9 @@ pub fn check_rebuild_integrity(before: &CanonicalState, after: &CanonicalState) 
     for record in &after.evidence {
         if !before.evidence.iter().any(|prior| prior.id == record.id)
             && record.id.starts_with("ev_")
+            && record.source_refs.is_empty()
         {
-            if record.source_refs.is_empty() {
-                report.hallucinated_evidence.push(record.id.clone());
-            }
+            report.hallucinated_evidence.push(record.id.clone());
         }
     }
 

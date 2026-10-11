@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 const DUPLICATE_LOG_OCCURRENCES: usize = 30_000;
 const DUPLICATE_LOG_LINE: &[u8] = b"src/probe.ts(12,7): error TS2322: fixture validation failed\n";
 

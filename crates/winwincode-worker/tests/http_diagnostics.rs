@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{io::Write as _, sync::Arc, time::Duration};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

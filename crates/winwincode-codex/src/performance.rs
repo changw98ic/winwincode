@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Instant, Sha256Digest};
 use winwincode_execution_port::runtime_trace_outbox::PerformanceBaselineReport;

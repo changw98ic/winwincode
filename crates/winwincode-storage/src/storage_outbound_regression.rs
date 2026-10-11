@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[test]
 #[ignore = "mechanism audit: atomic renewal authority history cost baseline"]
 fn m10_real_atomic_renewal_rebuilds_only_this_jobs_authority_history() {

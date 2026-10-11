@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[path = "provider_loopback_code_mode.rs"]
 mod code_mode;
 
@@ -483,8 +485,8 @@ fn loopback_response_for_profile(profile: &LoopbackResponseProfile) -> String {
             completed: true, ..
         } => loopback_verification_response(profile)
             .unwrap_or_else(|| "The requested stage action completed.".to_owned()),
-        LoopbackResponseProfile::Executor { completed: false } => String::new(),
-        LoopbackResponseProfile::CodeModeWait { .. }
+        LoopbackResponseProfile::Executor { completed: false }
+        | LoopbackResponseProfile::CodeModeWait { .. }
         | LoopbackResponseProfile::Verification {
             completed: false, ..
         } => String::new(),

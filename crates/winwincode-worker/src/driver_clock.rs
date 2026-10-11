@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::Instant;
 
 pub(super) struct DriverClock {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1372,6 +1374,8 @@ mod remote_worker_upload;
 #[cfg(feature = "local-worker")]
 #[allow(clippy::too_many_lines, clippy::large_futures)]
 mod heartbeat_gap {
+
+    // SPDX-License-Identifier: Apache-2.0
 
     use std::{
         fs,

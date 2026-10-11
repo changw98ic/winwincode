@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::Deserialize;
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionNormalization, ActionNormalizationErrorCode, ActionObject, ActionOperation,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::{Kernel, KernelFailure, KernelResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

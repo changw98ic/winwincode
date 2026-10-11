@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export function sharedCoreActivity() {
   return {
     callId: 'core:thread:request:8', activityType: 'tool', command: 'public_smoke',

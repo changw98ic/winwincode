@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use futures::future::BoxFuture;
 use serde_json::json;
 use sha2::{Digest, Sha256};

@@ -1,4 +1,5 @@
 #![cfg(feature = "test-support")]
+// SPDX-License-Identifier: Apache-2.0
 
 #[path = "support/test_helper_path.rs"]
 mod test_helper_path;

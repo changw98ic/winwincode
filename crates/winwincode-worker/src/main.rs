@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+// SPDX-License-Identifier: Apache-2.0
 
 mod shutdown_signal;
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod generated;
 mod git_candidate_artifact;
 mod git_diff;

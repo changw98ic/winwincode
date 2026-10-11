@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[path = "dispatch_fixture.rs"]
 #[allow(dead_code)]
 mod dispatch_fixture;

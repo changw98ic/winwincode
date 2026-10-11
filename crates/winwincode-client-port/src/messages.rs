@@ -1,4 +1,5 @@
 #![allow(clippy::large_enum_variant)]
+// SPDX-License-Identifier: Apache-2.0
 
 use serde::Deserialize;
 use serde::Serialize;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import type { SolutionReviewDiagramProjection } from './generated/contracts.js'
 
 export function solutionDiagram(document: Document, diagram: SolutionReviewDiagramProjection, markerId: string): HTMLElement {

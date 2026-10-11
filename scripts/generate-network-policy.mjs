@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync } from 'node:fs'
 const root = new URL('../', import.meta.url)

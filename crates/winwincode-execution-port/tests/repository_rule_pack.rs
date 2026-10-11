@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_execution_port::repository_rule_pack::{
     PostActionHook, PostActionOutcome, RepositoryRuleEvent, RepositoryRuleFact, RepositoryRulePack,
     RepositoryRulePackError,

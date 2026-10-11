@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::{Instant, ProductSessionId, ProjectId, RepositoryId};
 use winwincode_session::{
     ProductSession, ProductSessionCreate, ProductSessionError, ProductSessionState,

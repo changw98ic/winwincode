@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_codex::{CodexCoreAdapter, WorkerExecutionPort};
 use winwincode_domain::{ExecutionMessageId, Instant};
 use winwincode_execution_port::generated::ExecutionPortMessage;

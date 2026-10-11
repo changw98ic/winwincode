@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_test_assets::{
     ChangedFile, EvidenceSide, FindingDisposition, FindingKind, analyze_test_changes,
 };

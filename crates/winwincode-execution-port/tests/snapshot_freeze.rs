@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{Value, json};
 use winwincode_execution_port::{
     generated::{SnapshotFreezeReceiptMessage, SnapshotFreezeRequestMessage},

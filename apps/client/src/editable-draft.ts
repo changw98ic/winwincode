@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export type DraftValues = Readonly<Record<string, string>>
 
 export interface DraftServerSnapshot<Values extends DraftValues> {

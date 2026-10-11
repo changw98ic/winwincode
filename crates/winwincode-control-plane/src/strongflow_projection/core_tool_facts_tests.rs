@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::*;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Instant, Sha256Digest};
 use winwincode_execution_port::generated::{

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod slack_rate_limit;
 
 pub use slack_rate_limit::SlackRateLimitGate;

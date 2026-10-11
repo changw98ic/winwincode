@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{ExecutionLeaseRecord, SqliteStorage, StorageError};
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use sha2::Digest;
 use std::collections::VecDeque;
 use std::fmt;

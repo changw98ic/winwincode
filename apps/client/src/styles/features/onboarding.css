@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
 .wwc-onboarding {
   display: grid;
   gap: var(--wwc-space-2);

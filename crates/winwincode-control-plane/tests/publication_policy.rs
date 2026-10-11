@@ -1,4 +1,6 @@
 #![allow(
+// SPDX-License-Identifier: Apache-2.0
+
     clippy::too_many_lines,
     reason = "black-box policy tracers keep each storage, audit, and provider assertion together"
 )]

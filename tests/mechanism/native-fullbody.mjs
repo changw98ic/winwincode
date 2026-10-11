@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict'
 import { createHash, X509Certificate } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, readdirSync } from 'node:fs'

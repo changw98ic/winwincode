@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_arguments)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::{Path, PathBuf};

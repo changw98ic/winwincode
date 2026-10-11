@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod artifact;
 mod client_connect;
 mod client_downlink;

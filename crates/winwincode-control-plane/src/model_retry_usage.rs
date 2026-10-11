@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_provider::{ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind};
 
 use std::collections::{BTreeMap, BTreeSet};

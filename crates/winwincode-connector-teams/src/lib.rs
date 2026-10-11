@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 use std::time::Duration;

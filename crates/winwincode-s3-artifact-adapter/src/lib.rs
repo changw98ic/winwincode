@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{collections::BTreeSet, fmt, io::Read as _, sync::Arc, time::Duration};
 
 use serde::Serialize;

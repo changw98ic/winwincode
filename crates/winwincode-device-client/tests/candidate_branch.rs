@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1249,8 +1251,7 @@ fn malformed_requests_are_refused_without_any_effect() {
 
 #[test]
 fn the_branch_engine_error_names_a_stable_category_and_message() {
-    let error =
-        CandidateBranchError::from({ winwincode_device_client::DeviceStoreError::closed() });
+    let error = CandidateBranchError::from(winwincode_device_client::DeviceStoreError::closed());
     assert_eq!(error.kind(), CandidateBranchErrorKind::Store);
     assert!(error.message().contains("closed"));
     assert_eq!(

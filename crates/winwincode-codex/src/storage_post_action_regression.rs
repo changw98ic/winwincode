@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(unix)]
 #[test]
 #[ignore = "mechanism audit: whole-run post-action serialization cost baseline"]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 

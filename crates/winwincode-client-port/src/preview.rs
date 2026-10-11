@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 
 pub const PREVIEW_TUNNEL_SCHEMA_VERSION: &str = "winwincode/preview-v1";

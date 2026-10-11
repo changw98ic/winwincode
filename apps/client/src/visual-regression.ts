@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export const VISUAL_REGRESSION_SCHEMA_VERSION = 1
 
 export const VISUAL_REGRESSION_TOKEN_PREFIX = '--wwc-'

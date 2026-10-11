@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_api::generated::ModelRoute;
 use winwincode_control_plane::{
     ModelFrameWriteStatus, ModelRequestAdmission, ModelRequestAdmissionStatus, ModelRequestPool,

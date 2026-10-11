@@ -1,4 +1,6 @@
 #![allow(
+// SPDX-License-Identifier: Apache-2.0
+
     clippy::drop_non_drop,
     clippy::too_many_arguments,
     clippy::too_many_lines

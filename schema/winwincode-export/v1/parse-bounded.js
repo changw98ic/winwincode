@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const MAX_WINWINCODE_EXPORT_BYTES = 16 * 1024 * 1024
 
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true })

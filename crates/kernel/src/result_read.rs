@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct KernelToolResultReadRequest {
     pub session_id: String,

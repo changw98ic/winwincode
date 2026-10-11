@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::workrun_execution::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
 use std::collections::HashSet;
 use winwincode_domain::is_canonical_prefixed_id;

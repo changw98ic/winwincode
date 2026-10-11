@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::Value;
 use winwincode_api::generated::{CommandEnvelope, CommandName, WorkRunStartPayload};
 use winwincode_delivery::{

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{cell::Cell, fs, rc::Rc};
 
 use winwincode_domain::{

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export const MIN_FUSION_PROVIDER_COUNT = 3
 export const MAX_FUSION_PROVIDER_COUNT = 16
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RuntimeActivityProjection } from './generated/contracts.js'
 import { redactPublicText } from './public-redaction.js'
 

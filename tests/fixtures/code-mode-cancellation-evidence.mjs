@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'

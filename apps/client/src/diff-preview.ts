@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export interface DiffLine {
   readonly kind: 'added' | 'removed' | 'context' | 'hunk' | 'meta'
   readonly text: string

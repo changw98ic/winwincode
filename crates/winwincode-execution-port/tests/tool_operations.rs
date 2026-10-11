@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::json;
 use winwincode_execution_port::action_normalizer::{
     ActionRisk, FileAnalysis, FileOperation, FileRequest, McpRequest, ObservedFact,

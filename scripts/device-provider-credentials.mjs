@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 export function assertResolvedDeviceProviderCredentials({ apiKey, customHeaders }) {
   if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
     throw credentialError('PROVIDER_CREDENTIAL_MISSING')

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::exchange::dedup::CommandIdentity;
 use crate::exchange::dedup::DedupRegister;
 use crate::exchange::dedup::DedupVerdict;

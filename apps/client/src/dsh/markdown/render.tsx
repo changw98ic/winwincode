@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { Fragment, createElement } from 'react'
 import type { Key, ReactNode } from 'react'
 import type * as Md from 'mdast'

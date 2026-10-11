@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -773,14 +775,13 @@ fn wait_for_process_release(
             }
         });
         let release = observe_process_release(pid, identity, group);
-        if release != ProcessRelease::Alive {
-            if reaped
+        if release != ProcessRelease::Alive
+            && (reaped
                 || live
                     .as_mut()
-                    .is_none_or(|run| run.child.try_wait().is_ok_and(|status| status.is_some()))
-            {
-                return release;
-            }
+                    .is_none_or(|run| run.child.try_wait().is_ok_and(|status| status.is_some())))
+        {
+            return release;
         }
         if Instant::now() >= deadline {
             return ProcessRelease::Alive;

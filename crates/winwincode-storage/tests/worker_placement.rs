@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_domain::{
     ExecutionJobId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, WorkerId,
     WorkerInstanceId, WorkspaceId,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 #[path = "chatgpt_oauth_diagnostics.test.rs"]
 mod diagnostics_tests;

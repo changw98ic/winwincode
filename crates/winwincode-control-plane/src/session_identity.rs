@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_delivery::application::{
     session_binding::SessionBindingIdentity as DeliverySessionBindingIdentity,
     workrun_execution::SessionBindingAuthority,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { mountWinWinCodeClient } from './application.js'
 import { readWinWinCodeClientRuntimeConfig } from './runtime-config.js'
 

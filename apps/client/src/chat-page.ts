@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { mountChatAttachments, showChatAttachment } from './chat-attachments.js'
 import { readPreferences } from './preferences.js'
 import { renderRuntimeActivity } from './runtime-activity.js'

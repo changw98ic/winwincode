@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};

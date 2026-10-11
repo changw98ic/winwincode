@@ -1,4 +1,5 @@
 #![cfg(feature = "local-worker")]
+// SPDX-License-Identifier: Apache-2.0
 
 #[path = "support/strongflow_query_progress.rs"]
 mod support;

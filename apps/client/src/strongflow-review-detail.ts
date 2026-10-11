@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { renderRuntimeActivity } from './runtime-activity.js'
 import {
   retentionLabel,

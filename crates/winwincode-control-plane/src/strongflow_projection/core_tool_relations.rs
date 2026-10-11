@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 use super::sources::TrustedProjectionReadError;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};

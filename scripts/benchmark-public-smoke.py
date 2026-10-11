@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Device MCP tool for the frozen benchmark's public examples, never hidden grading."""
 import argparse
 from contextlib import contextmanager

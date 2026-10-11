@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 #[path = "fusion_claim_admission_tests.rs"]
 mod fusion_claim_admission_tests;

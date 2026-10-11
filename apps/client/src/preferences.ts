@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 const THEME_PREFERENCES = ['light', 'dark', 'system'] as const
 export type ThemePreference = typeof THEME_PREFERENCES[number]
 export interface Preferences {

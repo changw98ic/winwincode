@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
 export type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'

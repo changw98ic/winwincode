@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use winwincode_execution_port::{
     diagnostic_parser::dominant_diagnostic_repair_reason,
     generated::{DiagnosticBaselineComparison, ValidationReceiptStatus},

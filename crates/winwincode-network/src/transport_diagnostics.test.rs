@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{Duration, ExchangeIo, NextTimeout};
 use ureq::{Error, Timeout, unversioned::transport::time::Duration as TransportDuration};
 
