@@ -1976,9 +1976,34 @@ async fn local_and_remote_frames_drive_value_identical_worker_semantics() {
         })
     }
 
+    fn without_clock_reads(messages: &[ExecutionPortMessage]) -> Vec<serde_json::Value> {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.remove("sentAt");
+                    fields.remove("observedAt");
+                    fields.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        messages
+            .iter()
+            .map(|message| {
+                let mut value = serde_json::to_value(message).unwrap();
+                strip(&mut value);
+                value
+            })
+            .collect()
+    }
     let local = script(false).await;
     let remote = script(true).await;
-    assert_eq!(local, remote);
+    assert_eq!(
+        without_clock_reads(&local.0),
+        without_clock_reads(&remote.0)
+    );
+    assert_eq!(local.1, remote.1);
     assert_eq!(
         output_kinds(&local.0),
         [
