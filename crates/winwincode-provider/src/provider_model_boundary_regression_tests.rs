@@ -1018,7 +1018,7 @@ fn mechanism_actual_tls_size_limit_preserves_already_read_usage_receipt() {
             declared_length: None,
             delay: Duration::ZERO,
         }],
-        Duration::from_millis(5),
+        Duration::from_millis(50),
     );
     let mut settings = config(&fixture);
     settings.max_response_bytes = prefix.len() + 64;
@@ -1078,7 +1078,7 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
             declared_length: None,
             delay: Duration::ZERO,
         }],
-        Duration::from_millis(5),
+        Duration::from_millis(50),
     );
     let root = std::env::temp_dir().join(format!(
         "wwc-device-size-limit-{}-{}",
