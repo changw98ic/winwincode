@@ -313,9 +313,12 @@ async fn mechanism_m17_pending_does_not_deep_clone_store() {
 #[tokio::test(flavor = "current_thread")]
 async fn timer_clear_does_not_invoke_callback_and_new_timer_fires() {
     let session = InProcessCodeModeSession::new();
-    let response = session.execute(request(
-        "const id = setTimeout(() => text('cancelled callback'), 20); clearTimeout(id); await new Promise(resolve => setTimeout(resolve, 40)); text('completed');"
-    )).await.unwrap().initial_response().await.unwrap();
+    let response = session.execute(ExecuteRequest {
+        yield_time_ms: Some(60_000),
+        ..request(
+            "const id = setTimeout(() => text('cancelled callback'), 20); clearTimeout(id); await new Promise(resolve => setTimeout(resolve, 40)); text('completed');"
+        )
+    }).await.unwrap().initial_response().await.unwrap();
     assert_eq!(
         response,
         RuntimeResponse::Result {
