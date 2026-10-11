@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::from_slice;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::candidate_rejection::{
@@ -26,7 +25,7 @@ use winwincode_storage::{
     StorageError, ValidatedGitSourceArtifact,
 };
 
-use crate::runtime_event_transaction::{RuntimeLedgerState, runtime_stream_id_for_projection};
+use crate::runtime_event_transaction::{RuntimeLedgerState, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection};
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     DeliveryAuthorityError, DeliveryVerdictAuthority, repository_scope_key,
@@ -541,24 +540,10 @@ fn runtime_events(
 ) -> Result<Vec<ProductionRuntimeEvent>, DeliveryAuthorityError> {
     let scope_key = repository_scope_key(scope).map_err(|error| storage_error(&error))?;
     let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
-    let stored = storage
-        .load_state(&stream_id)
+    let mut ledger = load_ledger(storage, &stream_id)
         .map_err(|error| storage_error(&error))?
         .ok_or_else(|| DeliveryAuthorityError::new("verification runtime ledger is missing"))?;
-    let ledger: RuntimeLedgerState = from_slice(&stored.payload).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger is invalid: {error}"))
-    })?;
-    let canonical = serde_json::to_vec(&ledger).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger encode failed: {error}"))
-    })?;
-    if canonical != stored.payload
-        || stored.revision != ledger.highest_sequence
-        || ledger.events.len() as u64 != ledger.highest_sequence
-    {
-        return Err(DeliveryAuthorityError::new(
-            "verification runtime ledger is non-canonical or truncated",
-        ));
-    }
+    hydrate_runtime_ledger(storage, &mut ledger).map_err(|error| storage_error(&error))?;
     validate_runtime_identity(&ledger, delivery, binding, terminal)?;
     ledger
         .events
