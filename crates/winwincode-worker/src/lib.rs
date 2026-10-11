@@ -3836,6 +3836,23 @@ where
         self.enqueued_observation_opens
             .remove(&open.model_exchange_id.0);
         self.retain_execution_message(&ExecutionPortMessage::ModelOpenMessage(open.clone()))?;
+        let message_id = observation_cancel_message_id(&open.model_exchange_id);
+        if let Some(retained) = self
+            .codex
+            .pending_execution_deliveries()
+            .map_err(|_| codex_model_error())?
+            .into_iter()
+            .find(|delivery| {
+                matches!(&delivery.message, ExecutionPortMessage::ModelAckMessage(ack)
+                    if ack.message_id == message_id && ack.model_exchange_id == open.model_exchange_id)
+            })
+        {
+            self.enqueue_retained_effect(&retained)?;
+            return self
+                .codex
+                .accept_execution_delivery_ack(&retained.message)
+                .map_err(|_| codex_model_error());
+        }
         let acknowledgement = ModelAckMessage {
             ack_sequence: ExecutionAckSequence(0),
             error: Some(ExecutionPortError {
@@ -3845,7 +3862,7 @@ where
             }),
             kind: ModelAckMessageKind::ModelAck,
             lease: open.lease,
-            message_id: observation_cancel_message_id(&open.model_exchange_id),
+            message_id,
             model_exchange_id: open.model_exchange_id,
             replay_from_sequence: None,
             schema_version: SchemaVersion::WinwincodeV1,
