@@ -1376,6 +1376,23 @@ fn assert_code_mode_recovery(value: &serde_json::Value, call: &str) {
     assert_eq!(fact["fact"]["evidence"]["state"], "unavailable");
 }
 
+fn assert_interrupted_input_recovery(value: &serde_json::Value, call: &str) {
+    let output =
+        tool_output(value, call).expect("Core returned the original logical request result");
+    let fact: serde_json::Value =
+        serde_json::from_str(output.as_str().expect("Code Mode recovery JSON")).unwrap();
+    assert_eq!(fact["type"], "tool_recovery");
+    assert_eq!(fact["state"], "code_cell_interrupted");
+    assert_eq!(fact["schema_version"], 1);
+    assert_eq!(fact["continuationLost"], true);
+    assert_eq!(fact["inputConsumed"], true);
+    assert_eq!(fact["success"], false);
+    assert_eq!(
+        fact["answers"]["continue"]["answers"],
+        serde_json::json!([])
+    );
+}
+
 async fn assert_terminal_interactions_stay_retired(
     root: &Fixture,
     config: &winwincode_worker::WorkerConfig,
@@ -1693,12 +1710,12 @@ fn restarted_pending_input_converges_only_after_its_exact_core_event() {
         let body: serde_json::Value =
             serde_json::from_slice(&STANDARD.decode(&continuation.request.data_base64).unwrap())
                 .unwrap();
-        assert_code_mode_recovery(&body, "input-expiry-call");
+        assert_interrupted_input_recovery(&body, "input-expiry-call");
         assert_timeout_audit(&root, &saved.retained);
         assert_eq!(
             input_operation_state(&root, &saved.request.input_request_id.0).0,
-            "pending",
-            "unreplayed original input remains an audit fact"
+            "resolved",
+            "the replayed original cell consumes its timeout answer"
         );
         assert_eq!(port.messages().iter().filter(|message| matches!(message,
             wire::ExecutionPortMessage::InputRequestMessage(request) if request.input_request_id == saved.request.input_request_id)).count(), 0,
