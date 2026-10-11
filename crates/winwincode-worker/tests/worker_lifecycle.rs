@@ -1811,8 +1811,6 @@ async fn remote_model_replay_requires_the_producers_durable_handoff() {
     let messages = Rc::clone(&port.messages);
     let codex = FakeCodex::with_threads([thread('A')]);
     let mut producer = codex.clone();
-    let original = execution_port_fixture("model.open");
-    producer.retain_execution_delivery(&original).unwrap();
     let mut worker = test_worker(worker_config(1), port, codex);
     register(&mut worker).await;
     worker
@@ -1822,6 +1820,14 @@ async fn remote_model_replay_requires_the_producers_durable_handoff() {
         )
         .await
         .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let mut original = execution_port_fixture("model.open");
+    if let ExecutionPortMessage::ModelOpenMessage(open) = &mut original {
+        open.lease = active.lease.clone();
+        open.worker_session_id = active.worker_session_id.clone();
+        open.session_identity = active.session_identity.clone();
+    }
+    producer.retain_execution_delivery(&original).unwrap();
     worker.flush_durable_outbox().await.unwrap();
     assert!(
         !messages
