@@ -1515,8 +1515,7 @@ impl AdapterStore {
             return Ok(0);
         };
         let started_at = winwincode_domain::Instant(started_at);
-        let mut total =
-            elapsed_millis(&started_at, completed_at).ok_or(AdapterStoreError::Corrupt)?;
+        let mut total = elapsed_millis(&started_at, completed_at).unwrap_or(0);
         if let Some(last_completed_at) = last_completed_at {
             total = total.max(
                 elapsed_millis(&started_at, &winwincode_domain::Instant(last_completed_at))

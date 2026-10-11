@@ -6805,7 +6805,7 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
                         winwincode_domain::CodexThreadId(id("cdx", 999));
                 },
                 |m| {
-                    m.decided_at = at("2030-01-01T00:00:03.000Z");
+                    m.decided_at = at("2030-01-01T00:01:00.000Z");
                     m.sent_at = m.decided_at.clone();
                 },
             ];
