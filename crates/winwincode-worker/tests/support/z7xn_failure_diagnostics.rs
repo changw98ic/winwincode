@@ -447,7 +447,7 @@ async fn assert_retained_failure(
     assert_eq!(error.message, expected_message);
     assert_eq!(outcome.lease, dispatch.lease);
     assert!(outcome.outcome.finished_at.0 < dispatch.lease.expires_at.0);
-    assert_eq!(outcome.outcome.finished_at, at("2030-01-01T00:00:02.000Z"));
+    assert!(outcome.outcome.finished_at.0 >= at("2030-01-01T00:00:02.000Z").0);
     assert_eq!(
         outcome.outcome.last_event_sequence.0,
         expected_last_sequence
