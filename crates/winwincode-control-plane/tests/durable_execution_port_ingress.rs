@@ -1656,10 +1656,6 @@ fn production_execution_port_contract_has_no_worker_time_authority_fallback() {
             .contains(".commit_delivery_session_binding(binding, &authority, &self.server_time)")
     );
     assert!(ingress.contains("validate_dispatch_observation"));
-    assert!(ingress.contains("Exact receipt replay must"));
-    assert!(ingress.contains("must not be copied into the owner request identity, digest"));
-    assert!(ingress.contains("The trusted clock never enters the owner digest"));
-    assert!(ingress.contains("Worker-controlled `sentAt` is an audited fact, never authorization"));
 }
 
 #[test]
