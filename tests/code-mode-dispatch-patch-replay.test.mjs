@@ -11,8 +11,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.json'), 'utf8'))
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
 const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context' || id === 'codex-mechanism-behavior-audit')
-// Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
-// The retrospective 0094 export was already present in P1; the clean archive replay covers it.
 const originalHashes = {
   "codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs": null,
   "codex-rs/code-mode-runtime/src/runtime/mod.rs": "0c2cbbdf2dd94ad3bda1508dca676e385de578b32259c4b2d68c0799e6d77fef",
