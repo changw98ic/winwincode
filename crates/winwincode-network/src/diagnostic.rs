@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Payload-free diagnostic facts. Never retain transport Display strings here:
-//! those can contain URLs, headers, credentials or upstream response text.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -76,7 +74,6 @@ pub enum DiagnosticField {
     Neutral,
 }
 
-/// A generated response-log filename, never an arbitrary path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SseResponseLogId([u8; 32]);
 

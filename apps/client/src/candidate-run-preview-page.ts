@@ -106,12 +106,6 @@ function logStreamText(stream: PreviewLogSegmentFacts['stream']): string {
   }
 }
 
-/**
- * WWX-RUN-04 main surface: one section that always shows mode, identity,
- * lease-bound run controls, authorized remote preview, viewport/navigation,
- * file list, and bounded log citations. DOM and ARIA only — every value comes
- * from the view-model snapshot.
- */
 export function mountCandidateRunPreviewPage(
   options: CandidateRunPreviewPageOptions,
 ): CandidateRunPreviewPage {

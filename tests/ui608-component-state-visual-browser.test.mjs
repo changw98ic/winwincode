@@ -1,12 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//
-// UI-608 component-state visual regression, in a real browser.
-//
-// This lane is deliberately not a functional scenario: nothing is clicked
-// through, no command is asserted, and a failure here names the component state
-// and the visual property that moved.  A functional E2E failure means a flow
-// broke; a failure here means the product started looking different.
-
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -82,8 +74,6 @@ test('every component state renders exactly the committed visual baseline', asyn
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'captureComponentStates')
 
-  // The fixture can only produce comparable output when the product stylesheet
-  // and its design tokens actually loaded with the page.
   const ready = await evaluate(devtools, sessionId, 'globalThis.inspectGalleryReadiness()')
   assert.equal(ready.fontOverride.includes('ui-monospace'), true, 'the fixed font contract must be installed')
   assert.equal(ready.entries > 0, true, 'the component-state gallery must not be empty')
@@ -93,8 +83,6 @@ test('every component state renders exactly the committed visual baseline', asyn
   assert.equal(capture.fingerprints.length, capture.entryIds.length)
   assert.equal(new Set(capture.entryIds).size, capture.entryIds.length, 'entry ids must be unique')
 
-  // The baseline names design tokens, so the capture must actually resolve the
-  // product palette rather than falling back to raw colours.
   const tokenisedValues = capture.fingerprints.flatMap(fingerprint => fingerprint.nodes)
     .flatMap(node => Object.values(node.style))
     .filter(value => value.startsWith('var(--wwc-'))
@@ -104,7 +92,6 @@ test('every component state renders exactly the committed visual baseline', asyn
     'the capture must resolve design tokens into the recorded presentation',
   )
 
-  // Every visual state the decision names must be present in this lane.
   const ids = new Set(capture.entryIds)
   for (const required of [
     'button/default',
@@ -122,7 +109,6 @@ test('every component state renders exactly the committed visual baseline', asyn
     'connection-bar/offline',
   ]) assert.equal(ids.has(required), true, `${required} must be part of the component-state lane`)
 
-  // The capture is reviewed in CI, so it must carry no credential material.
   const captureScan = scanCredentialLeakBytes({
     bytes: Buffer.from(capture.capturedText, 'utf8'),
     label: ARTIFACT_CAPTURE,
@@ -134,8 +120,6 @@ test('every component state renders exactly the committed visual baseline', asyn
       + `${JSON.stringify(captureScan.findings)}`,
   )
 
-  // Each state the decision names maps to the entry that baselines it, so a
-  // renamed entry cannot silently drop a state from the lane.
   const REQUIRED_STATE_COVERAGE = Object.freeze({
     default: 'button/default',
     busy: 'button/busy',
@@ -196,9 +180,6 @@ test('every component state renders exactly the committed visual baseline', asyn
       + comparison.report,
   )
 
-  // A gate that cannot fail is not a gate.  Mutating the baseline the way a
-  // real palette change would must be reported, with the reason a reviewer
-  // needs to tell a palette change apart from a layout change.
   const mutatedBaseline = baseline.map(fingerprint => (
     fingerprint.id === 'button/destructive'
       ? {

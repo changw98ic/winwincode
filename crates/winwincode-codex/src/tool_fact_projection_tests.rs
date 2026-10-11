@@ -119,7 +119,6 @@ async fn pending_core_projection_repairs_replay_outbox_crash_and_keeps_source_cu
             .unwrap();
         adapter.runs.get_mut(&key).unwrap().record.core_tool_pending = Some(message.clone());
         adapter.persist_run(&key).unwrap();
-        // Crash after retaining the Core projection in replay, before its outbox write.
         if replay_retained {
             RuntimeReplayResponder::default()
                 .retain_runtime_event(&mut adapter.store, &adapter.bridge.authority(), &message)
@@ -275,7 +274,6 @@ async fn direct_outcome_retention_drains_core_before_close_and_replays_after_ack
             session_identity: binding.authority.session_identity.clone(),
             worker_session_id: binding.authority.worker_session_id.clone(),
         };
-        // Final candidate, delegated stop and Worker shutdown bypass the normal poll loop.
         let delivery = adapter.retain_job_outcome(&thread, &outcome).await.unwrap();
         let ExecutionPortMessage::JobOutcomeMessage(canonical) = &delivery.message else {
             panic!("canonical outcome")
@@ -644,7 +642,6 @@ async fn failed_core_close_cannot_seal_or_publish_a_final_source_cursor() {
     let thread = binding.canonical_thread_id.clone();
     let now = Instant("2026-08-28T00:00:02.000Z".into());
     let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
-    // This real Kernel error is deterministic: the claimed live session was never registered.
     adapter
         .install_active_run(&key, record, binding, true, false)
         .unwrap();

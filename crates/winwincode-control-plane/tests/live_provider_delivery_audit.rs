@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Independent, read-mostly audit of one completed live Provider Delivery.
-//!
-//! The live runner writes only identifiers and expected numeric Usage to a
-//! mode-0600 evidence file. This gate reopens the same product database and
-//! joins its existing Delivery, Provider, admission, pool, slot, lease, and
-//! Usage facts. It creates no parallel receipt or billing ledger.
-
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::{

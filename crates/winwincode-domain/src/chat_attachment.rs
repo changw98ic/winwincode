@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared validation at Chat admission and Device execution boundaries.
-
 use crate::ChatAttachment;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-/// Validates bounded inline attachments before persistence or model submission.
-///
-/// # Errors
-/// Rejects invalid names, text, image signatures, encoding, counts and sizes.
 pub fn validate_chat_attachments(attachments: &[ChatAttachment]) -> Result<(), &'static str> {
-    // ponytail: inline bytes stay within the 256 KiB execution frame; larger
-    // files need content-addressed upload/download rather than a larger queue.
     if attachments.len() > 4 {
         return Err("At most four attachments are allowed");
     }

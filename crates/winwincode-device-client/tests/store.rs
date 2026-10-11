@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable round trips for the local device-client store: schema migration,
-//! path-mapping CRUD, the client outbox, and the server-to-client inbox
-//! cursor. The temporary-directory infrastructure mirrors
-//! `crates/winwincode-storage/tests/sqlite.rs`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,7 +79,6 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
         .expect("path mapping write before restart");
     store.close().expect("store should close");
 
-    // Reopen a version-7 database with real preexisting local state.
     let legacy = Connection::open(&database_path).expect("legacy database");
     legacy
         .execute_batch("DROP TABLE server_command_results; PRAGMA user_version = 7;")
@@ -602,7 +596,6 @@ fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
         .bind_outbox_stream("node_local", "inst-a")
         .expect("bind the sender stream");
 
-    // An unbound stream is rejected before any mutation.
     let mut unbound = DeviceStore::open(&root).expect("second store handle");
     assert_eq!(
         FrameOutbox::load(&mut unbound)
@@ -612,7 +605,6 @@ fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
     );
     unbound.close().expect("second store handle close");
 
-    // The stream starts empty and appends persist the exact frame bytes.
     assert!(
         FrameOutbox::load(&mut store)
             .expect("load the empty bound stream")
@@ -651,7 +643,6 @@ fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
         .expect("stored bytes decode");
     assert_eq!(decoded.message_id, "msg-one");
 
-    // A stale compare-and-append base is rejected.
     let stored = codec
         .encode_envelope(&envelope("msg-three", "inst-a", 3))
         .expect("seal frame");
@@ -803,8 +794,6 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
             .expect("append");
     }
 
-    // The peer acknowledgement marks rows published; compaction moves them
-    // out of the delivery set while both durable cursors survive.
     session.acknowledge(&mut store, 1).expect("acknowledge");
     assert_eq!(
         store
@@ -832,7 +821,6 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
         "unconfirmed frames stay retained"
     );
 
-    // Cursors survive a full close and reopen, even with rows retained.
     store.close().expect("store close");
     let mut store = DeviceStore::open(&root).expect("restarted store");
     store
@@ -845,11 +833,6 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
     assert_eq!(snapshot.highest_sequence, 2);
     assert_eq!(session.next_sequence(&mut store).expect("next"), 3);
 
-    // The enrollment adoption re-keys the acknowledged prefix onto the
-    // assigned node at the same sequences and rebinds the stream: the next
-    // sequence continues where the assigned stream expects it (the server
-    // credited the acknowledged enroll sequence), and pending placeholder
-    // rows are untouched.
     store
         .adopt_enrolled_stream("node_local", "cnd_ASSIGNEDNODE1A1A1A1A1A1")
         .expect("adopt the enrolled stream");
@@ -875,7 +858,6 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
         "a stream that already has rows is never adopted twice"
     );
 
-    // Another node's rows are never visible to this stream.
     store
         .append_outbox_envelope(&envelope("msg-other", "inst-b", 1), "client.hello")
         .expect("other node append");
@@ -892,10 +874,6 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
     store.close().expect("restarted store close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
-
-// ---------------------------------------------------------------------------
-// CLIENT-300.3: the occupancy mirror and its release intents.
-// ---------------------------------------------------------------------------
 
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 
@@ -931,10 +909,8 @@ fn release_intent(
 fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
     let (root, mut store) = open_store("occupancy-mirror");
 
-    // No mirror: the device holds no occupancy.
     assert!(store.occupancy_mirror().expect("read").is_none());
 
-    // First offer starts the revision at 1.
     let first = store
         .advance_occupancy_mirror(&mirror_update("ocl_LEASEONE", 3))
         .expect("first advance");
@@ -948,7 +924,6 @@ fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
     assert_eq!(first.acknowledged_at, STAMP);
     assert_eq!(store.occupancy_mirror().expect("read"), Some(first.clone()));
 
-    // A higher token (new lease or force-fence) advances the revision.
     let second = store
         .advance_occupancy_mirror(&mirror_update("ocl_LEASETWO", 9))
         .expect("second advance");
@@ -958,8 +933,6 @@ fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
     assert_eq!(second.mirror_revision, 2);
     assert_eq!(second.occupancy_lease_id, "ocl_LEASETWO");
 
-    // The exact stored lease/token pair is an idempotent replay: unchanged,
-    // same revision, no second row.
     let replay = store
         .advance_occupancy_mirror(&mirror_update("ocl_LEASETWO", 9))
         .expect("replay advance");
@@ -969,8 +942,6 @@ fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
         "the replay must return the stored record untouched"
     );
 
-    // Lower, equal-on-a-foreign-lease, and equal-token updates never roll
-    // the mirror back.
     for (label, lease, token) in [
         ("lower token", "ocl_LEASETWO", 8),
         ("much older token", "ocl_LEASETWO", 1),
@@ -987,7 +958,6 @@ fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
         "the refused updates must not touch the mirror"
     );
 
-    // Restart: the mirror is rebuilt from the store, never cleared.
     store.close().expect("store close");
     let store = DeviceStore::open(&root).expect("restarted store");
     let mirror = store.occupancy_mirror().expect("restarted read");
@@ -1001,7 +971,6 @@ fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
 fn occupancy_mirror_validates_and_persists_its_facts() {
     let (root, mut store) = open_store("occupancy-mirror-fields");
 
-    // Token 0 and out-of-range tokens are refused before any write.
     for token in [0, 9_007_199_254_740_992] {
         let error = store
             .advance_occupancy_mirror(&mirror_update("ocl_LEASEONE", token))
@@ -1015,8 +984,6 @@ fn occupancy_mirror_validates_and_persists_its_facts() {
         .expect_err("empty holder");
     assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
 
-    // The force-fence shape: a fence superseding a foreign lease carries no
-    // holder/claim facts (None columns).
     let mut fenced = mirror_update("ocl_LEASEONE", 3);
     fenced.holder_user_id = None;
     fenced.claim_request_id = None;
@@ -1061,7 +1028,6 @@ fn release_intents_are_idempotent_by_key_and_ordered() {
         OccupancyReleaseIntentOutcome::Recorded(immediate.clone())
     );
 
-    // A replayed release command (same idempotency key) never records twice.
     let replay = store
         .record_occupancy_release_intent(&immediate)
         .expect("replayed intent");
@@ -1180,8 +1146,6 @@ fn worker_process_registry_round_trips_rows_and_state_transitions() {
     assert_eq!(loaded, worker_process_row("wss_ONE", 411, "running"));
     assert!(store.worker_process("wss_MISSING").expect("read").is_none());
 
-    // One session one worker: the session id is the primary key, so a
-    // replacement boot replaces the row instead of adding a second one.
     let mut replacement = worker_process_row("wss_ONE", 499, "running");
     replacement.worker_instance_id = "cix_REPLACEMENT".to_owned();
     store
@@ -1205,7 +1169,6 @@ fn worker_process_registry_round_trips_rows_and_state_transitions() {
         2
     );
 
-    // Terminal observation keeps the exit code next to the state.
     assert!(
         store
             .mark_worker_process_state("wss_ONE", "crashed", Some(3), "2026-09-04T01:00:00.000Z")

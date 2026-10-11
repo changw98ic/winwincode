@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! One Worker-owned policy for text that may enter bounded model context.
-
 use std::{fmt, sync::OnceLock};
 
 use sha2::{Digest, Sha256};
@@ -13,9 +11,7 @@ use winwincode_execution_port::generated::{
     DebugContextSafetyProfile, DebugContextSafetyScannerVersion,
 };
 
-/// Maximum UTF-8 bytes and Unicode scalar values accepted in one summary.
 pub const MAX_SAFE_SUMMARY_CHARS: usize = 500;
-/// Maximum UTF-8 bytes and Unicode scalar values accepted in one source snippet.
 pub const MAX_SAFE_SNIPPET_CHARS: usize = 2_000;
 
 const SECRET_SCAN_RULES: [&str; 7] = [
@@ -41,36 +37,23 @@ const RAW_CONTEXT_MARKERS: [&str; 8] = [
 
 static CONTEXT_SAFETY_PROFILE: OnceLock<DebugContextSafetyProfile> = OnceLock::new();
 
-/// Opaque text that passed the Worker context-safety policy.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ValidatedSafeText(String);
 
 impl ValidatedSafeText {
-    /// Validates one model-facing summary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, multiline, oversized, credential-shaped, or raw-log text.
     pub fn try_summary(value: impl Into<String>) -> Result<Self, ContextSafetyError> {
         Self::try_new(value.into(), MAX_SAFE_SUMMARY_CHARS)
     }
 
-    /// Validates one model-facing source snippet.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, multiline, oversized, credential-shaped, or raw-log text.
     pub fn try_snippet(value: impl Into<String>) -> Result<Self, ContextSafetyError> {
         Self::try_new(value.into(), MAX_SAFE_SNIPPET_CHARS)
     }
 
-    /// Borrows the validated text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Returns the validated owned text.
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
@@ -103,18 +86,12 @@ impl AsRef<str> for ValidatedSafeText {
     }
 }
 
-/// Stable reason that context text did not pass Worker validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextSafetyError {
-    /// The value contains no visible content.
     Empty,
-    /// The value is not one canonical line.
     NotSingleLine,
-    /// The value exceeds the bound for its role.
     TooLong,
-    /// The value contains credential-shaped material.
     SensitiveMaterial,
-    /// The value is labelled as raw command or log output.
     RawContextMarker,
 }
 
@@ -132,16 +109,10 @@ impl fmt::Display for ContextSafetyError {
 
 impl std::error::Error for ContextSafetyError {}
 
-/// Worker scanner used by the D4 context sealing boundary.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkerContextSafetyScanner;
 
 impl WorkerContextSafetyScanner {
-    /// Applies the complete Worker context-safety policy to one value.
-    ///
-    /// # Errors
-    ///
-    /// Rejects credential-shaped or raw-log text without retaining the value.
     pub fn validate(&self, value: &str) -> Result<(), ContextSafetyError> {
         <Self as DebugContextSafetyScanner>::validate(self, value).map_err(|error| match error {
             ContextSafetyScanError::SensitiveMaterial => ContextSafetyError::SensitiveMaterial,
@@ -149,7 +120,6 @@ impl WorkerContextSafetyScanner {
         })
     }
 
-    /// Returns the exact policy digest bound into D4 context receipts.
     #[must_use]
     pub fn profile(&self) -> &DebugContextSafetyProfile {
         CONTEXT_SAFETY_PROFILE.get_or_init(|| DebugContextSafetyProfile {

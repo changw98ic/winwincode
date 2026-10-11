@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Append-only Delivery records and the atomic persistence seam.
-//!
-//! [`DeliveryJournalPort`] is the only interface a `SQLite` or `PostgreSQL`
-//! adapter must implement. It moves opaque, verified bytes and performs one
-//! compare-and-publish operation; domain validation, replay, revision checks,
-//! record encoding, and digest-chain recovery stay inside this module.
-
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
@@ -132,14 +125,11 @@ impl DeliveryStoreError {
         &self.message
     }
 
-    /// Revision supplied by the rejected command, when the failure is a
-    /// concurrency conflict.
     #[must_use]
     pub const fn expected_revision(&self) -> Option<u64> {
         self.expected_revision
     }
 
-    /// Authoritative revision observed while rejecting a stale command.
     #[must_use]
     pub const fn current_revision(&self) -> Option<u64> {
         self.current_revision
@@ -243,9 +233,6 @@ pub struct AppendDelivery {
     pub snapshot: Delivery,
 }
 
-/// Typed `WorkerSession` attachment. The Store derives the next snapshot from
-/// the scheduler-owned authority instead of accepting a caller-provided
-/// `SessionBinding` snapshot.
 #[derive(Debug, Clone)]
 pub struct AcceptDeliveryWorkerSession {
     pub request_id: RequestId,
@@ -256,8 +243,6 @@ pub struct AcceptDeliveryWorkerSession {
     pub now_millis: u64,
 }
 
-/// Typed `CodexThread` attachment. The Store derives the next snapshot from the
-/// already accepted `WorkerSession` and the same scheduler-owned authority.
 #[derive(Debug, Clone)]
 pub struct ReportDeliveryCodexThread {
     pub request_id: RequestId,
@@ -270,7 +255,6 @@ pub struct ReportDeliveryCodexThread {
     pub now_millis: u64,
 }
 
-/// Scheduler-sealed replacement of one fully bound running Delivery attempt.
 #[derive(Debug, Clone)]
 pub struct ReplaceDeliveryExecutionAttempt {
     pub request_id: RequestId,
@@ -282,7 +266,6 @@ pub struct ReplaceDeliveryExecutionAttempt {
     pub now_millis: u64,
 }
 
-/// Creates an initial batch of controller-owned work items in the current contract.
 #[derive(Debug, Clone)]
 pub struct CreateDeliveryWorkItems {
     pub delivery_id: DeliveryId,
@@ -306,8 +289,6 @@ pub struct AppendDeliveryWorkRun {
     pub now_millis: u64,
 }
 
-/// Specialized verdict append that can be created only by the application
-/// service from sealed candidate, verification, and Evidence facts.
 #[derive(Debug, Clone)]
 pub struct SubmitDeliveryVerdict {
     pub request_id: RequestId,
@@ -316,9 +297,6 @@ pub struct SubmitDeliveryVerdict {
     pub transition: ComputedVerdictTransition,
 }
 
-/// Specialized canonical `WorkRun` dispatch append.  Unlike a stage start it
-/// changes no historical stage projection; it only seals the Delivery
-/// revision before the scheduler accepts the immutable job.
 #[derive(Debug, Clone)]
 pub struct StartDeliveryWorkRunDispatch {
     pub request_id: RequestId,
@@ -327,9 +305,6 @@ pub struct StartDeliveryWorkRunDispatch {
     pub transition: WorkRunStartResult,
 }
 
-/// Specialized terminal-outcome append. The Store re-verifies the sealed
-/// scheduler/Worker facts against its current journal tail before applying the
-/// canonical terminal transition.
 #[derive(Debug, Clone)]
 pub struct ApplyDeliveryTerminalOutcome {
     pub delivery_id: DeliveryId,
@@ -340,8 +315,6 @@ pub struct ApplyDeliveryTerminalOutcome {
     pub unchanged_recovery: Option<crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
 }
 
-/// Specialized Attention append created only from
-/// [`crate::application::attention::resolve_attention`].
 #[derive(Debug, Clone)]
 pub struct ResolveDeliveryAttention {
     pub request_id: RequestId,
@@ -350,7 +323,6 @@ pub struct ResolveDeliveryAttention {
     pub transition: ResolvedAttentionTransition,
 }
 
-/// Product refusal of an exact already-successful writer's source.
 #[derive(Debug, Clone)]
 pub struct RejectDeliveryCandidate {
     pub request_id: RequestId,
@@ -359,8 +331,6 @@ pub struct RejectDeliveryCandidate {
     pub transition: CandidateRejectedTransition,
 }
 
-/// Specialized bounded-rework clarification append created only from
-/// [`crate::application::workrun_execution::advance_rework`].
 #[derive(Debug, Clone)]
 pub struct ClarifyDeliveryRework {
     pub request_id: RequestId,
@@ -397,46 +367,18 @@ pub enum DeliveryQuery {
     },
 }
 
-/// One-method write interface for the Control Plane application layer.
-///
-/// This aggregate journal resolves replay only inside one Delivery. The HTTP
-/// command receipt resolves the canonical `actor + scope + requestId` identity
-/// before commands reach this port.
 pub trait DeliveryCommandPort: Send + Sync {
-    /// Applies a validated create or append command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for invalid input, replay conflicts,
-    /// stale revisions, corrupt records, or backend publication failures.
     fn execute(
         &self,
         command: DeliveryCommand,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError>;
 }
 
-/// One-method read interface for the Control Plane application layer.
 pub trait DeliveryQueryPort: Send + Sync {
-    /// Reconstructs and verifies one Delivery from its record chain.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the Delivery is absent, corrupt, or
-    /// cannot be loaded from the backend.
     fn query(&self, query: DeliveryQuery) -> Result<Delivery, DeliveryStoreError>;
 }
 
-/// Sealed append-only history projection used by the rework application path.
-///
-/// The adapter verifies the complete Delivery journal and returns only the
-/// derived fact. Callers cannot omit or rewrite prior verdict snapshots.
 pub trait DeliveryReworkHistoryPort: Send + Sync {
-    /// Derives the current rework history from one verified journal tail.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the supplied Delivery is not the
-    /// exact current tail or its append-only history is corrupt or incomplete.
     fn validated_rework_history(
         &self,
         delivery: &Delivery,
@@ -453,7 +395,6 @@ pub enum JournalEntryState {
 pub struct JournalRecordBytes {
     pub sequence: u64,
     pub state: JournalEntryState,
-    /// Digest metadata used for opaque compare-and-publish and verified on recovery.
     pub digest: String,
     pub bytes: Vec<u8>,
 }
@@ -502,87 +443,36 @@ impl JournalBackendError {
     }
 }
 
-/// Backend seam for `SQLite` (local) and `PostgreSQL` (enterprise) adapters.
-///
-/// `publish` must atomically compare the expected tail and publish or stage the
-/// new record in its current transaction. A long-lived adapter makes it
-/// authoritative before returning. A transaction-scoped adapter makes it
-/// authoritative with the containing state-and-outbox commit. A pending record
-/// is never authoritative and may be returned by `load`; recovery ignores it.
 pub trait DeliveryJournalPort: Send + Sync {
-    /// Loads the opaque manifest and all published or pending record bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalBackendError`] for backend read failures.
     fn load(
         &self,
         delivery_id: &DeliveryId,
     ) -> Result<Option<LoadedDeliveryJournal>, JournalBackendError>;
 
-    /// Atomically creates a journal or compares and appends one record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalBackendError`] for an existing Delivery, a changed
-    /// tail, a missing journal, or backend write failure.
     fn publish(&self, publication: AtomicPublication) -> Result<(), JournalBackendError>;
 }
 
-/// Canonical codec used by migration tools and persistence diagnostics.
-///
-/// Storage adapters normally keep these bytes opaque. Exposing the codec here
-/// gives one verified implementation for import/recovery without making a
-/// database adapter understand domain JSON or digest rules.
 pub struct DeliveryJournalCodec;
 
 impl DeliveryJournalCodec {
-    /// Encodes a canonical journal manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] if JSON serialization fails.
     pub fn encode_manifest(
         manifest: &DeliveryStoreManifest,
     ) -> Result<Vec<u8>, DeliveryStoreError> {
         encode_manifest(manifest)
     }
 
-    /// Strictly decodes and validates a journal manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the bytes are malformed or use an
-    /// unsupported store schema.
     pub fn decode_manifest(bytes: &[u8]) -> Result<DeliveryStoreManifest, DeliveryStoreError> {
         decode_manifest(bytes)
     }
 
-    /// Encodes one canonical append-only record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] if JSON serialization fails.
     pub fn encode_record(record: &DeliveryStoreRecord) -> Result<Vec<u8>, DeliveryStoreError> {
         encode_record(record)
     }
 
-    /// Strictly decodes and verifies one append-only record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for malformed bytes, invalid domain
-    /// facts, or a changed digest.
     pub fn decode_record(bytes: &[u8]) -> Result<DeliveryStoreRecord, DeliveryStoreError> {
         decode_record(bytes)
     }
 
-    /// Reconstructs one Delivery and verifies every chain relationship.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for a malformed manifest, a gap,
-    /// duplicate request, broken digest chain, or mismatched snapshot.
     pub fn verify(
         delivery_id: &DeliveryId,
         journal: LoadedDeliveryJournal,
@@ -601,7 +491,6 @@ pub struct DeliveryStore<'journal> {
 }
 
 impl DeliveryStore<'static> {
-    /// Builds a long-lived command/query module from a shared journal adapter.
     pub fn new<J>(journal: Arc<J>) -> Self
     where
         J: DeliveryJournalPort + 'static,
@@ -613,21 +502,12 @@ impl DeliveryStore<'static> {
 }
 
 impl<'journal> DeliveryStore<'journal> {
-    /// Builds a transaction-scoped module over a borrowed journal adapter.
-    ///
-    /// Phase 2.1 can use this constructor inside a `ProductStateStorage`
-    /// transaction, stage [`AtomicPublication`] together with its outbox event,
-    /// and make both authoritative in the outer transaction commit.
     pub fn borrowed(journal: &'journal dyn DeliveryJournalPort) -> Self {
         Self {
             journal: DeliveryJournalHandle::Borrowed(journal),
         }
     }
 
-    /// Restores the exact source and history of a committed rework dispatch.
-    ///
-    /// # Errors
-    /// Rejects a missing dispatch, a corrupt journal, or a non-reworking source.
     pub fn rework_dispatch_source(
         &self,
         delivery_id: &DeliveryId,
@@ -2092,8 +1972,6 @@ fn validate_spec_update_delta(
     before: &Delivery,
     after: &Delivery,
 ) -> Result<(), DeliveryStoreError> {
-    // A precise, already settled candidate refusal can explicitly start a new
-    // Spec. Ordinary Attention and active execution retain the existing gate.
     let restart_refused_candidate = current_candidate_rejection(before).is_some_and(|fact| {
         !before.snapshot().work_run_aggregate.runs.iter().any(|run| {
             matches!(

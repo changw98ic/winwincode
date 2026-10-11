@@ -3,13 +3,6 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 
-// Golden contract for the ClientControlPort envelope (multi-user client plan,
-// sections 9.3, 9.4, 9.5). Kind strings are copied verbatim from the plan.
-//
-// Fixtures: tests/fixtures/client-control/<kind>.json (one valid envelope per
-// protocol kind) and tests/fixtures/client-control/invalid/*.json (samples the
-// validator must reject).
-
 const root = resolve(import.meta.dirname, '..')
 const fixturesDir = join(root, 'tests', 'fixtures', 'client-control')
 const invalidDir = join(fixturesDir, 'invalid')
@@ -59,10 +52,6 @@ const KIND_TO_DIRECTION = Object.freeze(new Map([
   ...SERVER_TO_CLIENT_KINDS.map(kind => [kind, 'server-to-client']),
 ]))
 
-// Pure-fact deliveries carry no command fields. Per the frozen schema
-// (x-message-class), these 8 kinds are reports/acks/responses/requests:
-// every other envelope is one of the 19 commands and must carry
-// expectedRevision + idempotencyKey.
 const FACT_KINDS = Object.freeze(new Set([
   'client.heartbeat',
   'client.provider.report',
@@ -75,9 +64,6 @@ const FACT_KINDS = Object.freeze(new Set([
   'client.command_ack',
 ]))
 
-// Repository traffic is stamped only when an active occupancy lease exists
-// (`C + L（活动占用时）`), so its fencing fields are optional rather than
-// forbidden.
 const OPTIONAL_FENCING_KINDS = Object.freeze(new Set([
   'client.repository.upsert',
   'client.repository.removed',
@@ -85,9 +71,6 @@ const OPTIONAL_FENCING_KINDS = Object.freeze(new Set([
   'client.repository.rescan',
 ]))
 
-// Occupancy, worker, and candidate traffic rides on an occupancy lease, so
-// these 11 envelopes carry occupancyLeaseId + occupancyFencingToken. The fact
-// reports worker.state and worker.reconcile are deliberately NOT fenced.
 const FENCED_KINDS = Object.freeze(new Set([
   'client.occupancy.ack',
   'client.occupancy.rejected',
@@ -116,8 +99,6 @@ const ENVELOPE_REQUIRED_FIELDS = Object.freeze([
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
 const COMMAND_FIELDS = Object.freeze(['expectedRevision', 'idempotencyKey'])
 const FENCING_FIELDS = Object.freeze(['occupancyLeaseId', 'occupancyFencingToken'])
-// Mirrors ExecutionPort's FencingToken $def: a monotonically increasing
-// decimal token encoded as a string to preserve 64-bit precision.
 const FENCING_TOKEN_PATTERN = /^[1-9][0-9]{0,19}$/u
 
 function isFilledString(value) {
@@ -128,8 +109,6 @@ function isAbsolutePathText(value) {
   return value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value)
 }
 
-// Only the invalid lane may demonstrate an absolute path; valid fixtures must
-// keep every path-shaped string relative or a "<device-local-path>" placeholder.
 const EMBEDDED_ABSOLUTE_PATH_PATTERN =
   /(?:^|[\s("])\/(?:Users|home|tmp|var|etc|opt|usr|Volumes)\//u
 
@@ -146,8 +125,6 @@ function isFencedKind(kind) {
   return FENCED_KINDS.has(kind)
 }
 
-// Structural validator for one ClientControlPort envelope. Returns a sorted
-// list of violation codes; an empty list means the envelope is contract-clean.
 function collectViolations(envelope) {
   const violations = []
 

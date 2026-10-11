@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// Explicit offline mechanism audit; see docs/engineering-runtime/mechanism-audit-20261010.md.
 import assert from 'node:assert/strict'
 import { createHash, X509Certificate } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, realpathSync, readdirSync } from 'node:fs'
@@ -80,7 +79,6 @@ const {stopUnusedDeviceTaskAnchor}=await import(pathToFileURL(join(root,'scripts
 const certificate = createCertificate(directory)
 const trust = join(directory, 'owned-provider-root.der')
 writeFileSync(trust, new X509Certificate(readFileSync(certificate.cert)).raw, { mode: 0o600 })
-// The established Device fixture reads this explicit process-level trust setting.
 process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE = trust
 const setupOnly=process.env.MECHANISM_SETUP_ONLY==='1'
 const protocol = process.env.MECHANISM_PROVIDER_PROTOCOL ?? 'openai_responses'

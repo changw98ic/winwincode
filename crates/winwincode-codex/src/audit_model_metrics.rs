@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Offline audit counters. Counts actual reads, writes and checked frames, not SQL estimates.
 use serde::Serialize;
 use std::cell::RefCell;
 

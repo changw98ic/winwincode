@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Real HTTPS requests exercise recovery, durable receipts, replay and cancellation.
-
 use super::*;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::{
@@ -870,7 +868,6 @@ fn serve(
                 Err(error) => panic!("expected actual HTTPS request: {error}"),
             }
         };
-        // macOS accepted sockets inherit the listener's nonblocking mode.
         socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))

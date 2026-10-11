@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transactional Snapshot product records owned by the Control Plane seam.
-
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{
     Candidate, CandidateId, CanonicalSnapshot, CodexThreadId, ExecutionJobId, ProductSessionId,
@@ -16,7 +14,6 @@ use crate::{
 
 const SNAPSHOT_DISPATCH_TOPIC: &str = "verification.snapshot.dispatch";
 
-/// Runtime-injected binding for one verification execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotVerificationBinding {
@@ -44,8 +41,6 @@ pub struct SnapshotVerificationBinding {
     pub attempt: i64,
 }
 
-/// Product values prepared by Control Plane. Storage does not construct
-/// Candidate or Snapshot identities from Worker execution facts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotProductStaged {
     candidate: Candidate,
@@ -55,9 +50,6 @@ pub struct SnapshotProductStaged {
 }
 
 impl SnapshotProductStaged {
-    /// # Errors
-    /// Rejects an invalid Candidate, a mismatched or tampered Snapshot, or an
-    /// invalid verification binding before any storage write.
     pub fn new(
         candidate: Candidate,
         snapshot: CanonicalSnapshot,
@@ -73,7 +65,6 @@ impl SnapshotProductStaged {
         Ok(staged)
     }
 
-    /// Requires the product authority observed by Control Plane to remain current.
     #[must_use]
     pub fn with_state_guard(mut self, guard: StateRevisionGuard) -> Self {
         self.state_guards.push(guard);
@@ -101,7 +92,6 @@ impl SnapshotProductStaged {
     }
 }
 
-/// Durable result of one Snapshot product transaction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotProductCommit {
     pub receipt: CommitReceipt,
@@ -111,7 +101,6 @@ pub struct SnapshotProductCommit {
     pub dispatch: SnapshotVerificationDispatch,
 }
 
-/// Internal outbox intent atomically published with a Snapshot product.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotVerificationDispatch {
     pub event_id: String,
@@ -140,8 +129,6 @@ struct SnapshotVerificationDispatchPayload {
     session_binding: String,
 }
 
-/// Exact runtime identities checked before a verification execution/result is
-/// accepted against a Snapshot binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotBindingCheck {
     pub snapshot_id: SnapshotId,
@@ -170,7 +157,6 @@ impl SnapshotBindingCheck {
     }
 }
 
-/// Validated Snapshot binding returned at execution and result ingress.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotBindingValidated {
     pub verification_plan: winwincode_domain::VerificationPlan,
@@ -182,11 +168,6 @@ pub struct SnapshotBindingValidated {
     pub attempt: i64,
 }
 
-/// Commits Snapshot, Candidate, verification binding and dispatch intent as
-/// one receipt transaction. Exact retries return the original receipt.
-///
-/// # Errors
-/// Returns invalid input or a storage/idempotency/revision failure.
 pub fn commit_snapshot_product(
     storage: &mut dyn ProductStateStorage,
     identity: ReceiptIdentity,
@@ -241,8 +222,6 @@ pub fn commit_snapshot_product(
             payload,
         )],
     );
-    // A new verification attempt binds the original immutable product. Guard
-    // its revision in the same transaction rather than rewriting it.
     for (stream, payload) in [
         (candidate_stream_id(&candidate.id), candidate_json),
         (snapshot_stream_id(snapshot.snapshot_id()), snapshot_json),
@@ -287,11 +266,6 @@ pub fn commit_snapshot_product(
     })
 }
 
-/// Validates that the current durable Snapshot and runtime binding are the
-/// exact pair supplied to execution/result ingress.
-///
-/// # Errors
-/// Missing, foreign, stale, or tampered bindings fail closed.
 pub fn validate_snapshot_binding(
     storage: &dyn ProductStateStorage,
     check: &SnapshotBindingCheck,

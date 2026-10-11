@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! WORKER-100.5 coverage: the bounded, redacted worker-subprocess logs —
-//! explicit caps and rotation, ingest-time filtering of credentials,
-//! absolute paths, and model bodies, idempotent terminal exit facts, and
-//! the safe diagnostics surface that correlates an abnormal exit to its
-//! unique `WorkerSession`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,8 +27,6 @@ fn cleanup(root: &Path) {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Small bounds so rotation and the model-body backstop are reachable with
-/// a handful of appends.
 fn tight_config() -> WorkerLogConfig {
     WorkerLogConfig {
         max_segment_bytes: 128,
@@ -53,7 +45,6 @@ fn recorder(root: &Path, config: WorkerLogConfig) -> WorkerLogRecorder {
     WorkerLogRecorder::open(root, config).expect("worker log recorder opens")
 }
 
-/// Every byte stored under one session: meta plus all log segments.
 fn stored_bytes(root: &Path, session: &str) -> String {
     let directory = root.join(session);
     let mut stored = String::new();
@@ -236,7 +227,6 @@ fn absolute_paths_never_reach_storage_or_diagnostics() {
         WorkerLogStream::Stderr,
         &format!("PATH={}:{}", masked_paths[6], masked_paths[7]),
     );
-    // Relative paths survive: masking is selective, not a whole-line refusal.
     append_line(
         &logs,
         SESSION,
@@ -286,8 +276,6 @@ fn model_bodies_never_reach_storage_or_diagnostics() {
     );
     assert_eq!(stats.lines_written, 0);
 
-    // The backstop: an overlong diagnostic line (a transcript arriving on a
-    // diagnostic stream) is omitted too.
     let overlong = format!("transcript {}", "x".repeat(200));
     let stats = logs
         .append(
@@ -402,7 +390,6 @@ fn segments_rotate_within_the_explicit_caps() {
     );
     assert!(retained.contains("LASTLINE"));
 
-    // The stderr stream is bounded independently and untouched here.
     assert!(segment_names(&root, SESSION, "stderr").is_empty());
     cleanup(&root);
 }
@@ -464,8 +451,6 @@ fn repeated_recovery_does_not_duplicate_the_terminal_fact() {
         .expect("first exit record");
     assert_eq!(first, WorkerExitRecordOutcome::Recorded);
 
-    // The same recovery replayed (even with a different observation) is a
-    // no-op: no second marker, no meta change.
     let replay = logs
         .record_exit(SESSION, INSTANCE, WORKER_STATE_CRASHED, Some(1), STAMP)
         .expect("replayed exit record");
@@ -484,7 +469,6 @@ fn repeated_recovery_does_not_duplicate_the_terminal_fact() {
         1
     );
 
-    // A replacement boot of the same session records its own fresh fact.
     let replacement = "wki_TESTINSTANCE0000000002";
     append_line_with_instance(&logs, SESSION, replacement, "replacement boot");
     let second = logs
@@ -552,8 +536,6 @@ fn exit_facts_survive_a_worker_that_died_without_output() {
         .summary(SESSION)
         .expect("summary reads")
         .expect("exit fact created the session record");
-    // The exit fact itself is the retained stdout marker line; the worker
-    // wrote nothing.
     assert!(summary.stdout_bytes > 0);
     assert_eq!(summary.stderr_bytes, 0);
     let terminal = summary.terminal.expect("terminal fact");
@@ -565,7 +547,6 @@ fn exit_facts_survive_a_worker_that_died_without_output() {
         .expect("crash correlation without output");
     assert_eq!(reference.worker_session_id, SESSION);
 
-    // A buffered unterminated fragment is flushed before the marker.
     let root_flush = temporary_root("flush");
     let logs_flush = recorder(&root_flush, WorkerLogConfig::default());
     logs_flush
@@ -627,7 +608,6 @@ fn retention_prunes_expired_and_oldest_beyond_the_cap() {
     let sessions = logs.session_ids().expect("session list");
     assert_eq!(sessions, vec!["wks_PRUNENEW0000000000000000001".to_owned()]);
 
-    // Pruning again is idempotent.
     let removed = logs.prune("2026-09-04T00:00:00.000Z").expect("prune runs");
     assert_eq!(removed, 0);
     cleanup(&root);
@@ -697,7 +677,6 @@ fn invalid_inputs_are_rejected() {
         Err(WorkerLogError::InvalidInput(_))
     ));
 
-    // Unknown sessions answer safe empties.
     assert!(logs.summary(SESSION).expect("summary").is_none());
     assert!(logs.crash_reference(SESSION).expect("reference").is_none());
     cleanup(&root);

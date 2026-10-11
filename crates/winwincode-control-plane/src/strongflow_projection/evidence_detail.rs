@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact Evidence detail reads with closed Artifact availability.
-
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
@@ -1278,8 +1276,6 @@ mod tests {
         bytes: Vec<u8>,
     }
 
-    // Write the persisted Command/Test stage source directly to exercise the
-    // binding seam.
     #[allow(clippy::too_many_lines)]
     fn fixture(corruption: Corruption) -> Fixture {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);

@@ -17,7 +17,6 @@ import type {
   SettingsViewModelState,
 } from './settings-view-model.js'
 
-/** One mounted Usage & health panel inside the 用量 tab. */
 export interface SettingsUsagePanel {
   close(): void
 }
@@ -27,15 +26,9 @@ export interface SettingsPageOptions {
   readonly model: SettingsViewModel
   readonly serverUrl: string
   readonly fetch?: ControlPlaneClientTransport['fetch']
-  /**
-   * Mounts the live Usage & health panel into the 用量 tab.  Wired by the
-   * shell; invoked once when the tab is first opened, and the returned
-   * binding is closed with the page.
-   */
   readonly mountUsagePanel?: (
     root: HTMLElement,
   ) => Promise<SettingsUsagePanel | null> | SettingsUsagePanel | null
-  /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
 
@@ -162,8 +155,6 @@ function labelledInput(
   return Object.freeze({ label, input })
 }
 
-// --- 本地草稿(无控制面契约的偏好) -------------------------------------------
-
 type SettingsCategoryId = 'general' | 'providers' | 'execution' | 'storage' | 'diagnostics'
 
 const SETTINGS_CATEGORIES: readonly {
@@ -215,7 +206,6 @@ function categoryOf(id: SettingsCategoryId): {
   return found
 }
 
-/** 没有控制面契约的偏好只保留在页面内的本地草稿里,不进入网络状态。 */
 const LOCAL_DRAFT_SAVED_TEXT = '已保存到本地草稿'
 const NO_CONTRACT_TITLE = '暂不可用：等待控制面契约。'
 
@@ -232,12 +222,6 @@ function fillSelect(
   }
 }
 
-/**
- * Design pages 12-16 and 15: one settings page with a 设置分类 dropdown in the
- * top-right corner. 通用与个人 / 执行与强流程 / 数据与存储 / 诊断与用量 carry
- * presentation-only preferences stored as local drafts; 模型与 Provider keeps
- * Device-owned Provider configuration controls.
- */
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
   const generalPreferences = readPreferences(document.defaultView)
@@ -247,8 +231,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   let selectedCategory: SettingsCategoryId = 'providers'
   const initialCategory = categoryOf(selectedCategory)
 
-  // Design page 12: the display title stands alone — no status badge copy and
-  // no description subtitle under it.
   const pageHeader = mountPageHeader({
     document,
     props: {
@@ -320,7 +302,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const errorText = errorState.message
   errorText.className = 'wwc-settings-error-text'
 
-  /** 设计稿 12/14:左粗体标签 + 右控件的行式表单,行间发丝线。 */
   function settingsRow(
     className: string,
     labelText: string,
@@ -337,7 +318,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     return row
   }
 
-  /** 折叠行:粗体标题 + ›,展开后显示说明性的空内容。 */
   function collapsedRow(
     id: string,
     labelText: string,
@@ -350,7 +330,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     button.id = `${id}-button`
     button.setAttribute('aria-expanded', 'false')
     button.setAttribute('aria-controls', `${id}-content`)
-    // Design page 12: the disclosure chevron leads the row, before the label.
     const chevron = element(document, 'span', 'wwc-settings-collapsed-chevron')
     chevron.setAttribute('aria-hidden', 'true')
     chevron.textContent = '›'
@@ -383,8 +362,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     root.append(save, feedback)
     return { root, feedback }
   }
-
-  // --- 通用与个人(设计稿 12,默认分类) ---------------------------------------
 
   const generalSection = element(
     document,
@@ -470,8 +447,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     generalSave.root,
   )
 
-  // --- 模型与服务商(设计稿 13;现有控制面契约) ------------------------------
-
   const providersSection = element(
     document,
     'section',
@@ -484,8 +459,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const deviceProviders = mountDeviceProviderPanel({ root: providersSection, serverUrl: options.serverUrl,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }) })
-
-  // --- 执行与强流程(设计稿 14;本地草稿) -------------------------------------
 
   const executionSection = element(
     document,
@@ -571,8 +544,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     executionSave.root,
   )
 
-  // --- 数据与存储(设计稿 16;控制面暂无备份/恢复/导出契约) --------------------
-
   const storagePanel = mountPanel({
     document,
     props: {
@@ -635,8 +606,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     ),
   )
   storageSection.append(storagePanel.root)
-
-  // --- 诊断与用量(设计稿 15) --------------------------------------------------
 
   const diagnosticsSection = element(
     document,
@@ -741,9 +710,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   usagePanel.setAttribute('aria-label', '用量')
   usagePanel.tabIndex = -1
   usagePanel.hidden = true
-  // Design page 15: the 用量 tab hosts the one live Usage/Provider/Worker
-  // health summary panel.  The shell mounts it (lazily, on first open) so the
-  // settings route only pays for the usage projection when it is viewed.
   const usageSlot = element(document, 'div', 'wwc-settings-usage-slot')
   usagePanel.append(usageSlot)
   let usageBinding: SettingsUsagePanel | null = null
@@ -759,7 +725,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       }
       usageBinding = binding
     }).catch(() => {
-      // The tab keeps its empty slot when only this panel fails to mount.
     })
   }
 
@@ -783,7 +748,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     if (next === 'usage') onUsageFirstOpen()
   }
 
-  // 设计稿差异:仅「执行与强流程」(14)在标题下带副标题;12/13/15/16 均无。
   const CATEGORIES_WITH_DESCRIPTION: ReadonlySet<SettingsCategoryId> = new Set(['execution'])
 
   function showCategory(next: SettingsCategoryId): void {

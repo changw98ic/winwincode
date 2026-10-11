@@ -1,5 +1,3 @@
-/** Durable, provider-neutral facts projected from the embedded Codex runtime. */
-
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const
 
 export const RUNTIME_EVENT_KINDS = Object.freeze([
@@ -39,15 +37,11 @@ export type RuntimeTerminalReason =
   | 'cancelled'
   | 'unknown'
 
-/** Stable source identity retained by every projection and UI row. */
 export interface RuntimeSourceIdentity {
   readonly authority: 'codex-core'
-  /** DSH/product session identity used by projections and user-facing state. */
   readonly sessionId: string
-  /** Native Codex session identity used for control calls and event delivery. */
   readonly kernelSessionId: string
   readonly roleId: string
-  /** Stable identity of one native event-pump lifetime. */
   readonly kernelStreamId: string
   readonly kernelSequence: string
   readonly submissionId: string
@@ -60,7 +54,6 @@ export interface RuntimeSourceIdentity {
   readonly agentPath?: string
 }
 
-/** Monotonic cursor within one kernel session. */
 export interface RuntimeCursor {
   readonly sessionId: string
   readonly sequence: string
@@ -141,7 +134,6 @@ export interface RuntimeVerificationEvidenceSource {
 export const RUNTIME_VERIFICATION_RESULT_PROTOCOL =
   'winwincode.independent-verification-result.v1' as const
 
-/** One finding inside a validated Codex reviewer or verifier final response. */
 export interface RuntimeVerificationFinding {
   readonly findingId: string
   readonly criterionId: string | null
@@ -150,7 +142,6 @@ export interface RuntimeVerificationFinding {
   readonly evidenceSources: readonly RuntimeVerificationEvidenceSource[]
 }
 
-/** Strict JSON final response projected from an independent Codex session. */
 export interface RuntimeVerificationResultSemantic {
   readonly kind: 'verification-result'
   readonly protocol: typeof RUNTIME_VERIFICATION_RESULT_PROTOCOL
@@ -166,7 +157,6 @@ export type RuntimeSemanticPayload =
   | RuntimeAgentGraphSemantic
   | RuntimeVerificationResultSemantic
 
-/** One normalized fact. It remains a projection of Codex, never an execution command. */
 export interface RuntimeEvent {
   readonly schemaVersion: typeof RUNTIME_EVENT_SCHEMA_VERSION
   readonly id: string
@@ -179,7 +169,6 @@ export interface RuntimeEvent {
   readonly data: Readonly<Record<string, unknown>>
 }
 
-/** Deterministic identity used for replay deduplication and downstream effects. */
 export function runtimeEventId(sessionId: string, sequence: string): string {
   return `${sessionId}@${sequence}`
 }

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production bridge from canonical Worker/model facts to `ProductSession` Chat.
-
 use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -65,7 +63,6 @@ const SLOT_CANCEL_RECEIPT_NAMESPACE: &[u8] = b"slot-cancel-receipt";
 const SLOT_CLOSE_RECEIPT_NAMESPACE: &[u8] = b"slot-close-receipt";
 const EXECUTION_TERMINAL_RECEIPT_NAMESPACE: &[u8] = b"execution-terminal-receipt";
 
-/// Secret-free `ProductSession` execution bridge failure.
 #[derive(Debug)]
 pub enum ProductSessionExecutionApplicationError {
     ProductSession(ProductSessionServiceError),
@@ -81,8 +78,6 @@ impl fmt::Display for ProductSessionExecutionApplicationError {
 
 impl std::error::Error for ProductSessionExecutionApplicationError {}
 
-/// Decorates the one model/interaction delegate with `ProductSession` binding,
-/// public-text, and terminal ownership.
 pub struct ProductSessionExecutionApplication<Downstream> {
     downstream: Downstream,
     action_issuer: Option<ActionEnforcementIssuer>,
@@ -97,10 +92,6 @@ impl<Downstream> ProductSessionExecutionApplication<Downstream> {
         }
     }
 
-    /// Installs the Control Plane-owned signer used for Worker action
-    /// enforcement receipts. The signer is kept beside the existing
-    /// downstream model delegate, so action requests and model exchanges use
-    /// the same durable ingress and application state.
     #[must_use]
     pub const fn new_with_action_issuer(
         downstream: Downstream,
@@ -726,8 +717,6 @@ where
                         acknowledgement,
                     )]);
                 }
-                // The common ingress already checks the exact dispatch identity.
-                // Cancellation ACK confirms delivery; JobOutcome owns terminal settlement.
                 if matches!(message, ExecutionPortMessage::JobCancelAckMessage(_)) {
                     return Ok(Vec::new());
                 }
@@ -743,7 +732,6 @@ where
                     if chunk.session_identity.work_run_id.is_some() || chunk.error.is_some() {
                         return Err(DurableExecutionPortError::UnsupportedMessage);
                     }
-                    // Validate the public-only payload before it can bind or mutate a session.
                     let canonical = winwincode_provider::public_model_chunk(chunk)
                         .map_err(|_| storage_ingress("invalid public model frame"))?;
                     if canonical.payload != chunk.payload {
@@ -1244,7 +1232,6 @@ fn accept_worker_binding(
 }
 
 #[allow(clippy::too_many_lines)]
-/// Retains an authorized public frame and returns whether Chat may project it.
 fn prepare_public_model_frame(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
@@ -1299,9 +1286,6 @@ fn prepare_public_model_frame(
             && binding.worker_pool_id() == &staged.worker_pool_id
     });
     if record.session().state() == winwincode_session::ProductSessionState::Cancelled {
-        // Cancellation fences execution and public text, not observations of
-        // the already accepted dispatch. Keep the immutable frame receipt and
-        // acknowledge it without opening an exchange or changing Chat state.
         if successor_binding.is_none() {
             return Err(storage_ingress(
                 "cancelled Chat model frame differs from the bound execution",
@@ -1312,9 +1296,6 @@ fn prepare_public_model_frame(
     if successor_binding
         .is_some_and(|binding| binding.includes_model_exchange(&message.model_exchange_id))
     {
-        // The original durable binding already attached this exact exchange.
-        // Its receipt can be Continued or ExecutionBindingReplaced; never
-        // reinterpret that receipt through a different command on later frames.
         return Ok(true);
     }
     let replacement = context
@@ -1380,8 +1361,6 @@ fn prepare_public_model_frame(
     Ok(true)
 }
 
-/// Seals one exact public frame before projection. A known exchange alone is
-/// not a receipt for a new frame; renewed lease history is checked for new input.
 fn retain_chat_model_frame_authority(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
@@ -2453,7 +2432,6 @@ fn json_digest<T: Serialize>(value: &T) -> Result<Sha256Digest, DurableExecution
         .map_err(|_| storage_ingress("binding digest encode failed"))
 }
 
-// Worker message sequences are local to one process; durable receipts include the execution lease.
 fn execution_message_request_id(
     namespace: &[u8],
     lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,

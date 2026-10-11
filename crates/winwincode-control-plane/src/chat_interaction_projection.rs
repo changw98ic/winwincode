@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Secret-safe, rebuildable Chat input and approval projections.
-//!
-//! Execution Workers submit typed request messages to this module. Only the
-//! public prompt, choices, summary, expiry, and complete execution binding are
-//! retained. Browser clients read the resulting HTTP projection and use the
-//! matching WebSocket event only as an invalidation signal.
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -41,7 +34,6 @@ use winwincode_execution_port::generated::{
     InputRequestMessage,
 };
 
-/// Durable, secret-safe event used to rebuild the browser projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatInteractionProjectionEvent {
@@ -67,22 +59,18 @@ pub enum ChatInteractionProjectionEvent {
     },
 }
 
-/// Complete durable state. Serializing it never exposes an `ExecutionPort`
-/// envelope, approval details, provider data, credential data, or a response.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatInteractionProjectionSnapshot {
     pub events: Vec<ChatInteractionProjectionEvent>,
 }
 
-/// Whether a Worker request created a projection or exactly replayed one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionWriteStatus {
     Applied,
     Duplicate,
 }
 
-/// Result of recording one Worker interaction request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionWriteReceipt {
     pub status: ProjectionWriteStatus,
@@ -90,7 +78,6 @@ pub struct ProjectionWriteReceipt {
     pub product_session_id: ProductSessionId,
 }
 
-/// Fail-closed projection or command-validation error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChatInteractionProjectionError {
     InvalidField(&'static str),
@@ -151,7 +138,6 @@ struct CursorPayload {
     offset: usize,
 }
 
-/// Control Plane aggregate for pending Chat input and approval state.
 #[derive(Default)]
 pub struct ChatInteractionProjectionLedger {
     snapshot: ChatInteractionProjectionSnapshot,
@@ -159,7 +145,6 @@ pub struct ChatInteractionProjectionLedger {
 
 #[allow(clippy::missing_errors_doc)]
 impl ChatInteractionProjectionLedger {
-    /// Rebuilds one projection aggregate from its secret-safe event stream.
     pub fn restore(
         snapshot: ChatInteractionProjectionSnapshot,
     ) -> Result<Self, ChatInteractionProjectionError> {
@@ -168,13 +153,11 @@ impl ChatInteractionProjectionLedger {
         Ok(ledger)
     }
 
-    /// Returns the exact state that must be persisted atomically.
     #[must_use]
     pub fn snapshot(&self) -> ChatInteractionProjectionSnapshot {
         self.snapshot.clone()
     }
 
-    /// Records one input request and discards all private Worker envelope data.
     pub fn record_input_request(
         &mut self,
         request: &InputRequestMessage,
@@ -242,8 +225,6 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Records one approval request. The browser receives only producer-owned,
-    /// typed safe facts; raw command and patch payloads stay private.
     pub fn record_approval_request(
         &mut self,
         request: &ApprovalRequestMessage,
@@ -320,8 +301,6 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Validates the exact projection-bound `input.respond` payload and records
-    /// only its terminal state, never the submitted user value.
     pub fn apply_input_response(
         &mut self,
         expected_revision: &Revision,
@@ -357,8 +336,6 @@ impl ChatInteractionProjectionLedger {
         Ok(revision)
     }
 
-    /// Validates the complete projection-bound `approval.decide` payload and
-    /// records only its terminal state, never the operator reason.
     pub fn apply_approval_decision(
         &mut self,
         expected_revision: &Revision,
@@ -394,7 +371,6 @@ impl ChatInteractionProjectionLedger {
         Ok(revision)
     }
 
-    /// Executes the canonical `session.interactions.list` HTTP query.
     pub fn query(
         &self,
         request: &ChatInteractionListQuery,
@@ -472,7 +448,6 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Executes the canonical `approval.get` HTTP query.
     pub fn approval_get(
         &self,
         request: &ApprovalGetQuery,
@@ -498,7 +473,6 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Executes the canonical scope-wide `approval.list` HTTP query.
     pub fn approval_list(
         &self,
         request: &ApprovalListQuery,
@@ -552,7 +526,6 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Returns one current approval projection for a durable command result.
     pub fn approval(
         &self,
         approval_id: &ApprovalId,
@@ -565,8 +538,6 @@ impl ChatInteractionProjectionLedger {
         Ok(approval)
     }
 
-    /// Builds the secret-free WebSocket invalidation for the two authoritative
-    /// HTTP snapshots used by Chat.
     pub fn invalidation(
         &self,
         product_session_id: ProductSessionId,

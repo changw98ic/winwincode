@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed Control Plane adapter for the repository-scoped durable scheduler.
-//!
-//! Storage owns selection, receipts, queue state, and Registry authority. This
-//! module only decodes the already sealed `ExecutionJob` bytes and constructs
-//! generated `ExecutionPort` commands from committed authority.
-
 use std::fmt;
 
 use winwincode_delivery::domain::Delivery;
@@ -27,7 +21,6 @@ use winwincode_storage::{
     RepositorySchedulerTerminalRequest, SqliteStorage, StorageError,
 };
 
-/// Repository scheduler adapter failure before a Worker command is emitted.
 #[derive(Debug)]
 pub enum RepositoryExecutionSchedulerError {
     Storage(StorageError),
@@ -61,15 +54,10 @@ impl From<StorageError> for RepositoryExecutionSchedulerError {
     }
 }
 
-/// Production adapter over the one canonical product storage connection.
 pub struct RepositoryExecutionScheduler<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
-/// Public Delivery cancellation command after the UI command envelope has
-/// supplied its repository scope and request identity. The expected revision
-/// is the Delivery revision; the queue revision is always read from the
-/// durable `WorkRun` job below.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkRunCancellationRequest {
     pub scope: RepositorySchedulerScope,
@@ -78,9 +66,6 @@ pub struct WorkRunCancellationRequest {
     pub request_id: winwincode_domain::RequestId,
     pub expected_delivery_revision: u64,
     pub requested_at: Instant,
-    /// Digest of the complete generated public command. Queue revision and
-    /// server time are deliberately kept outside this value so retries can
-    /// reconstruct the original queue request while freezing client input.
     pub public_command_digest: winwincode_domain::Sha256Digest,
 }
 
@@ -90,13 +75,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         Self { storage }
     }
 
-    /// Claims one fair job and returns only a typed command built from the
-    /// committed queue/Registry receipt.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage errors and rejects a non-canonical or mismatched sealed
-    /// `ExecutionJob` before a command can leave the Control Plane.
     pub fn claim_next(
         &mut self,
         request: &RepositorySchedulerClaimRequest,
@@ -112,13 +90,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             .transpose()
     }
 
-    /// Claims one policy-eligible failed Job and returns the same typed
-    /// dispatch used by ordinary and crash-replacement claims.
-    ///
-    /// # Errors
-    ///
-    /// Propagates receipt, retry-policy, queue, Registry, and sealed
-    /// replacement-authority failures without constructing a fallback Job.
     pub fn retry_failed(
         &mut self,
         request: &RepositorySchedulerRetryRequest,
@@ -134,13 +105,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             .transpose()
     }
 
-    /// Records one Worker dispatch result through the atomic repository
-    /// scheduler seam and returns its durable Registry decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed wire attempts and propagates scheduler authority or
-    /// storage failures.
     pub fn record_dispatch_result(
         &mut self,
         repository_scope: &RepositoryScope,
@@ -182,13 +146,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             .map_err(Into::into)
     }
 
-    /// Resolves immutable repository scope from the durable queue before
-    /// applying the same atomic dispatch-result path.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing Job and propagates the same authority/storage errors
-    /// as [`Self::record_dispatch_result`].
     pub fn record_dispatch_result_for_job(
         &mut self,
         message: &JobDispatchResultMessage,
@@ -201,12 +158,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         self.record_dispatch_result(&domain_scope(&scope), message, server_time)
     }
 
-    /// Persists one user cancellation and returns an exact typed Worker
-    /// command only after both dispatch and slot/session authority exist.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/cross-job slot authority and storage failures.
     pub fn request_cancellation(
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
@@ -218,23 +169,10 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         cancel_message(self.storage, &receipt)
     }
 
-    /// Authorizes and persists cancellation for one canonical Delivery
-    /// `WorkRun`. The caller supplies the Delivery revision, while the queue
-    /// revision is obtained from the exact active `WorkRun` job so a client
-    /// cannot cancel a different attempt by guessing queue state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing or stale Delivery, a `WorkRun` from another Delivery,
-    /// a cross-repository job, and any queue/storage authority failure.
     pub fn request_cancellation_for_work_run(
         &mut self,
         request: &WorkRunCancellationRequest,
     ) -> Result<Option<JobCancelMessage>, RepositoryExecutionSchedulerError> {
-        // Include terminal queue rows so an already committed cancellation can
-        // be replayed after the Delivery and queue have moved on. The storage
-        // run-aware method performs the final identity check inside its
-        // immediate transaction, closing replacement races.
         let record = self
             .storage
             .repository_scheduler()?
@@ -275,10 +213,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
                     .load_dispatch_authority(&record.job_id)?
                     .is_none();
             if record.state == ExecutionJobState::Queued || unaccepted_lease {
-                // Claiming reserves a lease before accepted dispatch appends
-                // the Delivery WorkRun. Validate the immutable pre-acceptance
-                // input in both states; storage rechecks the exact run/queue
-                // revision and current lease atomically before cancellation.
                 validate_pre_acceptance_workrun_job(&record, &delivery, request)?;
             } else {
                 let run = delivery
@@ -331,12 +265,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         cancel_message(self.storage, &receipt)
     }
 
-    /// Rebuilds every outstanding exact `job.cancel` command after restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a corrupt cancellation revision or missing canonical
-    /// `WorkerSession` slot rather than fabricating session identity.
     pub fn pending_cancellations(
         &mut self,
         scope: &RepositorySchedulerScope,
@@ -380,12 +308,6 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         Ok(messages)
     }
 
-    /// Commits queue and Registry terminal authority in one storage
-    /// transaction.
-    ///
-    /// # Errors
-    ///
-    /// Propagates exact replay, fence, revision, and storage failures.
     pub fn settle_terminal(
         &mut self,
         request: &RepositorySchedulerTerminalRequest,
@@ -448,10 +370,6 @@ fn validate_pre_acceptance_workrun_job(
             "workItem revision",
         ));
     }
-    // The source Ready item can carry its InProgress execution copy before
-    // acceptance. Other active phases, including candidate-ready validation,
-    // must match every item field exactly; a role does not invent a new
-    // cancellation identity or require an accepted Delivery WorkRun.
     let mut input_item = input.work_item.clone();
     if item.state == WorkItemState::Ready && input_item.state == WorkItemState::InProgress {
         input_item.state = WorkItemState::Ready;
@@ -610,10 +528,6 @@ fn cancel_message(
         receipt.worker_session_id.as_ref(),
         receipt.message_id.as_ref(),
     ) else {
-        // Storage atomically cancels an unaccepted lease and terminalizes
-        // its queue row. That receipt can retain the exact Registry lease
-        // without a WorkerSession/message: no Worker accepted a side effect
-        // and no job.cancel command needs to be sent.
         if receipt.job.state == ExecutionJobState::Failed
             && receipt.job.cancellation.is_some()
             && receipt.worker_session_id.is_none()
@@ -631,9 +545,6 @@ fn cancel_message(
     let cancellation = receipt.job.cancellation.as_ref().ok_or(
         RepositoryExecutionSchedulerError::MissingCancellationAuthority("cancellation receipt"),
     )?;
-    // An accepted dispatch may be cancelled before its WorkerSession binds a
-    // slot. Keep the queue receipt durable and let restart/pending-cancel
-    // orchestration emit the command once codex thread authority exists.
     let Some(codex_thread_id) = receipt.codex_thread_id.clone() else {
         return Ok(None);
     };

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Safe, deterministic `StrongFlow` read models.
-//!
-//! This module is deliberately one-way: it accepts already-authoritative
-//! Delivery-domain facts and returns serializable values. It owns no command,
-//! scheduler, persistence, runtime-log, or credential port.
-
 pub mod delivery;
 pub mod redaction;
 pub mod runtime;
@@ -33,11 +27,6 @@ pub use solution::{
     WorkItemProposalProjection,
 };
 
-/// The only caller-selected inputs to the Delivery detail read model.
-///
-/// Candidate values are sealed domain facts. The current solution review is
-/// rebuilt internally from canonical Delivery Attention facts rather than
-/// accepted from a caller, DTO, or Worker message.
 #[derive(Clone, Copy)]
 pub struct ProjectionInput<'facts> {
     delivery: &'facts Delivery,
@@ -102,7 +91,6 @@ impl fmt::Display for ProjectionError {
 
 impl Error for ProjectionError {}
 
-/// Complete Delivery-owned `StrongFlow` detail without the mutable Delivery.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryProjection {
@@ -175,22 +163,11 @@ impl DeliveryProjection {
         self.verdict.as_ref()
     }
 
-    /// Deterministic JSON bytes for replay and reload equality checks.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if JSON encoding fails.
     pub fn encode_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
 }
 
-/// Builds the Delivery-owned `StrongFlow` detail projection.
-///
-/// # Errors
-///
-/// Rejects a stale candidate, a stale solution review, or a canonical verdict that does not identify the supplied
-/// current candidate.
 pub fn project_delivery_detail(
     input: ProjectionInput<'_>,
 ) -> Result<DeliveryProjection, ProjectionError> {

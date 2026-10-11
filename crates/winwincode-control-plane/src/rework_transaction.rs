@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Specialized atomic transaction for a bounded rework clarification.
-
 use serde_json::Value;
 use winwincode_api::generated::{CommandEnvelope, CommandName, WorkRunStartPayload};
 use winwincode_delivery::{

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Rebuildable collaboration Inbox over canonical Approval and Attention facts.
-//!
-//! The Inbox owns only claims and review annotations. Approval and Attention
-//! lifecycle remains owned by their business aggregates, while assignment and
-//! RBAC eligibility remains owned by the collaboration authority port.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -41,7 +35,6 @@ const MAX_RECORDS: usize = 20_000;
 const MAX_BOUNDED_TEXT: usize = 2_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable error classes exposed by the collaboration Inbox boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollaborationInboxErrorKind {
     Invalid,
@@ -58,7 +51,6 @@ pub enum CollaborationInboxErrorKind {
     Corrupt,
 }
 
-/// Bounded, secret-safe collaboration Inbox failure.
 #[derive(Debug)]
 pub struct CollaborationInboxError {
     kind: CollaborationInboxErrorKind,
@@ -96,7 +88,6 @@ impl From<StorageError> for CollaborationInboxError {
     }
 }
 
-/// Stable identity shared by a personal or Team Inbox item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum CollaborationInboxItemId {
@@ -127,7 +118,6 @@ impl PartialOrd for CollaborationInboxItemId {
     }
 }
 
-/// Canonical source family. It determines the formal command and required role.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationInboxItemKind {
@@ -136,7 +126,6 @@ pub enum CollaborationInboxItemKind {
     DeliveryAttention,
 }
 
-/// Lifecycle projected from the current canonical source fact.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationInboxItemState {
@@ -147,7 +136,6 @@ pub enum CollaborationInboxItemState {
     Expired,
 }
 
-/// Exact candidate identity required by a review annotation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationCandidateIdentity {
@@ -156,7 +144,6 @@ pub struct CollaborationCandidateIdentity {
     pub candidate_revision: u64,
 }
 
-/// Formal business command represented by one Inbox item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FormalCollaborationCommandRoute {
@@ -174,7 +161,6 @@ pub enum FormalCollaborationCommandRoute {
     },
 }
 
-/// One secret-safe fact read from the canonical Approval or Attention owner.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationInboxSourceItem {
@@ -206,7 +192,6 @@ impl CollaborationInboxSourceItem {
     }
 }
 
-/// One immutable read cut from the canonical Approval and Attention owners.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxSourceSnapshot {
     pub scope: RepositoryScope,
@@ -216,37 +201,27 @@ pub struct CollaborationInboxSourceSnapshot {
     pub items: Vec<CollaborationInboxSourceItem>,
 }
 
-/// Failure from the canonical Approval/Attention source adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollaborationInboxSourceError;
 
-/// Read-only canonical Approval/Attention boundary.
 pub trait CollaborationInboxSourcePort: Send {
-    /// Reads one atomic, bounded source cut for an exact repository scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error rather than returning a partial or inferred cut.
     fn snapshot(
         &mut self,
         scope: &RepositoryScope,
     ) -> Result<CollaborationInboxSourceSnapshot, CollaborationInboxSourceError>;
 }
 
-/// Personal view requested by the authenticated actor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum CollaborationInboxAudience {
     Personal(UserId),
 }
 
-/// One assignment visible to the current user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationResponsibilityEntitlement {
     pub assignment: ResponsibilityAssignment,
 }
 
-/// Current sealed Identity/RBAC/Assignment authority for one Inbox operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxAuthoritySnapshot {
     pub scope: RepositoryScope,
@@ -257,17 +232,10 @@ pub struct CollaborationInboxAuthoritySnapshot {
     pub state_guards: Vec<StateRevisionGuard>,
 }
 
-/// Authority lookup failure. Details stay behind the authority boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollaborationInboxAuthorityError;
 
-/// Read-only current Identity/RBAC/Assignment boundary.
 pub trait CollaborationInboxAuthorityPort: Send {
-    /// Authorizes one exact actor, authenticated scope set, repository and audience.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when current sealed authority is unavailable or denied.
     fn authorize(
         &mut self,
         actor: &Actor,
@@ -277,21 +245,13 @@ pub trait CollaborationInboxAuthorityPort: Send {
     ) -> Result<CollaborationInboxAuthoritySnapshot, CollaborationInboxAuthorityError>;
 }
 
-/// Trusted Inbox clock failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollaborationInboxClockError;
 
-/// Clock used to freeze expiration semantics into list cursors and receipts.
 pub trait CollaborationInboxClock: Send {
-    /// Returns Unix epoch milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error when the trusted clock is unavailable.
     fn now_millis(&mut self) -> Result<u64, CollaborationInboxClockError>;
 }
 
-/// System implementation of the trusted Inbox clock.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCollaborationInboxClock;
 
@@ -305,7 +265,6 @@ impl CollaborationInboxClock for SystemCollaborationInboxClock {
     }
 }
 
-/// Stable list filters included in the cursor digest.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationInboxFilter {
@@ -314,7 +273,6 @@ pub struct CollaborationInboxFilter {
     pub only_claimed_by_viewer: bool,
 }
 
-/// One stable, authorized Inbox page request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxListRequest {
     pub actor: Actor,
@@ -326,7 +284,6 @@ pub struct CollaborationInboxListRequest {
     pub cursor: Option<OpaqueCursor>,
 }
 
-/// Collaboration-owned claim overlay. It never resolves the business item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationClaim {
@@ -339,11 +296,9 @@ pub struct CollaborationClaim {
     pub source_sha256: Sha256Digest,
 }
 
-/// Stable annotation identity.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct CollaborationAnnotationId(pub String);
 
-/// Exact graph, file or hunk coordinate inside one frozen candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationAnnotationTarget {
@@ -363,7 +318,6 @@ pub enum CollaborationAnnotationTarget {
     },
 }
 
-/// Lifecycle of one collaboration annotation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationAnnotationState {
@@ -371,7 +325,6 @@ pub enum CollaborationAnnotationState {
     Revoked,
 }
 
-/// Review annotation bound to one exact candidate and source item revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationAnnotation {
@@ -388,9 +341,6 @@ pub struct CollaborationAnnotation {
     pub updated_at_millis: u64,
 }
 
-/// Stable identity for a page annotation retained with the collaboration
-/// catalog. The derived Attention and Evidence identities are deterministic
-/// selectors for the same Delivery source cut.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PageAnnotationId(pub String);
 
@@ -503,7 +453,6 @@ pub struct PageAnnotationCommand {
     pub action: PageAnnotationAction,
 }
 
-/// Business item plus collaboration overlays and its formal command route.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxItem {
     pub source: CollaborationInboxSourceItem,
@@ -514,7 +463,6 @@ pub struct CollaborationInboxItem {
     pub page_annotations: Vec<PageAnnotation>,
 }
 
-/// Stable keyset-like page sealed to source, authority, overlay, filters and time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxPage {
     pub items: Vec<CollaborationInboxItem>,
@@ -524,7 +472,6 @@ pub struct CollaborationInboxPage {
     pub catalog_revision: u64,
 }
 
-/// Authenticated context shared by claim and annotation mutations.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CollaborationInboxCommandContext {
     pub actor: Actor,
@@ -535,14 +482,12 @@ pub struct CollaborationInboxCommandContext {
     pub expected_revision: u64,
 }
 
-/// Claim lifecycle action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum CollaborationClaimAction {
     Claim,
     Release,
 }
 
-/// Replay-safe claim mutation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CollaborationClaimCommand {
     pub context: CollaborationInboxCommandContext,
@@ -550,7 +495,6 @@ pub struct CollaborationClaimCommand {
     pub action: CollaborationClaimAction,
 }
 
-/// Annotation lifecycle action.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CollaborationAnnotationAction {
     Upsert {
@@ -561,7 +505,6 @@ pub enum CollaborationAnnotationAction {
     Revoke,
 }
 
-/// Replay-safe annotation mutation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CollaborationAnnotationCommand {
     pub context: CollaborationInboxCommandContext,
@@ -570,7 +513,6 @@ pub struct CollaborationAnnotationCommand {
     pub action: CollaborationAnnotationAction,
 }
 
-/// Durable mutation result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationInboxReceipt {
@@ -620,7 +562,6 @@ struct CursorPayload {
     offset: usize,
 }
 
-/// Durable collaboration Inbox service.
 pub struct CollaborationInboxService {
     storage: Box<dyn ProductStateStorage>,
     source: Box<dyn CollaborationInboxSourcePort>,
@@ -676,9 +617,6 @@ impl CollaborationInboxService {
         }
     }
 
-    /// Composes the Inbox with the canonical `ArtifactStore` for screenshot
-    /// annotations. A service without this adapter rejects screenshot refs;
-    /// it never accepts an unverified ArtifactId/digest pair.
     #[must_use]
     pub fn with_clock_and_artifact_store(
         storage: Box<dyn ProductStateStorage>,
@@ -696,11 +634,6 @@ impl CollaborationInboxService {
         }
     }
 
-    /// Rebuilds one stable authorized page without invoking a business decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid, unauthorized, changed-cut, corrupt or unavailable reads.
     pub fn list(
         &mut self,
         request: &CollaborationInboxListRequest,
@@ -751,12 +684,6 @@ impl CollaborationInboxService {
         })
     }
 
-    /// Claims or releases one current pending item without resolving it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale revisions, terminal items, revoked responsibility, foreign scope,
-    /// request conflicts and authority/source changes before any write.
     pub fn apply_claim(
         &mut self,
         command: &CollaborationClaimCommand,
@@ -812,12 +739,6 @@ impl CollaborationInboxService {
         )
     }
 
-    /// Creates, updates or revokes an annotation against the exact current candidate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects old candidate identities, invalid coordinates, stale revisions,
-    /// terminal items, revoked responsibility and cross-tenant requests with zero writes.
     pub fn apply_annotation(
         &mut self,
         command: &CollaborationAnnotationCommand,
@@ -864,17 +785,6 @@ impl CollaborationInboxService {
         )
     }
 
-    /// Persists one page annotation against the exact current candidate cut.
-    ///
-    /// The page payload is stored in this same Inbox catalog and receipt ledger;
-    /// the derived Attention and Evidence IDs are stable references for the
-    /// Controller projection of the owning Delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when authorization, source identity, candidate
-    /// freshness, revision guards, or the canonical Delivery journal rejects
-    /// the command.
     pub fn apply_page_annotation(
         &mut self,
         command: &PageAnnotationCommand,
@@ -1417,10 +1327,6 @@ fn apply_page_annotation_action(
             if !source_item_matches_page_candidate(item, candidate) {
                 return Err(candidate_changed());
             }
-            // Page annotations are currently create-only. Reusing an annotation
-            // id would require a matching canonical Delivery mutation for the
-            // derived Attention/Evidence pair, so fail closed until that seam
-            // exists instead of leaving the projections stale.
             if current.is_some() {
                 return Err(wrong_state());
             }
@@ -1454,8 +1360,6 @@ fn apply_page_annotation_action(
         }
         PageAnnotationAction::Revoke => {
             let _ = (current, viewer, now);
-            // Revoke must atomically update the canonical Delivery Attention
-            // and Evidence projections. There is no such mutation route yet.
             Err(wrong_state())
         }
     }

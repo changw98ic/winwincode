@@ -1,23 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parallel multi-model orchestration for the Fusion Runtime (FUSION-02).
-//!
-//! Fusion Blind Panel targets (Astra / Sol / Fable / Opus / GLM / Kimi / Qwen
-//! product abstractions) execute concurrently over the existing kernel
-//! [`ModelPort`]. This module is a Fusion consumer only:
-//!
-//! - Provider routing, credentials, and the Device provider secrets path stay
-//!   inside the `WinWinCode` Provider Runtime (ge4r) behind [`ModelPort`].
-//! - Reasoning effort is carried in each attempt's existing
-//!   [`ModelPortRequest::payload_json`] contract; this runner never rewrites
-//!   the model request schema.
-//! - One model failure never fails the whole Fusion batch. Each target keeps
-//!   an independent terminal status and keeps sibling successes intact.
-//!
-//! Capabilities owned here: attempt timeout, cancel, partial success, shared
-//! token/cost/attempt budget, ordered provider fallback, cost capture, and
-//! latency capture.
-
 use std::{
     collections::HashSet,
     fmt,
@@ -35,48 +17,33 @@ use tokio::sync::watch;
 use winwincode_kernel::{ModelPort, ModelPortFailure, ModelPortRequest};
 use winwincode_provider::ProviderTokenUsage;
 
-/// One Provider/model route. The first route is primary; later routes are fallbacks.
 #[derive(Clone, Debug)]
 pub struct ParallelModelAttempt {
     pub route: String,
     pub request: ModelPortRequest,
 }
 
-/// One independently executed model target.
 #[derive(Clone, Debug)]
 pub struct ParallelModelTarget {
     pub target_id: String,
     pub attempts: Vec<ParallelModelAttempt>,
 }
 
-/// Product-level Fusion panel model identities.
-///
-/// These strings are Fusion target identities only. They do not open Provider
-/// connections, invent capabilities, or carry credentials.
 pub mod fusion_panel {
-    /// Canonical Fusion panel identity.
     pub const ASTRA: &str = "astra";
-    /// Canonical Fusion panel identity.
     pub const SOL: &str = "sol";
-    /// Canonical Fusion panel identity.
     pub const FABLE: &str = "fable";
-    /// Canonical Fusion panel identity.
     pub const OPUS: &str = "opus";
-    /// Canonical Fusion panel identity.
     pub const GLM: &str = "glm";
-    /// Canonical Fusion panel identity.
     pub const KIMI: &str = "kimi";
-    /// Canonical Fusion panel identity.
     pub const QWEN: &str = "qwen";
 
-    /// Default blind-panel target identities.
     #[must_use]
     pub fn default_panel() -> [&'static str; 7] {
         [ASTRA, SOL, FABLE, OPUS, GLM, KIMI, QWEN]
     }
 }
 
-/// One panel seat: product model identity plus ordered Provider Runtime routes.
 #[derive(Clone, Debug)]
 pub struct FusionPanelSeat {
     pub model: String,
@@ -84,7 +51,6 @@ pub struct FusionPanelSeat {
 }
 
 impl FusionPanelSeat {
-    /// Builds one blind-panel target for this seat.
     #[must_use]
     pub fn to_target<F>(&self, request_id_prefix: &str, payload_for_route: F) -> ParallelModelTarget
     where
@@ -108,7 +74,6 @@ impl FusionPanelSeat {
     }
 }
 
-/// Optional shared limits for one parallel batch. `None` means no limit.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ParallelModelBudget {
     pub max_attempts: Option<u64>,
@@ -118,15 +83,12 @@ pub struct ParallelModelBudget {
     pub attempt_timeout: Option<Duration>,
 }
 
-/// A clonable cancellation sender for one batch.
 #[derive(Clone, Debug)]
 pub struct ParallelModelCancelHandle(watch::Sender<bool>);
 
-/// The receiving half passed to [`ParallelModelRunner::run`].
 #[derive(Clone, Debug)]
 pub struct ParallelModelCancelSignal(watch::Receiver<bool>);
 
-/// Creates an isolated cancellation pair for one parallel batch.
 #[must_use]
 pub fn parallel_model_cancellation() -> (ParallelModelCancelHandle, ParallelModelCancelSignal) {
     let (sender, receiver) = watch::channel(false);
@@ -137,13 +99,11 @@ pub fn parallel_model_cancellation() -> (ParallelModelCancelHandle, ParallelMode
 }
 
 impl ParallelModelCancelHandle {
-    /// Cancels pending opens and drops every active model stream.
     pub fn cancel(&self) {
         let _ = self.0.send(true);
     }
 }
 
-/// Stable terminal state for one target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParallelModelStatus {
     Succeeded,
@@ -153,7 +113,6 @@ pub enum ParallelModelStatus {
     BudgetExceeded,
 }
 
-/// Metrics and failure facts for one primary or fallback attempt.
 #[derive(Clone, Debug)]
 pub struct ParallelModelAttemptRecord {
     pub route: String,
@@ -163,7 +122,6 @@ pub struct ParallelModelAttemptRecord {
     pub failure: Option<ModelPortFailure>,
 }
 
-/// Independent result for one target. Failed siblings never erase this result.
 #[derive(Clone, Debug)]
 pub struct ParallelModelResult {
     pub target_id: String,
@@ -174,13 +132,6 @@ pub struct ParallelModelResult {
     pub latency: Duration,
 }
 
-/// FUSION compose-seam feed rows: `(candidate_id/target_id, frames)` for each
-/// succeeded target.
-///
-/// Control-plane `fusion_compose::answers_from_parallel_model_frames` consumes
-/// these rows. `target_id` is the Fusion `candidate_id`. Failed / timed-out /
-/// cancelled / budget-exceeded targets are omitted so one model failure never
-/// fails the Fusion compose batch.
 #[must_use]
 pub fn fusion_compose_frame_rows(batch: &ParallelModelBatchResult) -> Vec<(String, Vec<String>)> {
     batch
@@ -191,7 +142,6 @@ pub fn fusion_compose_frame_rows(batch: &ParallelModelBatchResult) -> Vec<(Strin
         .collect()
 }
 
-/// Measured aggregate facts for the completed portion of a batch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ParallelModelTotals {
     pub attempts: u64,
@@ -204,7 +154,6 @@ pub struct ParallelModelTotals {
     pub cost_observations: u64,
 }
 
-/// Ordered target results plus aggregate usage, cost, and latency.
 #[derive(Clone, Debug)]
 pub struct ParallelModelBatchResult {
     pub results: Vec<ParallelModelResult>,
@@ -212,7 +161,6 @@ pub struct ParallelModelBatchResult {
     pub latency: Duration,
 }
 
-/// Invalid runner input. Model and Provider failures are returned per target instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ParallelModelRunError;
 
@@ -224,7 +172,6 @@ impl fmt::Display for ParallelModelRunError {
 
 impl std::error::Error for ParallelModelRunError {}
 
-/// Concurrent primary/fallback execution over the canonical model port.
 #[derive(Debug)]
 pub struct ParallelModelRunner {
     port: Arc<dyn ModelPort>,
@@ -236,12 +183,6 @@ impl ParallelModelRunner {
         Self { port }
     }
 
-    /// Runs all targets concurrently and preserves partial successes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or duplicate target identities, empty fallback lists, and
-    /// zero-valued limits before opening a Provider request.
     pub async fn run(
         &self,
         targets: Vec<ParallelModelTarget>,
@@ -264,7 +205,6 @@ impl ParallelModelRunner {
             ));
         }
         let mut results = Vec::with_capacity(target_count);
-        // Members observe stop signals themselves so their attempt records survive.
         while let Some(result) = pending.next().await {
             results.push(result);
         }
@@ -1035,8 +975,6 @@ mod tests {
         }
     }
 
-    /// Seven dynasty seats; FABLE fails and QWEN hangs so partial success,
-    /// reasoning-effort passthrough, cost and latency can all be asserted.
     fn dynasty_panel_seats() -> Vec<FusionPanelSeat> {
         let mut seats = vec![
             FusionPanelSeat {
@@ -1098,7 +1036,6 @@ mod tests {
                     dynasty_payload(route, effort)
                 });
                 for attempt in &mut target.attempts {
-                    // SOL primary and FABLE both force a terminal failure.
                     if (seat.model == fusion_panel::SOL && attempt.route.ends_with("-primary"))
                         || seat.model == fusion_panel::FABLE
                     {
@@ -1168,8 +1105,6 @@ mod tests {
             assert!(payload.get("secret").is_none());
         }
 
-        // Control-plane compose seam feed: only succeeded targets, target_id
-        // equals Fusion candidate_id, frames preserved for answer extraction.
         let rows = fusion_compose_frame_rows(&batch);
         assert_eq!(rows.len(), 5);
         assert!(rows.iter().any(|(id, _)| id == fusion_panel::ASTRA));

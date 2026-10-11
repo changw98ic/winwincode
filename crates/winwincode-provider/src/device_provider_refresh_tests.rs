@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Credential rotation must survive ordinary configuration saves without reviving replaced routes.
-
 use super::*;
 use std::{
     path::PathBuf,
@@ -284,8 +282,6 @@ fn refresh_rotation_does_not_overwrite_reauthorization() {
 #[test]
 fn incompatible_save_without_key_never_waits_for_a_credential_refresh() {
     let (fixture, mut store, mut config) = Fixture::new();
-    // If the old save path reaches refresh after the lock is released, fail locally.
-    // This keeps the regression entirely offline even on the broken implementation.
     let mut expired = record(false);
     expired["refresh_token"] = serde_json::json!("\n");
     store

@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, 'apps/client/node_modules/.cache/client-clients-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -89,7 +87,6 @@ function response(status, payload = '') {
   return {
     ok: status >= 200 && status < 300,
     status,
-    // These fixed outage fixtures test error mapping after an explicit deferral.
     ...(status >= 500 ? { headers: { get: name => name === 'retry-after' ? '301' : null } } : {}),
     async text() {
       return typeof payload === 'string' ? payload : JSON.stringify(payload)

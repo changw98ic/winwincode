@@ -1,8 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! Real Worker/SQLite/HTTPS/exchange regression. The ingress uses the production
-//! `ArtifactStore`; only the HTTP listener and business routing are fixture code.
 #![allow(clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
@@ -246,8 +243,6 @@ async fn scenario(chunks: usize) {
             platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
         },
     };
-    // A recovered Chat candidate uses the same production chunk/ACK ledger.
-    // The bytes are deterministic and no Kernel turn or Provider is started.
     let bytes = vec![0x7f; (chunks - 1) * 64 * 1024 + 1];
     let upload = CandidateArtifactUpload {
         snapshot_id: None,
@@ -394,10 +389,6 @@ async fn scenario(chunks: usize) {
                         for ack in request.acknowledgements() {
                             metrics.outstanding.remove(ack);
                         }
-                        // Core observes the original domain receipt. Count its
-                        // actual transport identity once the exchange exposes
-                        // it; heartbeat Gap/positive receipt IDs are separated
-                        // by the production queue after Core returns.
                         for delivery in decoded.deliveries() {
                             let frame =
                                 RemoteTransportAdapter::<ArtifactIngress>::decode(&delivery.frame)
@@ -458,8 +449,11 @@ async fn scenario(chunks: usize) {
         .await
         .unwrap();
     handle.confirm(id).unwrap();
-    // Intentionally delay ACK intake until the actual server admission threshold.
+    let mut parked = std::collections::VecDeque::new();
     for _ in 0..512 {
+        while let Some((id, message)) = handle.next_control().unwrap() {
+            parked.push_back((id, message));
+        }
         let requests_before = metrics.lock().unwrap().backlog.len();
         match Box::pin(worker.flush_durable_outbox()).await {
             Err(error) if error.code == WorkerErrorCode::ExecutionBackpressure => break,
@@ -493,7 +487,10 @@ async fn scenario(chunks: usize) {
     let mut final_confirmed = false;
     let mut artifact_confirmed = 0;
     for _ in 0..1024 {
-        while let Some((id, message)) = handle.next_control().unwrap() {
+        while let Some((id, message)) = parked
+            .pop_front()
+            .map_or_else(|| handle.next_control().unwrap(), Some)
+        {
             let before = metrics.lock().unwrap().backlog.len();
             Box::pin(worker.accept_control(&message, now.clone()))
                 .await
@@ -518,9 +515,6 @@ async fn scenario(chunks: usize) {
             break;
         }
     }
-    // The final drive may have emitted both a retained heartbeat and a new
-    // one. Consume their receipts, then send confirmations before inspecting
-    // the remaining queue (the fresh heartbeat leaves exactly one receipt).
     while let Some((id, message)) = handle.next_control().unwrap() {
         Box::pin(worker.accept_control(&message, now.clone()))
             .await

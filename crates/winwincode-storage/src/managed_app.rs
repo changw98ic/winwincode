@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server facts for the Device-owned managed application lifecycle.
-
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{StorageError, sql_error};
@@ -15,8 +13,6 @@ pub struct ManagedAppRunConfigRecord {
     pub config_json: Vec<u8>,
 }
 
-/// Server-owned repository template used to materialize one `WorkRun` config.
-/// It contains no run, candidate, or source identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedAppRunTemplateRecord {
     pub repository_binding_id: String,

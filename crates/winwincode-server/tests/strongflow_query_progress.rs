@@ -1,8 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
-//! `StrongFlow` source reconstruction must allow canonical Worker ingress to progress.
-
 #![cfg(feature = "local-worker")]
+// SPDX-License-Identifier: Apache-2.0
 
 #[path = "support/strongflow_query_progress.rs"]
 mod support;
@@ -103,8 +100,6 @@ fn slow_candidate_resolution_does_not_block_independent_worker_ingress() {
             .map_err(|error| error.to_string())
     });
 
-    // This barrier is reached only by resolving the real stored Git Artifact.
-    // It deliberately holds filesystem work, rather than an API test double.
     let entered = fixture.gate.wait_until_entered(Duration::from_secs(10));
     if !entered {
         fixture.gate.release();
@@ -121,8 +116,6 @@ fn slow_candidate_resolution_does_not_block_independent_worker_ingress() {
             .expect("report ingress outcome");
     });
 
-    // A bounded watchdog observes ordering. The source barrier remains closed
-    // throughout this wait, so a successful ACK proves independent progress.
     let before_release = ingress_result.recv_timeout(Duration::from_secs(1));
     let completed_before_release = before_release.is_ok();
     fixture.gate.release();
@@ -134,8 +127,6 @@ fn slow_candidate_resolution_does_not_block_independent_worker_ingress() {
     ingress_thread.join().expect("ingress thread");
     let query_result = query_thread.join().expect("query thread");
     let query_elapsed = query_started.elapsed();
-    // Re-enter through the same production Application after ingress has
-    // advanced. Exact replay must retain the original response's whole cut.
     let exact_result = match &query_result {
         Ok(response) => fixture
             .application

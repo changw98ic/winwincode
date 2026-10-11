@@ -18,7 +18,6 @@ const EXPECTED_PRESET_IDS: [&str; 8] = [
     "zhipu-glm",
 ];
 
-/// Same identifier charset as the durable Provider catalog validators.
 fn is_catalog_token(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {

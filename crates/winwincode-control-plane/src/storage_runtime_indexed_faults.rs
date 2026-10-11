@@ -280,7 +280,6 @@ fn indexed_runtime_rejects_corrupt_marker_tail_and_chain_with_receipt_first_repl
             )
             .is_err()
     );
-    // Exact committed receipt is checked before live/history corruption.
     let response = fixture
         .accept(
             &ExecutionPortMessage::RuntimeEventMessage(message.clone()),

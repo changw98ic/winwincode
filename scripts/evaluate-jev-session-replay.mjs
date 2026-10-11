@@ -1,15 +1,5 @@
 #!/usr/bin/env node
 
-/**
- * JEV-04 Phase1 session-replay harness.
- *
- * This evaluator is intentionally separate from the E13 production gate in
- * `scripts/evaluate-real-task-benchmark.mjs`. It compares the Phase1 arms
- * Baseline vs Deterministic GC vs GC+Jev on clearly labeled fixture/replay or
- * production session evidence. Fixture and replay datasets must declare an
- * honest `evidenceClass` and must never be presented as E13 production claims.
- */
-
 import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
@@ -25,7 +15,6 @@ export const REPLAY_MODE_SET = new Set(REPLAY_MODES)
 export const EVIDENCE_CLASSES = Object.freeze(['production', 'fixture', 'replay'])
 export const EVIDENCE_CLASS_SET = new Set(EVIDENCE_CLASSES)
 
-/** Real session inputs still required before Phase1 can claim production evidence. */
 export const MISSING_REAL_SESSION_DATA = Object.freeze([
   'production Codex session rollouts with per-turn raw/cached/uncached/output/reasoning token usage',
   'tool-call traces under each Phase1 arm so tool duplication can be measured, not assumed',

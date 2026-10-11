@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable `StrongFlow` stage-product projection over the canonical runtime stream.
-//!
-//! The projector accepts only trusted Codex lifecycle facts. It prepares the
-//! role-specific semantic product, assigns a deterministic event identity, and
-//! gives the complete generated frame to the existing runtime replay state
-//! machine before the caller may expose it or complete the turn.
-
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
@@ -48,7 +41,6 @@ const JSON_CONTENT_TYPE: &str = "application/json";
 const VERIFICATION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
 pub(crate) const VERIFICATION_POLICY_SOURCE: &str = "policy:session";
 
-/// Lease-bound identity and timestamps supplied by the production adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkRunRuntimeContext<'identity> {
     pub lease: &'identity ExecutionLeaseStamp,
@@ -58,7 +50,6 @@ pub struct WorkRunRuntimeContext<'identity> {
     pub sent_at: &'identity Instant,
 }
 
-/// Trusted fields from one completed Codex command.
 #[derive(Clone, Copy, Debug)]
 pub struct StageCommandEnd<'source> {
     pub command: &'source [String],
@@ -69,7 +60,6 @@ pub struct StageCommandEnd<'source> {
     pub artifact: Option<&'source ArtifactReference>,
 }
 
-/// Trusted fields from one completed Codex turn.
 #[derive(Clone, Copy, Debug)]
 pub struct StageTurnCompletion<'source> {
     pub turn_id: &'source str,
@@ -77,7 +67,6 @@ pub struct StageTurnCompletion<'source> {
     pub failed: bool,
 }
 
-/// Durable projection result for one trusted Codex source fact.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkRunRuntimeRetention {
     Ready {
@@ -93,7 +82,6 @@ pub enum WorkRunRuntimeRetention {
     },
 }
 
-/// Fail-closed stage runtime projection error.
 #[derive(Debug)]
 pub enum WorkRunRuntimeProjectionError<AuthorityError, StoreError> {
     Product(StageProductError),
@@ -126,12 +114,9 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Coordinator over the existing durable runtime replay authority.
 #[derive(Debug, Default)]
 pub struct WorkRunRuntimeProjector {
     responder: RuntimeReplayResponder,
-    // Only the immutable policy row identity is cached. Every use reads and
-    // verifies that exact row against the current stream header and frozen Job.
     policy_rows: Mutex<Option<HashMap<(String, String), CachedPolicyRow>>>,
 }
 
@@ -160,8 +145,6 @@ impl WorkRunRuntimeProjector {
         }
     }
 
-    /// Feedback for correcting a rejected result, derived only from this
-    /// lease's retained command receipts and sealed stage input.
     pub(crate) fn verification_repair_prompt<S: ReplayStore>(
         store: &mut S,
         context: WorkRunRuntimeContext<'_>,
@@ -187,15 +170,6 @@ impl WorkRunRuntimeProjector {
         ))
     }
 
-    /// Retains one verification read-only policy for this runtime before direct
-    /// evidence; later turns replay that same attestation.
-    ///
-    /// Non-verification roles produce no stage product at turn start.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed source identity, stale stage input, replay conflicts,
-    /// or durable store failures.
     pub fn retain_turn_started<S, A>(
         &self,
         store: &mut S,
@@ -230,12 +204,6 @@ impl WorkRunRuntimeProjector {
         .map(Some)
     }
 
-    /// Retains one direct Command or Test outcome after the policy event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown source, missing policy predecessor, malformed direct
-    /// outcome, changed duplicate, replay conflict, or durable store failure.
     pub fn retain_exec_command_end<S, A>(
         &self,
         store: &mut S,
@@ -296,18 +264,6 @@ impl WorkRunRuntimeProjector {
         .map(Some)
     }
 
-    /// Retains the strict Planner or verification final Activity before turn
-    /// completion is allowed to become terminal.
-    ///
-    /// A failed Codex turn produces no semantic result. Successful relevant
-    /// turns require a canonical final message; verification references are
-    /// resolved only against earlier direct evidence in this runtime stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing or malformed final JSON, stale stage facts, result
-    /// references without an earlier direct event, changed duplicates, replay
-    /// conflicts, or durable store failures.
     pub fn retain_turn_completed<S, A>(
         &self,
         store: &mut S,
@@ -325,12 +281,6 @@ impl WorkRunRuntimeProjector {
         )
     }
 
-    /// Retains the independent verification result together with exact claims
-    /// recovered from this run's durable Fusion panel.
-    ///
-    /// # Errors
-    /// Rejects malformed final output, invalid or stale Evidence, and durable
-    /// replay conflicts.
     pub fn retain_turn_completed_with_fusion_claims<S, A>(
         &self,
         store: &mut S,
@@ -488,8 +438,6 @@ impl WorkRunRuntimeProjector {
             .map_err(WorkRunRuntimeProjectionError::Product)?;
         let mut snapshot = load_exact_snapshot(store, identity, &canonical.0, 0)?;
         if snapshot.highest_sequence > snapshot.events.len() as u64 {
-            // Resolve and validate existing policy history once after recovery.
-            // This also rejects canonical plus older turn-dependent duplicates.
             snapshot = load_snapshot(store, identity)?;
         }
         let Some(policy) = retained_policy(&snapshot)? else {
@@ -512,9 +460,6 @@ impl WorkRunRuntimeProjector {
             .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
         validate_runtime_frame(frame, identity)?;
         if !snapshot_has_policy(&snapshot, job)? {
-            // Turn start classifies a changed frozen candidate as a conflicting
-            // attestation. Command evidence rejects the same mismatch. Neither
-            // operation may cache a policy that belongs to another frozen Job.
             return Ok(ReplaySnapshot {
                 events: vec![frame.clone()],
                 ..snapshot
@@ -546,9 +491,6 @@ impl WorkRunRuntimeProjector {
     {
         let event_id = projected_event_id(projection.job, projection.source)
             .map_err(WorkRunRuntimeProjectionError::Product)?;
-        // The policy attests this runtime's frozen candidate, not a single
-        // model turn. Reuse its original identity, including a frame retained
-        // by an older adapter, when a format correction starts another turn.
         let existing = if projection.source == VERIFICATION_POLICY_SOURCE {
             retained_policy(snapshot)?
         } else {
@@ -843,8 +785,6 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
 ) -> Result<Vec<u8>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
     let result: ModelVerificationResult = crate::structured_result::decode(final_message)
         .map_err(|()| WorkRunRuntimeProjectionError::InvalidModelResult)?;
-    // Providers may serialize schema-constrained JSON with different key order
-    // or whitespace. Bind typed fields, then serialize the authoritative result.
     let catalog = evidence_catalog(snapshot)?;
     let fusion_investigations = bind_fusion_investigations(
         expected_fusion_claim_keys,
@@ -884,8 +824,6 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                             .iter()
                             .any(|evidence| evidence.outcome == BoundEvidenceOutcome::Succeeded)
                 {
-                    // Reject before terminal projection so the existing durable
-                    // ReAct correction can execute the still-missing method.
                     return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
                 }
             }
@@ -905,9 +843,6 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
             Ok(BoundVerificationFinding {
                 finding_id: finding.finding_id,
                 criterion_id: finding.criterion_id,
-                // A successful inspection proves that the command ran, not
-                // that its output satisfies the business criterion. Retain
-                // the model finding and bind execution facts separately.
                 verdict: finding.verdict,
                 explanation: finding.explanation,
                 evidence_sources,
@@ -1002,9 +937,6 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         .or_else(|| value.get("exitCode"))
         .and_then(Value::as_i64);
     match status.as_deref() {
-        // Timeout, cancel, policy denial, infrastructure failure and plain
-        // failure are all terminal failures — the categories stay documented
-        // here even though they share one outcome.
         Some(
             "timed-out"
             | "timeout"
@@ -1028,7 +960,6 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
     }
 }
 
-/// Core's final-output constraint. Runtime evidence binding remains authoritative.
 pub(crate) fn verification_result_json_schema() -> Value {
     verification_result_schema(false)
 }
@@ -1257,8 +1188,6 @@ fn decode_payload(payload: &EncodedPayload) -> Option<Vec<u8>> {
     (digest == payload.payload_digest).then_some(bytes)
 }
 
-/// Bind a successful check after literal inspection commands to the approved
-/// method. The original Core invocation remains in the source call's rollout.
 fn verification_command_digest(
     job: &ExecutionJob,
     end: StageCommandEnd<'_>,
@@ -1294,8 +1223,6 @@ fn inspection_tail_digest(command: &[String]) -> Option<Sha256Digest> {
     if inspections.is_empty() || !inspections.iter().all(|words| is_literal_inspection(words)) {
         return None;
     }
-    // ponytail: only literal inspection prefixes qualify. General shell flow
-    // needs per-process completion facts, not guesses from a shell exit code.
     let mut pending = vec![tree.root_node()];
     let mut last_command = None;
     let mut last_start = 0;

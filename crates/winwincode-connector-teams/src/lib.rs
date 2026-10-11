@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Microsoft Teams protocol adapter over the durable Integration Framework.
-
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 use std::time::Duration;
@@ -19,7 +17,6 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical Integration Framework protocol identifier for Microsoft Teams.
 pub const MICROSOFT_TEAMS_CONNECTOR_PROTOCOL: &str = "microsoft.teams.graph.v1";
 
 const MAX_OPAQUE_ID_BYTES: usize = 256;
@@ -31,17 +28,11 @@ const MAX_GRAPH_RESPONSE_BYTES: u64 = 2 * 1_024 * 1_024;
 const GRAPH_LOOKUP_PAGE_SIZE: usize = 50;
 const GRAPH_USER_AGENT: &str = "WinWinCode-Microsoft-Teams-Connector";
 
-/// Canonical Microsoft Entra tenant GUID.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct TeamsTenantId(String);
 
 impl TeamsTenantId {
-    /// Builds a canonical lowercase GUID.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical GUID.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !is_lowercase_guid(&value) {
@@ -56,17 +47,11 @@ impl TeamsTenantId {
     }
 }
 
-/// Canonical Microsoft Teams team identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct TeamsTeamId(String);
 
 impl TeamsTeamId {
-    /// Builds a bounded Graph team identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, unsafe, or overlong input.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         validate_graph_id(&value)?;
@@ -79,17 +64,11 @@ impl TeamsTeamId {
     }
 }
 
-/// Canonical Microsoft Teams channel identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct TeamsChannelId(String);
 
 impl TeamsChannelId {
-    /// Builds a bounded Graph channel identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, unsafe, or overlong input.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         validate_graph_id(&value)?;
@@ -102,7 +81,6 @@ impl TeamsChannelId {
     }
 }
 
-/// Credential-free Teams connector authority configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsConnectorConfig {
     integration: IntegrationId,
@@ -113,11 +91,6 @@ pub struct TeamsConnectorConfig {
 }
 
 impl TeamsConnectorConfig {
-    /// Binds one connector to exactly one tenant/team/channel scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid Integration Framework or credential identities.
     pub fn try_new(
         integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
@@ -162,30 +135,22 @@ impl TeamsConnectorConfig {
     }
 }
 
-/// Microsoft Graph subscription validation challenge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsGraphValidationChallenge(String);
 
 impl TeamsGraphValidationChallenge {
-    /// Parses one percent-encoded `validationToken` query value.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed encoding, controls, empty values, or oversized tokens.
     pub fn try_from_query_value(value: &str) -> Result<Self, IntegrationError> {
         let decoded = percent_decode(value)?;
         validate_plain_token(&decoded)?;
         Ok(Self(decoded))
     }
 
-    /// Produces the exact plain-text Graph validation response.
     #[must_use]
     pub fn response(&self) -> TeamsGraphValidationResponse {
         TeamsGraphValidationResponse(self.0.as_bytes().to_vec())
     }
 }
 
-/// Exact plain-text response for a Graph subscription validation request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsGraphValidationResponse(Vec<u8>);
 
@@ -201,15 +166,9 @@ impl TeamsGraphValidationResponse {
     }
 }
 
-/// Secret Graph webhook client-state value.
 pub struct TeamsGraphClientState(Vec<u8>);
 
 impl TeamsGraphClientState {
-    /// Builds a bounded, non-empty secret.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized values.
     pub fn try_new(value: impl AsRef<[u8]>) -> Result<Self, IntegrationError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > MAX_SECRET_BYTES {
@@ -235,15 +194,9 @@ impl Drop for TeamsGraphClientState {
     }
 }
 
-/// Secret Microsoft Graph access token.
 pub struct TeamsGraphAccessToken(Vec<u8>);
 
 impl TeamsGraphAccessToken {
-    /// Builds a bounded token.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, control-containing, or oversized input.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if value.is_empty()
@@ -273,14 +226,12 @@ impl Drop for TeamsGraphAccessToken {
     }
 }
 
-/// Credential lookup failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamsCredentialErrorKind {
     Unavailable,
     Revoked,
 }
 
-/// Secret-safe credential lookup failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TeamsCredentialError(TeamsCredentialErrorKind);
 
@@ -309,23 +260,12 @@ impl fmt::Display for TeamsCredentialError {
 
 impl std::error::Error for TeamsCredentialError {}
 
-/// Credential authority used by inbound validation and outbound Graph calls.
 pub trait TeamsCredentialPort {
-    /// Resolves the Graph subscription client-state secret.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a stable missing/revoked result.
     fn resolve_webhook_client_state(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<TeamsGraphClientState, TeamsCredentialError>;
 
-    /// Resolves a tenant-bound Graph access token.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a stable missing/revoked result.
     fn resolve_access_token(
         &mut self,
         reference: &CredentialReferenceId,
@@ -333,7 +273,6 @@ pub trait TeamsCredentialPort {
     ) -> Result<TeamsGraphAccessToken, TeamsCredentialError>;
 }
 
-/// Verified facts from a Microsoft Graph notification JWT.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsGraphTokenClaims {
     tenant_id: TeamsTenantId,
@@ -341,12 +280,6 @@ pub struct TeamsGraphTokenClaims {
 }
 
 impl TeamsGraphTokenClaims {
-    /// Builds identity facts only after a JWT implementation has verified its signature,
-    /// issuer, audience, lifetime, and application identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unsafe application identity.
     pub fn try_new(
         tenant_id: TeamsTenantId,
         application_id: impl Into<String>,
@@ -370,27 +303,19 @@ impl TeamsGraphTokenClaims {
     }
 }
 
-/// Secret-safe JWT validation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamsGraphTokenValidationError {
     Rejected,
     Unavailable,
 }
 
-/// Port implemented by the production Entra/JWKS validator.
 pub trait TeamsGraphTokenValidatorPort {
-    /// Validates a Graph notification token against issuer keys, audience, and time.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe rejected/unavailable result.
     fn validate_notification_token(
         &mut self,
         token: &str,
     ) -> Result<TeamsGraphTokenClaims, TeamsGraphTokenValidationError>;
 }
 
-/// Builds Integration Framework requests from one-item Graph notification batches.
 #[derive(Clone, Debug)]
 pub struct TeamsGraphWebhookRequestFactory {
     config: TeamsConnectorConfig,
@@ -402,11 +327,6 @@ impl TeamsGraphWebhookRequestFactory {
         Self { config }
     }
 
-    /// Builds a raw request while preserving the client state and validation JWT only ephemerally.
-    ///
-    /// # Errors
-    ///
-    /// Rejects batches, unsupported notifications, and foreign scope/team/channel scope.
     pub fn build(
         &self,
         scope: IntegrationScope,
@@ -442,7 +362,6 @@ impl TeamsGraphWebhookRequestFactory {
     }
 }
 
-/// Graph client-state and JWT verifier.
 pub struct TeamsGraphWebhookVerifier<Credentials, Tokens> {
     config: TeamsConnectorConfig,
     credentials: Credentials,
@@ -510,7 +429,6 @@ impl<Credentials: TeamsCredentialPort, Tokens: TeamsGraphTokenValidatorPort>
     }
 }
 
-/// Provider response category for one Graph outbound call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamsGraphCallErrorKind {
     RateLimited,
@@ -519,7 +437,6 @@ pub enum TeamsGraphCallErrorKind {
     CredentialRevoked,
 }
 
-/// Secret-safe Microsoft Graph call failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TeamsGraphCallError {
     kind: TeamsGraphCallErrorKind,
@@ -529,11 +446,6 @@ pub struct TeamsGraphCallError {
 }
 
 impl TeamsGraphCallError {
-    /// Builds a non-rate-limit Graph error.
-    ///
-    /// # Errors
-    ///
-    /// Rejects `RateLimited`, which requires a retry lower bound.
     pub fn try_new(kind: TeamsGraphCallErrorKind) -> Result<Self, IntegrationError> {
         if kind == TeamsGraphCallErrorKind::RateLimited {
             return Err(invalid("Microsoft Graph rate limit requires Retry-After"));
@@ -546,11 +458,6 @@ impl TeamsGraphCallError {
         })
     }
 
-    /// Builds a Graph 429 response with a bounded Retry-After lower bound.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or an unsafe delay.
     pub fn rate_limited(retry_after_millis: u64) -> Result<Self, IntegrationError> {
         if retry_after_millis == 0 || retry_after_millis > MAX_SAFE_INTEGER {
             return Err(invalid("Microsoft Graph Retry-After is invalid"));
@@ -602,7 +509,6 @@ impl fmt::Display for TeamsGraphCallError {
 
 impl std::error::Error for TeamsGraphCallError {}
 
-/// Exact provider message passed to a Graph transport implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsGraphOutboundMessage {
     tenant_id: TeamsTenantId,
@@ -640,7 +546,6 @@ impl TeamsGraphOutboundMessage {
     }
 }
 
-/// Provider receipt returned by an idempotency-aware Graph transport.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsGraphMessageReceipt {
     message_id: String,
@@ -648,11 +553,6 @@ pub struct TeamsGraphMessageReceipt {
 }
 
 impl TeamsGraphMessageReceipt {
-    /// Builds a bounded provider message receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid Graph message identity.
     pub fn try_new(
         message_id: impl Into<String>,
         remote_write_performed: bool,
@@ -676,14 +576,12 @@ impl TeamsGraphMessageReceipt {
     }
 }
 
-/// Explicit TLS roots for Microsoft Graph or a loopback Graph sandbox.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamsGraphTlsRoots {
     WebPki,
     Specific(Vec<Vec<u8>>),
 }
 
-/// No-proxy, no-redirect Microsoft Graph transport with marker reconciliation.
 pub struct TeamsGraphHttpTransport {
     api_base_url: String,
     agent: ureq::Agent,
@@ -691,11 +589,6 @@ pub struct TeamsGraphHttpTransport {
 }
 
 impl TeamsGraphHttpTransport {
-    /// Builds a rustls-verified Microsoft Graph transport.
-    ///
-    /// # Errors
-    ///
-    /// Rejects insecure/credential-bearing endpoints or malformed explicit TLS roots.
     pub fn try_new(
         api_base_url: impl Into<String>,
         tls_roots: TeamsGraphTlsRoots,
@@ -945,13 +838,7 @@ struct TeamsGraphHttpResponse {
     body: Option<Value>,
 }
 
-/// Graph transport seam. Implementations must reconcile `operation_key` before creating a message.
 pub trait TeamsGraphTransportPort {
-    /// Delivers or finds the exact operation without performing a duplicate remote write.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed Graph failure; 429 must preserve Retry-After.
     fn deliver_message(
         &mut self,
         access_token: &TeamsGraphAccessToken,
@@ -959,7 +846,6 @@ pub trait TeamsGraphTransportPort {
     ) -> Result<TeamsGraphMessageReceipt, TeamsGraphCallError>;
 }
 
-/// Teams inbound normalizer and retry-stable outbound adapter.
 pub struct TeamsConnector<Credentials, Transport> {
     config: TeamsConnectorConfig,
     credentials: Credentials,

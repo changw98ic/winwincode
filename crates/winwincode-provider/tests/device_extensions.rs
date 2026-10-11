@@ -68,7 +68,6 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
         .expect("original key")
         .encryption_public_key;
     drop(store);
-    // An actual v1 database has only these Provider tables; migration must preserve identity/data.
     let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("v1 fixture");
     db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
     let config = json!({"providerId":"retained","displayName":"Retained","endpoint":"https://example.com/v1/messages","protocol":"anthropic_messages","modelIds":["model"],"enabled":true});
@@ -219,7 +218,6 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
         ),
         DeviceExtensionOutcome::Saved
     );
-    // Simulate an interrupted installation leaving an uncommitted Skill directory.
     fs::create_dir_all(home.join("skills/interrupted-install")).expect("orphan directory");
     fs::write(home.join("skills/interrupted-install/SKILL.md"), "stale").expect("orphan file");
     drop(store);
@@ -233,8 +231,6 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
         config
     );
     assert!(!home.join("skills/interrupted-install").exists());
-    // A restart resumes the in-flight task above; the next task on this same
-    // Worker must remove disabled Skills and deleted MCP services.
     assert!(
         store
             .refresh_extensions(&home)
@@ -377,7 +373,6 @@ fn benchmark_mcp_scope_keeps_generic_extensions_and_restores_the_task_snapshot()
     );
     drop(store);
     let store = DeviceProviderStore::open(&directory).expect("restart");
-    // In-flight recovery restores A even though Device configuration now differs.
     assert_eq!(
         server_ids(store.restore_extensions(&home).expect("restore task A")),
         [selected, "ordinary_probe"]
@@ -404,7 +399,6 @@ fn benchmark_mcp_scope_keeps_generic_extensions_and_restores_the_task_snapshot()
             .refresh_benchmark_extensions(&home, "benchmark_public_smoke_")
             .is_err()
     );
-    // Ordinary sessions still receive all enabled, tested Device extensions.
     assert_eq!(
         server_ids(
             store

@@ -3,8 +3,6 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { isAbsolute, resolve } from 'node:path'
 
-// A claimed cell is never automatically retried: its product run must be
-// reconciled first, even when the runner died before receiving a result.
 export function openBenchmarkLedger(path, identity, cells) {
   const database = new DatabaseSync(path)
   const transaction = action => {
@@ -69,8 +67,6 @@ export function openBenchmarkLedger(path, identity, cells) {
     throw error
   }
   return {
-    // Import only completed denominator rows into a new experiment. Old calls,
-    // claims, and failed rows never acquire authority in the new ledger.
     retainCompleted(entries = []) {
       transaction(() => {
         for (const entry of entries) {
@@ -94,7 +90,6 @@ export function openBenchmarkLedger(path, identity, cells) {
         }
       })
     },
-    // Read retained results without claiming or recovering any pending cell.
     records() {
       const rows = database.prepare('SELECT ordinal, record FROM benchmark_cell ORDER BY ordinal').all()
       if (rows.length !== cells.length) reject('LEDGER_CELL_MISSING')
@@ -180,9 +175,6 @@ export function openBenchmarkLedger(path, identity, cells) {
             const resolved = record.calls[position]
             if (JSON.stringify(resolved) === JSON.stringify(prior)) continue
             const launch = observed.launches.find(target => target.callId === prior.callId)
-            // An export or unresolved observation error is not a Provider outcome. Resolve only that
-            // exact registered call from retained product evidence, and keep
-            // its original failure in the same atomic recovery record.
             if (prior.status !== 'failed' || (prior.failure?.code !== 'BENCHMARK_EVIDENCE_FAILED'
                 && prior.unresolvedDeviceExecution !== true && prior.failure?.executionUnresolved !== true)
               || resolved?.status !== 'returned' || resolved.callId !== prior.callId
@@ -204,7 +196,6 @@ export function openBenchmarkLedger(path, identity, cells) {
             insert.run(index, call.callId, JSON.stringify(call))
           }
         }
-        // Fence the old driver and commit the recovered result together. Never clear a claim.
         database.prepare('UPDATE benchmark_cell SET token = ?, record = ? WHERE ordinal = ?')
           .run(randomUUID(), JSON.stringify(record), index)
       })

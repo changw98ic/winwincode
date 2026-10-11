@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-exchange socket authority: finite opening stages, progress idle timeout, and real cancellation.
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
@@ -59,8 +58,6 @@ impl ExchangeIo {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted());
         }
-        // ureq's not_zero() substitutes one second for an expired deadline.
-        // An exchange must stop before applying that socket-timeout fallback.
         if next.after.is_zero() {
             return Err(ureq::Error::Timeout(next.reason));
         }
@@ -178,13 +175,11 @@ impl Transport for ExchangeTransport {
         self.buffers.input_appended(count);
         Ok(count > 0)
     }
-    // Each Agent belongs to one exchange; a completed connection is never pooled for another.
     fn is_open(&mut self) -> bool {
         false
     }
 }
 
-/// Shared cancellation from before semantic preprocessing through the final model stream.
 #[derive(Debug, Default)]
 pub struct ExchangeCancellation {
     cancelled: AtomicBool,
@@ -269,8 +264,6 @@ fn connect_cancellable(
     }
 }
 
-/// Stops waiting for DNS when authority ends. A platform getaddrinfo already
-/// running may finish in its resolver thread; its result cannot open a socket.
 #[derive(Debug)]
 pub struct ExchangeResolver(pub Arc<ExchangeIo>);
 impl ureq::unversioned::resolver::Resolver for ExchangeResolver {

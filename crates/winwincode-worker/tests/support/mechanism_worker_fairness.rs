@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Actual owned validation scheduling and control receipt regression.
 use super::*;
 use winwincode_worker::control_driver::WorkerControlSource;
 use winwincode_worker::workspace::WorkspaceCloseReason;

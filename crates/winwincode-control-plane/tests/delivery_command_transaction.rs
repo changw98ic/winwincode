@@ -1187,9 +1187,6 @@ fn replay_uses_only_the_durable_receipt_even_when_payload_state_journal_and_fact
         .expect("initial create");
     first_plane.shutdown().expect("shutdown");
 
-    // Model a command written by a future payload parser while keeping the
-    // exact original durable result. Receipt replay must not deserialize that
-    // payload or consult mutable aggregate/state projections.
     let mut future_command = original.clone();
     future_command.payload["futureSchemaField"] = serde_json::json!({"version": 2});
     let future_digest = command_digest(&future_command);

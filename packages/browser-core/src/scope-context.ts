@@ -193,7 +193,6 @@ export function scopeSelectionFromHash(hash: string): ScopeRouteSelection {
   })
 }
 
-/** Preserve route-owned entity IDs while replacing only the exact Scope path. */
 export function scopeHash(
   hash: string,
   selection: ScopeRouteSelection | CompleteRepositorySelection,
@@ -210,10 +209,6 @@ export function scopeHash(
   return query.length === 0 ? path : `${path}?${query}`
 }
 
-/**
- * Resolve one current Scope exclusively from the URL and current AuthSession facts.
- * A parent identity is an option only when an authorized Scope explicitly carries it.
- */
 export function resolveScopeContext(
   scopes: readonly Scope[],
   hash: string,
@@ -267,7 +262,6 @@ export function resolveScopeContext(
   return Object.freeze({ status: 'selection-required', reason: 'partial', selection, options })
 }
 
-/** Keep only the current exact Scope when changing product areas. */
 export function surfaceHash(path: string, selection: ScopeRouteSelection): string {
   return scopeHash(`#${path}`, selection)
 }

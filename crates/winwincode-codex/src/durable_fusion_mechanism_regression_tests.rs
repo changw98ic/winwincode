@@ -42,7 +42,6 @@ async fn mechanism_m15_candidate_context_uses_bounded_git_processes() {
         let fixture = root.join(format!("blobs-{blobs}"));
         std::fs::create_dir_all(&fixture).unwrap();
         git(&fixture, &["init", "-q"]);
-        // Approximately equal total content bytes; filenames and Git objects remain synthetic.
         let bytes_per_blob = 100_000 / blobs;
         for file in 0..blobs {
             std::fs::write(
@@ -78,7 +77,6 @@ async fn mechanism_m15_candidate_context_uses_bounded_git_processes() {
         GIT_OUTPUTS.lock().unwrap().clear();
         let before_heartbeat = heartbeat.load(Ordering::SeqCst);
         let start = Instant::now();
-        // Calls the frozen production function. No copied candidate algorithm or mock Git output.
         let context = super::candidate_context(
             &fixture,
             &format!("refs/winwincode/candidates/{commit}"),
@@ -117,7 +115,6 @@ async fn incremental_candidate_context_uses_one_git_blob_batch() {
         let fixture = root.join(format!("blobs-{blobs}"));
         std::fs::create_dir_all(&fixture).unwrap();
         git(&fixture, &["init", "-q"]);
-        // Approximately equal total content bytes; filenames and Git objects remain synthetic.
         let bytes_per_blob = 100_000 / blobs;
         for file in 0..blobs {
             std::fs::write(
@@ -153,7 +150,6 @@ async fn incremental_candidate_context_uses_one_git_blob_batch() {
         THREAD_GIT_OUTPUTS.with(|outputs| outputs.borrow_mut().clear());
         let before_heartbeat = heartbeat.load(Ordering::SeqCst);
         let start = Instant::now();
-        // Calls the frozen production function. No copied candidate algorithm or mock Git output.
         let context = super::candidate_context(
             &fixture,
             &format!("refs/winwincode/candidates/{commit}"),

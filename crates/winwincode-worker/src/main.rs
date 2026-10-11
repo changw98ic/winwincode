@@ -1,8 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![recursion_limit = "256"]
-
-//! Standalone Execution Worker process entrypoint.
+// SPDX-License-Identifier: Apache-2.0
 
 mod shutdown_signal;
 
@@ -67,10 +64,6 @@ fn print_identity() {
     }
 }
 
-/// Identity and locality inputs the two entries differ on. Everything the
-/// execution loop needs beyond this (TLS trust root, helper release,
-/// provider model selection, action signing, execution envelope) stays on
-/// the existing process environment for both entries.
 struct WorkerBootstrap {
     exit_after_work: bool,
     worker_id: WorkerId,
@@ -115,11 +108,6 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
     Box::pin(run_worker(bootstrap)).await
 }
 
-/// Managed entry (plan §14.4): identity and locality come only from the
-/// local mode-0600 config file written by the Device Client. The execution
-/// loop below is the exact `--remote` machinery over the same
-/// `serverOrigin` `ExecutionPort` exchange; nothing is read from or decided
-/// by the Server beyond that existing protocol.
 fn await_managed_start_gate(
     mut input: impl std::io::Read,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -168,12 +156,6 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
     .await
 }
 
-/// The shared execution main loop. Both entries run the same registration,
-/// control drain, heartbeat, and Codex drive cycles over
-/// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
-/// Retries Worker registration until the lifecycle leaves the boot/register
-/// window. A silent retry loop would look like a hung process in production
-/// logs, so each failure prints its secret-safe category only.
 async fn register_until_active<Port, Codex>(
     worker: &mut WorkerMain<Port, Codex>,
     handle: &RemoteWorkerTransportHandle,
@@ -310,15 +292,9 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             _ = drive.tick() => {
                 let step = async {
                 if worker.transport_failure().is_some() { return Ok(true); }
-                // The shared driver retries one bounded outbox batch and polls
-                // Core even when that batch is backpressured. A separate
-                // pre-flush must not prevent cancellation facts from draining.
                 #[cfg(feature = "test-support")]
                 winwincode_worker::mechanism_timing::record("drive_entry", &serde_json::json!({}));
                 if let Some(error) = Box::pin(worker.drive_with_controls(&handle, now_instant)).await? {
-                    // Retain each finite category once. A trace mismatch also
-                    // carries only numeric cursors and identity-match booleans;
-                    // never persist raw frames, identities or Provider content.
                     if !observed_drive_failures.contains(&error.code) {
                         observed_drive_failures.push(error.code);
                         if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
@@ -544,8 +520,6 @@ fn configured_jev_context(
     Ok(Some(settings))
 }
 
-/// Canonical model route used when no managed config override exists —
-/// identical to the previous hardcoded `--remote` value.
 fn default_model_route() -> ModelGatewayRoute {
     ModelGatewayRoute {
         capability: "reasoning".to_owned(),

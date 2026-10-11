@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Database-neutral `winwincode-export/v1` contract.
-//!
-//! [`WinWinCodeExport::try_new`] canonicalizes records and seals the payload. The same value always
-//! produces the same compact UTF-8 JSON bytes, regardless of the input record order.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -58,12 +53,6 @@ pub struct WinWinCodeExport {
 }
 
 impl WinWinCodeExport {
-    /// Builds the only current export shape and canonicalizes record order before hashing it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid IDs, duplicate records, missing organization references, unsafe text, or a
-    /// document larger than [`MAX_WINWINCODE_EXPORT_BYTES`].
     pub fn try_new(
         export_id: impl Into<String>,
         mut content: WinWinCodeExportContent,
@@ -83,11 +72,6 @@ impl WinWinCodeExport {
         Ok(export)
     }
 
-    /// Decodes only the canonical compact JSON representation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects oversized, malformed, reordered, altered, or unsupported documents.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WinWinCodeExportError> {
         if bytes.len() > MAX_WINWINCODE_EXPORT_BYTES {
             return Err(WinWinCodeExportError::TooLarge);
@@ -101,11 +85,6 @@ impl WinWinCodeExport {
         Ok(export)
     }
 
-    /// Returns the canonical compact UTF-8 JSON bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid in-memory value or a document outside the size limit.
     pub fn encode_canonical(&self) -> Result<Vec<u8>, WinWinCodeExportError> {
         self.validate()?;
         encode_bounded(self)
@@ -285,8 +264,6 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), WinWinCodeExportErro
 }
 
 fn is_contract_whitespace(character: char) -> bool {
-    // ECMA-262 `\s`, used by the JSON Schema pattern, differs from Rust's Unicode whitespace
-    // set only by U+0085 and U+FEFF. U+0085 is already rejected as a control character.
     character.is_whitespace() || character == '\u{feff}'
 }
 

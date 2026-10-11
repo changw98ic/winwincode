@@ -1,5 +1,3 @@
-//! Exercise the embedded Core and the built product host through the `ModelPort` boundary.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -286,8 +284,6 @@ impl Fixture {
         .unwrap();
         let mut model = catalog["models"][0].clone();
         model["slug"] = json!("gpt-5.6-sol");
-        // The scripted transport accepts all three media kinds. Declare that
-        // capability so Core preserves the fixture's MCP audio content.
         model["input_modalities"] = json!(["text", "image", "audio"]);
         std::fs::write(
             root.join("home/models.json"),
@@ -302,8 +298,6 @@ impl Fixture {
 
     fn kernel_options(&self) -> KernelOptions {
         let mut options = KernelOptions::new(self.0.join("home"), self.0.join("helper"));
-        // Product composition supplies this alias so older bubblewrap can
-        // re-execute the sandbox helper through argv0.
         options.linux_sandbox_executable =
             cfg!(target_os = "linux").then(|| self.0.join("codex-linux-sandbox"));
         options
@@ -398,7 +392,6 @@ impl Drop for Fixture {
 }
 
 fn run_native_test(test: impl FnOnce(tokio::runtime::Runtime) + Send + 'static) {
-    // Core runs on the block_on caller as well as the runtime's worker threads.
     std::thread::Builder::new()
         .name("native-code-mode-test".into())
         .stack_size(16 * 1024 * 1024)
@@ -1201,8 +1194,6 @@ fn model_outputs(model: &ScriptedModel) -> String {
         .join("\n")
 }
 
-/// Read one current exec and its following waits from the final model request.
-/// Earlier tool outputs remain in Core history across turns and cannot prove this delivery.
 fn latest_exec_outputs(model: &ScriptedModel) -> Vec<Value> {
     let requests = model.requests.lock().unwrap();
     let input = requests.last().unwrap()["request"]["input"]
@@ -1224,7 +1215,6 @@ fn latest_exec_outputs(model: &ScriptedModel) -> Vec<Value> {
         .collect()
 }
 
-/// Resolve nested requests through Core's exact parent request and cell scope.
 fn latest_exec_requests(facts: &[Value]) -> std::collections::BTreeMap<i64, &Value> {
     let boundary = facts
         .iter()
@@ -1333,8 +1323,6 @@ fn assert_model_diagnostic_sources(model: &ScriptedModel, facts: &[Value]) {
             })
             .expect("model diagnosis must identify an offered Core fact");
         let calls = diagnostic["calls"].as_array().unwrap();
-        // Branch evidence may refer to other branches, but this question must
-        // include at least one original request from the current exec scope.
         assert!(
             calls
                 .iter()
@@ -1432,7 +1420,6 @@ fn model_outputs_ignore_script_markers_until_they_are_returned() {
     }
 }
 
-/// A valid old diagnosis and receipt remain in history after a new exec starts.
 fn historical_feedback_fixture() -> (ScriptedModel, Vec<Value>) {
     let operation = "a".repeat(64);
     let call = json!({"request_sequence":2,"tool":"mcp.fixture.public_smoke",

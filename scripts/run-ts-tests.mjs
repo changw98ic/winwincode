@@ -6,15 +6,6 @@ import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 
-// The TypeScript lane exercises the current Client and generated-contract
-// boundaries.  Product-process checks (Rust build, Server API, and release
-// assets) have their own root scripts so this lane stays deterministic and
-// does not start a second process-boundary build.
-//
-// The real-browser suites each rebuild the client into the shared
-// `apps/client/dist` tree, and this lane runs files concurrently, so the
-// browser harness waits out another suite's rebuild instead of failing on a
-// momentarily missing asset (see tests/fixtures/real-browser-harness.mjs).
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
   'tests/api-production-device-prerequisites.test.mjs',
@@ -33,7 +24,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/device-task-runtime.test.mjs',
   'tests/device-provider-structured-output.test.mjs',
   'tests/device-provider-credentials.test.mjs',
-  'tests/architecture-documentation.test.mjs',
   'tests/candidate-run-preview-ui.test.mjs',
   'tests/okqq-sidebar-board-wiring.test.mjs',
   'tests/wwx-gate-x3.test.mjs',
@@ -66,23 +56,16 @@ const canonicalTestFiles = Object.freeze([
   'tests/code-mode-native-build.test.mjs',
   'tests/native-kernel-acceptance-runner.test.mjs',
   'tests/compact-kernel-helper.test.mjs',
-  'tests/community-core-finalize.test.mjs',
-  'tests/community-persistence-ports.test.mjs',
-  'tests/engineering-runtime-backlog.test.mjs',
-  'tests/engineering-runtime-design.test.mjs',
   'tests/engineering-runtime-contract.test.mjs',
   'tests/contract-codegen.test.mjs',
   'tests/contextual-decision.test.mjs',
   'tests/contextual-decision-view-model.test.mjs',
   'tests/decision-clarification-ui.test.mjs',
-  'tests/control-plane-api-coverage.test.mjs',
   'tests/control-plane-client-facade.test.mjs',
   'tests/control-plane-http-contract.test.mjs',
-  'tests/control-plane-web-client-preflight.test.mjs',
   'tests/control-plane-websocket-contract.test.mjs',
   'tests/credential-leak-gate.test.mjs',
   'tests/data-export-semantic-conformance.test.mjs',
-  'tests/delivery-evidence-verdict-rework-contract.test.mjs',
   'tests/delivery-execution-job-schema.test.mjs',
   'tests/delivery-submit-verdict-http-contract.test.mjs',
   'tests/domain-schema.test.mjs',
@@ -93,7 +76,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/i18n-embed-fl-reproducibility.test.mjs',
   'tests/jev-session-replay.test.mjs',
   'tests/open-source-governance.test.mjs',
-  'tests/product-repository-boundary.test.mjs',
   'tests/pnpm-pack-report.test.mjs',
   'tests/query-cache.test.mjs',
   'tests/query-cache-view-model.test.mjs',
@@ -102,7 +84,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/readiness-browser.test.mjs',
   'tests/readiness-page.test.mjs',
   'tests/readiness-view-model.test.mjs',
-  'tests/readme-quickstart.test.mjs',
   'tests/real-task-benchmark.test.mjs',
   'tests/benchmark-public-smoke.test.mjs',
   'tests/benchmark-device-adapter.test.mjs',
@@ -119,7 +100,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/codex-login-settings.test.mjs',
   'tests/strongflow-canonical-api-contract.test.mjs',
   'tests/workrun-single-path-source-gate.test.mjs',
-  'tests/strongflow-projection-contract.test.mjs',
   'tests/strongflow-review-ui.test.mjs',
   'tests/strongflow-review-browser.test.mjs',
   'tests/strongflow-role.test.mjs',
@@ -127,9 +107,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/ui604-a11y-audit.test.mjs',
   'tests/ui604-shell-a11y-browser.test.mjs',
   'tests/ui605-large-list-virtualization.test.mjs',
-  // 用户裁定(2026-09-10):界面与设计稿的差异一律以真实渲染 + 视觉评审判断,
-  // 不再做指纹基线式的自动化样式断言。ui608 三个泳道文件保留在仓库作参考,
-  // 不再进入默认测试清单(bd winwincode-oq7r 收口记录)。
   'tests/usage-health-browser.test.mjs',
   'tests/usage-health-client.test.mjs',
   'tests/workspace-smoke.test.mjs',

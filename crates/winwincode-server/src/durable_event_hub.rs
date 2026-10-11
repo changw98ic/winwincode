@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable standalone Server publication, subscription, and cursor recovery.
-//!
-//! The hub is a transport projection of the Control Plane durable outbox. It
-//! persists an event before acknowledging its outbox row as published, so a
-//! crash between those operations is recovered by an idempotent republish.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -114,7 +108,6 @@ CREATE INDEX IF NOT EXISTS hub_events_stream_type
   ON hub_events (scope_json, stream_json, event_type_json, sequence);
 ";
 
-/// Stable event-hub failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DurableEventHubErrorCode {
     InvalidInput,
@@ -126,7 +119,6 @@ pub enum DurableEventHubErrorCode {
     Closed,
 }
 
-/// Secret-free event-hub failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableEventHubError {
     code: DurableEventHubErrorCode,
@@ -148,13 +140,11 @@ impl DurableEventHubError {
         )
     }
 
-    /// Stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> DurableEventHubErrorCode {
         self.code
     }
 
-    /// Converts an internal error to the public application boundary.
     #[must_use]
     pub fn api_error(&self) -> ApiError {
         let (status, code, message) = match self.code {
@@ -193,7 +183,6 @@ impl fmt::Display for DurableEventHubError {
 
 impl std::error::Error for DurableEventHubError {}
 
-/// Public event envelope facts that are not duplicated in an outbox payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommittedEventContext {
     pub scope: Scope,
@@ -349,7 +338,6 @@ fn source_from_storage(source: &PublicEventSource) -> ControlPlaneWebSocketEvent
     }
 }
 
-/// Millisecond clock used to derive the generated backpressure deadline.
 pub trait DurableEventHubClock: Send + Sync {
     #[must_use]
     fn now_millis(&self) -> u64;
@@ -367,8 +355,6 @@ impl DurableEventHubClock for SystemDurableEventHubClock {
     }
 }
 
-/// Control Plane outbox publisher that writes public events into one shared
-/// durable Server hub before the Control Plane acknowledges the outbox row.
 pub struct DurableEventPublisher {
     hub: Arc<DurableEventHub>,
 }
@@ -389,7 +375,6 @@ impl EventPublisher for DurableEventPublisher {
     }
 }
 
-/// Bounded transport limits emitted in generated acceptance/backpressure frames.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DurableEventHubConfig {
     pub max_unacked_events: u32,
@@ -425,7 +410,6 @@ impl Default for DurableEventHubConfig {
     }
 }
 
-/// SQLite-backed event publisher and subscription cursor owner.
 pub struct DurableEventHub {
     database_path: PathBuf,
     connection: Mutex<Option<Connection>>,
@@ -435,11 +419,6 @@ pub struct DurableEventHub {
 }
 
 impl DurableEventHub {
-    /// Opens or recovers the durable Server event catalog.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid limits, schema mismatches, and database failures.
     pub fn open(
         directory: impl AsRef<Path>,
         config: DurableEventHubConfig,
@@ -447,12 +426,6 @@ impl DurableEventHub {
         Self::open_with_clock(directory, config, Arc::new(SystemDurableEventHubClock))
     }
 
-    /// Opens the durable catalog with an explicit clock for deterministic
-    /// deadline calculation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid limits, schema mismatches, and database failures.
     pub fn open_with_clock(
         directory: impl AsRef<Path>,
         config: DurableEventHubConfig,
@@ -481,17 +454,11 @@ impl DurableEventHub {
         })
     }
 
-    /// Path of the durable event catalog.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
 
-    /// Records the current authorization epoch for one principal and scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-positive or regressing epochs.
     pub fn grant_authorization(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -524,12 +491,6 @@ impl DurableEventHub {
         Ok(())
     }
 
-    /// Revokes a scope, durably closes matching subscriptions, and returns
-    /// generated revocation frames for the live connections.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale epochs and database failures.
     pub fn revoke_authorization(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -576,13 +537,6 @@ impl DurableEventHub {
         Ok(frames)
     }
 
-    /// Copies public projection rows to the durable event catalog and drains
-    /// internal rows without exposing them on the public WebSocket transport.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on invalid generated public payloads or source/catalog
-    /// storage failures.
     pub fn publish_pending(
         &self,
         storage: &mut dyn ProductStateStorage,
@@ -600,13 +554,6 @@ impl DurableEventHub {
         Ok(inserted)
     }
 
-    /// Persists and fans out one already committed outbox row. Internal rows
-    /// are accepted but never become public frames.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed public rows before they can be acknowledged by the
-    /// Control Plane outbox owner.
     pub fn publish_committed(&self, event: &OutboxEvent) -> Result<bool, DurableEventHubError> {
         if event.projection_cursor.is_none() {
             return Ok(false);
@@ -621,13 +568,6 @@ impl DurableEventHub {
         Ok(inserted)
     }
 
-    /// Accepts one generated subscribe/resume frame and creates its bounded
-    /// live channel after durable cursor and authorization checks.
-    ///
-    /// # Errors
-    ///
-    /// Rejects wrong-state frames, foreign scopes, duplicate identities, and
-    /// invalid cursors.
     pub fn subscribe(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -651,11 +591,6 @@ impl DurableEventHub {
         }
     }
 
-    /// Applies one generated acknowledgement or pong frame.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-stream, beyond-sent, unauthorized, and unknown cursors.
     pub fn event_control(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -677,11 +612,6 @@ impl DurableEventHub {
         }
     }
 
-    /// Advances retention while keeping one exact floor cursor for reset.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a floor beyond the head or a missing floor event identity.
     pub fn retain_from(
         &self,
         scope: &Scope,
@@ -731,11 +661,6 @@ impl DurableEventHub {
         Ok(())
     }
 
-    /// Checkpoints and closes the durable catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database failure if checkpoint or close fails.
     pub fn close(&self) -> Result<(), DurableEventHubError> {
         self.live
             .lock()

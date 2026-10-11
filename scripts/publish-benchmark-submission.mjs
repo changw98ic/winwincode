@@ -30,7 +30,6 @@ function candidateFileBytes(file) {
   return bytes
 }
 
-/** Validates a completed product result before it can enter the public submission repository. */
 export function prepareBenchmarkSubmission(record, { experimentId, preparedInputsDirectory, preparedCatalogSha256,
   productSourceSealSha256 }) {
   if (!experimentId || !preparedCatalogSha256 || record?.status !== 'completed' || record.termination || record.failure
@@ -144,7 +143,6 @@ function verifyCandidateBundle(directory, manifest, candidate, selectedFiles) {
   } finally { rmSync(scratch, { recursive: true, force: true }) }
 }
 
-/** Pushes an orphan commit containing only allowed source files. Existing refs are immutable. */
 export function publishBenchmarkSubmission(prepared, { repositoryUrl, receiptDirectory, scratchRoot = tmpdir() }) {
   if (typeof repositoryUrl !== 'string' || !repositoryUrl || repositoryUrl.startsWith('-')) {
     throw fail('SUBMISSION_REPOSITORY_INVALID')
@@ -200,7 +198,6 @@ export function publishBenchmarkSubmission(prepared, { repositoryUrl, receiptDir
   }
 }
 
-/** Publishes a sealed 700-row ledger after execution, with no model or product command. */
 export function publishBenchmarkLedger({ ledgerPath, preparedInputsDirectory, repositoryUrl, receiptDirectory }) {
   const database = new DatabaseSync(resolve(ledgerPath), { readOnly: true })
   let identity

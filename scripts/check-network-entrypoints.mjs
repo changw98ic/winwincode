@@ -31,7 +31,6 @@ export function networkEntryErrors(sourceRoot = root) {
     for (const path of files(join(sourceRoot, directory))) {
       const name = relative(sourceRoot, path).replaceAll('\\', '/')
       if (excluded.has(name) || name === 'scripts/check-network-entrypoints.mjs' || /(?:test|spec)[._-]/u.test(name)) continue
-      // Rust fixture modules do not participate in production ownership.
       const source = readFileSync(path, 'utf8').split(/#\[cfg\((?:test|all\(test,\s*unix\))\)\]\s*(?:#\[path[^\n]*\]\s*)?mod\s/u)[0]
       if ([...source.matchAll(native)].length > 0 && !registered.has(name)) errors.push(`${name}: unregistered native network entry`)
     }

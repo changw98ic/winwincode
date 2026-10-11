@@ -134,7 +134,6 @@ test('edition.3: upgrade replaces the whole core; same-version digest drift fail
 test('edition.3: local artifact digest verification fails closed', () => {
   const directory = mkdtempSync(join(tmpdir(), 'core-lock-'))
   try {
-    // schema expects matching bytes and sha256; write a wrong byte stream.
     writeFileSync(join(directory, 'winwincode-contracts'), 'nope')
     const lock = completeLock()
     const result = verifyCoreLock(lock, { artifactDir: directory })

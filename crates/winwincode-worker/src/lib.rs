@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone Execution Worker lifecycle.
-//!
-//! This crate owns process and job orchestration only. The embedded Codex Core
-//! remains behind one injected [`CodexCoreAdapter`]. That adapter is also the
-//! only production assembly point for the existing Action Gateway, Capability
-//! Adapter, and Runtime `TraceOutbox`. Local and remote transports deliver the
-//! same generated `ExecutionPortMessage` values to [`WorkerMain`].
-
 pub mod action_enforcement;
 pub mod candidate_ref;
 pub mod change_batch_store;
@@ -35,12 +27,6 @@ pub mod validation_diagnostics;
 pub mod verification_isolation;
 pub mod workspace_runtime;
 
-/// Canonical types used by deployment adapters that compose this Worker.
-///
-/// The local launcher intentionally depends on the Worker, rather than on a
-/// second copy of the execution protocol. Re-exporting the existing generated
-/// messages and transport adapters keeps local and separated deployments on
-/// the same typed boundary.
 pub mod composition {
     pub use winwincode_domain as domain;
     pub use winwincode_domain::Instant;
@@ -119,102 +105,61 @@ use workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
 
 pub mod workspace;
 
-/// Static Worker process identity and registration profile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerConfig {
-    /// Stable Worker identity.
     pub worker_id: WorkerId,
-    /// Unique identity for this process boot.
     pub worker_instance_id: WorkerInstanceId,
-    /// Exact process start time.
     pub started_at: Instant,
-    /// Capability profile registered before any job is accepted.
     pub capabilities: WorkerCapabilitySet,
 }
 
-/// Process-level lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerLifecycleState {
-    /// Constructed, but not registered.
     Booting,
-    /// Registration request sent; awaiting the matching result.
     Registering,
-    /// Registered and accepting work.
     Active,
-    /// Refusing new work while active jobs are cancelled and closed.
     Draining,
-    /// Clean shutdown completed.
     Stopped,
-    /// A process-level protocol invariant failed.
     Faulted,
 }
 
-/// State of one non-terminal execution attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveJobLifecycle {
-    /// One Codex thread and turn are active.
     Running,
-    /// One cooperative interrupt has been requested.
     Cancelling,
 }
 
-/// One exact active Job/lease/WorkerSession/CodexThread binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveJob {
     pub snapshot_id: Option<winwincode_domain::SnapshotId>,
-    /// Immutable dispatched job.
     pub job: ExecutionJob,
-    /// Current exact lease and fencing authority.
     pub lease: ExecutionLeaseStamp,
-    /// Worker-owned execution session.
     pub worker_session_id: WorkerSessionId,
-    /// Four-part product, stage, Worker, and Codex binding.
     pub session_identity: SessionIdentity,
-    /// Only live Codex thread for this attempt.
     pub codex_thread_id: CodexThreadId,
-    /// Current local job lifecycle.
     pub lifecycle: ActiveJobLifecycle,
-    /// Highest runtime trace sequence forwarded for this attempt.
     pub last_event_sequence: ExecutionAckSequence,
 }
 
-/// Stable Worker lifecycle rejection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerErrorCode {
-    /// Operation does not fit the current process lifecycle.
     InvalidLifecycle,
-    /// Control Plane message is not accepted by this lifecycle module.
     UnexpectedMessage,
-    /// Registration result is for another Worker, process, or request.
     RegistrationMismatch,
-    /// Registration was rejected.
     RegistrationRejected,
-    /// Dispatch contains invalid or stale Worker/lease authority.
     InvalidDispatchAuthority,
-    /// A trace message does not match its exact active session.
     RuntimeTraceMismatch,
-    /// A delegated event does not match its exact active Job and session.
     DelegatedPollMismatch,
-    /// Canonical finite context exceeded its byte ceiling.
     DelegatedContextLimit,
-    /// A detached per-Job checkout could not be created, recovered, or removed.
     Workspace,
-    /// Candidate bytes or acknowledgement differ from the pending writer Job.
     CandidateArtifactMismatch,
-    /// Outbound `ExecutionPort` failed.
     ExecutionPort,
-    /// The remote Worker queue must drain before sending more business frames.
     ExecutionBackpressure,
-    /// A local Provider call definitely did not start; poll local responses before retrying.
     ModelStartDeferred,
-    /// A single outbound frame was rejected permanently.
     ExecutionMessageRejected,
-    /// The port cannot continue (authentication or protocol failure).
     ExecutionTerminal,
 }
 
-/// Typed delegated event returned by Codex before an `ExecutionPort` transport
-/// envelope is defined for this family.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DelegatedPollOutcome {
     ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
@@ -223,12 +168,9 @@ pub enum DelegatedPollOutcome {
     RepairRequired(Box<RepairEnvelope>),
 }
 
-/// Secret-free Worker lifecycle error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerError {
-    /// Stable failure category.
     pub code: WorkerErrorCode,
-    /// Secret-free explanation.
     pub reason: String,
 }
 
@@ -240,13 +182,11 @@ impl fmt::Display for WorkerError {
 
 impl std::error::Error for WorkerError {}
 
-/// Deterministic graceful shutdown result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerShutdownReport {
-    /// Jobs for which a terminal cancellation outcome was emitted.
     pub cancelled_jobs: Vec<ExecutionJobId>,
-    /// Number of Codex interrupt/close/shutdown calls that failed.
     pub codex_failures: usize,
+    pub delivery_failures: Vec<WorkerErrorCode>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,7 +207,6 @@ struct PreparedDispatch {
     workspace_revision: winwincode_domain::WorkspaceRevision,
 }
 
-/// Test-only process stop around the adapter submission intent.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSubmissionFault {
@@ -275,7 +214,6 @@ pub enum WorkerSubmissionFault {
     AfterIntent,
 }
 
-/// Test-only process stops around the durable delegated freeze.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerFinalFreezeFault {
@@ -355,7 +293,6 @@ impl CandidateTerminalFact {
     }
 }
 
-/// Single semantic Worker core shared by local and remote `ExecutionPort` IO.
 pub struct WorkerMain<Port, Codex> {
     device_models: Option<device_model::DeviceModels>,
     intake_log_path: Option<std::path::PathBuf>,
@@ -366,14 +303,6 @@ pub struct WorkerMain<Port, Codex> {
     workspaces: JobWorkspaceRuntime,
     lifecycle: WorkerLifecycleState,
     registration_request_id: Option<RequestId>,
-    /// Optional process-scoped namespace for an exact registration frame.
-    ///
-    /// The lightweight Worker fixtures intentionally keep their historical
-    /// sequence ids.  The local production launcher opts into this namespace
-    /// so a replacement process cannot collide with a predecessor's durable
-    /// `(worker_id, request_id)` registration receipt. Restarting the same
-    /// process identity reconstructs the exact request id, message id, and
-    /// timestamp for Registry replay.
     registration_request_namespace: Option<String>,
     heartbeat_interval_ms: Option<u64>,
     heartbeat_sequence: i64,
@@ -386,33 +315,17 @@ pub struct WorkerMain<Port, Codex> {
     pending_delegated_proposals: HashMap<String, ChangeBatchProposalEvent>,
     delivery_failure: Option<WorkerErrorCode>,
     driver_clock: driver_clock::DriverClock,
-    /// Delivery ids sent during the current Worker scheduling turn.  A
-    /// response batch can contain acknowledgements for several earlier
-    /// frames; suppressing an already-sent frame until the next poll avoids
-    /// sending it twice while still allowing a later poll to retry a lost
-    /// response.
     sent_delivery_ids: HashSet<String>,
     outbox_flush_cursor: Option<String>,
-    /// Interactive frames sent while a recovered Core turn is rebuilding its
-    /// in-memory waiter. The durable request remains visible to the Control
-    /// Plane, but the live Core event must not produce a second copy in the
-    /// same recovery turn.
     recovery_sent_delivery_ids: HashSet<String>,
     recovered_delegated_routes: HashSet<String>,
-    /// Recovered interactive requests stay behind the resumed Core event. A
-    /// replacement Worker must not let the Control Plane answer the durable
-    /// replay before Core has rebuilt its pending request in memory.
     deferred_core_interaction_jobs: HashSet<String>,
-    /// Job ids for interactive frames emitted by the current Core poll. This
-    /// clears the recovery deferral only after the exact resumed event has
-    /// been observed and forwarded.
     core_interaction_jobs: HashSet<String>,
     delegated_poll_outcomes: VecDeque<DelegatedPollOutcome>,
     delegated_progress_ledgers: HashMap<(String, ChangeBatchId), ChangeBatchProgressLedger>,
     observer_mode: ObserverMode,
     observation_model: Option<ObservationModelConfiguration>,
     enqueued_observation_opens: HashSet<String>,
-    // Only a producer/recovery owner may request a remote model dispatch.
     requested_model_deliveries: HashSet<String>,
     #[cfg(feature = "test-support")]
     submission_fault: Option<WorkerSubmissionFault>,
@@ -425,11 +338,6 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Binds model execution to the launching Device's private Provider store.
-    /// Production launchers must set this before registering the Worker.
-    ///
-    /// # Errors
-    /// Rejects unavailable or unsafe device storage.
     pub fn with_device_providers(
         mut self,
         directory: &std::path::Path,
@@ -443,7 +351,6 @@ where
         Ok(self)
     }
 
-    /// Attaches a durable non-secret intake log for Device→Worker model frames.
     #[must_use]
     pub fn with_model_intake_log(mut self, path: &std::path::Path) -> Self {
         self.intake_log_path = Some(path.to_path_buf());
@@ -495,7 +402,6 @@ where
         );
     }
 
-    /// Creates a booting Worker without starting IO or Codex services.
     #[must_use]
     pub fn new(
         config: WorkerConfig,
@@ -553,27 +459,18 @@ where
         }
     }
 
-    /// Selects the one Observer runtime policy supported by this Worker.
     #[must_use]
     pub const fn with_observer_mode(mut self, mode: ObserverMode) -> Self {
         self.observer_mode = mode;
         self
     }
 
-    /// Installs the independent one-shot Observer route.
     #[must_use]
     pub fn with_observation_model(mut self, model: ObservationModelConfiguration) -> Self {
         self.observation_model = Some(model);
         self
     }
 
-    /// Uses the Worker process identity to namespace its registration request.
-    ///
-    /// A stable Worker id is deliberately reused across replacement boots,
-    /// while the process identity changes.  Registration receipts are keyed
-    /// by Worker id and request id, so production local composition must
-    /// derive a fresh request id from that process identity.  This opt-in
-    /// keeps direct Worker contract fixtures deterministic.
     #[must_use]
     pub fn with_registration_request_namespace(
         mut self,
@@ -585,13 +482,11 @@ where
         self
     }
 
-    /// Installs one test-only process stop around submission intent persistence.
     #[cfg(feature = "test-support")]
     pub fn inject_submission_fault(&mut self, fault: WorkerSubmissionFault) {
         self.submission_fault = Some(fault);
     }
 
-    /// Injects a definite no-start refusal in the attached local Provider lane.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn inject_device_start_fault(&mut self) -> bool {
@@ -601,10 +496,6 @@ where
         })
     }
 
-    /// Installs a wall/monotonic anchor with deterministic elapsed time.
-    ///
-    /// # Panics
-    /// Panics if the requested elapsed time exceeds the monotonic clock range.
     #[cfg(feature = "test-support")]
     pub fn inject_driver_clock(&mut self, wall_anchor: Instant, elapsed: std::time::Duration) {
         self.driver_clock = driver_clock::DriverClock::new(
@@ -615,37 +506,31 @@ where
         );
     }
 
-    /// Stops one delegated finalization after the canonical freeze is durable.
     #[cfg(feature = "test-support")]
     pub fn inject_final_freeze_fault(&mut self, fault: WorkerFinalFreezeFault) {
         self.final_freeze_fault = Some(fault);
     }
 
-    /// Exposes the owned workspace intake for deterministic lifecycle fixtures.
     #[cfg(feature = "test-support")]
     pub fn workspace_runtime_for_test(&mut self) -> &mut JobWorkspaceRuntime {
         &mut self.workspaces
     }
 
-    /// Returns the current process lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> WorkerLifecycleState {
         self.lifecycle
     }
 
-    /// Reports owned read-only verification that still needs driver advancement.
     #[must_use]
     pub fn has_pending_workspace_validation(&self) -> bool {
         !self.pending_delegated_proposals.is_empty()
     }
 
-    /// Returns the negotiated heartbeat interval after registration.
     #[must_use]
     pub const fn heartbeat_interval_ms(&self) -> Option<u64> {
         self.heartbeat_interval_ms
     }
 
-    /// Returns active jobs sorted by Job id.
     #[must_use]
     pub fn active_jobs(&self) -> Vec<&ActiveJob> {
         let mut jobs = self.active.values().collect::<Vec<_>>();
@@ -653,7 +538,6 @@ where
         jobs
     }
 
-    /// True only after accepted work and every retained terminal delivery have drained.
     #[must_use]
     pub fn work_drained(&mut self) -> bool {
         !self.dispatches.is_empty()
@@ -666,11 +550,6 @@ where
                 .is_ok_and(|pending| pending.is_empty())
     }
 
-    /// True when the durable Worker→Control-Plane outbox still holds
-    /// verification/evidence frames that must reach the Server. Used by the
-    /// process entry to keep retrying after a Server restart instead of
-    /// exiting while `runtime.event` / `artifact.chunk` / `JobOutcome` remain
-    /// pending.
     #[must_use]
     pub fn has_pending_durable_evidence(&mut self) -> bool {
         self.codex
@@ -689,27 +568,15 @@ where
             })
     }
 
-    /// Flushes one bounded batch of pending durable Worker→Server deliveries on the existing
-    /// exchange protocol. Safe to call when the in-memory Job is already gone.
-    ///
-    /// # Errors
-    ///
-    /// Returns an outbound-port or Codex-store failure.
     pub async fn flush_durable_outbox(&mut self) -> Result<(), WorkerError> {
         Box::pin(self.flush_durable_execution_deliveries()).await
     }
 
-    /// Flushes using the driver's current trusted clock, including elapsed time
-    /// while a first local model start waits for its Provider thread.
-    ///
-    /// # Errors
-    /// Returns the same delivery errors as `flush_durable_outbox`.
     pub async fn flush_durable_outbox_at(&mut self, now: Instant) -> Result<(), WorkerError> {
         self.observe_driver_clock(now);
         self.flush_durable_outbox().await
     }
 
-    /// Returns an unusable transport after even the bounded optional projection is refused.
     #[must_use]
     pub fn transport_failure(&self) -> Option<WorkerError> {
         (self.delivery_failure == Some(WorkerErrorCode::ExecutionTerminal)).then(|| {
@@ -720,7 +587,6 @@ where
         })
     }
 
-    /// Returns a task transport failure that could not itself be delivered.
     #[must_use]
     pub fn required_delivery_failure(&self) -> Option<WorkerError> {
         (self.delivery_failure == Some(WorkerErrorCode::ExecutionMessageRejected)).then(|| {
@@ -731,14 +597,6 @@ where
         })
     }
 
-    /// Builds a bounded recovery hint for one active task.
-    ///
-    /// The returned view is explicitly non-authoritative; only Controller
-    /// facts and accepted receipts may advance product state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an inactive Job or unavailable workspace/receipt/Git state.
     pub fn recovery_handoff_snapshot(
         &self,
         job_id: &ExecutionJobId,
@@ -761,27 +619,15 @@ where
             .map_err(|_| workspace_error())
     }
 
-    /// Returns every validated delegated event in Codex poll order.
-    ///
-    /// The events remain inside the Worker until this explicit read, so the
-    /// current lack of an `ExecutionPortMessage` variant cannot silently drop
-    /// them or disguise them as runtime trace records.
     pub fn take_delegated_poll_outcomes(&mut self) -> Vec<DelegatedPollOutcome> {
         self.delegated_poll_outcomes.drain(..).collect()
     }
 
-    /// Consumes the Worker and returns its injected ports for deterministic tests
-    /// or outer process composition.
     #[must_use]
     pub fn into_parts(self) -> (Port, Codex) {
         (self.port, self.codex)
     }
 
-    /// Starts the Worker by sending exactly one registration request.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn start(&mut self, now: Instant) -> Result<(), WorkerError> {
         if matches!(
             self.lifecycle,
@@ -838,15 +684,6 @@ where
         self.dispatch_retained_effect(delivery).await
     }
 
-    /// `ModelChunk` control path: the durable model-call frame ledger is
-    /// written inside `accept_model_chunk`. Follow-up intents are persisted
-    /// before confirmation; transport is exclusively driven outside consumption.
-    ///
-    /// # Errors
-    ///
-    /// Returns the workspace, Codex-adapter, or `WorkerError` failure that
-    /// aborted this frame. A mandatory intent persistence error keeps the
-    /// control retryable; a later dispatch error cannot revoke confirmation.
     async fn accept_model_chunk_control(
         &mut self,
         chunk: &ModelChunkMessage,
@@ -885,15 +722,6 @@ where
         self.enqueue_codex_effects()
     }
 
-    /// Applies one Control Plane message to the shared Worker lifecycle core.
-    ///
-    /// Local and remote adapters must decode into the same generated union
-    /// before calling this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable protocol, lifecycle, authority or persistence failure.
-    /// Success means reliably consumed; this entry point never dispatches effects.
     pub async fn accept_control(
         &mut self,
         message: &ExecutionPortMessage,
@@ -935,7 +763,6 @@ where
             );
         }
         applied?;
-        // Acknowledgement means applied + durable handoff, never transport success.
         self.enqueue_codex_effects()
     }
 
@@ -1042,8 +869,6 @@ where
                     && valid_lease_renewal(&active.lease, renewal, &renewal.sent_at)
             })
         {
-            // Exact authority which arrived too late cannot extend the
-            // expired lease. Settle only its Job, preserving other Jobs.
             let summary = format!(
                 "lease renewal expired before consumption: prior_expires_at={} new_expires_at={} sent_at={} processed_at={}",
                 renewal.prior_expires_at.0, renewal.lease.expires_at.0, renewal.sent_at.0, now.0
@@ -1068,11 +893,6 @@ where
         self.accept_lease_renewal(renewal, &now)
     }
 
-    /// Sends one explicit heartbeat with current capacity and lease progress.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
         let started = std::time::Instant::now();
         self.observe_driver_clock(now);
@@ -1121,23 +941,12 @@ where
         };
         let delivery = self
             .retain_execution_message(&ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat))?;
-        // Schedule from the attempt's start. A slow response must not add a
-        // second interval, and a retryable failure must not enqueue a fresh
-        // heartbeat on every 25 ms owner turn. Its retained delivery retries
-        // through the ordinary durable outbox.
         self.next_heartbeat_due = self
             .heartbeat_interval_ms
             .and_then(|interval| started.checked_add(std::time::Duration::from_millis(interval)));
         self.dispatch_retained_effect(delivery).await
     }
 
-    /// Polls each active Codex thread once, forwarding only exact retained trace
-    /// messages and deterministic terminal outcomes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an exact trace-identity or outbound-port failure. Codex polling
-    /// failures become infrastructure outcomes without exposing adapter text.
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
         let mut stage = drive_diagnostics::DriveStage::Admission;
@@ -1167,8 +976,6 @@ where
                 "Codex polling requires an active Worker",
             ));
         }
-        // A crash/store failure after archiving a refused frame must still finish
-        // its job before Core starts any further work on the restored attempt.
         let rejected_jobs = self
             .active
             .values()
@@ -1183,8 +990,6 @@ where
         for job_id in rejected_jobs {
             Box::pin(self.finish_rejected_job(&job_id)).await?;
         }
-        // Collect before dispatch; a refused batch still permits result intake and
-        // state progression, but cannot trigger another batch in the same poll.
         self.sent_delivery_ids.clear();
         *stage = DriveStage::CollectEffects;
         self.enqueue_codex_effects()?;
@@ -1240,10 +1045,6 @@ where
                     .as_ref()
                     .is_some_and(|models| models.owns_exchange(&exchange));
                 if !owned {
-                    // Shared Device providers.sqlite3 holds every session's
-                    // exchanges. A foreign frame that fails authority must not
-                    // be retry-pinned at the queue front or this Worker's own
-                    // verification exchange never becomes durable.
                     self.log_model_intake(
                         "poll_codex",
                         "FOREIGN_OR_UNOWNED_EXCHANGE",
@@ -1270,15 +1071,10 @@ where
                         error.code
                     );
                 }
-                // Keep the exact owned input retryable, but do not let its
-                // failed intake strand already recorded Core facts. In
-                // particular, cancellation closure must remain observable
-                // while a late Provider frame cannot enter the model bridge.
                 intake_error = Some(error);
                 break;
             }
         }
-        // A lost binding response must not strand a prepared Core turn.
         let pending = self
             .active
             .values()
@@ -1472,8 +1268,6 @@ where
                 if self.core_interaction_jobs.remove(&job_id) {
                     self.deferred_core_interaction_jobs.remove(&job_id);
                 }
-                // Completion includes workspace manifest decoding. Keep its large
-                // async state off the polling stack before entering that decoder.
                 *stage = DriveStage::CoreFact;
                 Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await
             }
@@ -1654,10 +1448,6 @@ where
                     "cancelled Codex result lost its active Job authority",
                 )
             })?;
-        // Cancellation owns the terminal decision once its acknowledgement
-        // is accepted. If the first Core interrupt failed, a late result must
-        // retry that fence rather than apply a patch, retain progress, or
-        // replace the cancelled outcome with another terminal state.
         self.codex
             .interrupt(&thread_id, now)
             .await
@@ -2763,16 +2553,6 @@ where
         .await
     }
 
-    /// Retains the verified detached writer candidate before its first upload.
-    ///
-    /// A successful Codex completion for an executor or remediator remains
-    /// non-terminal until this method retains the exact candidate and a final
-    /// matching `artifact.ack` is accepted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign, cancelling, non-writer, or non-completed Job and any
-    /// candidate whose sealed authority differs from the active attempt.
     #[allow(clippy::too_many_lines)]
     pub async fn retain_candidate_artifact(
         &mut self,
@@ -2865,19 +2645,10 @@ where
                 .finish_candidate_job(&job_id.0, accepted, upload.created_at)
                 .await;
         }
-        // Upload frames are retained atomically. All sending, including the
-        // first pass, uses the bounded driver batch.
         self.outbox_flush_cursor = None;
         Ok(())
     }
 
-    /// Stops accepting work, interrupts every active turn, emits terminal
-    /// outcomes, closes threads, and shuts down the embedded Codex adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an outbound-port or durable candidate-cancellation failure. Codex
-    /// interrupt/shutdown failures are counted without leaking adapter text.
     pub async fn shutdown(&mut self, now: Instant) -> Result<WorkerShutdownReport, WorkerError> {
         if matches!(
             self.lifecycle,
@@ -2902,8 +2673,11 @@ where
                 .map_err(|_| codex_model_error())?;
         }
         self.pending_candidates.clear();
-        self.flush_durable_execution_deliveries().await?;
         self.lifecycle = WorkerLifecycleState::Draining;
+        let mut delivery_failures = Vec::new();
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
+        }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
         let mut codex_failures = 0;
@@ -2926,33 +2700,39 @@ where
             if self.codex.interrupt(&thread_id, &now).await.is_err() {
                 codex_failures += 1;
             } else {
-                // The interrupt retains the terminal Usage and Stopped
-                // traces. Forward them while the active Job still owns the
-                // runtime cursor so the shutdown outcome binds their final
-                // sequence instead of closing the Job first.
-                self.enqueue_codex_effects()?;
-                self.flush_durable_execution_deliveries().await?;
+                if let Err(error) = self.enqueue_codex_effects() {
+                    delivery_failures.push(error.code);
+                }
+                if let Err(error) = self.flush_durable_execution_deliveries().await {
+                    delivery_failures.push(error.code);
+                }
             }
             let Some(id) = self.active.get(&job_id).map(|job| job.job.job_id.clone()) else {
                 continue;
             };
-            self.finish_job(
-                &job_id,
-                ExecutionOutcomeStatus::Cancelled,
-                "Worker shutdown cancelled the active turn",
-                Vec::new(),
-                None,
-                Some(port_error(
-                    ExecutionPortErrorCode::Cancelled,
+            match self
+                .finish_job(
+                    &job_id,
+                    ExecutionOutcomeStatus::Cancelled,
                     "Worker shutdown cancelled the active turn",
-                    false,
-                )),
-                now.clone(),
-            )
-            .await?;
-            cancelled_jobs.push(id);
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::Cancelled,
+                        "Worker shutdown cancelled the active turn",
+                        false,
+                    )),
+                    now.clone(),
+                )
+                .await
+            {
+                Ok(()) => cancelled_jobs.push(id),
+                Err(error) => delivery_failures.push(error.code),
+            }
         }
-        self.flush_durable_execution_deliveries().await?;
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
+        }
         if self.codex.shutdown().await.is_err() {
             codex_failures += 1;
         }
@@ -2960,6 +2740,7 @@ where
         Ok(WorkerShutdownReport {
             cancelled_jobs,
             codex_failures,
+            delivery_failures,
         })
     }
 
@@ -3053,8 +2834,6 @@ where
             .freeze_snapshot(&prepared.active, request, &now)
             .await
             .map_err(|_| workspace_error())?;
-        // The workspace recovery manifest retains this exact response before
-        // transport. Replaying the durable CP request recovers it after a crash.
         self.enqueue_effect(&ExecutionPortMessage::SnapshotFreezeReceiptMessage(
             response,
         ))
@@ -3134,12 +2913,6 @@ where
                 now,
             );
         }
-        // Validate the complete WorkRun contract before creating a checkout or
-        // opening a Codex thread.  The input is Controller-sealed authority,
-        // not model prompt text; a scope/input mismatch must be rejected as a
-        // dispatch capability error rather than becoming an infrastructure
-        // failure after local resources have already been allocated.  Existing
-        // Job IDs are handled above so changed replays remain conflicts.
         if winwincode_codex::stage_product::stage_product_prompt(&dispatch.job).is_err() {
             return self.reject_dispatch_failure(
                 dispatch,
@@ -3340,10 +3113,6 @@ where
         thread_id: &CodexThreadId,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        // Synchronize the adapter's trusted clock after the binding is
-        // installed but before replay or submission can cause a Provider
-        // request.  This closes the gap where a lease expires between
-        // dispatch validation and the first embedded Kernel model call.
         if let Err(_error) = self.codex.observe_now(&now) {
             return Err(codex_model_error());
         }
@@ -3351,10 +3120,6 @@ where
             self.deferred_core_interaction_jobs
                 .insert(job.job_id.0.clone());
         }
-        // A restart can leave response-bearing approval/input frames in the
-        // adapter outbox while the in-memory Worker has no active Job yet.
-        // Flush again after installing this dispatch so those exact retained
-        // frames are replayed before a recovered Core turn is submitted.
         if let Some(active) = self.active.get(&job.job_id.0).cloned()
             && let Some(open) = self
                 .workspaces
@@ -3676,13 +3441,9 @@ where
             self.validate_candidate_ack_state(acknowledgement, accepted)?;
         }
         match outcome {
-            // The adapter has persisted the ACK and any replay/replacement
-            // intent. Network IO belongs to the driver after control confirm.
             ArtifactAckOutcome::Pending => Ok(()),
             ArtifactAckOutcome::Replay(deliveries) => {
                 for delivery in deliveries {
-                    // A replay is durable already; clear only the process-local
-                    // successful-attempt suppression, never send from intake.
                     self.sent_delivery_ids.remove(&delivery.delivery_id);
                     self.recovery_sent_delivery_ids
                         .remove(&delivery.delivery_id);
@@ -3700,12 +3461,10 @@ where
                 {
                     return Ok(());
                 }
-                if acknowledgement.retained_artifact.as_ref() == Some(&artifact) {
-                    // The durable adapter authenticated this completed predecessor;
-                    // retain its reference before sealing the terminal outcome.
-                    if let Some(pending) = self.pending_candidates.get_mut(&job_id) {
-                        pending.artifact = Some(artifact.clone());
-                    }
+                if acknowledgement.retained_artifact.as_ref() == Some(&artifact)
+                    && let Some(pending) = self.pending_candidates.get_mut(&job_id)
+                {
+                    pending.artifact = Some(artifact.clone());
                 }
                 self.finish_candidate_job(&job_id, artifact, now).await
             }
@@ -3774,10 +3533,6 @@ where
         Ok(())
     }
 
-    /// Rebinds a successor-authority ACK to the predecessor authority which
-    /// owns the retained candidate frames. A replacement receipt may expose a
-    /// successor Job to the Worker while the durable Artifact stream remains
-    /// byte- and session-identical to its predecessor.
     fn durable_candidate_ack(
         &self,
         acknowledgement: &ArtifactAckMessage,
@@ -3931,8 +3686,6 @@ where
                     "lease renewal authority is invalid",
                 )
             })?;
-        // Active state advances only after both durable updates succeeded.
-        // Replayed delivery must not re-enter a Core turn that may now be done.
         if active.lease == renewal.lease {
             return Ok(());
         }
@@ -3999,8 +3752,6 @@ where
             .cancel_validation(&cancel.lease.job_id, &now)
             .await
         {
-            // Core cancellation remains effective even when process cleanup
-            // cannot be confirmed. The workspace and positive ACK stay gated.
             if status == JobCancelAckMessageStatus::Accepted
                 && let Some(thread_id) = thread_id.as_ref()
             {
@@ -4084,7 +3835,6 @@ where
         };
         self.enqueued_observation_opens
             .remove(&open.model_exchange_id.0);
-        // Adopt a journal-only request left by an interrupted upgrade before retiring it.
         self.retain_execution_message(&ExecutionPortMessage::ModelOpenMessage(open.clone()))?;
         let acknowledgement = ModelAckMessage {
             ack_sequence: ExecutionAckSequence(0),
@@ -4117,24 +3867,13 @@ where
         message: RuntimeEventMessage,
     ) -> Result<(), WorkerError> {
         let Some(active) = self.active.get(job_id) else {
-            // finish_job (or a Server-restart recovery path) can drop the
-            // in-memory Job before every Core runtime frame reached the
-            // Control Plane. Retain and send on the durable outbox path so
-            // verification evidence is not stranded; Server validates the
-            // lease/fencing stamp.
             let delivery =
                 self.retain_execution_message(&ExecutionPortMessage::RuntimeEventMessage(message))?;
             return self.enqueue_retained_effect(&delivery);
         };
         let sequence = message.event.sequence.0;
         let last_sequence = active.last_event_sequence.0;
-        // A recovered adapter owns the durable runtime cursor. When every
-        // earlier frame was already acknowledged there is no pending frame
-        // from which WorkerMain can reconstruct that cursor, so the first
-        // canonical trace resumes at the adapter-provided sequence.
         let resumes_fully_acknowledged_cursor = last_sequence == 0 && sequence > 0;
-        // Recovery replays the immutable original frame. Renewal can extend
-        // its expiry without changing the exact Job, lease, or session owner.
         if !retained_lease_matches_current(&message.lease, &active.lease)
             || message.worker_session_id != active.worker_session_id
             || message.session_identity != active.session_identity
@@ -4155,11 +3894,6 @@ where
         }
         let delivery =
             self.retain_execution_message(&ExecutionPortMessage::RuntimeEventMessage(message))?;
-        // `install_active_run` queues unacknowledged original frames for
-        // direct adapter replay, while `flush_durable_execution_deliveries`
-        // may have sent the same frame before the adapter poll.  Retaining
-        // first still checks that a same-sequence frame is byte-identical;
-        // the already-forwarded copy then needs no second transport attempt.
         if sequence <= last_sequence {
             return Ok(());
         }
@@ -4194,7 +3928,6 @@ where
         }
         self.pending_delegated_proposals.remove(job_id);
 
-        // Keep the terminal future bounded at every caller, including recovery.
         Box::pin(async move {
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             worker_error(
@@ -4292,9 +4025,6 @@ where
                 ));
             }
         }
-        // Completion and accounting are independent facts. Recover observed
-        // lower bounds from the durable ledger, and explicitly retain unknown
-        // totals when a successful completion has no accounting observations.
         let usage = usage.or_else(|| {
             (status == ExecutionOutcomeStatus::Succeeded)
                 .then(|| ExecutionOutcomeUsage::unknown(0, 0))
@@ -4331,10 +4061,6 @@ where
             .retain_job_outcome(&active.codex_thread_id, &outcome)
             .await
             .map_err(|_| codex_model_error())?;
-        // Retain the terminal outcome before consuming the checkout.  If the
-        // process stops between these durable boundaries, the accepted
-        // candidate and the outcome remain discoverable and the original
-        // mutable workspace is still recoverable on the next dispatch.
         if let Some(progress) = self.workspaces
             .prepare_terminal_job_close(&active, close_reason, &now)
             .map_err(|_| workspace_error())?
@@ -4421,9 +4147,6 @@ where
             dispatch,
         )
         .map_err(|_| workspace_error())?;
-        // The run key is already validated by the dispatch path. Keep the
-        // parameter in this private seam because callers use it to derive the
-        // Codex thread immediately beside the WorkerSession identity.
         debug_assert_eq!(run_key, &CodexRunKey::from_dispatch(dispatch));
         Ok(worker_session_id)
     }
@@ -4513,12 +4236,6 @@ where
             }))
     }
 
-    /// Removes registration frames retained by a predecessor process before
-    /// creating this process's replacement registration.  Such frames cannot
-    /// be replayed: the Control Plane correctly answers with the predecessor
-    /// instance, which this Worker must reject.  Treating the frame as an
-    /// internal superseded receipt preserves the durable outbox invariant for
-    /// every other response-bearing frame.
     fn retire_stale_registration_deliveries(&mut self) -> Result<(), WorkerError> {
         let stale = self
             .codex
@@ -4682,9 +4399,6 @@ fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
 }
 
 fn observation_ack_message_id(ack: &ModelAckMessage) -> Result<ExecutionMessageId, WorkerError> {
-    // Accepted, Duplicate and Gap may describe different receipts for the same
-    // input sequence. Derive the ID from the immutable receipt, including its
-    // source timestamp, so replay cannot reuse an ID with changed bytes.
     let bytes = serde_json::to_vec(&(
         &ack.ack_sequence,
         &ack.error,
@@ -4754,12 +4468,6 @@ fn candidate_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
     }
 }
 
-/// Resumes the numeric Worker message-id cursor from the durable adapter
-/// outbox.  Transport frames intentionally remain retained after a successful
-/// send, so a replacement Worker must not start at `xmsg_...01` and collide
-/// with an earlier frame that has a different timestamp or lifecycle status.
-/// Non-numeric ids belong to externally supplied protocol frames and do not
-/// participate in this local cursor.
 fn recover_message_sequence<Codex: CodexCoreAdapter>(codex: &mut Codex) -> u64 {
     codex.recovered_message_sequence().unwrap_or(0)
 }
@@ -5321,8 +5029,6 @@ fn replacement_candidate_authority_matches(
         })
 }
 
-/// Compare the immutable work identity while allowing the predecessor and
-/// successor to have distinct run/attempt identities.
 fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
     match (left, right) {
         (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
@@ -5359,11 +5065,6 @@ fn port_error(code: ExecutionPortErrorCode, message: &str, retryable: bool) -> E
     }
 }
 
-/// Validates the bounded canonical delivery patch carried by one proposal.
-///
-/// The patch content itself is bound to the batch identity by its canonical
-/// digest, which the durable store re-derives before any effect; this check
-/// rejects unbounded or off-format proposals before they become durable.
 fn validate_delegated_patch(patch: &str) -> Result<(), WorkerErrorCode> {
     const MAX_PATCH_BYTES: usize = 512 * 1024;
     if patch.is_empty()
@@ -5439,24 +5140,16 @@ fn codex_model_error() -> WorkerError {
     )
 }
 
-/// Stable binary identity emitted by `winwincode-worker --check`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerBinaryIdentity {
-    /// Binary role.
     pub role: &'static str,
-    /// Canonical `ExecutionPort` schema version.
     pub execution_port: &'static str,
-    /// Execution authority implementation.
     pub execution_kernel: &'static str,
-    /// Whether a CLI or external-agent fallback exists.
     pub external_fallback: bool,
-    /// Whether this binary accepts `--managed-session <config-file>` (plan
-    /// §14.4) and reports the managed session identity surface.
     pub managed_session: bool,
 }
 
-/// Returns compile-time Worker role identity without starting runtime services.
 #[must_use]
 pub const fn binary_identity() -> WorkerBinaryIdentity {
     WorkerBinaryIdentity {
@@ -5468,8 +5161,6 @@ pub const fn binary_identity() -> WorkerBinaryIdentity {
     }
 }
 
-// Keep these exact canonical types reachable from this crate's public API so
-// workspace and integration modules never introduce parallel event identities.
 #[allow(dead_code)]
 fn canonical_runtime_identity_types(
     _event_id: ExecutionEventId,

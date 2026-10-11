@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable bridge from verified Provider terminal facts into the canonical
-//! retry and Usage ledger.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -25,14 +22,12 @@ use crate::{
 
 const CONTEXT_SCHEMA: &str = "winwincode.model-retry-settlement-context.v3";
 
-/// Stable context dependency failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRetrySettlementContextErrorKind {
     Corrupt,
     Unavailable,
 }
 
-/// Bounded error returned by the durable frozen-context authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRetrySettlementContextError {
     kind: ModelRetrySettlementContextErrorKind,
@@ -67,32 +62,19 @@ impl fmt::Display for ModelRetrySettlementContextError {
 
 impl std::error::Error for ModelRetrySettlementContextError {}
 
-/// Reads the exact frozen retry context committed with a Provider exchange.
 pub trait ModelRetrySettlementContextPort: Send + Sync {
-    /// Loads the context for one exact exchange. Absence is a fail-closed fact.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable error for corrupt state or dependency unavailability.
     fn load_context(
         &self,
         model_exchange_id: &ModelExchangeId,
     ) -> Result<Option<ModelRetrySettlementContext>, ModelRetrySettlementContextError>;
 }
 
-/// Production reader for contexts atomically committed by
-/// [`crate::ModelRetryUsageService::start_attempt`].
 pub struct DurableModelRetryContextSource {
     storage: Mutex<SqliteStorage>,
     database_path: PathBuf,
 }
 
 impl DurableModelRetryContextSource {
-    /// Opens the retry-context index in the product database.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Unavailable` when the database cannot be opened.
     pub fn open(
         data_directory: impl AsRef<Path>,
     ) -> Result<Self, ModelRetrySettlementContextError> {
@@ -105,17 +87,11 @@ impl DurableModelRetryContextSource {
         })
     }
 
-    /// Returns the exact canonical database path for composition checks.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
 
-    /// Deterministically closes the owned database connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Unavailable` for a poisoned mutex or close failure.
     pub fn close(self) -> Result<(), ModelRetrySettlementContextError> {
         let storage = self
             .storage
@@ -162,7 +138,6 @@ impl ModelRetrySettlementContextPort for DurableModelRetryContextSource {
     }
 }
 
-/// Canonical secret-free retry context frozen before Provider invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelRetrySettlementContext {
     request: ModelRetryUsageRequest,
@@ -172,11 +147,6 @@ pub struct ModelRetrySettlementContext {
 }
 
 impl ModelRetrySettlementContext {
-    /// Validates and freezes the request and exact started attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed plan, attribution, attempt, route, or request identity.
     pub fn try_new(
         request: ModelRetryUsageRequest,
         start_receipt: ModelAttemptStartReceipt,
@@ -194,22 +164,11 @@ impl ModelRetrySettlementContext {
         })
     }
 
-    /// Serializes the only canonical durable context representation.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CorruptContext` if canonical serialization fails.
     pub fn encode_json(&self) -> Result<Vec<u8>, ModelRetrySettlementError> {
         serde_json::to_vec(&StoredSettlementContext::from_context(self)?)
             .map_err(|_| ModelRetrySettlementError::corrupt_context())
     }
 
-    /// Rehydrates and fully revalidates canonical durable context bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical JSON or any changed authority, plan, attribution,
-    /// attempt, route, or request fingerprint.
     pub fn decode_json(bytes: &[u8]) -> Result<Self, ModelRetrySettlementError> {
         let stored: StoredSettlementContext = serde_json::from_slice(bytes)
             .map_err(|_| ModelRetrySettlementError::corrupt_context())?;
@@ -274,7 +233,6 @@ impl ModelRetrySettlementContext {
         &self.request_fingerprint
     }
 
-    /// Returns the digest binding request, plan, attribution, exchange, and attempt.
     #[must_use]
     pub fn context_fingerprint(&self) -> &str {
         &self.context_fingerprint
@@ -340,7 +298,6 @@ struct StoredRetryStep {
     max_attempts: u64,
 }
 
-/// Stable production settlement failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRetrySettlementErrorKind {
     MissingContext,
@@ -351,7 +308,6 @@ pub enum ModelRetrySettlementErrorKind {
     StorageUnavailable,
 }
 
-/// Bounded production settlement failure.
 #[derive(Debug)]
 pub struct ModelRetrySettlementError {
     kind: ModelRetrySettlementErrorKind,
@@ -394,7 +350,6 @@ impl std::error::Error for ModelRetrySettlementError {
     }
 }
 
-/// Typed result of one durable retry/Usage settlement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelRetrySettlementReceipt {
     Failed(ModelRetryDecisionReceipt),
@@ -411,18 +366,12 @@ impl ModelRetrySettlementReceipt {
     }
 }
 
-/// Unique production adapter from Gateway settlement to durable retry Usage.
 pub struct DurableProviderRetrySettlement<'a> {
     storage: Mutex<SqliteStorage>,
     contexts: &'a dyn ModelRetrySettlementContextPort,
 }
 
 impl<'a> DurableProviderRetrySettlement<'a> {
-    /// Opens the canonical retry ledger in the product data directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns `StorageUnavailable` if the `SQLite` ledger cannot be opened.
     pub fn open(
         data_directory: impl AsRef<Path>,
         contexts: &'a dyn ModelRetrySettlementContextPort,
@@ -436,11 +385,6 @@ impl<'a> DurableProviderRetrySettlement<'a> {
         })
     }
 
-    /// Deterministically checkpoints and closes the settlement ledger.
-    ///
-    /// # Errors
-    ///
-    /// Returns `StorageUnavailable` for a poisoned mutex or close failure.
     pub fn close(self) -> Result<(), ModelRetrySettlementError> {
         let storage = self.storage.into_inner().map_err(|_| {
             ModelRetrySettlementError::new(ModelRetrySettlementErrorKind::StorageUnavailable)
@@ -450,12 +394,6 @@ impl<'a> DurableProviderRetrySettlement<'a> {
         })
     }
 
-    /// Applies one verified terminal to the canonical retry/Usage ledger.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for missing/corrupt context, changed identities, poisoned
-    /// storage access, or any durable ledger conflict.
     pub fn apply(
         &self,
         settlement: &ProviderGatewaySettlement,

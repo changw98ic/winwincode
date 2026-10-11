@@ -46,7 +46,6 @@ test('startup evidence is captured while the failed test runs and preserves its 
     platform: 'darwin', stdio: 'pipe', captureAfterMillis: 0, pollMillis: 5,
     inspect: async rootPid => {
       inspections += 1
-      // Compilation has no Kernel child to sample. The test appears later.
       if (inspections < 3) return ''
       command.observe(rootPid)
       return `${process.pid + 100_000} ${process.pid + 200_000} /irrelevant/code_mode_kernel-other\n`

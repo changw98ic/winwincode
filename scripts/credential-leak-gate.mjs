@@ -221,7 +221,6 @@ function inspectBytes(bytes, label, fingerprints, findings) {
   }
 }
 
-/** Deterministically scan bytes without returning matched Credential values. */
 export function scanCredentialLeakBytes({
   bytes,
   label = 'output',

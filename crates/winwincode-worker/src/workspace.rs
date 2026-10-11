@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-job Git worktree, temporary home, sandbox, and Artifact isolation.
-//!
-//! This module owns only Worker-local files. Durable lease/session authority
-//! remains in the Control Plane; an [`ActiveJob`](crate::ActiveJob) is copied
-//! into immutable candidate and Artifact provenance at the boundary.
-
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -39,7 +33,6 @@ const RECOVERY_MANIFEST_SCHEMA: u8 = 3;
 const CANDIDATE_MANIFEST_SCHEMA: u8 = 1;
 const MAX_PATH_BYTES: usize = 4_096;
 
-/// Stable categories for workspace failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceErrorCode {
     InvalidInput,
@@ -54,7 +47,6 @@ pub enum WorkspaceErrorCode {
 }
 
 impl WorkspaceErrorCode {
-    /// Stable public category; raw Git/IO messages remain private.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -71,7 +63,6 @@ impl WorkspaceErrorCode {
     }
 }
 
-/// Test-only process interruption points in durable workspace creation.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCreationInterruption {
@@ -80,7 +71,6 @@ pub enum WorkspaceCreationInterruption {
     AfterWorktreeAdded,
 }
 
-/// Test-only process interruption points in durable workspace cleanup.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCleanupInterruption {
@@ -92,7 +82,6 @@ pub enum WorkspaceCleanupInterruption {
     FailParentSync,
 }
 
-/// Test-only cleanup failure selected for a normal creation rollback.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCreationRollbackFailure {
@@ -177,7 +166,6 @@ impl From<WorkspaceCreationRollbackFailure> for CleanupInterruption {
     }
 }
 
-/// Failure returned by Worker-local workspace operations.
 #[derive(Debug)]
 pub struct WorkspaceError {
     code: WorkspaceErrorCode,
@@ -200,7 +188,6 @@ impl WorkspaceError {
         Self::new(WorkspaceErrorCode::Io, format!("{context}: {error}"))
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> WorkspaceErrorCode {
         self.code
@@ -215,7 +202,6 @@ impl fmt::Display for WorkspaceError {
 
 impl std::error::Error for WorkspaceError {}
 
-/// Immutable lease, attempt, Worker, and session binding copied from an active job.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceProvenance {
@@ -456,7 +442,6 @@ fn valid_sha256_digest(digest: &Sha256Digest) -> bool {
     })
 }
 
-/// Paths allocated exclusively to one active write job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceLayout {
     root: PathBuf,
@@ -468,44 +453,37 @@ pub struct WorkspaceLayout {
 }
 
 impl WorkspaceLayout {
-    /// Entire job-private directory removed at terminal cleanup.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Detached Git worktree used by the embedded executor.
     #[must_use]
     pub fn checkout(&self) -> &Path {
         &self.checkout
     }
 
-    /// Job-private home directory.
     #[must_use]
     pub fn home(&self) -> &Path {
         &self.home
     }
 
-    /// Job-private sandbox state directory.
     #[must_use]
     pub fn sandbox(&self) -> &Path {
         &self.sandbox
     }
 
-    /// Job-private temporary directory.
     #[must_use]
     pub fn temporary(&self) -> &Path {
         &self.temporary
     }
 
-    /// Job-private Artifact staging directory.
     #[must_use]
     pub fn artifacts(&self) -> &Path {
         &self.artifacts
     }
 }
 
-/// Why an isolated workspace reached terminal cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCloseReason {
     Completed,
@@ -513,7 +491,6 @@ pub enum WorkspaceCloseReason {
     Failed,
 }
 
-/// Evidence that one job-private directory was removed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceCleanupReport {
     pub workspace_id: String,
@@ -521,7 +498,6 @@ pub struct WorkspaceCleanupReport {
     pub removed_root: PathBuf,
 }
 
-/// One file in a complete Artifact staging snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceArtifactFile {
@@ -530,7 +506,6 @@ pub struct WorkspaceArtifactFile {
     pub digest: Sha256Digest,
 }
 
-/// Verifiable Artifact-set identity bound to exact execution authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceArtifactSnapshot {
@@ -539,7 +514,6 @@ pub struct WorkspaceArtifactSnapshot {
     pub content_digest: Sha256Digest,
 }
 
-/// Immutable code and execution facts produced from the detached worktree.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateFreezeFact {
@@ -602,7 +576,6 @@ impl CandidateFreezeFact {
         &self.provenance
     }
 
-    /// Canonical candidate Artifact bytes consumed by the trusted source resolver.
     #[must_use]
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
@@ -661,7 +634,6 @@ struct RetainedSnapshotFreeze {
     snapshot: Option<winwincode_domain::CanonicalSnapshot>,
 }
 
-/// Factory and startup recovery boundary for Worker-local workspaces.
 #[derive(Clone, Debug)]
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -731,11 +703,6 @@ impl WorkspaceManager {
         reconcile_cleaning_workspaces(&self.root, &self.source_root)
     }
 
-    /// Opens controlled source and workspace roots.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing source roots and overlapping source/workspace roots.
     pub fn open(
         root: impl AsRef<Path>,
         source_root: impl AsRef<Path>,
@@ -760,12 +727,6 @@ impl WorkspaceManager {
         Ok(manager)
     }
 
-    /// Creates one exclusive detached worktree for an authenticated active job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched authority, foreign repositories, duplicate opens,
-    /// invalid revisions, and filesystem or Git failures.
     pub fn create(&self, active: &ActiveJob) -> Result<WorkerWorkspace, WorkspaceError> {
         let plan = self.plan(active)?;
         Self::create_plan(plan)
@@ -817,17 +778,6 @@ impl WorkspaceManager {
         )
     }
 
-    /// Creates the exact Job worktree or resumes its original private checkout.
-    ///
-    /// Recovery never rebuilds mutable files from source. The deterministic
-    /// workspace identity, canonical manifest, controlled repository, private
-    /// directory layout, Git worktree root, source commit, and full active Job
-    /// provenance must all still match before the checkout is returned.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/corrupt directories, changed authority, links, missing
-    /// worktree state, or any normal creation failure.
     pub fn create_or_recover(
         &self,
         active: &ActiveJob,
@@ -1269,8 +1219,6 @@ fn archive_predecessor_snapshot_freeze(
                 "retained freeze differs from the sealed predecessor",
             ));
         }
-        // Keep the predecessor's request, receipt and Snapshot immutable.
-        // A new attempt needs its own freeze receipt before dispatch.
         manifest.snapshot_freeze_history.push(retained);
     }
     Ok(())
@@ -1331,7 +1279,6 @@ fn recovery_workspace_plan(
     }
 }
 
-/// Live exclusive workspace for one active job.
 #[derive(Debug)]
 pub struct WorkerWorkspace {
     workspace_id: String,
@@ -1356,29 +1303,21 @@ impl WorkerWorkspace {
             || rev_parse(&self.layout.checkout, "HEAD^{tree}")? != self.source_tree_id)
     }
 
-    /// Stable opaque workspace identity derived from source and lease authority.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.workspace_id
     }
 
-    /// Job-private directory layout.
     #[must_use]
     pub const fn layout(&self) -> &WorkspaceLayout {
         &self.layout
     }
 
-    /// Current authority bound to new snapshots produced here.
     #[must_use]
     pub const fn provenance(&self) -> &WorkspaceProvenance {
         &self.current_provenance
     }
 
-    /// Persists a validated same-attempt lease extension before changing memory.
-    /// The caller owns control-message authentication and expiry checks.
-    ///
-    /// # Errors
-    /// Rejects changed authority, shorter leases, or a changed durable manifest.
     pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), WorkspaceError> {
         let current = WorkspaceProvenance::from_active_job(active)?;
         if !same_provenance_with_extended_lease(&self.current_provenance, &current) {
@@ -1405,42 +1344,25 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Immutable authority that originally allocated this checkout and binds
-    /// deterministic candidate commits across sealed Worker replacement.
     #[must_use]
     pub const fn origin_provenance(&self) -> &WorkspaceProvenance {
         &self.origin_provenance
     }
 
-    /// Exact commit this detached checkout was created from.
-    ///
-    /// This is immutable base authority for deterministic batch receipts. It is
-    /// not a candidate snapshot or a later workflow barrier.
     #[must_use]
     pub fn resolved_source_commit(&self) -> &str {
         &self.source_commit_id
     }
 
-    /// Exact sealed source tree used as the first accepted workspace revision.
     #[must_use]
     pub fn resolved_source_tree(&self) -> WorkspaceRevision {
         WorkspaceRevision(format!("git-tree:{}", self.source_tree_id))
     }
 
-    /// Resolves a relative checkout path without permitting traversal or links.
-    ///
-    /// # Errors
-    ///
-    /// Rejects absolute paths, parent traversal, and symbolic links.
     pub fn checkout_path(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WorkspaceError> {
         controlled_path(&self.layout.checkout, relative.as_ref(), false)
     }
 
-    /// Writes one new Artifact file below the job-private staging directory.
-    ///
-    /// # Errors
-    ///
-    /// Rejects traversal, links, replacement, or writes beyond the job limit.
     pub fn write_artifact(
         &mut self,
         relative: impl AsRef<Path>,
@@ -1489,16 +1411,6 @@ impl WorkerWorkspace {
         artifact_file(&self.layout.artifacts, &path)
     }
 
-    /// Freezes checkout changes into a deterministic detached candidate commit.
-    ///
-    /// The stable `refs/winwincode/candidates/<candidate-id>` ref is recorded
-    /// before the snapshot is returned, so the ref always exists ahead of any
-    /// later Worktree cleanup. A ref failure fails the freeze, which keeps the
-    /// Candidate from being announced as deliverable.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unchanged tree, unsupported path types, or Git failures.
     pub fn freeze_candidate(&mut self) -> Result<CandidateFreezeFact, WorkspaceError> {
         git_status(&self.layout.checkout, &["add", "--all"])?;
         let candidate_tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
@@ -1550,17 +1462,6 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Captures the exact clean checkout used by a read-only verification Job.
-    ///
-    /// Verification workspaces are created from the frozen writer candidate
-    /// commit. They must not create a second commit or mutate the checkout;
-    /// this snapshot binds the existing commit and tree to the verifier's
-    /// lease so its terminal outcome can carry an independently acknowledged
-    /// candidate Artifact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a dirty checkout, an invalid Git head, or Git failures.
     pub fn freeze_verification(&self) -> Result<CandidateFreezeFact, WorkspaceError> {
         if !workspace_checkout_clean(&self.layout.checkout)? {
             return Err(WorkspaceError::conflict(
@@ -1601,8 +1502,6 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Retains exact freeze facts before they can leave the Worker. No product
-    /// identity is allocated here. The caller must establish protection first.
     pub(crate) fn retain_snapshot_freeze(
         &self,
         request: &SnapshotFreezeRequestMessage,
@@ -1763,11 +1662,6 @@ impl WorkerWorkspace {
             && dispatch.snapshot_id.as_ref() == Some(snapshot.snapshot_id()))
     }
 
-    /// Rebuilds a candidate's source, tree, digest, manifest, and provenance.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DigestMismatch` for altered or foreign snapshot facts.
     pub fn verify_candidate(&self, snapshot: &CandidateFreezeFact) -> Result<(), WorkspaceError> {
         let candidate_tree = rev_parse(
             &self.layout.checkout,
@@ -1800,11 +1694,6 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Captures every staged Artifact file and one aggregate content digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects links, non-regular files, non-portable paths, and read failures.
     pub fn snapshot_artifacts(&self) -> Result<WorkspaceArtifactSnapshot, WorkspaceError> {
         let files = artifact_files(&self.layout.artifacts)?;
         let content_digest = artifact_set_digest(&files);
@@ -1815,11 +1704,6 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Recomputes all Artifact file and aggregate digests.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DigestMismatch` when bytes or provenance changed.
     pub fn verify_artifacts(
         &self,
         snapshot: &WorkspaceArtifactSnapshot,
@@ -1834,25 +1718,12 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Captures an ephemeral Git tree without creating a candidate commit or
-    /// candidate ref. This is the snapshot primitive for `DebugExperiment`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a workspace error when the checkout cannot be staged or its
-    /// tree cannot be read.
     pub fn snapshot_ephemeral_revision(&mut self) -> Result<WorkspaceRevision, WorkspaceError> {
         git_status(&self.layout.checkout, &["add", "--all"])?;
         let tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
         Ok(WorkspaceRevision(format!("git-tree:{tree_id}")))
     }
 
-    /// Restores an ephemeral checkout to its accepted source commit. The base
-    /// revision is checked first so a foreign experiment cannot be reset.
-    ///
-    /// # Errors
-    ///
-    /// Returns a conflict for a foreign base or a Git error during reset.
     pub fn rollback_ephemeral_revision(
         &mut self,
         base_revision: &WorkspaceRevision,
@@ -1869,11 +1740,6 @@ impl WorkerWorkspace {
         git_status(&self.layout.checkout, &["clean", "-fdx"])
     }
 
-    /// Removes the worktree, sandbox, home, temporary files, and Artifact staging.
-    ///
-    /// # Errors
-    ///
-    /// Returns a Git or filesystem error after cleanup was attempted.
     pub fn close(
         mut self,
         reason: WorkspaceCloseReason,
@@ -3120,8 +2986,6 @@ fn candidate_manifest(
             format!("candidate bundle ref is invalid: {error}"),
         )
     })?;
-    // The Server rebuilds the candidate independently of the Device filesystem.
-    // ponytail: include history within the artifact byte limit; use negotiated incremental bundles if transfer cost warrants it.
     let bundle = git_output(repository, &["bundle", "create", "-", &reference])?;
     GitCandidateArtifactManifest::new(candidate_commit_id, bundle)
         .and_then(|manifest| manifest.encode())

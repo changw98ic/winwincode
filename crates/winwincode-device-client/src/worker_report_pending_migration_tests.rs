@@ -706,7 +706,6 @@ mod trigger_upsert_regression {
         store.close().unwrap();
         let path = root.join("device-client.sqlite3");
         let connection = Connection::open(&path).unwrap();
-        // This is the exact unpublished pre-repair WIP layout, not a weakened schema.
         connection.execute_batch("DROP TRIGGER worker_report_after_insert;
             DROP TRIGGER worker_report_after_update;
             CREATE TRIGGER worker_report_after_insert AFTER INSERT ON worker_process_registry BEGIN

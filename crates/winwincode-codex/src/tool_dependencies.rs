@@ -23,8 +23,6 @@ pub(super) fn freeze(
     }
     let ToolInputContext { request, .. } = context;
     let codex_payload = &request.payload;
-    // ToolInputContext preserves the Core wire payload. Restrict this adapter to
-    // the registered empty-argument public-example operation.
     if !matches!(codex_payload, winwincode_kernel::ToolInputGatePayload::Function { arguments } if serde_json::from_str::<serde_json::Value>(arguments).ok() == Some(serde_json::json!({})))
     {
         return None;
@@ -39,8 +37,6 @@ pub(super) fn freeze(
         binding.authority.lease.attempt,
         current_generation(state, &context.request.thread_id).ok()?
     );
-    // This adapter runs offline public examples. Its account is the installed
-    // local server and worker; it has no provider credential or OAuth account.
     adapter.snapshot(
         &catalog.catalog_digest().0,
         &binding.authority.lease.worker_id.0,

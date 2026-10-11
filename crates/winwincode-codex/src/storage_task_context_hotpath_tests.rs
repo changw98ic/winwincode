@@ -165,7 +165,6 @@ fn task_handoff_persist_keeps_skipped_history_uncloned_and_status_current() {
         drop(adapter);
         std::fs::remove_dir_all(root).unwrap();
     }
-    // Every scale and the complete audit are observed before a cost assertion fails.
     for (size, metrics, status_current) in samples {
         assert_eq!(metrics.post_action_trace_clones, 0, "history size {size}");
         assert_eq!(metrics.post_action_read_rows, 0);

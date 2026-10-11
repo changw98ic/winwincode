@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Secret-safe performance accounting for one exact Codex run.
-
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Instant, Sha256Digest};
 use winwincode_execution_port::runtime_trace_outbox::PerformanceBaselineReport;
 
-/// Stable aggregate category. The string value is persisted in the private
-/// Worker store and must remain one-to-one with this enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PerformanceOperationKind {
     PrimaryModel,
@@ -33,7 +29,6 @@ impl PerformanceOperationKind {
     }
 }
 
-/// Bounded values recorded when one stable operation completes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PerformanceOperationCompletion {
     pub(crate) usage_known: bool,
@@ -42,8 +37,6 @@ pub(crate) struct PerformanceOperationCompletion {
     pub(crate) input_tokens: i64,
     pub(crate) cached_tokens: i64,
     pub(crate) output_tokens: i64,
-    /// Actual settled Provider charge. `None` means the terminal transport did
-    /// not prove a cost and must never be interpreted as a zero-cost call.
     pub(crate) actual_cost_microunits: Option<i64>,
 }
 
@@ -61,7 +54,6 @@ impl Default for PerformanceOperationCompletion {
     }
 }
 
-/// Exact terminal model usage decoded from a provider-neutral `ModelPort` frame.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PrimaryModelUsage {
     pub(crate) input: i64,
@@ -82,8 +74,6 @@ pub(crate) struct DelegatedPerformanceTotals {
     pub(crate) pending_model_calls: i64,
 }
 
-/// Durable report projection reservation used to replay the same event after
-/// a process stop.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct StoredPerformanceProjection {
@@ -94,9 +84,6 @@ pub(crate) struct StoredPerformanceProjection {
     pub(crate) retained: bool,
 }
 
-/// Returns a bounded millisecond value or `None` for a malformed/backwards
-/// interval. Callers then retain the operation with unknown duration instead
-/// of inventing timing data.
 pub(crate) fn elapsed_millis(started_at: &Instant, completed_at: &Instant) -> Option<i64> {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 

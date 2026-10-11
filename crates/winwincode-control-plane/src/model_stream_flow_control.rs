@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stateless orchestration across the canonical Provider Gateway and model
-//! request pool. The pool remains the only frame/capacity authority and the
-//! Gateway remains the only Provider transport/settlement authority.
-
 use std::fmt;
 
 use winwincode_domain::{Instant, ModelExchangeId};
@@ -17,7 +13,6 @@ use crate::{
     ProviderGatewayTerminalReceipt, ProviderStreamControlReceipt,
 };
 
-/// Stable flow-control failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelStreamFlowErrorKind {
     InvalidBatch,
@@ -25,7 +20,6 @@ pub enum ModelStreamFlowErrorKind {
     Gateway,
 }
 
-/// Bounded failure from the cross-authority coordinator.
 #[derive(Debug)]
 pub struct ModelStreamFlowError {
     kind: ModelStreamFlowErrorKind,
@@ -83,7 +77,6 @@ impl From<ProviderGatewayError> for ModelStreamFlowError {
     }
 }
 
-/// Result of applying one canonical Provider event batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStreamFlowWriteReceipt {
     pub pool: ModelFrameWriteReceipt,
@@ -91,22 +84,18 @@ pub struct ModelStreamFlowWriteReceipt {
     pub gateway_terminal: Option<ProviderGatewayTerminalReceipt>,
 }
 
-/// Result of a Worker acknowledgement and any resulting Provider resume.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStreamFlowAckReceipt {
     pub pool: ModelFrameAckReceipt,
     pub provider_control: Option<ProviderStreamControlReceipt>,
 }
 
-/// Exact cross-authority cancellation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStreamFlowCancellationReceipt {
     pub gateway: ProviderGatewayTerminalReceipt,
     pub pool: ModelRequestTerminalReceipt,
 }
 
-/// The only orchestration seam joining Provider reads, buffered frames, Worker
-/// acknowledgements, and terminal slot release. It owns no exchange state.
 pub struct ModelStreamFlowCoordinator<'borrow, 'storage> {
     pool: &'borrow mut ModelRequestPool,
     gateway: &'borrow mut ProviderGateway<'storage>,
@@ -121,15 +110,6 @@ impl<'borrow, 'storage> ModelStreamFlowCoordinator<'borrow, 'storage> {
         Self { pool, gateway }
     }
 
-    /// Applies one already-converted Provider event batch. The caller retains
-    /// the frames and retries the exact batch after a backpressure receipt.
-    ///
-    /// Terminal Provider release/settlement precedes admission-slot release;
-    /// exact retries replay both authorities without a second release.
-    ///
-    /// # Errors
-    ///
-    /// Rejects inconsistent terminal facts and propagates pool/Gateway errors.
     pub fn offer_provider_batch(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -140,12 +120,6 @@ impl<'borrow, 'storage> ModelStreamFlowCoordinator<'borrow, 'storage> {
         self.offer_provider_batch_inner(model_exchange_id, frames, terminal, None, observed_at)
     }
 
-    /// Applies a Provider batch with durable terminal-side-effect checkpoints.
-    ///
-    /// # Errors
-    ///
-    /// Rejects inconsistent terminal facts and propagates pool, Gateway, or
-    /// checkpoint failures.
     pub fn offer_provider_batch_with_progress(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -199,12 +173,6 @@ impl<'borrow, 'storage> ModelStreamFlowCoordinator<'borrow, 'storage> {
         })
     }
 
-    /// Advances the only buffered-frame cursor and resumes Provider reading
-    /// only after the route-local low watermark is reached.
-    ///
-    /// # Errors
-    ///
-    /// Propagates pool/Gateway errors while leaving both transitions replayable.
     pub fn acknowledge(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -219,12 +187,6 @@ impl<'borrow, 'storage> ModelStreamFlowCoordinator<'borrow, 'storage> {
         })
     }
 
-    /// Applies an authoritative Worker cancellation in Gateway→Pool order so
-    /// Provider resources settle before the active admission slot is granted.
-    ///
-    /// # Errors
-    ///
-    /// Propagates exact Worker authority, Gateway, or pool failures.
     pub fn cancel_from_worker(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -234,11 +196,6 @@ impl<'borrow, 'storage> ModelStreamFlowCoordinator<'borrow, 'storage> {
         Ok(ModelStreamFlowCancellationReceipt { gateway, pool })
     }
 
-    /// Cancels with durable checkpoints around every terminal side effect.
-    ///
-    /// # Errors
-    ///
-    /// Propagates exact Worker authority, Gateway, checkpoint, or pool failures.
     pub fn cancel_from_worker_with_progress(
         &mut self,
         acknowledgement: &ModelAckMessage,

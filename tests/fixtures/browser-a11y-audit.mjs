@@ -1,11 +1,3 @@
-// UI-604 keyboard, focus, landmark, and live-region audit fixture.
-//
-// The shell findings cannot be pinned by a deterministic DOM double because
-// they are about real focus order, real landmark roles, and the real set of
-// live regions a page exposes after a realtime render.  This fixture mounts the
-// one browser shell against a closed facade and reports those facts for every
-// management surface, plus the chat surface.
-
 import { mountWinWinCodeClient } from '/module/application.js'
 
 const schemaVersion = 'winwincode/v1'
@@ -193,23 +185,17 @@ const PAGE_SELECTOR = {
   settings: '.wwc-settings',
 }
 
-// UI-604: the audit keeps one explicit allow-list of live regions.  Anything
-// outside it — a list, a card grid, a whole page container — is a regression
-// toward re-announcing every realtime render.
 const LIVE_REGION_ALLOWLIST = Object.freeze([
-  // shell
   'wwc-connection-status',
   'wwc-connection-copy-feedback',
   'wwc-auth-session-status',
   'wwc-readiness-summary',
   'wwc-client-error-copy-feedback',
-  // chat
   'wwc-chat-status',
   'wwc-chat-model-notice',
   'wwc-chat-error',
   'wwc-chat-messages',
   'wwc-chat-convert-error',
-  // management surfaces: exactly one polite status line per page
   'wwc-home-status',
   'wwc-settings-status',
 ])
@@ -238,8 +224,6 @@ function headings() {
   for (let index = 1; index < list.length; index += 1) {
     const previous = list[index - 1].level
     const current = list[index].level
-    // Nesting deeper is fine; moving back up past a parent is what breaks the
-    // outline a screen reader builds for the page.
     if (current > previous + 1) skipped.push([list[index - 1].tag, list[index].tag])
   }
   return { list, skipped }
@@ -341,8 +325,6 @@ globalThis.runSkipLinkScenario = async () => {
 
 globalThis.inspectHeadingLevels = async name => {
   await settled(name)
-  // Scoped to the page root so the shell's Scope selector and readiness
-  // sections do not blur the page's own outline.
   const root = document.querySelector(PAGE_SELECTOR[name])
   return [...root.querySelectorAll('h1, h2, h3, h4')].map(node => ({
     tag: node.tagName,

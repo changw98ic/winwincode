@@ -9,7 +9,6 @@ export interface EmptyStateProps {
   readonly detail: string
   readonly action?: HTMLElement
   readonly className?: string
-  /** UI-604: follow the level of the panel the state nests inside. */
   readonly headingLevel?: EmptyStateHeadingLevel
 }
 

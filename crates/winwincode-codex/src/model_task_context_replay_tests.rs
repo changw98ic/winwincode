@@ -144,8 +144,6 @@ async fn run_task_context_replay(database_reopened: bool, jev_enabled: bool) {
     let raw_digest = model_call_digest(&raw["request"]).unwrap();
     let live = bridge.model_port().stream(request.clone()).await.unwrap();
     let open = task_context_replay_open(&bridge);
-    // The adapter persists each queued ModelOpen before transport. Exercise that
-    // real outbox barrier, rather than calling prepare_host_payload in isolation.
     bridge
         .outbox
         .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))

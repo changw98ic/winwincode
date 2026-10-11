@@ -416,7 +416,6 @@ test('home decision cards merge one Delivery while retaining actionable item cou
 })
 
 test('Chat is the canonical default surface and every product entry stays reachable', () => {
-  // 设计稿侧栏:新对话排首位并是默认落地页,任务看板紧随其后。
   assert.equal(CLIENT_SURFACES[0]?.id, 'chat')
   assert.deepEqual(CLIENT_SURFACES.map(surface => surface.id), [
     'chat',
@@ -528,7 +527,6 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
   assert.equal(cards.running[0]?.activeWorkRunId, workRunId)
   assert.equal(DEFAULT_HOME_DASHBOARD_LIMITS.deliveries, 4)
 
-  // Section limits stay bounded even when the Scope holds many Deliveries.
   const bounded = homeDashboardState({
     visits: [],
     deliveries: deliveryState([
@@ -566,7 +564,6 @@ test('every canonical WorkItem state lands in exactly one board section', () => 
       `${status} must project into one canonical section (got ${section})`,
     )
   }
-  // The WWC-ER-1001 mapping, section by section, from the served status alone.
   assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
     status: 'in_progress',
   })])[0]), 'running')
@@ -591,7 +588,6 @@ test('every canonical WorkItem state lands in exactly one board section', () => 
   assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
     status: 'done',
   })])[0]), 'completed')
-  // Failure signals outrank motion: a partial failure surfaces as failed.
   assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
     status: 'in_progress',
     workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 2, backlog: 0, total: 3, validating: 0 },
@@ -702,8 +698,6 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     visited: 0,
   })
 
-  // A failed Attention read hides the first-use claim: the dashboard cannot
-  // prove nothing needs the user when one projection is unreadable.
   const uncertain = homeDashboardState({
     visits: [],
     deliveries: deliveryState([]),
@@ -1100,8 +1094,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   const page = byClass(rootElement, 'wwc-home')
   assert.equal(page.dataset.wwcPage, 'home')
 
-  // Design page 04: big title, display-only Scope select, and the new-task
-  // entry that deep links the §16.6 form.
   assert.match(visibleText(byClass(rootElement, 'wwc-home-heading')), /任务看板/u)
   const projectSelect = byClass(rootElement, 'wwc-home-project-select')
   assert.equal(projectSelect.disabled, true)
@@ -1125,7 +1117,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
     /就绪 · 3 项待决策 · 1 个运行中 · 1 个已完成/u,
   )
 
-  // The two live columns: Running left, Needs-you right, bold + gray count.
   const runningSection = descendants(page).find(node => node.dataset?.section === 'running')
   assert.notEqual(runningSection, undefined)
   assert.equal(byClass(runningSection, 'wwc-home-section-heading').textContent, '运行中')
@@ -1146,7 +1137,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(disabledAction.tabIndex, -1)
   assert.match(visibleText(disabled), /已过期 · 操作禁用/u)
 
-  // Pending cards: status line by kind, one accent action per decision class.
   const inputCard = decisionCards.find(card => card.dataset.urgency === 'pending')
   assert.equal(byClass(inputCard, 'wwc-home-card-status').textContent, '方案待审核')
   assert.equal(byClass(inputCard, 'wwc-home-card-action').textContent, '审核方案')
@@ -1154,8 +1144,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, 'Review the proposed delivery scope')
   assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
 
-  // Running cards: 强流程 + the mapped status text; the action opens the run
-  // page (设计稿 04 的「查看进度」).
   const runningCard = allByClass(rootElement, 'wwc-home-card')
     .find(card => card.dataset.kind === 'delivery')
   assert.notEqual(runningCard, undefined)
@@ -1189,8 +1177,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   )
   assert.deepEqual(chatLinks, [homeChatHash(productSessionId, scopeSelection)])
 
-  // Design page 04: the Usage panel and the first-use block are gone; the
-  // canonical history groups render as collapsed hairline rows.
   assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
   assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
   const validatingSection = descendants(page).find(node => node.dataset?.section === 'validating')
@@ -1254,7 +1240,6 @@ test('the Home page stays usable when one projection is unavailable and closes i
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /待办 不可用/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /用量与健康 不可用/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Running delivery/u)
-  // 设计稿 04:看板画布没有刷新控件——模型刷新只能来自生命周期,不是按钮。
   assert.equal(model.refreshes, 1)
 
   mountedPage.close()
@@ -1278,8 +1263,6 @@ test('an empty Scope stays honest without the first-use block or usage panel', (
     scopeSelection,
     ownsModel: false,
   })
-  // Design page 04 removes the first-use block and the Usage panel; the empty
-  // columns keep their explicit notes and the new-task entry stays reachable.
   assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
   assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
   const decisionsSection = descendants(rootElement)
@@ -1316,8 +1299,6 @@ test('the composed view model stays partial when pending-decision data is unavai
   assert.equal(model.state.sources.delivery, 'ok')
   assert.equal(model.state.sources.attention, 'unavailable')
   assert.equal(model.state.decisions.length, 0)
-  // A broken projection hides the first-use claim: the dashboard cannot prove
-  // the Scope is unused while Attention is unreadable.
   assert.equal(model.state.firstUse, false)
   model.close()
 })

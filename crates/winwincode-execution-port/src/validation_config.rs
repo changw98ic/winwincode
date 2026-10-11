@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical validation configuration parsing and profile selection.
-
 use std::{collections::BTreeMap, fmt, path::Component};
 
 use sha2::{Digest as _, Sha256};
@@ -14,18 +12,12 @@ use crate::generated::{
     ValidationReceiptStatus, ValidationSelectionSource,
 };
 
-/// Repository-relative location of the sole validation configuration.
 pub const VALIDATION_CONFIGURATION_PATH: &str = ".winwincode/validation.toml";
-/// Recommended command timeout that repository configurations may state explicitly.
 pub const DEFAULT_VALIDATION_TIMEOUT_MILLIS: i64 = 300_000;
-/// Recommended combined stdout/stderr limit that configurations may state explicitly.
 pub const DEFAULT_VALIDATION_OUTPUT_LIMIT_BYTES: i64 = 1_048_576;
-/// Parser bound before TOML decoding.
 pub const MAX_VALIDATION_CONFIGURATION_BYTES: usize = 262_144;
-/// Aggregate argv bound for one command.
 pub const MAX_VALIDATION_ARGV_BYTES: usize = 65_536;
 
-/// Stable validation-configuration failure classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationConfigurationErrorCode {
     InvalidToml,
@@ -34,7 +26,6 @@ pub enum ValidationConfigurationErrorCode {
     RevisionMismatch,
 }
 
-/// Bounded error that does not echo configuration or command contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidationConfigurationError {
     code: ValidationConfigurationErrorCode,
@@ -46,7 +37,6 @@ impl ValidationConfigurationError {
         Self { code, message }
     }
 
-    /// Returns the stable machine-readable failure class.
     #[must_use]
     pub const fn code(self) -> ValidationConfigurationErrorCode {
         self.code
@@ -61,7 +51,6 @@ impl fmt::Display for ValidationConfigurationError {
 
 impl std::error::Error for ValidationConfigurationError {}
 
-/// Strictly parsed configuration and its byte-exact identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedValidationConfiguration {
     configuration: ValidationConfiguration,
@@ -69,25 +58,17 @@ pub struct ParsedValidationConfiguration {
 }
 
 impl ParsedValidationConfiguration {
-    /// Returns the canonical generated configuration.
     #[must_use]
     pub const fn configuration(&self) -> &ValidationConfiguration {
         &self.configuration
     }
 
-    /// Returns the digest of the exact TOML bytes that were parsed.
     #[must_use]
     pub const fn digest(&self) -> &Sha256Digest {
         &self.digest
     }
 }
 
-/// Parses the one supported TOML shape and validates cross-reference rules.
-///
-/// # Errors
-///
-/// Rejects oversized, malformed, unknown-field, duplicate, unsafe-path, shell,
-/// incomplete-language, or dangling-command configurations.
 pub fn parse_validation_configuration(
     input: &str,
 ) -> Result<ParsedValidationConfiguration, ValidationConfigurationError> {
@@ -95,9 +76,6 @@ pub fn parse_validation_configuration(
     {
         return Err(invalid_configuration());
     }
-    // Decode through TOML's own value model before applying the generated JSON
-    // contract. This keeps TOML syntax handling separate while preserving the
-    // generated DTO's unknown-field and exact-oneOf validation.
     let toml_value: toml::Value = toml::from_str(input).map_err(|_| invalid_toml())?;
     let json_value = serde_json::to_value(toml_value).map_err(|_| invalid_toml())?;
     let configuration: ValidationConfiguration =
@@ -112,11 +90,6 @@ pub fn parse_validation_configuration(
     })
 }
 
-/// Selects an executable profile from an explicit parsed configuration.
-///
-/// # Errors
-///
-/// Rejects an unknown profile or invalid changed path set.
 pub fn select_configured_profile(
     parsed: &ParsedValidationConfiguration,
     requested: &str,
@@ -140,14 +113,6 @@ pub fn select_configured_profile(
     })
 }
 
-/// Produces a non-executable suggestion when no explicit configuration exists.
-///
-/// The returned command list is always empty, so inference cannot authorize a
-/// process invocation.
-///
-/// # Errors
-///
-/// Rejects a duplicate or non-portable changed path.
 pub fn suggest_validation_profile(
     changed_paths: &[String],
 ) -> Result<ValidationProfileSelection, ValidationConfigurationError> {
@@ -164,15 +129,6 @@ pub fn suggest_validation_profile(
     })
 }
 
-/// Resolves one profile with explicit configuration taking unconditional priority.
-///
-/// A missing configuration produces only a non-executable suggestion. An
-/// invalid present configuration must fail during parsing and is never treated
-/// as if the file were absent.
-///
-/// # Errors
-///
-/// Rejects an unknown explicit profile or invalid changed paths.
 pub fn resolve_validation_profile(
     configuration: Option<&ParsedValidationConfiguration>,
     requested: &str,
@@ -184,12 +140,6 @@ pub fn resolve_validation_profile(
     }
 }
 
-/// Verifies that a normalizer receipt binds the exact input and proven result tree.
-///
-/// # Errors
-///
-/// Rejects a revision mismatch or a status/result combination that claims more
-/// exactness than was proven.
 pub fn validate_normalizer_receipt_binding(
     receipt: &NormalizerReceipt,
     expected_base: &WorkspaceRevision,
@@ -217,12 +167,6 @@ pub fn validate_normalizer_receipt_binding(
     Ok(())
 }
 
-/// Verifies that validation ran against one exact result tree.
-///
-/// # Errors
-///
-/// Rejects non-canonical profiles, revision drift, or impossible status/check
-/// combinations.
 pub fn validate_validation_receipt_binding(
     receipt: &ValidationReceipt,
     expected_base: &WorkspaceRevision,

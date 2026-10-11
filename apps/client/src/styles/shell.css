@@ -1,15 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/*
- * Shell layout: a left sidebar (brand, vertical navigation, connection footer)
- * beside the routed main area. Connection status shares the compact mobile bar.
- */
-
 .wwc-shell {
   display: grid;
   grid-template-columns: var(--wwc-sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
-  /* App-shell viewport: the sidebar and its footer stay pinned while the main
-     area scrolls internally. */
   height: 100vh;
 }
 
@@ -56,8 +49,6 @@
   cursor: pointer;
 }
 
-/* UI-604: the skip link is the keyboard bypass for the sidebar navigation.  It
-   stays visually hidden until focused so pointer users see no change. */
 .wwc-skip-link {
   position: absolute;
   left: var(--wwc-space-2);
@@ -103,14 +94,10 @@
   cursor: not-allowed;
 }
 
-/* The settings entry sits in the sidebar footer, as in the reference layout. */
-/* Design sidebar footer: the settings entry renders inside the connection-bar
-   footer row, under 「Client 已连接」. */
 .wwc-connection-bar .wwc-navigation-link {
   margin-top: var(--wwc-space-3);
 }
 
-/* UI-506: navigation badge for entries that need the user. */
 .wwc-navigation-badge {
   display: inline-block;
   min-width: var(--wwc-space-4);
@@ -125,9 +112,6 @@
   text-align: center;
 }
 
-/* The connection bar docks to the sidebar footer; its appearance lives in the
-   components layer, this only places it in the grid. 它与侧栏同列同底色,
-   右侧描边与 header 贯通,读起来是侧栏的一部分而非独立浮块。 */
 .wwc-connection-bar {
   flex: 0 0 auto;
   margin: auto calc(-1 * var(--wwc-space-3)) calc(-1 * var(--wwc-space-4));
@@ -213,13 +197,10 @@
   background: var(--wwc-color-danger-surface);
 }
 
-/* Pages render flat on the canvas; cards and panels carry the borders instead. */
 .wwc-surface-slot {
   min-height: 30rem;
 }
 
-/* AUTH-100.2: the username + password sign-in page is the unauthenticated
-   shell region. The reference layout centers the form on the paper canvas. */
 .wwc-login {
   max-width: 26rem;
   margin: var(--wwc-space-16) auto;
@@ -262,7 +243,6 @@
   box-sizing: border-box;
 }
 
-/* Design page 01: the eye toggle sits inside the password field's right edge. */
 .wwc-login-password-wrap {
   position: relative;
 }
@@ -390,10 +370,8 @@
     margin-top: var(--wwc-space-0);
   }
 
-
 }
 
-/* Design shell: nav links are icon + label rows in the sidebar. */
 .wwc-navigation-link {
   display: flex;
   align-items: center;
@@ -409,8 +387,6 @@
   min-width: 0;
 }
 
-/* Connection footer: the design keeps a single "Client 已连接" line that links
-   to the device page; details stay available in the sidebar flow. */
 .wwc-connection-device-link {
   color: inherit;
   text-decoration: none;
@@ -422,7 +398,6 @@
   display: none;
 }
 
-/* Design sidebar 「最近对话」 section under the navigation. */
 .wwc-recent-chats {
   min-height: 0;
   flex: 1;
@@ -456,12 +431,10 @@
   flex: 0 0 auto;
 }
 
-/* The active session uses the same neutral selection as the navigation. */
 .wwc-sidebar-recent-item-active {
   background: var(--wwc-color-header-active);
 }
 
-/* 设计稿 03b:会话打开时「新对话」不再重复高亮。 */
 .wwc-navigation-link.wwc-navigation-link-in-session[aria-current='page'] {
   background: transparent;
   border-color: transparent;

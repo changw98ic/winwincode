@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receipt-derived internal task state. Raw tool output remains in Core storage.
-
 use std::path::{Component, Path};
 
 use codex_protocol::protocol::{
@@ -13,8 +11,6 @@ const MAX_CHANGES: usize = 128;
 const MAX_CHECKS: usize = 16;
 const MAX_PENDING: usize = 64;
 
-/// Derives the small host-owned part of the request. Core history is not copied
-/// into a second ledger; only this suffix is frozen for request replay.
 pub(crate) fn context_snapshot(
     run: &serde_json::Value,
 ) -> Result<Option<String>, serde_json::Error> {
@@ -29,8 +25,6 @@ pub(crate) fn context_snapshot(
     } else {
         TaskHandoffRecord::from_job(&job, workspace)
     };
-    // The state is advisory, but must refer to this exact sealed execution.
-    // Do not let a stale restored record describe another checkout or Job.
     if state.task.job_id != job.job_id.0
         || state.workspace != workspace
         || state.task.source_revision != job.workspace.checkout_revision
@@ -69,7 +63,6 @@ pub(crate) fn context_snapshot(
     )))
 }
 
-/// Attaches the already-frozen host state while preserving Core instructions.
 pub(crate) fn attach_context(
     payload: &mut serde_json::Value,
     context: &str,
@@ -92,7 +85,6 @@ pub(crate) fn attach_context(
     Ok(())
 }
 
-/// Records observed operations, with exact turn/call provenance.
 pub(crate) fn observe(record: &mut TaskHandoffRecord, event: &EventMsg) -> bool {
     match event {
         EventMsg::ExecCommandBegin(call) => {
@@ -113,7 +105,6 @@ pub(crate) fn observe(record: &mut TaskHandoffRecord, event: &EventMsg) -> bool 
         EventMsg::PatchApplyEnd(call) => observe_patch(record, call),
         EventMsg::PlanUpdate(plan) => {
             record.task.plan = Some(serde_json::json!({"items": plan.plan}));
-            // A checklist marked completed is not independent acceptance.
         }
         _ => return false,
     }
@@ -126,7 +117,6 @@ fn observe_check(record: &mut TaskHandoffRecord, call: &ExecCommandEndEvent) {
     if !winwincode_domain::observed_verification_command_is_check(&call.command) {
         return;
     }
-    // Re-delivery of a result must not evict another observation or reorder checks.
     if record
         .validation
         .checks
@@ -162,8 +152,6 @@ fn observe_patch(record: &mut TaskHandoffRecord, call: &PatchApplyEndEvent) {
     let source = source_id(&call.turn_id, &call.call_id);
     record.unverified.remove(&source);
     if !call.success || call.status != PatchApplyStatus::Completed {
-        // The result is known and no successful change was observed. Failed
-        // attempt history remains in receipts, rather than as a missing result.
         return;
     }
     for (path, change) in &call.changes {

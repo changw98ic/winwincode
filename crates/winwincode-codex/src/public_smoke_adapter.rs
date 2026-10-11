@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Trusted dependency adapter for the bundled offline public-example runner.
 use crate::tool_input_source::source_digest;
 use serde::Deserialize;
 use serde_json::{Value, json};

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Slack protocol adapter over the durable Integration Framework.
-
 use std::fmt;
 use std::fmt::Write as _;
 use std::str::FromStr;
@@ -21,7 +19,6 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical Integration Framework protocol identifier for Slack.
 pub const SLACK_CONNECTOR_PROTOCOL: &str = "slack.web-api.v1";
 
 const MAX_SIGNING_SECRET_BYTES: usize = 4_096;
@@ -36,17 +33,11 @@ const INTERACTION_ACK_BUDGET_MILLIS: u64 = 3_000;
 const HISTORY_PAGE_SIZE: usize = 100;
 const USER_AGENT: &str = "WinWinCode-Slack-Connector";
 
-/// Canonical Slack workspace identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SlackWorkspaceId(String);
 
 impl SlackWorkspaceId {
-    /// Builds a canonical Slack workspace identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-portable Team or workspace identifier.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !valid_slack_id(&value, b"TE") {
@@ -61,17 +52,11 @@ impl SlackWorkspaceId {
     }
 }
 
-/// Canonical Slack application identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SlackAppId(String);
 
 impl SlackAppId {
-    /// Builds a canonical Slack application identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-portable application identifier.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !valid_slack_id(&value, b"A") {
@@ -86,17 +71,11 @@ impl SlackAppId {
     }
 }
 
-/// Canonical Slack bot identity returned by `auth.test`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SlackBotId(String);
 
 impl SlackBotId {
-    /// Builds a canonical Slack bot identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-portable bot identifier.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !valid_slack_id(&value, b"B") {
@@ -111,7 +90,6 @@ impl SlackBotId {
     }
 }
 
-/// Exact non-secret Slack installation identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlackInstallationIdentity {
@@ -146,17 +124,11 @@ impl SlackInstallationIdentity {
     }
 }
 
-/// Canonical Slack conversation identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SlackChannelId(String);
 
 impl SlackChannelId {
-    /// Builds a canonical Slack public/private/direct conversation identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-portable conversation identifier.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !valid_slack_id(&value, b"CGD") {
@@ -171,14 +143,12 @@ impl SlackChannelId {
     }
 }
 
-/// Explicit TLS roots for Slack or a loopback Slack sandbox.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SlackTlsRoots {
     WebPki,
     Specific(Vec<Vec<u8>>),
 }
 
-/// Credential-free connector authority for one workspace/channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlackConnectorConfig {
     integration: IntegrationId,
@@ -193,11 +163,6 @@ pub struct SlackConnectorConfig {
 }
 
 impl SlackConnectorConfig {
-    /// Builds one exact Slack workspace/channel and Control Plane deep-link boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identities, insecure URLs, or malformed TLS roots.
     pub fn try_new(
         integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
@@ -252,18 +217,12 @@ impl SlackConnectorConfig {
     }
 }
 
-/// Slack request signature headers preserved only for immediate verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SlackWebhookHeaders {
     proof: SlackSigningProof,
 }
 
 impl SlackWebhookHeaders {
-    /// Builds canonical Slack signing headers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsafe time or a non-canonical `v0=` signature.
     pub fn try_new(
         timestamp_seconds: u64,
         signature: impl Into<String>,
@@ -293,7 +252,6 @@ impl fmt::Debug for SlackWebhookHeaders {
     }
 }
 
-/// Immediate empty acknowledgment for one valid Slack interaction request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlackInteractionAcknowledgement {
     send_by_millis: u64,
@@ -316,7 +274,6 @@ impl SlackInteractionAcknowledgement {
     }
 }
 
-/// Parsed Slack interaction plus its mandatory immediate acknowledgment.
 pub struct SlackInteractionIngress {
     acknowledgement: SlackInteractionAcknowledgement,
     decision: Option<InboundWebhookRequest>,
@@ -349,7 +306,6 @@ impl SlackInteractionIngress {
     }
 }
 
-/// Builds Integration Framework requests from Slack interactivity form bodies.
 #[derive(Clone, Debug)]
 pub struct SlackWebhookRequestFactory {
     config: SlackConnectorConfig,
@@ -361,11 +317,6 @@ impl SlackWebhookRequestFactory {
         Self { config }
     }
 
-    /// Builds one exact raw request after closed callback/scope validation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed form data, unsupported actions, or foreign workspace/channel scope.
     pub fn accept(
         &self,
         scope: IntegrationScope,
@@ -418,15 +369,9 @@ impl SlackWebhookRequestFactory {
     }
 }
 
-/// Secret Slack app signing material.
 pub struct SlackSigningSecret(Vec<u8>);
 
 impl SlackSigningSecret {
-    /// Builds a bounded non-empty signing secret.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized material.
     pub fn try_new(value: impl AsRef<[u8]>) -> Result<Self, IntegrationError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > MAX_SIGNING_SECRET_BYTES {
@@ -452,7 +397,6 @@ impl Drop for SlackSigningSecret {
     }
 }
 
-/// Closed Slack token permission snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SlackBotPermissions {
     chat_write: bool,
@@ -469,7 +413,6 @@ impl SlackBotPermissions {
     }
 }
 
-/// Short-lived, scope-bound Slack bot token.
 pub struct SlackBotToken {
     value: Vec<u8>,
     installation: SlackInstallationIdentity,
@@ -478,11 +421,6 @@ pub struct SlackBotToken {
 }
 
 impl SlackBotToken {
-    /// Builds a token bound to its resolved workspace/channel permission facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, control-containing, or oversized token material.
     pub fn try_new(
         value: impl Into<String>,
         installation: SlackInstallationIdentity,
@@ -532,14 +470,12 @@ impl Drop for SlackBotToken {
     }
 }
 
-/// Credential lookup failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlackCredentialErrorKind {
     Unavailable,
     Revoked,
 }
 
-/// Secret-safe Slack credential resolution failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SlackCredentialError(SlackCredentialErrorKind);
 
@@ -568,23 +504,12 @@ impl fmt::Display for SlackCredentialError {
 
 impl std::error::Error for SlackCredentialError {}
 
-/// Credential authority used by signing verification and Web API calls.
 pub trait SlackCredentialPort {
-    /// Resolves the Slack app signing secret.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable missing/revoked facts.
     fn resolve_signing_secret(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<SlackSigningSecret, SlackCredentialError>;
 
-    /// Resolves a scope-bound bot token.
-    ///
-    /// # Errors
-    ///
-    /// Returns only stable missing/revoked facts.
     fn resolve_bot_token(
         &mut self,
         reference: &CredentialReferenceId,
@@ -592,13 +517,11 @@ pub trait SlackCredentialPort {
     ) -> Result<SlackBotToken, SlackCredentialError>;
 }
 
-/// Clock used for Slack signature and durable rate-limit boundaries.
 pub trait SlackClock {
     #[must_use]
     fn now_millis(&self) -> u64;
 }
 
-/// Production wall clock for Slack protocol boundaries.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemSlackClock;
 
@@ -613,7 +536,6 @@ impl SlackClock for SystemSlackClock {
     }
 }
 
-/// Slack HMAC-SHA256 verifier with strict timestamp replay protection.
 pub struct SlackWebhookVerifier<Credentials, Clock> {
     config: SlackConnectorConfig,
     credentials: Credentials,
@@ -671,7 +593,6 @@ impl<Credentials: SlackCredentialPort, Clock: SlackClock> WebhookSignatureVerifi
     }
 }
 
-/// Slack Web API methods with independent workspace/application rate gates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlackWebApiMethod {
     ChatPostMessage,
@@ -679,7 +600,6 @@ pub enum SlackWebApiMethod {
 }
 
 impl SlackWebApiMethod {
-    /// Returns the canonical Slack API method name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -689,13 +609,7 @@ impl SlackWebApiMethod {
     }
 }
 
-/// Product-owned durable lower bound for Slack API retries.
 pub trait SlackRateLimitPort {
-    /// Returns the remaining lower-bound delay for one method.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe storage failure when the gate is unavailable.
     fn retry_after_millis(
         &self,
         installation: &SlackInstallationIdentity,
@@ -703,11 +617,6 @@ pub trait SlackRateLimitPort {
         now_millis: u64,
     ) -> Result<Option<u64>, ConnectorCallError>;
 
-    /// Records a provider `Retry-After` floor and returns the effective delay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe storage failure when the gate is unavailable.
     fn observe(
         &self,
         installation: &SlackInstallationIdentity,
@@ -717,7 +626,6 @@ pub trait SlackRateLimitPort {
     ) -> Result<u64, ConnectorCallError>;
 }
 
-/// Slack inbound normalizer and retry-stable Web API adapter.
 pub struct SlackConnector<Credentials, Clock> {
     config: SlackConnectorConfig,
     credentials: Credentials,
@@ -727,11 +635,6 @@ pub struct SlackConnector<Credentials, Clock> {
 }
 
 impl<Credentials, Clock> SlackConnector<Credentials, Clock> {
-    /// Builds a no-proxy, no-redirect, rustls-verified Slack connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots.
     pub fn try_new(
         config: SlackConnectorConfig,
         credentials: Credentials,

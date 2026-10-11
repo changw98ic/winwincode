@@ -30,7 +30,6 @@ use crate::{
     command_receipt,
 };
 
-/// Failure at the single generated-command → policy → audit → Publication seam.
 #[derive(Debug)]
 pub enum PublicationCommandError {
     InvalidInput(String),
@@ -206,14 +205,6 @@ impl From<PublicationProviderRegistryError> for PublicationCommandError {
 }
 
 impl ControlPlane {
-    /// Applies the repository policy and durably audits its exact rule before
-    /// persisting one Publication intent. Provider effects remain deferred to
-    /// the policy-guarded resume seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PERMISSION_DENIED` facts for a recorded policy denial and fails
-    /// closed before intent persistence when policy facts or audit storage are unavailable.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_publication_publish(
         &mut self,
@@ -261,14 +252,6 @@ impl ControlPlane {
         Ok(publication)
     }
 
-    /// Reconciles one durable Publication only after the current repository
-    /// policy decision has been recorded. This is the application seam used by
-    /// recovery workers; the provider adapter has no direct coordinator path.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed before a provider lookup or write when current policy facts
-    /// are denied, stale, or cannot be written to the immutable audit store.
     pub fn resume_publication(
         &mut self,
         publication_id: &winwincode_domain::PublicationId,
@@ -310,12 +293,6 @@ impl ControlPlane {
         Ok(publication)
     }
 
-    /// Reads retained audit facts through an already-authorized exact scope.
-    /// This is the Rust application seam; no HTTP audit query is introduced here.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the audit store is unavailable, corrupt, or the page is invalid.
     pub fn read_audit(
         &self,
         access: &AuditAccess,
@@ -335,9 +312,6 @@ impl ControlPlane {
         context: &PublicationPolicyContext,
     ) -> Result<(), PublicationCommandError> {
         let Some(store) = self.audit_store.as_mut() else {
-            // A new intent or provider operation cannot reach this point without
-            // the policy audit. The only audit-less success is an exact durable
-            // command-receipt replay whose original result was already audited.
             return Ok(());
         };
         append_publication_result_audit(store, publication, context)

@@ -1,18 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `WorkerLaunchGrant` application service over the durable Server-side
-//! launch grant ledger.
-//!
-//! The Control Plane is the authoritative owner of Worker launch grants (plan
-//! 7.8, 14, 17.2): it issues one grant per worker launch behind the
-//! five-condition issue gate (device online, lease holder with a confirmed
-//! `occupied` or `draining` lease and the exact fencing token, a binding
-//! belonging to the leased client and visible to the holder, a free
-//! worker-session slot), settles the Device Client's
-//! `client.worker.launch_ack` exactly once, and revokes or expires grants
-//! through their frozen `issued | consumed | revoked | expired` state
-//! machine. Every transition lands in the durable launch audit trail.
-
 use std::fmt;
 
 use winwincode_domain::Instant;
@@ -21,57 +8,33 @@ use winwincode_storage::{
     WorkerLaunchGrantStoreError, WorkerLaunchGrantStoreErrorKind,
 };
 
-/// Re-exported so service consumers can name the frozen grant states and
-/// records without importing the storage crate directly.
 pub use winwincode_storage::WorkerLaunchGrantRecord;
 pub use winwincode_storage::WorkerLaunchGrantState as LaunchGrantState;
 
-/// Stable service failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerLaunchGrantServiceErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// The client node presence is not `online`.
     PresenceNotOnline,
-    /// The client node is `locked`.
     ClientLocked,
-    /// No occupancy lease matches the requested identity.
     UnknownOccupancyLease,
-    /// The lease belongs to a user other than the grant holder.
     NotLeaseHolder,
-    /// The lease is neither `occupied` nor `draining`.
     OccupancyNotConfirmed,
-    /// The command carried a fencing token other than the bound token.
     FencingTokenMismatch,
-    /// No repository binding matches the requested identity.
     UnknownRepositoryBinding,
-    /// The binding belongs to a client node other than the leased one.
     BindingForeignClient,
-    /// The binding is not visible to the holder.
     BindingNotVisible,
-    /// The client node has no free worker-session slot.
     CapacityExhausted,
-    /// The worker session already carries a non-terminal grant.
     LaunchGrantConflict,
-    /// The grant's expiry deadline passed before the acknowledgement.
     GrantExpired,
-    /// No launch grant matches the requested identity.
     UnknownLaunchGrant,
-    /// An echoed settlement field does not match the grant binding.
     FieldMismatch,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost an impossible race.
     RevisionConflict,
-    /// A durable row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free launch grant service error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerLaunchGrantServiceError {
     kind: WorkerLaunchGrantServiceErrorKind,
@@ -163,25 +126,16 @@ impl From<WorkerLaunchGrantStoreError> for WorkerLaunchGrantServiceError {
     }
 }
 
-/// Worker launch grant application service over one storage connection.
 pub struct WorkerLaunchGrantService<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl<'storage> WorkerLaunchGrantService<'storage> {
-    /// Builds one service over the sole product-state storage authority.
     #[must_use]
     pub fn new(storage: &'storage mut SqliteStorage) -> Self {
         Self { storage }
     }
 
-    /// Atomically issues one worker launch grant behind the issue gate (plan
-    /// 14.3 step 4). The `issued` grant and its audit row commit together.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any failed gate condition, a reused grant id, or storage
-    /// failure.
     pub fn issue(
         &mut self,
         issuance: &LaunchGrantIssuance,
@@ -193,9 +147,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .issue(issuance, now)?)
     }
 
-    /// Issues a unique launch successor under trusted exit authority.
-    /// # Errors
-    /// Rejects altered identity, duplicate launch or storage failure.
     pub fn issue_replacement(
         &mut self,
         issuance: &LaunchGrantIssuance,
@@ -208,15 +159,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .issue_replacement(issuance, Some(predecessor), now)?)
     }
 
-    /// Settles one `client.worker.launch_ack` exactly once (plan 14.3 step
-    /// 10): an accepted acknowledgement consumes an `issued` grant, a replay
-    /// of a consumed grant is an idempotent no-op, and a rejection keeps the
-    /// grant `issued` with the reason recorded in the audit trail.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a field mismatch, a stale token, an expired
-    /// grant, an illegal transition, or storage failure.
     pub fn settle_device_launch_ack(
         &mut self,
         node_id: &str,
@@ -229,10 +171,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .settle_device_launch_ack(node_id, settlement, now)?)
     }
 
-    /// Settles an exact durable launch receipt.
-    ///
-    /// # Errors
-    /// Returns an authority or storage failure without changing the receipt.
     pub fn settle_launch_ack(
         &mut self,
         settlement: &LaunchAckSettlement,
@@ -244,11 +182,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .settle_launch_ack(settlement, now)?)
     }
 
-    /// Revokes an `issued` grant before the device accepted it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a non-`issued` grant, or storage failure.
     pub fn revoke(
         &mut self,
         worker_launch_grant_id: &str,
@@ -264,12 +197,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
         )?)
     }
 
-    /// Expires every `issued` grant whose expiry deadline passed; returns
-    /// the expired grant ids.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire(
         &mut self,
         cutoff: &Instant,
@@ -277,11 +204,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
         Ok(self.storage.worker_launch_grant_ledger()?.expire(cutoff)?)
     }
 
-    /// Returns one durable launch grant projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity or storage failure.
     pub fn snapshot(
         &mut self,
         worker_launch_grant_id: &str,
@@ -292,11 +214,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .snapshot(worker_launch_grant_id)?)
     }
 
-    /// Returns the one non-terminal grant of a worker session, if any.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity or storage failure.
     pub fn active_grant_for_session(
         &mut self,
         worker_session_id: &str,
@@ -307,9 +224,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .active_grant_for_session(worker_session_id)?)
     }
 
-    /// Settles an authenticated current Device's exact process exit.
-    /// # Errors
-    /// Rejects invalid report identity or unavailable storage.
     pub fn observe_trusted_exit(
         &mut self,
         node: &str,
@@ -324,9 +238,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .observe_trusted_exit(node, session, instance, occupancy, now)?)
     }
 
-    /// Returns durable current-Device exit evidence for a launch grant.
-    /// # Errors
-    /// Rejects malformed identity or unavailable storage.
     pub fn has_trusted_exit(&mut self, grant: &str) -> Result<bool, WorkerLaunchGrantServiceError> {
         Ok(self
             .storage
@@ -334,13 +245,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .has_trusted_exit(grant)?)
     }
 
-    /// Returns the newest launch grant anchored to one product session, if
-    /// any, whatever its lifecycle state: the anchor is the permission fact
-    /// that ties the session to device execution.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical product session identity or storage failure.
     pub fn newest_grant_for_product_session(
         &mut self,
         product_session_id: &str,
@@ -351,14 +255,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .newest_grant_for_product_session(product_session_id)?)
     }
 
-    /// Returns the newest launch grant anchored to one `StrongFlow` `WorkRun`,
-    /// if any, whatever its lifecycle state (`FLOW-100.5`): the per-WorkRun
-    /// anchor routes that role's job to the exact `WorkerSession` the Client
-    /// launched for it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `WorkRun` identity or storage failure.
     pub fn newest_grant_for_work_run(
         &mut self,
         work_run_id: &str,
@@ -369,12 +265,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .newest_grant_for_work_run(work_run_id)?)
     }
 
-    /// Counts the non-terminal grants of one client node — the durable
-    /// reservation view capacity is judged against (plan 14.5).
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn non_terminal_count_for_node(
         &mut self,
         client_node_id: &str,
@@ -385,11 +275,6 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .non_terminal_count_for_node(client_node_id)?)
     }
 
-    /// Returns the durable launch audit trail of one grant, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity or storage failure.
     pub fn audit_trail(
         &mut self,
         worker_launch_grant_id: &str,
@@ -447,8 +332,6 @@ mod tests {
 
     const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-    /// Seeds the happy-path fixture and returns every identity the issuance
-    /// command needs.
     fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> (String, String, u64, String) {
         let node = format!("cnd_{}", suffix(seed));
         let holder = format!("usr_{}", suffix(seed + 1));
@@ -607,7 +490,6 @@ mod tests {
 
     #[test]
     fn representative_store_errors_map_one_to_one_onto_the_service_taxonomy() {
-        // Input validation failures need no database.
         let invalid = LaunchGrantIssuance::try_new(
             "nope",
             format!("cnd_{}", suffix(1)),
@@ -631,11 +513,8 @@ mod tests {
         );
 
         let mut storage = SqliteStorage::open(temporary_directory("mapping")).expect("storage");
-        // Production flows open the registry ledger first; touch it so the
-        // client_nodes schema exists on this fresh database.
         let _ = storage.client_node_registry().expect("registry");
         let mut service = WorkerLaunchGrantService::new(&mut storage);
-        // Issue against an empty database names the unknown client node.
         let issuance = LaunchGrantIssuance::try_new(
             format!("wlg_{}", suffix(20)),
             format!("cnd_{}", suffix(21)),
@@ -660,8 +539,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantServiceErrorKind::UnknownClientNode
         );
-        // Settlement and revocation against an unknown grant name the
-        // unknown-grant category.
         let settlement = LaunchAckSettlement::try_new(
             format!("wlg_{}", suffix(30)),
             format!("ocl_{}", suffix(31)),
@@ -744,7 +621,6 @@ mod tests {
                 )
                 .expect("settle");
             assert!(matches!(outcome, LaunchAckOutcome::Consumed(_)));
-            // The replay stays an accepted idempotent no-op.
             let outcome = service
                 .settle_launch_ack(
                     &settlement_for(seed + 20, &lease_id, token, true),

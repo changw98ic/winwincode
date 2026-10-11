@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable candidate/runtime/Evidence join for production Delivery verdicts.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::from_slice;
 use sha2::{Digest, Sha256};
@@ -96,12 +94,6 @@ pub(crate) fn resolve(
     })
 }
 
-/// Rebuilds the current successful writer candidate from the same durable
-/// terminal and Artifact authorities used by production verdict resolution.
-///
-/// A Delivery without a successful current writer has no candidate. Once a
-/// writer succeeds, every missing, corrupt, ambiguous, or stale source fact is
-/// rejected rather than falling back to an older writer.
 pub(crate) fn resolve_current_candidate(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -113,10 +105,6 @@ pub(crate) fn resolve_current_candidate(
         .map(|resolved| resolved.map(|(candidate, _source)| candidate))
 }
 
-/// Rebuilds the current Candidate together with the opaque trusted Git source
-/// used to freeze it. Read-only Candidate detail projections use this seam so
-/// they never accept a caller-supplied repository locator, commit, tree, path,
-/// or diff digest.
 pub(crate) fn resolve_current_candidate_with_source(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -179,7 +167,6 @@ pub(crate) fn resolve_current_candidate_with_source(
     Ok(Some((candidate, source)))
 }
 
-/// One candidate authority join shared by terminal replay, review reads and verdicts.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn freeze_source(
     storage: &dyn ProductStateStorage,

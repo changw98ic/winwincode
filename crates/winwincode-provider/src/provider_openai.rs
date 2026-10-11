@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `OpenAI` chat/completions protocol translation for the external HTTPS/SSE adapter.
-//!
-//! Converts the Codex `ModelStreamRequest` JSON shape into an `OpenAI`
-//! `chat.completions` body and converts `chat.completion.chunk` SSE frames into
-//! canonical `ProviderStreamEvent`s. The configured endpoint is used verbatim;
-//! this module never forces a `/v1/messages` suffix.
-
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
@@ -31,11 +24,6 @@ mod media_tests;
 #[path = "provider_openai_usage_tests.rs"]
 mod usage_tests;
 
-/// Translates one Codex `ModelStreamRequest` payload into an `OpenAI` chat body.
-///
-/// # Errors
-///
-/// Rejects malformed envelopes, unsafe token limits, and size overflows.
 pub(crate) fn prepare_openai_chat_request(
     payload: &[u8],
     upstream_model_id: &str,
@@ -225,8 +213,6 @@ fn tool_result_content(
             _ => return Err(AnthropicCodecError::invalid_request()),
         }
     }
-    // Chat tool messages accept text only. A matched receipt precedes the
-    // mixed content, whose source marker and block order remain intact.
     if has_media {
         Ok((format!("Tool call source_id: {call_id}"), media))
     } else {
@@ -253,16 +239,11 @@ fn openai_image(block: &Map<String, Value>) -> Result<Value, AnthropicCodecError
     Ok(image)
 }
 
-/// Parsed `OpenAI` chat stream: canonical events plus a terminal fact.
 pub(crate) struct ParsedOpenAiStream {
     pub events: Vec<ProviderStreamEvent>,
     pub terminal: ProviderGatewayTerminal,
 }
 
-/// Retains a real usage fact even when later stream data is incomplete.
-///
-/// Only a bounded, well-formed prefix from one validated response identity is
-/// considered. A usage fact does not establish successful model completion.
 pub(crate) fn observed_openai_usage(
     bytes: &[u8],
     max_event_bytes: usize,
@@ -319,11 +300,6 @@ pub(crate) fn observed_openai_usage(
     Some((response_id?, usage?))
 }
 
-/// Converts `chat.completion.chunk` SSE into canonical Provider stream events.
-///
-/// # Errors
-///
-/// Rejects malformed chunks, lifecycle violations, and size overflows.
 pub(crate) fn parse_openai_chat_sse(
     bytes: &[u8],
     max_event_bytes: usize,
@@ -418,9 +394,6 @@ fn parse_openai_sse_envelopes(
             index + 1 == frame_count,
         )?;
     }
-    // [DONE] is a transport marker. The chunks still have to establish their
-    // own completion, valid output and usage, whether this marker is present
-    // or the peer closes the response immediately after the terminal chunk.
     Ok(OpenAiWire { envelopes, done })
 }
 
@@ -845,8 +818,6 @@ fn tool_arguments_error(reason: ProviderFinishReason) -> AnthropicCodecError {
 }
 
 fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError> {
-    // External usage metadata is additive. Validate consumed counters, not
-    // an exact upstream field list, for both stream and attempt accounting.
     let value = object(value).map_err(|_| usage_error("$.usage"))?;
     let prompt = usage_number(value, "prompt_tokens", "$.usage.prompt_tokens")?;
     let completion = usage_number(value, "completion_tokens", "$.usage.completion_tokens")?;

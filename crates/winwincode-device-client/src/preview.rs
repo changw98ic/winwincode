@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-initiated tunnel for exact, locally authorized preview services.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
@@ -29,11 +27,6 @@ const MAX_HTTP_RESPONSE_BYTES: usize = MAX_PREVIEW_BODY_BYTES + 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// One service approved by the local run supervisor.
-///
-/// The socket stays device-local. Only loopback sockets are accepted, and a
-/// request from the Backend selects this service by opaque `sourceId`; it can
-/// never provide a host or port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizedPreviewSource {
     descriptor: PreviewSourceDescriptor,
@@ -41,13 +34,6 @@ pub struct AuthorizedPreviewSource {
 }
 
 impl AuthorizedPreviewSource {
-    /// Binds one preview identity to the exact loopback socket owned by its
-    /// managed run.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-loopback/zero-port targets, malformed identities, and a
-    /// live/frozen identity mismatch.
     pub fn new(
         descriptor: PreviewSourceDescriptor,
         socket: SocketAddr,
@@ -90,7 +76,6 @@ impl AuthorizedPreviewSource {
     }
 }
 
-/// Device-local sources currently authorized by a managed preview run.
 #[derive(Clone, Default, Debug)]
 pub struct AuthorizedPreviewSourceRegistry {
     sources: Arc<RwLock<BTreeMap<String, AuthorizedPreviewSource>>>,
@@ -98,8 +83,6 @@ pub struct AuthorizedPreviewSourceRegistry {
 }
 
 impl AuthorizedPreviewSourceRegistry {
-    /// Adds or replaces a source whose identity and loopback socket were
-    /// already checked by [`AuthorizedPreviewSource::new`].
     pub fn insert(&self, source: AuthorizedPreviewSource) {
         let mut sources = self
             .sources
@@ -109,7 +92,6 @@ impl AuthorizedPreviewSourceRegistry {
         self.revision.fetch_add(1, Ordering::Release);
     }
 
-    /// Removes one source and returns whether it was present.
     pub fn remove(&self, source_id: &str) -> bool {
         let mut sources = self
             .sources
@@ -122,7 +104,6 @@ impl AuthorizedPreviewSourceRegistry {
         removed
     }
 
-    /// Returns the exact current sources used for the next registration.
     #[must_use]
     pub fn snapshot(&self) -> Vec<AuthorizedPreviewSource> {
         self.sources
@@ -153,9 +134,6 @@ impl AuthorizedPreviewSourceRegistry {
     }
 }
 
-/// One outbound preview tunnel. The caller owns reconnect policy; every call
-/// to [`Self::run_once`] creates the connection from the Device Client to the
-/// Backend, registers the current exact sources, and serves until disconnect.
 #[derive(Clone, Debug)]
 pub struct PreviewTunnelClient {
     endpoint: String,
@@ -166,12 +144,6 @@ pub struct PreviewTunnelClient {
 }
 
 impl PreviewTunnelClient {
-    /// Builds one tunnel without opening a socket.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-WebSocket endpoint, a malformed node id, an empty
-    /// credential, duplicate sources, or an empty source set.
     pub fn new(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -220,13 +192,6 @@ impl PreviewTunnelClient {
         })
     }
 
-    /// Builds a tunnel backed by a source registry that can change while the
-    /// connection is reconnecting.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-WebSocket endpoint, malformed node id, or empty
-    /// credential.
     pub fn with_registry(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -242,13 +207,6 @@ impl PreviewTunnelClient {
         )
     }
 
-    /// Builds a registry-backed tunnel with an optional DER-encoded Server
-    /// root, matching the Device exchange transport's TLS trust configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the endpoint, identity, credential, or TLS root
-    /// is invalid.
     pub fn with_registry_and_tls_root_der(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -279,14 +237,6 @@ impl PreviewTunnelClient {
         })
     }
 
-    /// Connects outward and serves preview requests until the Backend closes
-    /// the tunnel.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-free transport or protocol reason. Per-request local
-    /// service failures are returned to the Backend as `502` responses and do
-    /// not tear down the tunnel.
     pub async fn run_once(&self) -> Result<(), PreviewTunnelError> {
         self.run_once_with_stop(None).await
     }
@@ -450,7 +400,6 @@ impl PreviewTunnelClient {
     }
 }
 
-/// Owns one reconnecting outbound tunnel and stops it when dropped.
 pub struct PreviewTunnelSupervisor {
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -467,13 +416,6 @@ impl fmt::Debug for PreviewTunnelSupervisor {
 }
 
 impl PreviewTunnelSupervisor {
-    /// Starts a tunnel loop. An empty registry stays idle until a managed run
-    /// publishes an authorized source.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid tunnel identity values or a thread that cannot be
-    /// created.
     pub fn start(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -483,12 +425,6 @@ impl PreviewTunnelSupervisor {
         Self::start_with_tls_root_der(endpoint, client_node_id, device_credential, registry, None)
     }
 
-    /// Starts a tunnel loop with the optional Device Server TLS root.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tunnel configuration is invalid or the
-    /// supervisor thread cannot be created.
     pub fn start_with_tls_root_der(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -560,13 +496,11 @@ impl PreviewTunnelSupervisor {
         })
     }
 
-    /// Returns the registry used for managed-run source updates.
     #[must_use]
     pub const fn registry(&self) -> &AuthorizedPreviewSourceRegistry {
         &self.registry
     }
 
-    /// Stops the connection and waits for the reconnect loop to exit.
     pub fn shutdown(mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
@@ -967,7 +901,6 @@ fn portable_identifier(value: &str) -> bool {
         })
 }
 
-/// Secret-free preview tunnel failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTunnelError {
     message: String,

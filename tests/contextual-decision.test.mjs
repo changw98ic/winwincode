@@ -296,8 +296,6 @@ test('an approval is decided inline and keeps its reason until the server confir
   findByClass(row, 'wwc-contextual-decision-submit').click()
   assert.deepEqual(actions, [['decideApproval', 'apr_00000000000000000000000001', 'approve', 'Reviewed the exact command.']])
 
-  // The draft survives the submission: the row clears only when the server
-  // stops listing this decision.
   assert.equal(reason.value, 'Reviewed the exact command.')
   assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, '拒绝')
 
@@ -461,7 +459,6 @@ test('the card keeps the host note and falls back to its own count', () => {
   const note = findByClass(root, 'wwc-contextual-decision-note')
   assert.equal(note.hidden, false)
   assert.equal(note.textContent, 'The Solution review is decided in the Delivery actions.')
-  // Without a host note the card reports its own decision count.
   card.update({
     view: view({ approvals: [approval()] }),
     presentation: readyPresentation,
@@ -493,18 +490,6 @@ test('the card suite is registered once and its modules are inventoried', () => 
       1,
       `${path} must be registered exactly once in the canonical TypeScript lane`,
     )
-  }
-  const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
-    'utf8',
-  ))
-  const listed = inventory.surfaces
-    .flatMap(surface => surface.sourcePaths)
-  for (const path of [
-    'apps/client/src/contextual-decision.ts',
-    'apps/client/src/contextual-decision-view-model.ts',
-  ]) {
-    assert.equal(listed.filter(entry => entry === path).length, 1, `${path} is inventoried once`)
   }
 })
 

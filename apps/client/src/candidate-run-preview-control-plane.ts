@@ -1,5 +1,6 @@
-import { requestFetch as sendHttp } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
+
+import { requestFetch as sendHttp } from '@winwincode/network-request'
 
 import {
   candidateBoundaryError,
@@ -56,8 +57,6 @@ const MAX_FILE_CONTENT_BYTES = 256 * 1024 * 1024
 const LOG_READ_BYTES = 64 * 1024
 const LOG_ARTIFACT_KINDS = new Set(['log', 'test_output', 'command_output'])
 
-/** The only context accepted by candidate.files.list. It is a canonical
- * Delivery read cut, never a URL or device-local candidate projection. */
 export interface CandidatePreviewFileContext {
   readonly deliveryId: DeliveryId
   readonly atCursor: StrongFlowReadCursor
@@ -66,7 +65,6 @@ export interface CandidatePreviewFileContext {
   readonly diffSha256: Sha256Digest
 }
 
-/** Projects file-query context only from the canonical run identity read. */
 export function candidatePreviewFileContextFromIdentity(
   projection: ControlPlaneRunIdentityProjection,
 ): CandidatePreviewFileContext | null {
@@ -208,21 +206,16 @@ function parseGrant(
   })
 }
 
-/** Browser facade for the existing short-lived Server preview access routes. */
 export function createControlPlaneCandidatePreviewPort(options: {
   readonly serverUrl: string
   readonly fetch: ControlPlaneTransportFetch | undefined
   readonly identity: CandidatePreviewIdentity
-  /** Canonical authenticated query seam used by the file-list adapter. */
   readonly client?: ControlPlaneClient
   readonly actor?: Actor
   readonly scope?: RepositoryScope
   readonly fileContext?: CandidatePreviewFileContext
-  /** Current canonical run projection; no local log source is accepted. */
   readonly runIdentityProjection?: () => Promise<ControlPlaneRunIdentityProjection | null>
-  /** Current holder lease used to fence managed-app commands. */
   readonly occupancyStatus?: (clientId: string) => Promise<ControlPlaneOccupancyStatus>
-  /** Candidate run config selected by the canonical execution projection. */
   readonly managedAppRunConfig?: ManagedAppRunControlProjection
   readonly nextRequestId?: () => RequestId
 }): CandidatePreviewPort {
@@ -472,8 +465,6 @@ export function createControlPlaneCandidatePreviewPort(options: {
             || candidateConfig.candidateCommit !== options.identity.candidateCommit))) {
         throw failure('protocol', 'MANAGED_APP_CONFIG_UNAVAILABLE', '当前候选没有可用的受管应用运行配置。')
       }
-      // The Server resolves the complete executable config from the durable
-      // WorkRun fact. The browser sends only the operation and run identity.
       config = null
     }
     const command: ManagedAppCommand = {
@@ -481,9 +472,6 @@ export function createControlPlaneCandidatePreviewPort(options: {
       operation: operation as ManagedAppCommand['operation'],
       idempotencyKey: requestId as ManagedAppCommand['idempotencyKey'],
       occupancyLeaseId: occupancy.occupancyLeaseId as ManagedAppCommand['occupancyLeaseId'],
-      // The browser occupancy facade keeps this as a safe JS number; the
-      // generated exchange alias is a wire bigint string. The managed-app
-      // HTTP endpoint is JSON/u64 and therefore receives the numeric value.
       occupancyFencingToken: occupancy.fencingToken as unknown as ManagedAppCommand['occupancyFencingToken'],
       config,
       runId: runId as ManagedAppCommand['runId'],

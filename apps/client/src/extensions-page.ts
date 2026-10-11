@@ -1,5 +1,6 @@
-import { requestFetch as sendHttp } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
+
+import { requestFetch as sendHttp } from '@winwincode/network-request'
 
 import { mountButton, mountPageHeader } from '@winwincode/browser-ui'
 import { mountEmptyState, mountTabs } from './components/index.js'
@@ -21,7 +22,6 @@ const TABS = [
   { id: 'mcp', label: 'MCP 连接', panelId: 'wwc-extensions-mcp-panel' },
 ] as const
 
-/** Manage confirmed Device extensions; each new task loads the latest configuration. */
 export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsPage {
   const document = options.root.ownerDocument
   const controller = new AbortController()

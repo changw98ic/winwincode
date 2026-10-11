@@ -454,8 +454,6 @@ async fn input_result_page_at(
     call_id: &str,
     args: serde_json::Value,
 ) -> (wire::ModelOpenMessage, serde_json::Value) {
-    // The real CodeMode delegate throws handler rejections. Catch only this
-    // reader's exact typed negative result and emit it through the public exec.
     let script = format!(
         "// @exec: {{\"yield_time_ms\":10000}}\n\
          const reader = ALL_TOOLS.find(t => t.name.endsWith('request_user_input_result'));\n\
@@ -1204,7 +1202,6 @@ fn multiquestion_case(mode: &str, count: usize, exact: &str, other: bool) {
                 .expect("actual Core handler emitted the legal question event"),
         )
         .unwrap();
-        // Keep the complete typed event and terminal in the receipt before semantic assertions.
         let outcomes = port
             .messages()
             .into_iter()

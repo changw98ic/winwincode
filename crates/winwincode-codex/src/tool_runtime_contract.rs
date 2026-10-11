@@ -7,7 +7,6 @@ use sha2::{Digest as _, Sha256};
 use winwincode_domain::Sha256Digest;
 use winwincode_execution_port::agent_config::AgentSessionConfigSnapshot;
 
-/// Immutable product composition retained beside the original Core rollout.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ToolRuntimeContract {

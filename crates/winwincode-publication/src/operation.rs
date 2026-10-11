@@ -418,11 +418,6 @@ pub struct PublicationPortError {
 }
 
 impl PublicationPortError {
-    /// Builds one stable provider error code without retaining raw provider text.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, or non-portable codes.
     pub fn new(code: impl Into<String>) -> Result<Self, String> {
         let code = code.into();
         if !portable(&code, 100) {
@@ -446,21 +441,11 @@ impl fmt::Display for PublicationPortError {
 impl std::error::Error for PublicationPortError {}
 
 pub trait PublicationPort {
-    /// Looks up the exact stable operation key before any remote write.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe provider failure when lookup could not complete.
     fn lookup(
         &mut self,
         operation: &PublicationOperation,
     ) -> Result<PublicationPortObservation, PublicationPortError>;
 
-    /// Applies one absent operation using its stable key and request digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe provider failure when apply could not complete.
     fn apply(
         &mut self,
         operation: &PublicationOperation,

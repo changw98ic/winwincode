@@ -1,12 +1,3 @@
-//! Typed adapters from the generated stream messages to the shared replay
-//! state machine.
-//!
-//! This module only validates wire shape, derives a stable stream key, and
-//! retains the canonical encoded message. Runtime frames use the nested event
-//! record as their semantic digest so transport envelope ids do not split
-//! duplicate handling. Lease authority, product state, and persistence remain
-//! caller-owned concerns of [`crate::replay`].
-
 use std::fmt;
 
 use serde::Serialize;
@@ -31,7 +22,6 @@ use crate::runtime_replay::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// The three lease-scoped streams that use the replay state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReplayStreamKind {
     Runtime,
@@ -39,73 +29,44 @@ pub enum ReplayStreamKind {
     Model,
 }
 
-/// A generated stream frame mapped to the transport-neutral replay shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedReplayFrame {
-    /// The generated stream family represented by `frame`.
     pub kind: ReplayStreamKind,
-    /// The canonical lease/resource stream key.
     pub stream: ReplayStreamKey,
-    /// The original canonical JSON frame and its digest.
     pub frame: ReplayFrame,
 }
 
-/// A generated acknowledgement mapped to the transport-neutral replay shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedReplayAcknowledgement {
-    /// The generated stream family represented by `acknowledgement`.
     pub kind: ReplayStreamKind,
-    /// The canonical lease/resource stream key.
     pub stream: ReplayStreamKey,
-    /// The generic acknowledgement cursor and status.
     pub acknowledgement: ReplayAcknowledgement,
 }
 
-/// A stream key extracted from any runtime, artifact, or model stream message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedReplayStream {
-    /// The generated stream family represented by `stream`.
     pub kind: ReplayStreamKind,
-    /// The canonical lease/resource stream key.
     pub stream: ReplayStreamKey,
 }
 
-/// Shape failures found before a replay store or authority is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypedReplayMappingError {
-    /// The message is not one of the runtime, artifact, or model stream types.
     UnsupportedMessage,
-    /// A stream control message carries no sequenceable frame.
     UnsequencedMessage,
-    /// The generated discriminator does not match the expected message type.
     WrongKind,
-    /// The generated schema version is not supported by this adapter.
     UnsupportedSchema,
-    /// A required identity or message identifier is empty.
     EmptyIdentity,
-    /// A frame event identifier is empty.
     EmptyEventId,
-    /// A sequence is zero or negative.
     InvalidSequence,
-    /// A sequence exceeds the JSON-safe wire range.
     SequenceOutOfRange,
-    /// A lease attempt is not positive.
     InvalidAttempt,
-    /// A fencing token is not canonical decimal text.
     InvalidFencingToken,
-    /// The duplicated `WorkerSession` values differ.
     WorkerSessionMismatch,
-    /// The duplicated `CodexThread` values differ.
     CodexThreadMismatch,
-    /// A negative acknowledgement was supplied.
     NegativeAcknowledgement,
-    /// A gap acknowledgement omitted its replay start.
     GapReplayMissing,
-    /// A gap acknowledgement did not start at ack plus one.
     GapReplayMismatch,
-    /// A non-gap acknowledgement supplied a replay start.
     UnexpectedReplayStart,
-    /// Canonical JSON encoding failed.
     Serialization,
 }
 
@@ -135,16 +96,6 @@ impl fmt::Display for TypedReplayMappingError {
 
 impl std::error::Error for TypedReplayMappingError {}
 
-/// Maps one generated runtime, artifact, or model data message to a generic
-/// [`ReplayFrame`].  Stream declarations, replay requests, and acknowledgements
-/// are intentionally not accepted here because they do not carry a frame
-/// sequence.
-///
-/// # Errors
-///
-/// Returns a mapping error when the message is not a sequenced stream frame or
-/// when its generated identity, sequence, schema, or canonical encoding is
-/// invalid.
 pub fn frame_from_message(
     message: &ExecutionPortMessage,
 ) -> Result<TypedReplayFrame, TypedReplayMappingError> {
@@ -164,13 +115,6 @@ pub fn frame_from_message(
     }
 }
 
-/// Maps one generated runtime, artifact, or model acknowledgement to the
-/// generic acknowledgement cursor and status used by the replay state machine.
-///
-/// # Errors
-///
-/// Returns a mapping error when the message is not a stream acknowledgement or
-/// when its identity, cursor, schema, or gap replay hint is invalid.
 pub fn acknowledgement_from_message(
     message: &ExecutionPortMessage,
 ) -> Result<TypedReplayAcknowledgement, TypedReplayMappingError> {
@@ -182,14 +126,6 @@ pub fn acknowledgement_from_message(
     }
 }
 
-/// Derives the same stream key for an open, frame, acknowledgement, or replay
-/// request message.  This function creates no lease authority and performs no
-/// product-state lookup.
-///
-/// # Errors
-///
-/// Returns a mapping error when the message is outside the supported stream
-/// families or contains an invalid generated identity.
 pub fn stream_key_from_message(
     message: &ExecutionPortMessage,
 ) -> Result<TypedReplayStream, TypedReplayMappingError> {

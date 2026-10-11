@@ -58,9 +58,6 @@ function page(limit = 100) {
 
 function waitFor(predicate, label) {
   return new Promise((resolve, reject) => {
-    // External-volume checkouts run the Server, Chrome, and this fixture off
-    // one slow disk; keep the assertions identical but give each step the
-    // same generous budget the startup gates use.
     const deadline = Date.now() + 45_000
     const poll = () => {
       if (predicate()) {

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Delivery append for an accepted `WorkRun` dispatch.
-//!
-//! The scheduler first accepts the Worker dispatch and seals its opaque lease
-//! authority. This transaction is the only seam that turns that authority into
-//! the canonical Delivery `WorkRun` and its pending `SessionBinding`.
-
 use sha2::{Digest, Sha256};
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
@@ -27,7 +21,6 @@ use crate::{
 
 const EVENT_COMPONENT: &str = "execution-dispatch-workrun";
 
-/// Commits the `WorkRun` and pending binding produced by one accepted dispatch.
 #[allow(
     clippy::too_many_lines,
     reason = "Keep accepted dispatch proof and its atomic WorkRun publication together"
@@ -97,10 +90,6 @@ pub(crate) fn execute(
     )?;
     let command_digest = winwincode_domain::Sha256Digest(format!("sha256:{request_digest}"));
 
-    // Replay is keyed by the original dispatch identity, not by the current
-    // Delivery revision. A later SessionBinding/terminal commit may have
-    // advanced the aggregate, but must not make the original append appear
-    // stale or manufacture a second WorkRun receipt.
     if let Some(receipt) = storage.load_receipt(&receipt_identity, &command_digest)? {
         return Ok(receipt);
     }

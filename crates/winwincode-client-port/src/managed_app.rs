@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Contract for the Device-owned managed application lifecycle.
-//!
-//! This contract is deliberately separate from the WorkerSession contract.
-//! A managed application is a candidate/live HTTP process with its own run
-//! identity and process group; a Worker is never a substitute for it.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -42,25 +36,14 @@ pub struct ManagedAppRunConfig {
     pub run_id: String,
     #[serde(rename = "repositoryBindingId")]
     pub repository_binding_id: String,
-    /// Revision of the repository-scoped template captured when this run
-    /// was confirmed. It makes the launch settings used by a WorkRun
-    /// restart-stable and auditable after the template changes.
     #[serde(rename = "templateRevision")]
     pub template_revision: u64,
     pub attempt: u32,
     pub mode: ManagedAppMode,
-    /// Candidate identity is mandatory for frozen previews and forbidden for
-    /// live previews. The Device resolves the repository binding locally.
     #[serde(rename = "candidateCommit")]
     pub candidate_commit: Option<String>,
-    /// Repository-relative working directory; absolute paths never cross the
-    /// Server→Device contract.
     pub cwd: String,
-    /// Executable plus arguments. The Device validates this against its local
-    /// allowlist before spawning.
     pub argv: Vec<String>,
-    /// The execution environment is intentionally empty. Device-local
-    /// process policy owns any future trusted variables.
     pub env: BTreeMap<String, String>,
     #[serde(rename = "healthCheck")]
     pub health_check: ManagedAppHealthCheck,
@@ -70,8 +53,6 @@ pub struct ManagedAppRunConfig {
     pub source_id: String,
 }
 
-/// Repository-scoped launch settings. Server materializes a full
-/// [`ManagedAppRunConfig`] from this template at WorkRun confirmation time.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedAppRunTemplate {
@@ -87,11 +68,6 @@ pub struct ManagedAppRunTemplate {
 }
 
 impl ManagedAppRunTemplate {
-    /// Validates repository-scoped launch settings before persistence.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same portable-field errors as a materialized run config.
     pub fn validate(&self) -> Result<(), ManagedAppContractError> {
         if self.schema_version != MANAGED_APP_RUN_TEMPLATE_SCHEMA_VERSION
             || self.argv.is_empty()
@@ -114,12 +90,6 @@ impl ManagedAppRunTemplate {
 }
 
 impl ManagedAppRunConfig {
-    /// Validates the portable Server-to-Device run configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ManagedAppContractError`] when an identity, path, command,
-    /// health check, environment key, or candidate mode is invalid.
     pub fn validate(&self) -> Result<(), ManagedAppContractError> {
         if self.schema_version != MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION {
             return Err(ManagedAppContractError::Invalid("schemaVersion"));
@@ -195,12 +165,6 @@ pub struct ManagedAppCommand {
 }
 
 impl ManagedAppCommand {
-    /// Validates the managed application command and its optional run config.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ManagedAppContractError`] when command authority is invalid
-    /// or the operation carries an incompatible run configuration.
     pub fn validate(&self) -> Result<(), ManagedAppContractError> {
         if self.schema_version != MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION
             || !portable_identifier(&self.idempotency_key)

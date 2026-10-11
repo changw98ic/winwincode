@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise diagnostics through production event consumption and durable Worker
-//! outcomes. Faults enter before classification; no test constructs a terminal.
-
 use super::*;
 use winwincode_codex::ProductionEventPollFault;
 
@@ -110,8 +107,6 @@ fn z7xn_closed_kernel_session_admission_rejects_with_safe_typed_classification()
         let reopened =
             winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root)).unwrap();
         drop(reopened);
-        // Dispatch rejection is a response-free transport fact. A successful
-        // send removes it from pending(), but its canonical bytes stay durable.
         let connection =
             rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
         let (digest, bytes): (String, Vec<u8>) = connection
@@ -197,8 +192,6 @@ async fn assert_shutdown_then_recover(submission: bool) {
     );
     assert!(stored["coreToolFinalCursor"].is_null());
     assert_secret_safe(&messages, &stored);
-    // Drop the globally closed owner. The new owner reads the same Core DB;
-    // no test writes a cursor, terminal, or tool fact into it.
     drop(worker);
     let recovered_port = RecordedPort::default();
     let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root)).unwrap();
@@ -307,8 +300,6 @@ fn z7xn_explicit_cancel_does_not_become_a_pending_event_failure() {
         let root = TestDirectory::new("z7xn-active-cancel");
         let dispatch = dispatch(&root);
         let port = RecordedPort::default();
-        // The cancellation terminal must take precedence over a future stream
-        // failure; its retained frame must never acquire that failure's cause.
         let adapter = winwincode_codex::ProductionCodexAdapter::open(
             adapter_config(&root).with_test_event_poll_fault(ProductionEventPollFault::Closed),
         )
@@ -454,8 +445,6 @@ async fn assert_retained_failure(
     assert_eq!(error.code, code);
     assert_eq!(error.retryable, retryable);
     assert_eq!(error.message, expected_message);
-    // The event failure occurs at two seconds with five minutes of authority.
-    // It must not become a lease-expiry or cancellation diagnosis.
     assert_eq!(outcome.lease, dispatch.lease);
     assert!(outcome.outcome.finished_at.0 < dispatch.lease.expires_at.0);
     assert_eq!(outcome.outcome.finished_at, at("2030-01-01T00:00:02.000Z"));
@@ -515,8 +504,6 @@ async fn assert_legacy_snapshot_replays_canonical_terminal(
     root: &TestDirectory,
     expected: &[ExecutionPortMessage],
 ) {
-    // Simulate the exact pre-upgrade record shape. Only the newly optional
-    // classification field is removed; receipts and cursors are untouched.
     let connection =
         rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
     let (key, bytes): (String, Vec<u8>) = connection
@@ -568,8 +555,6 @@ fn assert_canonical_export(
     root: &TestDirectory,
     outcome: &winwincode_execution_port::generated::JobOutcomeMessage,
 ) {
-    // This is the canonical Host frame read by collectCoreFacts in the real
-    // batch runner. It is separate from the Delivery's status-only projection.
     let connection = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3"))
         .expect("open canonical outcome export");
     let (digest, bytes): (String, Vec<u8>) = connection
@@ -710,7 +695,6 @@ fn assert_control_plane_retains_failure(
     )
     .unwrap();
     let mut storage = SqliteStorage::open(root.data()).unwrap();
-    // Replaying the exact message after expiry must use its durable receipt.
     let responses = DurableExecutionPortIngress::new(
         &mut control_plane,
         &mut storage,

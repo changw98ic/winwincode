@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# Unified env harness for:
-#   (A) Jev memory management tests (community.4)
-#   (B) Fusion multi-model aggregation panel tests (community.5)
-#
-# Sources local .env, counts provider env names before/after, lists Fusion
-# seats (names + key last4 only), runs existing Jev smoke + local fixture
-# tests, and runs focused Fusion compose/runner cargo tests when present.
-#
-# Does NOT invent Phase1 quality/recall pass. Remote probe ≠ Phase1 gate.
-# Secrets are never printed in full.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,9 +39,7 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
-# shellcheck disable=SC1091
 set -a
-# shellcheck source=/dev/null
 . "$ENV_FILE"
 set +a
 
@@ -63,7 +51,6 @@ DELTA=$((AFTER_COUNT - BEFORE_COUNT))
 echo "PROVIDER_ENV_DELTA=+$DELTA"
 list_provider_env_names | sed 's/^/  - /'
 
-# --- Fusion seat coverage (names + last4 only) ---
 echo
 echo "=== Fusion seats (names + key last4 only) ==="
 SEAT_CONFIGURED=0
@@ -119,7 +106,6 @@ echo "  TYPESAFE_API_KEY=$(redact_last4 "${TYPESAFE_API_KEY:-}")"
 echo "  OPENJEV_PROVIDER=${OPENJEV_PROVIDER:-(unset)}"
 echo "  OPENJEV_ENDPOINT=${OPENJEV_ENDPOINT:-(unset)}"
 
-# --- Jev smoke: remote probe + local cargo/node ---
 echo
 echo "=== (A) Jev memory management smoke ==="
 JEV_SMOKE_RC=0
@@ -136,12 +122,10 @@ else
   JEV_SMOKE_RC=2
 fi
 
-# typesafe smoke already ran remote probe + local cargo/node fixture tests
 if [ "$JEV_SMOKE_RC" -ne 0 ] && [ "$JEV_SMOKE_RC" -ne 2 ]; then
   echo "(typesafe smoke already reported remote probe status; local tests were included)"
 fi
 
-# --- Fusion compose / parallel model runner tests (exist on main) ---
 echo
 echo "=== (B) Fusion multi-model aggregation focused cargo tests ==="
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/winwincode-jev-test-target}"
@@ -162,10 +146,6 @@ run_cargo_filter() {
     FUSION_RC=1
   fi
 }
-
-# Run focused tests serially. Use --lib / named integration tests so cargo does
-# not walk every control-plane integration binary after unit tests already pass.
-# Cold CARGO_TARGET_DIR can take many minutes on the ORICO workspace volume.
 
 if grep -q "blind_panel_compose_keeps_isolation" "$ROOT/crates/winwincode-control-plane/src/fusion_compose.rs" 2>/dev/null; then
   FUSION_TESTS_FOUND=1
@@ -210,7 +190,6 @@ echo
 echo "FUSION_TESTS_FOUND=$FUSION_TESTS_FOUND"
 echo "FUSION_TEST_RC=$FUSION_RC"
 
-# --- Document how FUSION_SEAT_* would feed mock ModelPort panel ---
 cat <<'DOC'
 
 === How FUSION_SEAT_* feeds mock ModelPort / Fusion panel (documentation) ===
@@ -231,7 +210,6 @@ cat <<'DOC'
    (see bd memory fusion-02-modelport-boundary-20260920).
 DOC
 
-# --- Summary ---
 echo
 echo "=============================================="
 echo "SUMMARY"
@@ -250,8 +228,6 @@ echo "=============================================="
 if [ "$JEV_SMOKE_RC" -ne 0 ] && [ "$FUSION_RC" -ne 0 ]; then
   exit 1
 fi
-# Partial failures still exit 0 if at least one track produced evidence; parent
-# reads SUMMARY lines. Exit non-zero only when both tracks fail hard.
 if [ "$JEV_SMOKE_RC" -ne 0 ]; then
   echo "HARNESS_RESULT=partial (Jev smoke rc=$JEV_SMOKE_RC; fusion rc=$FUSION_RC)"
   exit 0

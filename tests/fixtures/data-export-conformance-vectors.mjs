@@ -67,7 +67,6 @@ function splicedBytes(bytes, from, to) {
   ])
 }
 
-/** Exchanges two canonical record texts, because the encoder itself always sorts. */
 function swappedRecords(bytes, left, right) {
   const text = utf8Decoder.decode(bytes)
   const leftText = JSON.stringify(left)
@@ -682,7 +681,6 @@ const VECTOR_BUILDERS = Object.freeze([
   },
 ])
 
-/** Builds the complete published vector set from the canonical encoder. */
 export function generatedWinWinCodeExportConformanceVectors() {
   return {
     schema: 'winwincode-export-conformance-vectors/v1',

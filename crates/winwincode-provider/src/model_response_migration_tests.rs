@@ -404,10 +404,6 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
     let mutation = Arc::new(Mutex::new(None::<Result<i64, String>>));
     let mutation_for_hook = Arc::clone(&mutation);
 
-    // SQLite invokes this hook while preparing the real suffix SELECT. The
-    // earlier metadata query has returned; the second WAL connection commits
-    // changed, individually valid response bytes and the trigger revokes its
-    // seal. This does not replace the production reader or its SQL results.
     store
         .connection
         .authorizer(Some(move |context: AuthContext<'_>| {

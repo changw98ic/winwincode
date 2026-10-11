@@ -80,7 +80,6 @@ export interface SettingsUpdateInput {
 
 export interface SettingsViewModel {
   readonly state: SettingsViewModelState
-  /** Browser draft owner; changes with the authenticated Actor or exact Scope. */
   readonly draftScope: string
   subscribe(listener: SettingsViewModelListener): () => void
   start(): Promise<void>
@@ -180,7 +179,6 @@ function expectCompletedCommand<Command extends keyof SettingsCommandResponses>(
   return response as SettingsCommandResponses[Command]
 }
 
-/** Build the local settings surface from the generated execution settings contract. */
 export function createSettingsViewModel(options: SettingsViewModelOptions): SettingsViewModel {
   const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<SettingsViewModelListener>()

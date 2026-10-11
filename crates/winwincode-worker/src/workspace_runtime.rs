@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact active-Job ownership for detached Worker workspaces.
-//!
-//! This deep module is the only mutable map from an authenticated active Job
-//! to its private checkout. It resumes the original worktree after a process
-//! crash, freezes writer changes through the canonical candidate builder, and
-//! consumes the checkout at every terminal cleanup boundary.
-//!
-//! Delegated `ChangeBatch` work is routed through one injected deterministic
-//! executor port: this module never mutates checkout bytes itself. Every
-//! proposal, progress fact, receipt, validation decision, and Observer
-//! exchange is durable in the Worker-owned [`ChangeBatchStore`] before it
-//! becomes observable, and the accepted revision only advances through the
-//! exact revision gate.
-
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
@@ -99,7 +85,6 @@ use crate::workspace::WorkspaceCreationRollbackFailure;
 #[cfg(feature = "test-support")]
 use crate::workspace::{WorkspaceCleanupInterruption, WorkspaceCreationInterruption};
 
-/// Stable active-workspace failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobWorkspaceErrorCode {
     AuthorityMismatch,
@@ -109,7 +94,6 @@ pub enum JobWorkspaceErrorCode {
     ChangeBatch,
 }
 
-/// Independent Provider route used only for bounded one-shot observations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationModelConfiguration {
     pub provider: String,
@@ -117,7 +101,6 @@ pub struct ObservationModelConfiguration {
     pub route: ModelGatewayRoute,
 }
 
-/// One authority-checked Observer chunk application.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationChunkApplication {
     pub retention: ObservationChunkRetention,
@@ -127,8 +110,6 @@ pub struct ObservationChunkApplication {
     pub terminal_accounting: Option<ObserverTerminalAccounting>,
 }
 
-/// Internal terminal Observer accounting retained independently from the
-/// public receipt, including billed Provider failures.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObserverTerminalAccounting {
     pub batch_id: ChangeBatchId,
@@ -136,11 +117,6 @@ pub struct ObserverTerminalAccounting {
 }
 
 impl ObservationModelConfiguration {
-    /// Creates a bounded route that is independent from the Composer model.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, control-bearing, or credential-shaped values.
     pub fn try_new(
         provider: impl Into<String>,
         model: impl Into<String>,
@@ -172,7 +148,6 @@ impl ObservationModelConfiguration {
     }
 }
 
-/// Secret-safe active-workspace failure.
 #[derive(Debug)]
 pub struct JobWorkspaceError {
     code: JobWorkspaceErrorCode,
@@ -191,19 +166,16 @@ impl JobWorkspaceError {
         }
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> JobWorkspaceErrorCode {
         self.code
     }
 
-    /// Safe failure boundary, independent of private checkout paths.
     #[must_use]
     pub const fn stage(&self) -> &'static str {
         self.stage
     }
 
-    /// Safe lower-level category preserved through candidate preparation.
     #[must_use]
     pub const fn cause_code(&self) -> &'static str {
         self.cause_code
@@ -255,17 +227,14 @@ impl From<ChangeBatchStoreError> for JobWorkspaceError {
     }
 }
 
-/// Exact immutable input passed to the injected deterministic executor.
 #[derive(Clone, Copy)]
 pub struct ChangeBatchExecutionRequest<'request> {
     pub active: &'request ActiveJob,
     pub base_revision: &'request WorkspaceRevision,
     pub checkout: &'request Path,
-    /// Exact patch bytes whose canonical digest is bound to the batch identity.
     pub patch: &'request str,
 }
 
-/// Bounded result returned by an injected deterministic executor.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeBatchExecutionResult {
     Applied {
@@ -285,7 +254,6 @@ pub enum ChangeBatchExecutionResult {
     },
 }
 
-/// Secret-free deterministic executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeBatchExecutorError;
 
@@ -297,14 +265,12 @@ impl fmt::Display for ChangeBatchExecutorError {
 
 impl std::error::Error for ChangeBatchExecutorError {}
 
-/// Exact validation output stream persisted before its bounded command receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationArtifactStream {
     Stdout,
     Stderr,
 }
 
-/// Replay-stable identity and bytes submitted to the private validation Artifact store.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidationArtifactRequest<'request> {
     pub identity: &'request ChangeBatchIdentity,
@@ -315,7 +281,6 @@ pub struct ValidationArtifactRequest<'request> {
     pub bytes: &'request [u8],
 }
 
-/// Secret-free failure from the authority-bound validation Artifact store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidationArtifactError;
 
@@ -327,13 +292,7 @@ impl fmt::Display for ValidationArtifactError {
 
 impl std::error::Error for ValidationArtifactError {}
 
-/// Authority-bound, replay-idempotent raw validation output store.
 pub trait ValidationArtifactPort: fmt::Debug + Send {
-    /// Persists exact bytes and returns the canonical Artifact identity and digest.
-    ///
-    /// # Errors
-    ///
-    /// Exact-key changed bytes and storage failures are rejected.
     fn persist(
         &mut self,
         request: ValidationArtifactRequest<'_>,
@@ -352,7 +311,6 @@ impl ValidationArtifactPort for UnavailableValidationArtifactPort {
     }
 }
 
-/// One non-blocking deterministic executor operation.
 pub type ChangeBatchExecutorFuture<'operation> = Pin<
     Box<
         dyn Future<Output = Result<ChangeBatchExecutionResult, ChangeBatchExecutorError>>
@@ -361,33 +319,17 @@ pub type ChangeBatchExecutorFuture<'operation> = Pin<
     >,
 >;
 
-/// Explicit mutation port for deterministic checkout changes.
 pub trait ChangeBatchExecutor: fmt::Debug + Send {
-    /// Starts one new deterministic execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when the executor cannot prove an exact result.
     fn execute<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation>;
 
-    /// Reconciles an execution whose durable stream reached `apply_started`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when recovery cannot prove an exact result.
     fn recover<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation>;
 
-    /// Rolls back or proves the state of a cancelling execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when cancellation cannot prove an exact result.
     fn cancel<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
@@ -860,7 +802,6 @@ fn applied_summary(
     })
 }
 
-/// Terminal evidence of one executed or replayed delegated proposal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutedChangeBatch {
     pub progress: Vec<ChangeBatchProgressEvent>,
@@ -869,9 +810,6 @@ pub struct ExecutedChangeBatch {
     pub replayed: bool,
 }
 
-/// Revalidated terminal facts used to rebuild a bounded delegated loop after
-/// a Worker restart. The durable store remains the sole source of proposal and
-/// receipt history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DelegatedBatchHistory {
     pub proposal: ChangeBatchProposalEvent,
@@ -880,7 +818,6 @@ pub struct DelegatedBatchHistory {
     pub terminal_at: Instant,
 }
 
-/// Process-owned manager for all live detached Job workspaces.
 #[derive(Debug)]
 pub struct JobWorkspaceRuntime {
     manager: WorkspaceManager,
@@ -913,15 +850,6 @@ impl Drop for JobWorkspaceRuntime {
 }
 
 impl JobWorkspaceRuntime {
-    /// Opens the controlled workspace and source roots.
-    ///
-    /// Existing directories are left untouched until an exact active Job asks
-    /// to resume them; foreign orphan cleanup remains an explicit startup
-    /// policy rather than deleting a resumable writer checkout.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical workspace-root validation failure.
     pub fn open(
         root: impl Into<PathBuf>,
         source_root: impl Into<PathBuf>,
@@ -949,9 +877,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Shares durable attempts only within one repository and execution Job.
-    /// # Errors
-    /// Rejects unsafe roots or unavailable repository identity.
     pub fn open_partitioned(
         root: impl Into<PathBuf>,
         source_root: impl Into<PathBuf>,
@@ -989,7 +914,6 @@ impl JobWorkspaceRuntime {
             .transpose()
     }
 
-    /// Installs the sole deterministic mutation executor.
     #[must_use]
     pub fn with_change_batch_executor(
         mut self,
@@ -999,7 +923,6 @@ impl JobWorkspaceRuntime {
         self
     }
 
-    /// Installs the authority-bound raw validation Artifact store.
     #[must_use]
     pub fn with_validation_artifact_port(
         mut self,
@@ -1009,15 +932,6 @@ impl JobWorkspaceRuntime {
         self
     }
 
-    /// Creates or resumes the one exact checkout for an active Job.
-    ///
-    /// Repeated calls for the same authority return the original path. A Job ID
-    /// whose active lease/session/thread changed is rejected without opening a
-    /// second checkout in this process.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed authority or any create/recovery failure.
     pub fn open_for_job(
         &mut self,
         active: &ActiveJob,
@@ -1040,17 +954,6 @@ impl JobWorkspaceRuntime {
         Ok(checkout)
     }
 
-    /// Opens a checkout only after every durable interrupted batch is
-    /// reconciled to a proven terminal state.
-    ///
-    /// A batch whose evidence is still unresolved, quarantined, or foreign
-    /// keeps the checkout closed: this module never exposes a checkout whose
-    /// exact state cannot be proven.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, quarantined receipts, and unresolved durable
-    /// batch state.
     pub fn open_for_job_recovering(
         &mut self,
         active: &ActiveJob,
@@ -1108,11 +1011,6 @@ impl JobWorkspaceRuntime {
         self.open_for_job(active, replacement)
     }
 
-    /// Leaves the exact durable workspace creation state at one crash point.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected interruption or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn interrupt_workspace_creation_for_test(
         &mut self,
@@ -1129,11 +1027,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Leaves an exact workspace at one durable cleanup crash point.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected interruption or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn interrupt_workspace_cleanup_for_test(
         &mut self,
@@ -1149,11 +1042,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Leaves a Creating intent after a normal creation error whose rollback fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected rollback failure or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn fail_workspace_creation_rollback_for_test(
         &mut self,
@@ -1169,12 +1057,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Freezes and verifies the live writer checkout into a Candidate upload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/foreign workspace, non-writer or cancelling Job,
-    /// unchanged checkout, or any Git verification failure.
     pub fn prepare_candidate(
         &mut self,
         active: &ActiveJob,
@@ -1194,16 +1076,6 @@ impl JobWorkspaceRuntime {
         }
     }
 
-    /// Captures and verifies the clean candidate checkout used by a read-only
-    /// reviewer or verifier into its own Candidate upload.
-    ///
-    /// The read-only checkout reports only Worker-owned code and execution
-    /// facts. Product Snapshot identity is assigned by the Control Plane.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/foreign workspace, an invalid verification Job, a
-    /// dirty checkout, or any Git/authority failure.
     pub fn prepare_verification(
         &mut self,
         active: &ActiveJob,
@@ -1219,8 +1091,6 @@ impl JobWorkspaceRuntime {
         prepare_verification_artifact(active, workspace).map_err(Into::into)
     }
 
-    /// Probes execution-time protection and durably retains the freeze facts.
-    /// This does not start a model turn or allocate a product Snapshot.
     pub(crate) async fn freeze_snapshot(
         &mut self,
         active: &ActiveJob,
@@ -1238,8 +1108,6 @@ impl JobWorkspaceRuntime {
         }
         let scope = ProtectedInputScope::new(workspace.layout().checkout(), &[])
             .map_err(|_| change_batch_error("Snapshot protected input is unavailable"))?;
-        // This scratch is only for the capability probe. Execution allocates
-        // its own scratch; exact receipt replay rechecks protection each time.
         let probe_id = format!(
             "{}:{}:{:?}",
             request.request_id.0,
@@ -1300,10 +1168,6 @@ impl JobWorkspaceRuntime {
             })
     }
 
-    /// Persists a validated extension of the active workspace lease.
-    ///
-    /// # Errors
-    /// Rejects missing workspaces, changed bindings, shorter leases, or I/O failures.
     pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), JobWorkspaceError> {
         self.active
             .get_mut(&active.job.job_id.0)
@@ -1320,11 +1184,6 @@ impl JobWorkspaceRuntime {
         maximum > 0 && (self.active.contains_key(&job_id.0) || self.active.len() < maximum)
     }
 
-    /// Returns the exact source tree this Job's checkout was sealed from.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing or foreign workspace.
     pub fn resolved_source_revision(
         &self,
         active: &ActiveJob,
@@ -1339,12 +1198,6 @@ impl JobWorkspaceRuntime {
         Ok(workspace.resolved_source_tree())
     }
 
-    /// Rebuilds terminal delegated-batch history from the durable store.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign workspace authority or a terminal receipt without its
-    /// matching terminal progress fact.
     pub fn delegated_batch_history(
         &self,
         active: &ActiveJob,
@@ -1387,13 +1240,6 @@ impl JobWorkspaceRuntime {
             .collect()
     }
 
-    /// Confirms that a stale-looking workspace revision belongs to the exact
-    /// already-retained proposal being replayed after its accepted tree was
-    /// committed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign workspace authority or corrupt durable records.
     pub fn is_exact_delegated_identity_replay(
         &self,
         active: &ActiveJob,
@@ -1413,11 +1259,6 @@ impl JobWorkspaceRuntime {
             .any(|record| record.event.identity == *identity))
     }
 
-    /// Rebuilds Worker-owned bounded-loop counters before an Observer call.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched Job authority or corrupt durable counters.
     pub fn delegated_observer_counters(
         &self,
         active: &ActiveJob,
@@ -1469,11 +1310,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Resolves one durable Observer exchange to its exact `ChangeBatch`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown exchange or mismatched Job authority.
     pub fn observation_batch_id(
         &self,
         active: &ActiveJob,
@@ -1489,18 +1325,6 @@ impl JobWorkspaceRuntime {
         Ok(record.request.intent.identity.batch_id)
     }
 
-    /// Executes or replays one canonical proposal without ending its Job.
-    ///
-    /// The proposal, every progress transition, and the final receipt are
-    /// durable before this method returns. A replay with a terminal receipt
-    /// never invokes the executor again. The accepted revision only advances
-    /// through the exact revision gate after passing validation or an exact
-    /// observed checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, changed intent bytes, invalid plans/results,
-    /// or unavailable durable state.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::large_futures)]
     pub async fn execute_change_batch(
@@ -1519,11 +1343,6 @@ impl JobWorkspaceRuntime {
         }
     }
 
-    /// Advances one exact batch without waiting for its read-only validation.
-    /// Only this owner applies the completed validation to the durable batch.
-    ///
-    /// # Errors
-    /// Rejects changed authority, intent bytes, or unavailable durable state.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::large_futures)]
     pub async fn poll_change_batch(
@@ -1907,8 +1726,6 @@ impl JobWorkspaceRuntime {
                 error.cause_code = "VALIDATION_CLEANUP_PENDING_UNAVAILABLE";
                 error
             })?;
-        // The pending transaction can wait for a writer across the deadline.
-        // Only its exact, still-unstarted marker may be cleared on rejection.
         if let Err(error) = self.validation_start_time(active, &state, clock) {
             self.clear_confirmed_validation_cleanup(&state)?;
             return Err(error);
@@ -2026,8 +1843,6 @@ impl JobWorkspaceRuntime {
             return Err(authority_error());
         }
         if !will_validate || validation.receipt.is_none() {
-            // No executable validation: the evidence ends at the exact apply
-            // checkpoint, with no decision and no observation.
             return Ok(ExecutedChangeBatch {
                 progress,
                 receipt,
@@ -2136,9 +1951,6 @@ impl JobWorkspaceRuntime {
             progress.push(repair);
         }
         if !observation_requested && decision == ValidationDiagnosticDisposition::Pass {
-            // Diagnostic persistence can wait on another SQLite writer. Check
-            // effective authority again at the accepted-revision seam rather
-            // than authorizing it with the time sampled before those writes.
             let current = clock.timestamp().ok_or_else(authority_error)?;
             let now = &current;
             let workspace = self
@@ -2189,12 +2001,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Reports whether this batch has an executable read-only validation
-    /// profile, without retaining any state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid present validation configuration.
     fn validation_will_run(
         &self,
         active: &ActiveJob,
@@ -2218,12 +2024,6 @@ impl JobWorkspaceRuntime {
         Ok(selection.executable && !commands.is_empty())
     }
 
-    /// Runs the retained result state through its configured validation
-    /// profile, persisting every raw command output as a private Artifact.
-    ///
-    /// Read-only validation commands only: this module never mutates the
-    /// checkout, so formatter and writer phases belong to the deterministic
-    /// executor delivery and are never executed here.
     fn validation_input(
         &self,
         active: &ActiveJob,
@@ -2258,7 +2058,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Stops this Job's read-only validation before cancellation or terminal cleanup.
     pub(crate) async fn cancel_validation(
         &mut self,
         job_id: &ExecutionJobId,
@@ -2397,9 +2196,6 @@ impl JobWorkspaceRuntime {
         self.validation_completion_writer_barrier = Some((arrived, writer_locked));
     }
 
-    /// # Errors
-    ///
-    /// Rejects an unavailable `SQLite` authorizer setup.
     #[cfg(feature = "test-support")]
     pub fn delay_next_validation_cleanup_clear_for_test(
         &self,
@@ -2410,9 +2206,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// # Errors
-    ///
-    /// Rejects an unavailable `SQLite` cleanup-pending fault trigger setup.
     #[cfg(feature = "test-support")]
     pub fn fail_validation_cleanup_pending_for_test(&self) -> Result<(), JobWorkspaceError> {
         self.change_batch_store
@@ -2426,9 +2219,6 @@ impl JobWorkspaceRuntime {
         self.pending_validations.len()
     }
 
-    /// # Errors
-    ///
-    /// Rejects an unavailable `SQLite` cleanup-diagnostic fault trigger setup.
     #[cfg(feature = "test-support")]
     pub fn fail_validation_cleanup_diagnostic_for_test(&self) -> Result<(), JobWorkspaceError> {
         self.change_batch_store
@@ -2436,9 +2226,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// # Errors
-    ///
-    /// Rejects an unavailable `SQLite` cleanup-clear fault trigger setup.
     #[cfg(feature = "test-support")]
     pub fn fail_validation_cleanup_clear_for_test(&self) -> Result<(), JobWorkspaceError> {
         self.change_batch_store
@@ -2446,12 +2233,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Consumes and removes one exact Job workspace at terminal cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing active workspace, an unresolved durable batch, or a
-    /// cleanup failure.
     pub fn close_job(
         &mut self,
         job_id: &ExecutionJobId,
@@ -2486,13 +2267,6 @@ impl JobWorkspaceRuntime {
         Ok(report)
     }
 
-    /// Consumes the checkout only after every durable batch reached a proven
-    /// terminal decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing workspace, an unresolved durable batch, or a cleanup
-    /// failure.
     pub fn prepare_close_job(
         &mut self,
         job_id: &ExecutionJobId,
@@ -2513,17 +2287,6 @@ impl JobWorkspaceRuntime {
         self.consume_workspace(job_id, reason)
     }
 
-    /// Closes a terminal Job while retaining any unresolved batch checkout.
-    ///
-    /// Failed or cancelled Jobs may release their execution lease after the
-    /// exact unresolved workspace is durably quarantined. Its files, receipt,
-    /// active batch and accepted revision remain unchanged for diagnosis.
-    /// Successful Jobs still require the ordinary proven cleanup boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, unavailable durable state, or unresolved
-    /// mutation on a successful Job.
     pub fn prepare_terminal_job_close(
         &mut self,
         active: &ActiveJob,
@@ -2588,13 +2351,10 @@ impl JobWorkspaceRuntime {
             binding.state,
             BatchState::Quarantined,
         )?;
-        // Drop only the live owner lock. The quarantined checkout is never
-        // consumed or exposed to another execution through recovery.
         self.active.remove(&active.job.job_id.0);
         Ok(Some(terminal))
     }
 
-    /// Returns whether this process owns an open checkout for the Job.
     #[must_use]
     pub fn contains(&self, job_id: &ExecutionJobId) -> bool {
         self.active.contains_key(&job_id.0)
@@ -2637,11 +2397,6 @@ impl JobWorkspaceRuntime {
         workspace.freeze_candidate().map(|_| ()).map_err(Into::into)
     }
 
-    /// Returns the currently accepted tree that authorizes the next batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing active workspace or corrupt durable state.
     pub fn accepted_revision(
         &self,
         job_id: &ExecutionJobId,
@@ -2656,11 +2411,6 @@ impl JobWorkspaceRuntime {
             ))
     }
 
-    /// Returns whether the exchange belongs to a retained Observer intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt durable Observer state.
     pub fn is_observation_model_exchange(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -2678,12 +2428,6 @@ impl JobWorkspaceRuntime {
         Ok(record.is_some())
     }
 
-    /// Returns the exact unfinished Observer open for restart replay.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing current authority, a stale revision, or corrupt durable
-    /// exchange state.
     pub fn pending_observation_model_open(
         &self,
         active: &ActiveJob,
@@ -2726,11 +2470,6 @@ impl JobWorkspaceRuntime {
         Ok(Some(open))
     }
 
-    /// Terminalizes and returns the unfinished Observer open for Job cancel.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority or an unavailable durable cancellation write.
     pub fn cancel_pending_observation_model(
         &mut self,
         active: &ActiveJob,
@@ -2778,18 +2517,6 @@ impl JobWorkspaceRuntime {
         Ok(Some(open))
     }
 
-    /// Builds and durably retains the exact no-tools, strict-JSON one-shot
-    /// Provider open for one already-retained Observer intent.
-    ///
-    /// The returned message may be sent only after this method succeeds. An
-    /// exact replay returns the original message, including its first send
-    /// timestamp, so the Control Plane's durable Provider runtime invokes and
-    /// bills the exchange at most once.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/stale authority, changed intent bytes, unavailable
-    /// durable state, or a request that exceeds the bounded Provider shape.
     pub fn prepare_observation_model_open(
         &mut self,
         active: &ActiveJob,
@@ -2873,14 +2600,6 @@ impl JobWorkspaceRuntime {
         Ok(open)
     }
 
-    /// Applies one authority-bound Observer model chunk and, on a terminal
-    /// frame, durably routes its strict decision exactly once.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, gaps with changed bytes, tool/reasoning
-    /// frames, invalid payloads, or a decision that is not bound to the exact
-    /// retained intent.
     #[allow(clippy::too_many_lines)]
     pub fn accept_observation_model_chunk(
         &mut self,
@@ -2956,9 +2675,6 @@ impl JobWorkspaceRuntime {
             },
             now,
         )?;
-        // A completed historical observation is keyed by its original authority
-        // and exact retained frame bytes, not by a later batch's workspace phase.
-        // Retention above still rejects changed bytes and new terminal frames.
         if terminal_replay && !pending_terminal_route {
             return Ok(Some(ObservationChunkApplication {
                 retention,
@@ -3145,16 +2861,6 @@ impl JobWorkspaceRuntime {
         }))
     }
 
-    /// Atomically records one externally produced post-apply validation or
-    /// observation progress fact.
-    ///
-    /// This seam persists externally produced facts but does not invoke a
-    /// validator or observer.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, stale workspace state, or a progress fact
-    /// outside the bounded post-apply sequence.
     pub fn record_checkpoint_progress(
         &mut self,
         active: &ActiveJob,
@@ -3196,14 +2902,6 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Accepts one checkpoint only after an exact typed observation fact.
-    ///
-    /// Stale or foreign revision and digest facts return `Stale` without
-    /// changing the accepted tree or releasing the Writer barrier.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable or corrupt durable state and invalid progress bytes.
     pub fn accept_observed_checkpoint(
         &mut self,
         active: &ActiveJob,
@@ -3390,9 +3088,6 @@ async fn run_result_validation(
         } else if command.diagnostic_parser_version.is_some() {
             parser_failed = true;
         }
-        // An infrastructure failure proves nothing about the remaining
-        // profile, so the run stops instead of recording an incomplete
-        // snapshot as if it were complete.
         if run.infrastructure_failure() {
             break;
         }
@@ -3428,7 +3123,6 @@ async fn run_result_validation(
     })
 }
 
-/// Bounded outcome of one validation pass over the applied result state.
 #[derive(Debug)]
 struct ValidationOutcome {
     selection: ValidationProfileSelection,
@@ -3461,7 +3155,6 @@ impl From<&VerificationIsolation> for IsolationBinding {
     }
 }
 
-/// One bounded command outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValidationCommandOutcome {
     Passed,
@@ -3472,7 +3165,6 @@ enum ValidationCommandOutcome {
     CapabilityUnavailable,
 }
 
-/// One executed read-only validation command.
 struct ValidationCommandRun {
     command_id: String,
     outcome: ValidationCommandOutcome,
@@ -3628,7 +3320,6 @@ fn verification_helper_executable() -> Option<PathBuf> {
     std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").map(PathBuf::from)
 }
 
-/// Maps a canonical environment variable name to its process key.
 const fn environment_name(
     name: &winwincode_execution_port::generated::ValidationEnvironmentName,
 ) -> &'static str {
@@ -3642,7 +3333,6 @@ const fn environment_name(
     }
 }
 
-/// Reads the repository validation configuration from an exact checkout.
 fn load_validation_configuration(
     checkout: &Path,
 ) -> Result<
@@ -3668,11 +3358,16 @@ fn load_validation_configuration(
         .map_err(|_| change_batch_error("validation configuration is invalid"))
 }
 
-/// Executes one read-only validation command inside the checkout.
-///
-/// The command runs in its own process group without a shell, with an
-/// allowlisted environment, a hard output cap, and a hard deadline. Every
-/// output stream is durably persisted as a private Artifact before it is used.
+fn working_directory_within(checkout: &Path, working_directory: &Path) -> Option<PathBuf> {
+    match (
+        fs::canonicalize(checkout),
+        fs::canonicalize(working_directory),
+    ) {
+        (Ok(root), Ok(resolved)) if resolved.starts_with(&root) => Some(resolved),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::large_futures)]
 async fn run_validation_command(
@@ -3693,11 +3388,11 @@ async fn run_validation_command(
     } else {
         checkout.join(&command.working_directory)
     };
-    if !working_directory.starts_with(checkout) {
+    let Some(working_directory) = working_directory_within(checkout, &working_directory) else {
         return Err(change_batch_error(
             "validation command working directory leaves the checkout",
         ));
-    }
+    };
     let mut environment = HashMap::new();
     environment.insert("PATH".to_owned(), std::env::var("PATH").unwrap_or_default());
     for variable in &command.environment {
@@ -3774,7 +3469,6 @@ async fn run_validation_command(
     })
 }
 
-/// Persists one exact validation output stream and proves its digest.
 fn persist_validation_artifact(
     port: &mut dyn ValidationArtifactPort,
     proposal: &ChangeBatchProposalEvent,
@@ -3803,8 +3497,6 @@ fn persist_validation_artifact(
     Ok(artifact)
 }
 
-/// Loads the retained result baseline whose exact result tree equals one
-/// base revision, so the next batch is judged against proven history only.
 fn retained_history_baseline(
     store: &ChangeBatchStore,
     job_id: &ExecutionJobId,
@@ -3820,7 +3512,6 @@ fn retained_history_baseline(
     Ok(None)
 }
 
-/// Resolves the exact post-apply checkout tree through Git's index writer.
 fn resolve_checkout_tree(checkout: &Path) -> Result<WorkspaceRevision, JobWorkspaceError> {
     let write = std::process::Command::new("git")
         .arg("-C")
@@ -3856,12 +3547,10 @@ fn resolve_checkout_tree(checkout: &Path) -> Result<WorkspaceRevision, JobWorksp
     Ok(WorkspaceRevision(format!("git-tree:{tree_id}")))
 }
 
-/// Lists the portable paths one receipt changed against its base tree.
 fn git_changed_paths(receipt: &ChangeBatchReceipt) -> Vec<String> {
     receipt.files.iter().map(|file| file.path.clone()).collect()
 }
 
-/// Proves the proposal patch digest before any durable effect.
 fn verify_proposal_patch_digest(event: &ChangeBatchProposalEvent) -> Result<(), JobWorkspaceError> {
     let derived = Sha256Digest(format!(
         "sha256:{:x}",
@@ -4097,10 +3786,7 @@ fn same_change_batch_progress_authority(
         && event.identity.workspace_revision == *expected_revision
 }
 
-/// Resolves the private Worker-owned store root beside one workspace root.
 fn change_batch_store_root(workspace_root: &Path) -> Result<PathBuf, JobWorkspaceError> {
-    // The store directory is the canonical sibling of the runtime root, so
-    // the durable database lives at `<parent>/.workspaces-change-batches`.
     workspace_root
         .parent()
         .map(Path::to_path_buf)
@@ -4610,16 +4296,6 @@ fn observation_receipt_from_terminal(
     Ok(receipt)
 }
 
-/// Builds the one bounded Observer evidence pack for an inconclusive
-/// validation whose exact result the Worker already retained.
-///
-/// Returns `None` when the bounded input itself carries sensitive material:
-/// such evidence is never sent to an independent Provider route.
-///
-/// # Errors
-///
-/// Rejects evidence that is not an inconclusive validation, exceeds its
-/// bounded capacity, or cannot be canonically digested.
 #[allow(clippy::too_many_lines)]
 fn build_observation_request(
     store: &ChangeBatchStore,
@@ -4895,16 +4571,6 @@ const PROMPT_INJECTION_MARKERS: [&str; 9] = [
     "\"decision\":\"accept\"",
 ];
 
-/// Computes and durably retains the deterministic diagnostic decision for one
-/// validated batch against its accepted baseline.
-///
-/// A missing baseline never becomes blame: the decision is recorded with the
-/// exact evidence that existed, so the routed Observer intent can be replayed
-/// byte-for-byte after a restart.
-///
-/// # Errors
-///
-/// Rejects unavailable durable state or an incomparable baseline pair.
 #[allow(clippy::too_many_arguments)]
 fn retain_validation_diagnostic_evaluation(
     store: &mut ChangeBatchStore,
@@ -4955,12 +4621,41 @@ fn retain_validation_diagnostic_evaluation(
 mod validation_rerun_tests {
     use super::{
         IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
-        exact_validation_commands, validation_receipt_status,
+        exact_validation_commands, validation_receipt_status, working_directory_within,
     };
     use winwincode_execution_port::{
         generated::{ValidationCheckStatus, ValidationReceiptStatus},
         validation_config::{parse_validation_configuration, resolve_validation_profile},
     };
+
+    #[test]
+    fn validation_working_directory_rejects_symlink_and_dotdot_escapes() {
+        let base = std::env::temp_dir().join(format!(
+            "wwc-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkout = base.join("checkout");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, checkout.join("escape")).unwrap();
+        assert_eq!(
+            working_directory_within(&checkout, &checkout),
+            Some(std::fs::canonicalize(&checkout).unwrap())
+        );
+        assert_eq!(
+            working_directory_within(&checkout, &checkout.join("src")),
+            Some(std::fs::canonicalize(checkout.join("src")).unwrap())
+        );
+        assert!(working_directory_within(&checkout, &checkout.join("escape")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("../outside")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("missing")).is_none());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn a_passing_bounded_rerun_cannot_hide_the_original_failure() {

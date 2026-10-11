@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `ProductSession`'s lifecycle state machine.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +9,6 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_TITLE_LENGTH: usize = 500;
 const MAX_REASON_LENGTH: usize = 2_000;
 
-/// The product-visible state of one `ProductSession`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductSessionState {
@@ -24,7 +21,6 @@ pub enum ProductSessionState {
     Failed,
 }
 
-/// Input owned by the Control Plane when creating one `ProductSession`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductSessionCreate {
     pub product_session_id: ProductSessionId,
@@ -34,8 +30,6 @@ pub struct ProductSessionCreate {
     pub now: Instant,
 }
 
-/// `ProductSession` aggregate. Mutations go through the lifecycle methods so a
-/// caller cannot skip a state transition or revision update.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -49,7 +43,6 @@ pub struct ProductSession {
     updated_at: Instant,
 }
 
-/// `ProductSession` lifecycle failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductSessionError {
     InvalidIdentity(&'static str),
@@ -87,7 +80,6 @@ impl std::error::Error for ProductSessionError {}
 
 #[allow(clippy::missing_errors_doc)]
 impl ProductSession {
-    /// Creates an idle `ProductSession` at revision one.
     pub fn create(input: ProductSessionCreate) -> Result<Self, ProductSessionError> {
         validate_id(&input.product_session_id.0, "productSessionId", "psn_")?;
         validate_id(&input.project_id.0, "projectId", "prj_")?;
@@ -105,7 +97,6 @@ impl ProductSession {
         })
     }
 
-    /// Convenience constructor for callers that do not need the input struct.
     pub fn new(
         product_session_id: ProductSessionId,
         project_id: ProjectId,
@@ -157,7 +148,6 @@ impl ProductSession {
         &self.updated_at
     }
 
-    /// Updates display metadata without changing the execution lifecycle.
     pub fn rename(&mut self, title: String, now: Instant) -> Result<(), ProductSessionError> {
         validate_title(&title)?;
         self.transition(self.state, "rename", now, |_| true)?;
@@ -165,7 +155,6 @@ impl ProductSession {
         Ok(())
     }
 
-    /// Starts a Chat turn from an idle or failed session.
     pub fn begin_turn(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(ProductSessionState::Running, "begin_turn", now, |state| {
             matches!(
@@ -175,7 +164,6 @@ impl ProductSession {
         })
     }
 
-    /// Moves a running turn to the user-input wait state.
     pub fn wait_for_input(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(
             ProductSessionState::WaitingForInput,
@@ -185,7 +173,6 @@ impl ProductSession {
         )
     }
 
-    /// Moves a running turn to the execution-approval wait state.
     pub fn wait_for_approval(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(
             ProductSessionState::WaitingForApproval,
@@ -195,7 +182,6 @@ impl ProductSession {
         )
     }
 
-    /// Resumes a turn after its input or approval request is resolved.
     pub fn resume(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(ProductSessionState::Running, "resume", now, |state| {
             matches!(
@@ -205,14 +191,12 @@ impl ProductSession {
         })
     }
 
-    /// Completes the current turn and returns the session to idle.
     pub fn complete_turn(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(ProductSessionState::Idle, "complete_turn", now, |state| {
             *state == ProductSessionState::Running
         })
     }
 
-    /// Records a terminal model or infrastructure failure for the current turn.
     pub fn fail(
         &mut self,
         reason: impl AsRef<str>,
@@ -229,7 +213,6 @@ impl ProductSession {
         })
     }
 
-    /// Cancels a session. Replaying cancellation is idempotent.
     pub fn cancel(
         &mut self,
         reason: impl AsRef<str>,
@@ -244,7 +227,6 @@ impl ProductSession {
         })
     }
 
-    /// Closes an idle, failed, or cancelled session. Replaying close is idempotent.
     pub fn close(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         if self.state == ProductSessionState::Closed {
             return Ok(());
@@ -324,7 +306,6 @@ fn canonical_id(value: &str, prefix: &str) -> bool {
 
 fn validate_instant(instant: &Instant) -> Result<(), ProductSessionError> {
     let value = instant.0.as_bytes();
-    // `YYYY-MM-DDTHH:mm:ss.sssZ`, matching the canonical schema's fixed UTC form.
     let valid_shape = value.len() == 24
         && value[4] == b'-'
         && value[7] == b'-'

@@ -273,8 +273,6 @@ test('serialized WebSocket invalidation bursts still coalesce to one trailing HT
     delayReload = true
     mock.timers.enable({ apis: ['setTimeout'] })
     try {
-      // Production queues validated frames while awaiting each callback. Let the first
-      // reload enter HTTP, then queue the rest before applying them serially.
       const frames = Array.from({ length: 40 }, (_, index) => ({
         type: 'event.v1',
         subscriptionId: 'sub_00000000000000000000000001',

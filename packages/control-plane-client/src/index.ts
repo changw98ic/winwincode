@@ -1,5 +1,6 @@
-import { executeFetch, wait, withResponseFailure, policy as networkPolicy } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
+
+import { executeFetch, wait, withResponseFailure, policy as networkPolicy } from '@winwincode/network-request'
 
 import type {
   ControlPlaneAuthSession as AuthSessionResponse,
@@ -119,7 +120,6 @@ export interface ControlPlaneGeneratedWebSocketClient<
   close(): void
 }
 
-/** Product-generated HTTP/WebSocket code is supplied at the composition root. */
 export interface ControlPlaneGeneratedTransport<
   ProductSession extends AuthSessionResponse = AuthSessionResponse,
   ProductCommandRequest extends CommandRequest = CommandRequest,
@@ -184,13 +184,6 @@ const AUTH_PASSWORD_PATH = '/api/v1/auth/password'
 const SERVER_INITIALIZATION_PATH = '/api/v1/server/initialization'
 const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
 
-/**
- * The one place that names the sign-in wire failure codes of
- * `POST /api/v1/auth/session`. Pages and view-models only ever see the
- * `ControlPlaneLoginFailure` union below. The Server deliberately folds
- * disabled accounts into the same `AUTHENTICATION_REQUIRED` rejection as a
- * wrong password, so no separate disabled wire code exists.
- */
 const LOGIN_AUTHENTICATION_REQUIRED_CODE = 'AUTHENTICATION_REQUIRED'
 const LOGIN_RATE_LIMITED_CODE = 'RATE_LIMITED'
 
@@ -214,7 +207,6 @@ export interface ControlPlaneClientErrorFields {
   readonly cause?: unknown
 }
 
-/** The one error shape exposed by the browser network boundary. */
 export class ControlPlaneClientError extends Error {
   readonly kind: ControlPlaneClientErrorKind
   readonly code: string
@@ -234,16 +226,10 @@ export class ControlPlaneClientError extends Error {
 }
 
 export interface ControlPlaneServerLocation {
-  /** Normalized HTTP(S) base used by commands and queries. */
   readonly serverUrl: string
-  /** Derived WS(S) base used by subscriptions. */
   readonly webSocketUrl: string
 }
 
-/**
- * Validate the sole runtime address before the page or a transport is started.
- * Paths are allowed for reverse-proxy deployments; credentials, query, and hash are not.
- */
 export function parseControlPlaneServerUrl(value: unknown): ControlPlaneServerLocation {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw configurationError(
@@ -302,7 +288,6 @@ export interface ControlPlaneTransportRequestInit {
   readonly redirect?: 'error'
   readonly cache?: 'no-store'
   readonly referrerPolicy?: 'no-referrer'
-  /** Cross-origin Control Plane sessions use the same secure cookie authentication as WebSocket. */
   readonly credentials: 'include'
   readonly signal?: AbortSignal
 }
@@ -313,9 +298,7 @@ export type ControlPlaneTransportFetch = (
 ) => Promise<ControlPlaneHttpResponse>
 
 export interface ControlPlaneClientTransport {
-  /** Deterministic injection seam; production defaults to the browser HTTP transport. */
   readonly fetch?: ControlPlaneTransportFetch
-  /** Deterministic injection seam; production defaults to the browser WebSocket transport. */
   readonly createSocket?: ControlPlaneWebSocketFactory
 }
 
@@ -339,7 +322,6 @@ export interface ControlPlaneClientOptions<
     ControlPlaneWebSocketSubscribeStartAt,
   ProductEventReadCursor extends EventReadCursor = EventReadCursor,
 > {
-  /** Product-owned generated transport and validators. */
   readonly generated: ControlPlaneGeneratedTransport<
     ProductSession,
     ProductCommandRequest,
@@ -354,7 +336,6 @@ export interface ControlPlaneClientOptions<
     ProductStartAt,
     ProductEventReadCursor
   >
-  /** The only runtime network address. HTTP and WebSocket endpoints are derived from it. */
   readonly serverUrl: string
   readonly maxNetworkRetries?: number
   readonly reconnectDelayMillis?: number
@@ -369,13 +350,11 @@ export interface ControlPlaneRequestOptions {
 
 export type ControlPlaneSession = AuthSessionResponse
 
-/** Username and password material for one sign-in attempt. */
 export interface ControlPlanePasswordCredentials {
   readonly username: string
   readonly password: string
 }
 
-/** Current and replacement password for the signed-in local Owner. */
 export interface ControlPlanePasswordChange {
   readonly currentPassword: string
   readonly newPassword: string
@@ -385,17 +364,10 @@ export interface ControlPlaneOwnerInitialization extends ControlPlanePasswordCre
   readonly bootstrapProof: string
 }
 
-/** Whether the Server still accepts the one-time bootstrap initialization. */
 export interface ControlPlaneInitializationStatus {
   readonly initialized: boolean
 }
 
-/**
- * The one presentation-facing sign-in failure taxonomy. Server wire codes are
- * translated by `controlPlaneLoginFailure` and never read anywhere else.
- * Disabled accounts share the wrong-password rejection on the wire, so no
- * separate disabled presentation state exists.
- */
 export type ControlPlaneLoginFailure =
   | 'invalid-credentials'
   | 'rate-limited'
@@ -419,7 +391,6 @@ export interface ControlPlaneSubscribeOptions<
   readonly subscription: ProductSubscription
   readonly startAt?: ProductStartAt
   readonly signal?: AbortSignal
-  /** Synchronous observer for a validated event waiting in the ordered application queue. */
   readonly onEventQueued?: (event: ProductEventFrame) => void
   readonly onEvent: (event: ProductEventFrame) => Promise<void> | void
   readonly onResetRequired?: (
@@ -459,23 +430,19 @@ export interface ControlPlaneClient<
   ProductEventReadCursor extends EventReadCursor = EventReadCursor,
 > {
   readonly serverUrl: string
-  /** Restore the secret-free identity and authorized scopes from the HttpOnly cookie. */
   restore(options?: ControlPlaneRequestOptions): Promise<ProductSession>
   initializeOwner(
     initialization: ControlPlaneOwnerInitialization,
     options?: ControlPlaneRequestOptions,
   ): Promise<ProductSession>
-  /** Exchange a username and password for one browser session. */
   login(
     credentials: ControlPlanePasswordCredentials,
     options?: ControlPlaneRequestOptions,
   ): Promise<ProductSession>
-  /** Replace the signed-in Owner password after verifying the current password. */
   changePassword(
     change: ControlPlanePasswordChange,
     options?: ControlPlaneRequestOptions,
   ): Promise<void>
-  /** Read whether the Server still shows the first-time initialization entry. */
   initializationStatus(
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneInitializationStatus>
@@ -611,11 +578,6 @@ function accessKind(code: string): ControlPlaneClientErrorKind | null {
   return null
 }
 
-/**
- * Validate sign-in input before a request exists. The password length bound
- * mirrors the bootstrap proof bound; neither the username nor the password is
- * ever copied into an error message.
- */
 function assertLoginCredentials(credentials: ControlPlanePasswordCredentials): void {
   const username = typeof credentials?.username === 'string' ? credentials.username : ''
   const password = typeof credentials?.password === 'string' ? credentials.password : ''
@@ -679,14 +641,6 @@ function loginBoundaryError(status: number, source: string): ControlPlaneClientE
   })
 }
 
-/**
- * Translate one sign-in failure into the presentation taxonomy. Every wire
- * code stays inside this function; view-models and pages branch only on the
- * returned union. A 401 `AUTHENTICATION_REQUIRED` rejection covers wrong
- * credentials and disabled accounts alike (the Server does not distinguish
- * them), and every other failure — outage, protocol drift, wrong state — is
- * presented as an unavailable sign-in.
- */
 export function controlPlaneLoginFailure(error: unknown): ControlPlaneLoginFailure {
   if (error instanceof ControlPlaneClientError) {
     if (error.code === LOGIN_RATE_LIMITED_CODE) return 'rate-limited'
@@ -852,7 +806,6 @@ function versionCheckedResponse(
   }
 }
 
-/** Create the only browser entry to Control Plane commands, queries, and subscriptions. */
 export function createControlPlaneClient<
   ProductSession extends AuthSessionResponse,
   ProductCommandRequest extends CommandRequest,
@@ -918,7 +871,6 @@ export function createControlPlaneClient<
     try {
       options.onAccessFailure?.(error)
     } catch {
-      // Authentication UI failures must not replace the canonical server error.
     }
   }
 
@@ -1327,15 +1279,3 @@ export function createControlPlaneClient<
     },
   }
 }
-
-// ---------------------------------------------------------------------------
-// Repository directory: the authorized repository list (REPO-100.3).
-//
-// FAKE-DRIVEN SHAPES: the route and payload shape in this block are the
-// presentation-side contract for the repository list. The Server owns the
-// real wire route and payload names; when the Server landing settles them,
-// only the path constant and the parsers in this block change. Pages and
-// view-models only ever see the typed unions and summaries below. The enum
-// values mirror the canonical contracts (`RepositoryDirtyState`,
-// `RepositoryAvailability`) without importing the contracts source.
-// ---------------------------------------------------------------------------

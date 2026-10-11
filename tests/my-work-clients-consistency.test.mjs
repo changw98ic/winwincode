@@ -1,6 +1,3 @@
-// [UI-100.3] My Work Clients zone and the Clients page render one shared
-// Clients area model, so every Server snapshot must flow to both surfaces
-// with the same state copy, the same counts, and the same failure survival.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
@@ -30,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/my-work-tests')
-// Plain module paths keep one module identity across the reused projections
-// and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -210,7 +205,6 @@ function clientsFake(devices) {
   }
 }
 
-/** One deterministic occupancy port without the Owner seam (portFake shape). */
 function portFake() {
   const pending = []
   function track() {
@@ -226,11 +220,6 @@ function portFake() {
   }
 }
 
-/**
- * One shared Clients area model drives both surfaces, exactly like the shell
- * composition: the Clients page and the My Work zone subscribe to the same
- * view-model and therefore the same Server snapshot.
- */
 function consistencyFixture({ devices = [device()] } = {}) {
   const document = new FakeDocument()
   const myWorkRoot = new FakeElement(document, 'div')
@@ -407,11 +396,6 @@ function presenceText(node) {
     .textContent
 }
 
-/**
- * The one consistency assertion: for the snapshot the shared model serves,
- * both surfaces print the same state copy per device and the zone summary
- * matches the served list.
- */
 function assertSurfacesAgree(fixtureHandle, expectedDevices) {
   const { myWorkRoot, clientsRoot, clients, model } = fixtureHandle
   const zone = byClass(myWorkRoot, 'wwc-my-work-clients')
@@ -500,8 +484,6 @@ test('draining and recovery-pending states reach both surfaces; only the card sh
   await handle.clients.refresh()
   assertSurfacesAgree(handle, next)
 
-  // The interaction surface (the Clients page card) carries the §12.4 window;
-  // the status zone stays at the same state copy without inventing details.
   const recoveringCard = cardFor(handle.clientsRoot, 'Recovering Rig')
   const recovery = descendants(recoveringCard)
     .find(child => child.className === 'wwc-clients-card-recovery')
@@ -531,7 +513,6 @@ test('a failed device read marks both surfaces and keeps the same served snapsho
   assert.equal(handle.model.state.sources.clients, 'unavailable')
   assert.equal(handle.model.state.status, 'partial')
 
-  // Neither surface clears the served rows, and the state copy stays put.
   assert.equal(pageCards(handle.clientsRoot).length, 1)
   assert.equal(zoneRows(handle.myWorkRoot).length, 1)
   assert.equal(

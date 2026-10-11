@@ -43,11 +43,6 @@ export interface ChatDeliveryCreatorState {
   readonly deliveryId?: DeliveryId
 }
 
-/**
- * Structural composition seam; Chat does not import a delivery workbench
- * model.  The creator turns one confirmed Chat draft into the first Delivery
- * through the canonical DeliveryCreate command.
- */
 export interface ChatDeliveryCreator {
   readonly state: ChatDeliveryCreatorState
   subscribe(listener: (state: ChatDeliveryCreatorState) => void): () => void
@@ -119,7 +114,6 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   )
 }
 
-/** Create the first Delivery through canonical commands on behalf of one Chat session. */
 export function createChatDeliveryCreator(
   options: ChatDeliveryCreatorOptions,
 ): ChatDeliveryCreator {

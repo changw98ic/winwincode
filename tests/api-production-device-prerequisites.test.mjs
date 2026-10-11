@@ -318,7 +318,6 @@ test('runtime children do not inherit orchestration credentials or injected star
   })
   const actual = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
     'process.stdout.write(JSON.stringify(process.env))'], { env: environment, encoding: 'utf8' }))
-  // CoreFoundation adds this platform-owned setting on macOS process startup.
   delete actual.__CF_USER_TEXT_ENCODING
   assert.deepEqual(actual, { PATH: '/usr/bin:/bin', HOME: '/tmp/isolated-benchmark-home', LANG: 'C' })
 })

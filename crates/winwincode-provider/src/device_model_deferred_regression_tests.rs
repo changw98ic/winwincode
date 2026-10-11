@@ -217,8 +217,6 @@ fn exercise_deferred(crash_resume: bool) {
             store.model_retry_state(&open).unwrap(),
             Some((next_attempt, wake_ms))
         );
-        // Synthetic wall-clock advancement: exercise the actual resumed queue
-        // without a five-minute fixture sleep. Identity and attempt stay intact.
         store
             .connection
             .execute(

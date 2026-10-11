@@ -68,11 +68,6 @@ pub struct DeliveryVerdict {
     pub produced_at_millis: u64,
 }
 
-/// Evidence and verdict facts derived together for one atomic Delivery write.
-///
-/// Its fields are private and there is no deserializer or public constructor.
-/// Callers can inspect or move the computed canonical facts, but cannot submit
-/// a preselected status, `CriterionResult`, `DeliveryVerdict`, or Attention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputedDeliveryVerdict {
     evidence: Vec<EvidenceRef>,
@@ -95,12 +90,6 @@ impl ComputedDeliveryVerdict {
     }
 }
 
-/// Highest-authority input that determined a [`CanonicalDecision`].
-///
-/// Priority is strict and never inverted:
-/// Verified Fact > Tool Observation > Model Consensus > Single Model Claim.
-/// Fusion and analyzer output have no authority to override Verifier real
-/// test results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionAuthority {
     VerifiedFact,
@@ -110,11 +99,6 @@ pub enum DecisionAuthority {
     NoDecision,
 }
 
-/// Read-only adjudication over existing Delivery facts and Evidence.
-///
-/// This projection has no identity or deserializer and is never a second
-/// canonical store. Its references point back to the current Delivery,
-/// candidate, verdict, and Evidence that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalDecision {
     delivery_id: DeliveryId,
@@ -157,24 +141,12 @@ impl CanonicalDecision {
     }
 }
 
-/// One host-mapped model claim shaped from analyzer output.
-///
-/// Control-plane owns `FusionAnalysis` (FUSION-03). Delivery accepts this
-/// fixture so adjudication never imports the analyzer crate and never creates
-/// a dependency cycle. Analyzer evidence quality never becomes Delivery
-/// [`DecisionAuthority::VerifiedFact`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzerClaimFixture {
     pub candidate_id: String,
     pub outcome: CriterionVerdict,
 }
 
-/// Analyzer-shaped fixture consumed by [`adjudicate_canonical_decision_from_analysis`].
-///
-/// Hosts map real `FusionAnalysis` findings into this shape: unanimous
-/// consensus outcomes, evidence-ranked conflict positions, and unsupported
-/// model claims all become adjudication model claims. Candidate counts never
-/// raise authority above tool observation or verified facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionAnalysisFixture {
     pub consensus_outcomes: Vec<CriterionVerdict>,
@@ -186,15 +158,12 @@ impl FusionAnalysisFixture {
     #[must_use]
     pub fn from_claims(claims: &[AnalyzerClaimFixture]) -> Self {
         let mut fixture = Self::default();
-        // Hosts may tag consensus later; default fixture keeps every claim in
-        // the model-claim tier so verified facts still outrank them.
         for claim in claims {
             fixture.unsupported_model_claims.push(claim.outcome);
         }
         fixture
     }
 
-    /// Maps this fixture into adjudicator model claims.
     #[must_use]
     pub fn model_claims(&self) -> Vec<CriterionVerdict> {
         let mut claims = self.consensus_outcomes.clone();
@@ -204,24 +173,6 @@ impl FusionAnalysisFixture {
     }
 }
 
-/// Adjudicates without granting model output any canonical-state write power.
-///
-/// Binds Repo State ([`FrozenDeliveryCandidate`]), Canonical State
-/// ([`Delivery`]), Tests and Tool Evidence ([`ResolvedDeliveryEvidence`]),
-/// and Verifier Evidence ([`ComputedDeliveryVerdict`] or a persisted
-/// [`DeliveryVerdict`]).
-///
-/// Priority is strict: a persisted or freshly computed verifier verdict,
-/// sealed test Evidence, sealed tool Evidence, unanimous model claims, then a
-/// single model claim. An inconclusive verifier verdict remains authoritative;
-/// lower tiers cannot turn a verification dispute into a pass.
-///
-/// This function never invents a verifier pass. When no verifier or sealed
-/// test fact exists, authority is not [`DecisionAuthority::VerifiedFact`].
-///
-/// # Errors
-///
-/// Rejects stale repository, canonical, verifier, or Evidence bindings.
 pub fn adjudicate_canonical_decision(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -292,15 +243,6 @@ pub fn adjudicate_canonical_decision(
     Ok(decision(delivery, candidate, outcome, authority, vec![]))
 }
 
-/// Adjudicates from analyzer-shaped fixture data plus sealed Delivery facts.
-///
-/// Control-plane maps `analyze_fusion` output into [`FusionAnalysisFixture`].
-/// Delivery never imports that analyzer crate. Verifier and sealed test facts
-/// still outrank every mapped model claim.
-///
-/// # Errors
-///
-/// Rejects stale repository, canonical, verifier, or Evidence bindings.
 pub fn adjudicate_canonical_decision_from_analysis(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -453,16 +395,6 @@ struct DeliveryVerdictIdentity<'verdict> {
     unresolved_findings: &'verdict [String],
 }
 
-/// Computes one deterministic, fail-closed verdict from sealed domain facts.
-///
-/// This is the module's only computation entry. It never accepts caller-made
-/// Evidence, criterion results, verdict status, or Attention values.
-///
-/// # Errors
-///
-/// Rejects stale candidates or verification projections, duplicate/foreign
-/// Evidence, invalid time ordering, and any derived facts that do not satisfy
-/// the canonical Delivery relationships.
 #[allow(clippy::too_many_lines)]
 pub fn compute_delivery_verdict(
     delivery: &Delivery,
@@ -888,7 +820,6 @@ fn compute_criterion(
     }
 }
 
-/// Computes one role's result with the same evidence rules used by Verdict.
 #[must_use]
 pub fn compute_verifier_result(
     delivery: &Delivery,
@@ -1244,10 +1175,6 @@ const fn direct_evidence_type(evidence_type: EvidenceRefType) -> bool {
     )
 }
 
-/// Retains already-resolved executor/remediator Commit Evidence that names the
-/// exact frozen candidate producer identity. Preview source authority reads
-/// this sealed fact from the Delivery evidence store even when no acceptance
-/// criterion cites it as runtime verification evidence.
 fn is_producer_candidate_commit_evidence(
     resolved: &ResolvedDeliveryEvidence,
     candidate: &FrozenDeliveryCandidate,
@@ -1746,7 +1673,6 @@ mod tests {
             *candidate.producer_session_binding_id()
         );
         assert_eq!(&commits[0].candidate_id, candidate.candidate_id());
-        // Criterion evaluation still uses only runtime command/test evidence.
         assert!(
             !computed.verdict().criteria[0]
                 .evidence_refs

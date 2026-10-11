@@ -1,12 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//
-// Community product boundary: WinWinCode Community is a single local Owner
-// product. This application graph mounts DSH, StrongFlow, local Owner
-// login/session, Device Client, and Repository surfaces only. Cloud/Enterprise
-// management routes and organization/member administration navigation are not
-// Community product surface. Scope query keys that still carry organizationId
-// use LocalDefaultScope singleton values.
-
 import { mountPreferences } from './preferences.js'
 import { REPOSITORY_NAME_CHANGED_EVENT } from './display-labels.js'
 
@@ -122,16 +114,11 @@ export interface WinWinCodeClientApplicationOptions {
   readonly serverUrl: string
   readonly root: HTMLElement
   readonly window?: Window
-  /** Canonical facade injection used by deterministic browser fixtures and host composition. */
   readonly controlPlane?: ControlPlaneClient
-  /** Secret-safe clipboard seam for browser hosts and deterministic fixtures. */
   readonly copyText?: (value: string) => Promise<void> | void
-  /** Session history renderer seam for hosts with a non-DOM test document. */
   readonly mountSessionBrowser?: (root: HTMLElement) => ReturnType<typeof mountSessionBrowser>
   readonly now?: () => string
-  /** Server/deployment facts projected into navigation presentation only. */
   readonly navigationCapabilities?: Readonly<NavigationCapabilityFacts>
-  /** 假优先任务锚点种子(演示 fixture 用,设计稿 05 的任务详情内容)。 */
   readonly taskSeed?: readonly ControlPlaneTaskAnchor[]
 }
 
@@ -186,7 +173,6 @@ function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransp
   return Object.freeze({ fetch })
 }
 
-/** Mount the one browser shell. Feature modules attach to its named surface slot. */
 export function mountWinWinCodeClient(
   options: WinWinCodeClientApplicationOptions,
 ): WinWinCodeClientApplication {
@@ -223,14 +209,7 @@ export function mountWinWinCodeClient(
     transport: browserTransport,
   })
   accessFailureSession = authSession
-  // AUTH-100.2: the username + password login page talks to the one Control
-  // Plane facade directly. Expected sign-in failures stay in the form instead
-  // of polluting feature connection health, mirroring the Scope selector seam.
   const loginModel: LoginViewModel = createLoginViewModel({ client: rawControlPlane })
-  // CLIENT-200.4: the Clients area talks to the one Control Plane facade
-  // through its directory extension. Expected add-Client failures stay in the
-  // form instead of polluting feature connection health, mirroring the login
-  // page seam above.
   const clientDirectory = createControlPlaneClientDirectory({
     client: rawControlPlane,
     transport: browserTransport,
@@ -242,11 +221,6 @@ export function mountWinWinCodeClient(
     client: rawControlPlane,
     transport: browserTransport,
   })
-  // CLIENT-300.5: the device card occupancy interactions run against the
-  // frozen occupancy facade (claim / drain-aware release / cancel-and-release
-  // with confirmation); without a Client surface the model mounts with a null
-  // port and reports the honest unavailable failure instead of pretending the
-  // actions landed.
   const clientOccupancy = createClientOccupancyFacade({
     client: rawControlPlane,
     transport: browserTransport,
@@ -255,17 +229,13 @@ export function mountWinWinCodeClient(
     port: clientOccupancyPortFromFacade(clientOccupancy),
     clients: clientsModel,
   })
-  // REPO-100.3: the repository list talks to the same directory facade; the
-  // list is a Server snapshot read, so expected failures stay inside the area.
   const repositoriesModel: RepositoriesViewModel = createRepositoriesViewModel({
     client: clientDirectory,
   })
-  // UI-504: 浏览器本地的最近打开交付历史,看板以「最近访问」折叠行渲染。
   const homeVisits: HomeRecentVisitStore = createHomeRecentVisitStore({
     storage: browserHomeVisitStorage(browser),
   })
 
-  /** 记录一次交付访问;非交付深链路由不写入。 */
   function recordHomeVisit(hash: string): void {
     const path = hash.slice(0, hash.indexOf('?') < 0 ? hash.length : hash.indexOf('?'))
     if (path !== '#/home/task-run') return
@@ -322,11 +292,8 @@ export function mountWinWinCodeClient(
   const clientsRoot = element(document, 'div', 'wwc-clients-root')
   const repositoriesRoot = element(document, 'div', 'wwc-repositories-root')
   const main = element(document, 'main', 'wwc-main')
-  // Community binds one repository at Server startup; there is no multi-tenant
-  // Scope switcher. Notices for revoked/empty scope use a plain alert region.
   const scopeNotice = element(document, 'p', 'wwc-scope-notice')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
-  // The shell supplies the accessible page title for every routed surface.
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
   const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
@@ -341,7 +308,6 @@ export function mountWinWinCodeClient(
   let activeRouteReadOnly = false
   let revokedScopeIdentity: string | null = null
   let closed = false
-  // UI-506: one shell-owned notification monitor for the selected repository Scope.
   let attentionMonitor: AttentionNotificationMonitor | null = null
   let attentionMonitorScope: string | null = null
   function selectionIdentity(selection: ScopeRouteSelection): string {
@@ -504,10 +470,6 @@ export function mountWinWinCodeClient(
   readOnlyNotice.setAttribute('role', 'status')
   readOnlyNotice.textContent = '此区域为只读。写入操作不可用，服务端授权仍然生效。'
   readOnlyNotice.hidden = true
-  // UI-604: the surface slot holds the whole mounted page.  Marking it as a live
-  // region queued every realtime DOM change for announcement and nested inside
-  // the page's own status regions, so the shell stays silent and each page keeps
-  // exactly one polite channel for its own status line.
   skipLink.href = '#wwc-main'
   skipLink.textContent = '跳到主内容'
   skipLink.addEventListener('click', event => {
@@ -544,8 +506,6 @@ export function mountWinWinCodeClient(
     links.set(surface.id, link)
     navigation.append(link)
   }
-  // Design sidebar footer: 设置 sits in the footer under 「Client 已连接」,
-  // not inside the top navigation group.
   connectionBar.root.append(links.get('settings')!)
 
   const recentChatsRoot = element(document, 'div', 'wwc-recent-chats')
@@ -669,11 +629,6 @@ export function mountWinWinCodeClient(
     model: repositoriesModel,
   })
 
-  /**
-   * The login page is the unauthenticated surface. It appears on sign-out and
-   * on session expiry, and the URL hash never changes, so a successful
-   * sign-in re-renders the originally requested route.
-   */
   let loginVisible: boolean | null = null
   let clientsVisible: boolean | null = null
   function updateClientsVisibility(status: AuthSessionViewModel['state']['status']): void {
@@ -682,8 +637,6 @@ export function mountWinWinCodeClient(
     clientsVisible = visible
     clientsPage.setVisible(visible)
     if (visible) void clientsModel.refresh()
-    // REPO-100.3: the repository area follows the Clients area's signed-in
-    // visibility; its content is driven by the device card selection.
     repositoriesPage.setVisible(visible)
     if (visible && repositoriesModel.state.clientId !== null) {
       void repositoriesModel.refresh()
@@ -691,8 +644,6 @@ export function mountWinWinCodeClient(
   }
   function updateLoginVisibility(): void {
     const status = authSession.state.status
-    // CLIENT-200.4: the Clients area is the signed-in device directory, so its
-    // visibility is decided independently of the login page's early return.
     updateClientsVisibility(status)
     const visible = status === 'signed-out'
       || status === 'restoring'
@@ -701,8 +652,6 @@ export function mountWinWinCodeClient(
     loginVisible = visible
     loginPage.setVisible(visible)
     if (visible) {
-      // Each unauthenticated episode arms a fresh form; the previous
-      // submission outcome must never re-trigger a session restore.
       loginModel.reset()
       void loginModel.refreshInitialization()
     }
@@ -763,8 +712,6 @@ export function mountWinWinCodeClient(
       link.href = surfaceHash(entry.surface.path, scopeSelectionFromHash(browser.location.hash))
       link.dataset.capability = entry.capability
       link.hidden = entry.capability === 'hidden'
-      // The icon span from mount time must survive label updates, so only the
-      // dedicated text node is rewritten here.
       let text = linkText.get(link)
       if (text === undefined) {
         text = link.lastElementChild as HTMLElement | null ?? link
@@ -788,11 +735,8 @@ export function mountWinWinCodeClient(
       }
       if (!link.hidden) visible.push(link)
     }
-    // The 设置 link lives in the sidebar footer (moved at mount), so the
-    // navigation group rebuild keeps only the top group.
     navigation.replaceChildren(...visible.filter(link => link.dataset.surface !== 'settings'))
     navigation.dataset.deployment = projection.deployment
-    // Rebuilding the labels also rebuilds the badge, so it is re-applied here.
     attentionMonitor?.applyBadge()
     return projection
   }
@@ -847,11 +791,6 @@ export function mountWinWinCodeClient(
     attentionMonitorScope = null
   }
 
-  /**
-   * Keep exactly one shell-owned notification monitor for the selected
-   * repository Scope.  It opens no event subscription of its own, so the
-   * mounted feature routes keep their single event stream.
-   */
   async function ensureAttentionMonitor(
     generation: number,
     actor: NonNullable<AuthSessionViewModel['state']['session']>['actor'],
@@ -1017,9 +956,6 @@ export function mountWinWinCodeClient(
           replaceHash(`#/chat?${parameters.toString()}`)
         },
       })
-      // Design page 03b: a confirmed draft becomes the first Delivery; the
-      // receipt line inside the conversation carries the follow-up link, so
-      // creation itself never navigates away from the session.
       const deliveryCreator = createChatDeliveryCreator({
         client: controlPlane,
         actor: context.actor,
@@ -1027,7 +963,6 @@ export function mountWinWinCodeClient(
         nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onCreated() {
-          // The page re-renders from the creator subscription; no navigation.
         },
       })
       activeFeature = mountChatPage({
@@ -1081,8 +1016,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** Design page 07: 项目与仓库 list. Backed by the directory facades the shell
-   *  already owns; the page module owns DOM and presentation only. */
   async function renderProjects(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1112,7 +1045,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** Design page 08: 执行设备. Reuses the shell-owned Clients model. */
   async function renderDevice(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1137,7 +1069,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** Device-owned extension configuration and confirmed execution capabilities. */
   async function renderExtensions(generation: number): Promise<void> {
     if (authenticatedRouteContext() === null) return
     const controller = new AbortController()
@@ -1183,9 +1114,6 @@ export function mountWinWinCodeClient(
         fetch: browserTransport.fetch,
         model,
         readOnly: activeRouteReadOnly,
-        // Design page 15: the 用量 tab lazily mounts the live Usage/Provider/
-        // Worker health summary, so the settings route only pays for the usage
-        // projection when the tab is opened.
         mountUsagePanel: async usageRoot => {
           const [{ createUsageHealthViewModel }, { mountUsageHealthSummary }] = await Promise.all([
             import('./usage-health-view-model.js'),
@@ -1222,12 +1150,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /**
-   * UX-100.1: My Work is the converged post-login first screen.  It reuses the
-   * existing Home dashboard projection (Attention, Delivery, Usage) as its work
-   * sections, adds the §16.2 start-task entry and the Clients status zone from
-   * the shell-owned Clients area model, and keeps every Home deep link.
-   */
   async function renderHome(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1250,12 +1172,8 @@ export function mountWinWinCodeClient(
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         visits: homeVisits,
-        // The Clients zone reuses the one shell-owned Clients area model, so
-        // the first screen never grows a second device-list state.
         clients: clientsModel,
       })
-      // The page owns the composed model: its close chain also closes the
-      // Attention, Delivery and Usage projections it mounted.
       activeFeature = mountMyWorkPage({
         root: slot,
         model,
@@ -1268,12 +1186,9 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** The Home surface carries the §16.6/§16.7 sub-routes under its path. */
   function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' | 'candidate-preview' | 'clarification' {
     const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
     if (path === '/home/new-task') return 'task-entry'
-    // `/home/run` is the canonical sub-route; `/home/task-run` is the same
-    // task-detail page under its design-page name.
     if (path === '/home/run' || path === '/home/task-run') return 'task-run'
     if (path === '/home/preview') return 'candidate-preview'
     if (path === '/home/clarify') return 'clarification'
@@ -1281,7 +1196,6 @@ export function mountWinWinCodeClient(
     return 'my-work'
   }
 
-  /** The anchor facts a deep-linked run route must carry to be actionable. */
   function taskRunRouteAnchor(): {
     readonly taskId: WorkItemId
     readonly deliveryId: DeliveryId
@@ -1298,12 +1212,6 @@ export function mountWinWinCodeClient(
     return { taskId: taskId as WorkItemId, deliveryId: deliveryId as DeliveryId }
   }
 
-  /**
-   * UI-100.2 (fake-first): the §16.6 new-task form.  It reuses the shell-owned
-   * Clients and Repositories models for its options, creates the task through
-   * the fake-first task port, and lands on the run route with the task anchor
-   * in the URL (form values like the description never enter the URL).
-   */
   async function renderTaskEntry(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1345,10 +1253,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /**
-   * UI-100.2: the §16.7 run page. Client, Occupancy, and Repository rows are
-   * live shell facts; execution identity comes only from WorkRun.
-   */
   async function renderTaskRun(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1417,7 +1321,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** Edit the current Delivery Spec through the canonical delivery contract. */
   async function renderDecisionClarification(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1460,11 +1363,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /**
-   * WWX-RUN-04: the candidate run preview main surface under `#/home/preview`.
-   * The preview source comes from the canonical WorkRun projection; query
-   * parameters only identify the Delivery and WorkItem anchor.
-   */
   async function renderCandidateRunPreview(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1730,7 +1628,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** Authorized artifacts plus the Controller-owned solution-review decision. */
   async function renderReview(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1791,8 +1688,6 @@ export function mountWinWinCodeClient(
     activeFeature = null
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
-    // Design pages 07/08: device onboarding and repository lists live on their
-    // own pages, never as panels above work surfaces.
     clientsRoot.hidden = true
     repositoriesRoot.hidden = true
     for (const link of links.values()) link.removeAttribute('data-route-access')
@@ -1831,8 +1726,6 @@ export function mountWinWinCodeClient(
           })
         : resolved
       currentScopeResolution = resolution
-      // Community: resolve the single authorized repository without a Scope
-      // switcher. Empty selection auto-picks the only compatible repository.
       if (resolution.status === 'selected') {
         scopeNotice.hidden = true
         scopeNotice.textContent = ''
@@ -1854,9 +1747,6 @@ export function mountWinWinCodeClient(
       scopeNotice.hidden = true
       scopeNotice.textContent = ''
     }
-    // 设计稿 16 页:没有任何页面在内联位置渲染就绪检查清单(它属于独立的
-    // 首次设置流程),因此外壳不再把这个区块压在内容上方;模型照常更新,
-    // 保证独立的就绪页与连接健康状态保持准确。
     readinessRoot.hidden = true
     {
       const resolution = currentScopeResolution
@@ -1879,7 +1769,6 @@ export function mountWinWinCodeClient(
       const current = id === activeSurface.id
       if (current) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
-      // 设计稿 03b:会话打开时高亮的是会话行,不是「新对话」导航项。
       link.classList.toggle(
         'wwc-navigation-link-in-session',
         id === 'chat' && chatSessionActive,
@@ -1908,8 +1797,6 @@ export function mountWinWinCodeClient(
       }),
     }))
     if (activeSurface.id === 'home') {
-      // UI-100.2: the Home surface carries the §16.6 new-task form and the
-      // §16.7 run page as sub-routes of the My Work first screen.
       const homeRoute = homeSubRoute()
       if (homeRoute === 'task-entry') {
         launchRoute(renderTaskEntry(generation), generation, 'TASK_ENTRY_ROUTE_FAILURE')
@@ -1939,7 +1826,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** 设计稿 02:首次设置第 1 步——连接执行设备(裸画布流程页)。 */
   function renderOnboarding(generation: number): void {
     featureController?.abort()
     activeFeature?.close()
@@ -2009,7 +1895,6 @@ export function mountWinWinCodeClient(
     render()
   }
   const onOffline = () => { connection.offline() }
-  // Returning to the tab revalidates the badge so it never shows stale counts.
   const onFocus = () => { void attentionMonitor?.refresh().catch(() => {}) }
   const onOnline = () => {
     queryCache.clear('reconnect')

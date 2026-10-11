@@ -29,18 +29,12 @@ CREATE TABLE IF NOT EXISTS slack_method_rate_limits (
 );
 ";
 
-/// Community SQLite-backed Slack `Retry-After` floor.
 #[derive(Clone, Debug)]
 pub struct SlackRateLimitGate {
     database_path: PathBuf,
 }
 
 impl SlackRateLimitGate {
-    /// Opens the Slack rate-limit database below one private integration directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable adapter error when the directory, database, or schema is unavailable.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         let data_directory = data_directory.as_ref();
         fs::create_dir_all(data_directory).map_err(|_| storage_error())?;
@@ -52,11 +46,6 @@ impl SlackRateLimitGate {
         Ok(Self { database_path })
     }
 
-    /// Returns the current shared lower-bound delay for one workspace/application/method.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the clock or durable gate is invalid.
     pub fn retry_after_millis(
         &self,
         installation: &SlackInstallationIdentity,

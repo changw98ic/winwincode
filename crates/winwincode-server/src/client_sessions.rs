@@ -1,29 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! User-facing Worker launch flow over the durable `WorkerLaunchGrant`
-//! ledger (plan 14.2-14.3, 17.2, contract `client-control-port-v1.md`
-//! `client.worker.launch` / `client.worker.launch_ack` / `client.worker.stop`).
-//!
-//! `POST /api/v1/sessions` is the launch entry the signed-in occupancy holder
-//! uses to start one `WorkerSession` on the Client they occupy. The flow
-//! validates the durable preconditions (`WorkerLaunchGrantService::issue`:
-//! the caller is the lease holder, the lease is `occupied` or `draining`,
-//! the binding belongs to the leased Client and is visible to the holder,
-//! and a worker-session slot is free), mints the worker identities and a
-//! 32-byte short-lived worker credential through the credential lifecycle
-//! service (only the `sha256:` digest is persisted; the durable credential
-//! row is what revoke, rotate, and expiry resolve against), enqueues the
-//! `client.worker.launch` downlink frame with every
-//! `C + L` field into the durable outbox, and waits a bounded, configurable
-//! interval for the Device Client's `client.worker.launch_ack` to be settled
-//! by the client exchange (`settle_launch_ack`). An accepted acknowledgement
-//! consumes the grant exactly once; a rejection keeps it `issued` with the
-//! reason in the launch audit trail.
-//!
-//! `worker_stop_message` is the shared `client.worker.stop` construction
-//! helper: the supervisor and release flows stamp the same occupancy
-//! fencing context so the device rejects any stop carrying a stale token.
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,19 +51,12 @@ use crate::client_occupancy::offset_instant;
 use crate::worker_session_credentials::WorkerSessionCredentialService;
 use crate::worker_session_credentials::issue_credential_material;
 
-/// Schema version of the public browser-facing launch surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// Bounded-wait and credential policy of the launch flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSessionsConfig {
-    /// How long one launch waits for the Device Client launch acknowledgement
-    /// before failing (plan 14.3, bounded step 10).
     pub launch_wait: std::time::Duration,
-    /// How often the durable grant state is polled while waiting.
     pub poll_interval: std::time::Duration,
-    /// Time-to-live of one issued launch grant; an unanswered grant expires
-    /// at `issuedAt + ttl` and can no longer be consumed.
     pub grant_ttl: std::time::Duration,
 }
 
@@ -101,44 +70,23 @@ impl Default for ClientSessionsConfig {
     }
 }
 
-/// Stable failure categories of the launch flow boundary. Each category maps
-/// to exactly one wire error code of the central launch error-code table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientSessionsErrorKind {
-    /// The request body violated the launch contract.
     InvalidRequest,
-    /// The public Client ID does not name a launchable Client.
     ClientNotFound,
-    /// The Client is not reachable (offline or degraded).
     ClientOffline,
-    /// The Client is locked by a local operator.
     ClientLocked,
-    /// The occupancy lease belongs to another user.
     NotHolder,
-    /// The Client has no usable occupancy (none, unconfirmed, or pending
-    /// recovery).
     OccupancyRequired,
-    /// The binding is unknown, foreign, or invisible to the holder.
     BindingNotVisible,
-    /// The Client has no free worker-session slot.
     CapacityExhausted,
-    /// The grant expired before the device answered.
     GrantExpired,
-    /// The Device Client rejected the launch, or the grant was revoked
-    /// while waiting.
     LaunchRejected,
-    /// The Device Client did not answer within the bounded wait; the grant
-    /// stays `issued` until its expiry.
     LaunchAckTimeout,
-    /// The `ProductSession` or its prior Device Worker cannot be started in the
-    /// current durable state. Callers must recover/stop the prior worker or
-    /// reopen a live conversation; this is never a fake success.
     SessionNotLaunchable,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Finite internal stages; diagnostics never retain an upstream error or input.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LaunchFailureStage {
     StorageOpen,
@@ -197,7 +145,6 @@ impl LaunchFailureCode {
     }
 }
 
-/// Secret-free launch flow failure.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientSessionsError {
     kind: ClientSessionsErrorKind,
@@ -211,7 +158,6 @@ impl ClientSessionsError {
         self.kind
     }
 
-    /// Internal failure stage for safe request-correlated diagnostics.
     #[must_use]
     pub const fn failure_stage(&self) -> Option<&'static str> {
         match self.failure {
@@ -220,7 +166,6 @@ impl ClientSessionsError {
         }
     }
 
-    /// Finite adapter category; never an upstream error message or SQL text.
     #[must_use]
     pub const fn failure_code(&self) -> Option<&'static str> {
         match self.failure {
@@ -285,7 +230,6 @@ impl fmt::Display for ClientSessionsError {
 
 impl std::error::Error for ClientSessionsError {}
 
-/// What one validated launch prepared before the bounded wait.
 struct PreparedLaunch {
     node: ClientNodeRecord,
     occupancy_lease_id: String,
@@ -295,21 +239,12 @@ struct PreparedLaunch {
     work_run_id: Option<String>,
 }
 
-/// The outcome of one poll of a pending launch grant.
 enum PollOutcome {
-    /// The grant is still `issued`; keep waiting.
     Pending,
-    /// The grant was consumed; the flow returns the `201` body.
     Consumed,
-    /// The flow failed with the mapped domain error.
     Failed(ClientSessionsError),
 }
 
-/// The signed-in user's Worker launch surface over the Server's one
-/// product-state database directory. Like the connect and occupancy flows,
-/// every operation opens and closes its own storage connection so concurrent
-/// flows never share state in memory and the bounded wait holds no database
-/// lock.
 #[derive(Clone)]
 pub struct ClientSessionsApplication {
     data_directory: PathBuf,
@@ -371,11 +306,6 @@ impl ClientSessionsApplication {
         }
         Ok(())
     }
-    /// Composes the launch application over one product-state directory.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the configuration violates its bounds.
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientSessionsConfig,
@@ -388,13 +318,6 @@ impl ClientSessionsApplication {
         Self::open_with_exchange(data_directory, config, client_exchange)
     }
 
-    /// Composes the launch application with the exact Device exchange used
-    /// by the running Server, so ephemeral Worker credentials travel on the
-    /// same authenticated response as their launch frame.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the configuration violates its bounds.
     pub fn open_with_exchange(
         data_directory: impl Into<PathBuf>,
         config: &ClientSessionsConfig,
@@ -416,15 +339,6 @@ impl ClientSessionsApplication {
         })
     }
 
-    /// Runs the full launch flow (plan 14.3, steps 3-5 with the bounded
-    /// device acknowledgement) and resolves to the `201` session body.
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable launch failure categories; `LaunchAckTimeout`
-    /// leaves the grant `issued` (it expires at its deadline), and
-    /// `LaunchRejected` covers a Device Client that answered with a
-    /// rejection.
     pub async fn launch(
         &self,
         user_id: &str,
@@ -458,13 +372,6 @@ impl ClientSessionsApplication {
         }
     }
 
-    /// Schedules one Device-owned managed application command and returns the
-    /// latest status projection known from the Client exchange.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable client-session error when the run, device, occupancy,
-    /// or durable managed-app authority is unavailable or invalid.
     pub fn manage_managed_app(
         &self,
         user_id: &str,
@@ -477,10 +384,6 @@ impl ClientSessionsApplication {
         let node = Self::lookup_node(&mut storage, public_client_id)?;
         let authoritative =
             load_authoritative_managed_app_config(&storage, &command.run_id, command.operation)?;
-        // The browser can select only the operation and run identity. The
-        // Server attaches the durable executable config immediately before
-        // enqueueing so argv, cwd and env never cross the public query or
-        // command request boundary.
         if matches!(
             command.operation,
             ManagedAppOperation::Start | ManagedAppOperation::Restart
@@ -505,8 +408,6 @@ impl ClientSessionsApplication {
         Ok(managed_app_response(&command, status.as_ref()))
     }
 
-    /// Validates the request and durable preconditions, issues the launch
-    /// grant, and enqueues the `client.worker.launch` downlink frame.
     #[allow(clippy::too_many_lines)]
     fn prepare(
         &self,
@@ -542,8 +443,6 @@ impl ClientSessionsApplication {
         let node = Self::lookup_node(&mut storage, &public_client_id)?;
         let now = now_instant();
 
-        // Occupancy: the caller must hold the node's one active lease and it
-        // must be device-confirmed (`occupied` or `draining`).
         let lease = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             occupancy
@@ -572,9 +471,6 @@ impl ClientSessionsApplication {
             ));
         }
 
-        // Worker identities and the short-lived credential (32 random bytes
-        // through the credential lifecycle service; only the digest is
-        // persisted).
         let work_run_id = fields
             .get("workRunId")
             .and_then(Value::as_str)
@@ -733,8 +629,6 @@ impl ClientSessionsApplication {
                 && grant.occupancy_fencing_token == lease.fencing_token;
             let binding_state = binding.as_ref().map(|record| record.state);
             let slot_state = slot.as_ref().map(|record| record.state);
-            // Device-reported release is the strongest evidence the prior
-            // Chat worker ended under the current occupancy.
             let trusted_exit = WorkerLaunchGrantService::new(&mut storage)
                 .has_trusted_exit(&grant.worker_launch_grant_id)
                 .map_err(|_| ClientSessionsError::unavailable())?;
@@ -759,8 +653,6 @@ impl ClientSessionsApplication {
                 replacement_worker_id = Some(grant.worker_id.clone());
                 predecessor_grant_id = Some(grant.worker_launch_grant_id.clone());
             }
-            // A terminal Worker-session slot after a bind means the worker
-            // process exited without a release report (abnormal exit).
             let slot_exited = slot_state.is_some_and(|state| {
                 matches!(
                     state,
@@ -770,11 +662,6 @@ impl ClientSessionsApplication {
                         | WorkerSlotState::RecoveryFailed
                 )
             });
-            // Live-worker evidence for a consumed grant under the current
-            // occupancy: the Device has not reported release and the Worker
-            // slot is not known to be terminal. A still-running slot is the
-            // strongest form; a missing slot still maps to the same grant
-            // because the Device accepted the launch under this occupancy.
             let credential = WorkerSessionCredentialService::new(&mut storage)
                 .status_for_session(&grant.worker_session_id)
                 .map_err(|_| ClientSessionsError::unavailable())?;
@@ -809,9 +696,6 @@ impl ClientSessionsApplication {
                     work_run_id: work_run_id.map(|id| id.0),
                 });
             }
-            // A binding still bound under a prior occupancy stamp cannot be
-            // proven released. Restarting under the new lease would escalate
-            // occupancy privilege; require recovery/stop first.
             let bound_under_foreign_occupancy =
                 binding_state == Some(DeviceExecutionBindingState::Bound) && !occupancy_matches;
             if bound_under_foreign_occupancy {
@@ -826,10 +710,6 @@ impl ClientSessionsApplication {
                     "the occupancy behind the pending launch grant is gone",
                 ));
             }
-            // Restart-with-evidence: the prior worker is not live (device
-            // reported release, abnormal exit, or occupancy rewrite without a
-            // still-bound foreign binding). Replace the old credential under
-            // the *current* occupancy and issue a fresh grant.
             let mut credentials = WorkerSessionCredentialService::new(&mut storage);
             if credential
                 .as_ref()
@@ -910,8 +790,6 @@ impl ClientSessionsApplication {
                 ClientSessionsError::unavailable_at(LaunchFailureStage::CredentialPublication, code)
             })?;
 
-        // The launch command is computed against the mirror revision the
-        // device last confirmed: the device refuses any other stamp.
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id).map_err(
                 |_| {
@@ -984,11 +862,6 @@ impl ClientSessionsApplication {
         })
     }
 
-    /// Reads the durable grant state once and drives the flow to its next
-    /// transition (plan 14.3 step 10). A rejection never moves the state, so
-    /// the launch audit trail carries the verdict: a recorded
-    /// `launch_rejected` entry fails the flow immediately instead of
-    /// burning the whole bounded wait.
     fn poll(&self, worker_launch_grant_id: &str) -> Result<PollOutcome, ClientSessionsError> {
         let mut storage = self.open_storage()?;
         let mut grants = WorkerLaunchGrantService::new(&mut storage);
@@ -1102,7 +975,6 @@ impl ClientSessionsApplication {
     }
 }
 
-/// Maps one issue-gate failure onto the central launch error-code taxonomy.
 fn issue_gate_error(kind: WorkerLaunchGrantServiceErrorKind) -> ClientSessionsError {
     match kind {
         WorkerLaunchGrantServiceErrorKind::UnknownClientNode
@@ -1148,8 +1020,6 @@ fn issue_gate_error(kind: WorkerLaunchGrantServiceErrorKind) -> ClientSessionsEr
     }
 }
 
-/// Builds the secret-free `201` session body. Credential material travels
-/// only through the in-memory Device exchange sidecar.
 fn session_body(prepared: &PreparedLaunch) -> Value {
     json!({
         "schemaVersion": SUPPORTED_SCHEMA_VERSION,
@@ -1194,8 +1064,6 @@ fn managed_app_response(command: &ManagedAppCommand, status: Option<&ManagedAppS
     })
 }
 
-/// Builds the occupancy fencing stamp every occupancy-backed downlink
-/// command carries (contract `client-control-port-v1.md`, `C + L`).
 #[must_use]
 pub fn occupancy_stamp(
     expected_revision: u64,
@@ -1213,15 +1081,6 @@ pub fn occupancy_stamp(
     }
 }
 
-/// Builds one managed application command only when its command lease and
-/// fencing token are exactly the occupancy context selected by the Server.
-/// The Device performs the same check against its durable mirror before it
-/// starts, stops, restarts, or queries the local process.
-///
-/// # Errors
-///
-/// Returns an invalid request for malformed commands or an occupancy error for
-/// a stale lease or fencing token.
 pub fn managed_app_command_message(
     occupancy: &OccupancyCommandContext,
     command: ManagedAppCommand,
@@ -1385,15 +1244,6 @@ fn validate_managed_app_command_against_authority(
     Ok(())
 }
 
-/// Enqueues one managed-app command after checking the durable occupancy
-/// holder, lifecycle state, lease id, fencing token, and Device mirror
-/// revision. The append is the Server scheduling point; the Device repeats
-/// the checks before touching a local process.
-///
-/// # Errors
-///
-/// Returns a stable client-session error when any durable authority or
-/// occupancy check fails.
 pub fn enqueue_managed_app_command(
     data_directory: &Path,
     storage: &mut SqliteStorage,
@@ -1449,11 +1299,6 @@ pub fn enqueue_managed_app_command(
     enqueue_frame(storage, node, message, now)
 }
 
-/// Builds one `client.worker.stop` downlink message (contract
-/// `client-control-port-v1.md`): the stamped occupancy context, the worker
-/// session and worker to stop, and the reason. The supervisor and release
-/// flows enqueue this through the durable outbox so a device that is offline
-/// still receives the stop after it reconnects.
 #[must_use]
 pub fn worker_stop_message(
     occupancy: OccupancyCommandContext,
@@ -1469,8 +1314,6 @@ pub fn worker_stop_message(
     })
 }
 
-/// Enqueues one Server → Client frame into the durable outbox at the next
-/// free stream position.
 fn enqueue_frame(
     storage: &mut SqliteStorage,
     node: &ClientNodeRecord,
@@ -1548,7 +1391,6 @@ fn encode_frame(
     .map_err(|_| ClientSessionsError::unavailable())
 }
 
-/// Reads one required public Client ID: 9-12 ASCII digits.
 fn required_client_id(value: Option<&Value>) -> Result<String, ClientSessionsError> {
     let text = value
         .and_then(Value::as_str)
@@ -1560,21 +1402,17 @@ fn required_client_id(value: Option<&Value>) -> Result<String, ClientSessionsErr
     }
 }
 
-/// The canonical application instant the boundary shares across one flow.
 fn now_instant() -> Instant {
     use crate::application::StandaloneApplicationClock as _;
     crate::application::SystemStandaloneApplicationClock.now_instant()
 }
 
-/// Signed millisecond amount of one duration, clamped to the `i64` range.
 fn duration_millis(duration: std::time::Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, ClientSessionsError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| ClientSessionsError::unavailable())?;

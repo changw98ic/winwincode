@@ -55,8 +55,6 @@ async function captureStack(target) {
   }, null, 2)}\n`)
 }
 
-// The probe observes the actual test process after Cargo compilation. It never
-// changes startup deadlines, serializes tests, retries, or terminates the test.
 export async function runNativeKernelAcceptance(command, args, {
   platform = process.platform,
   inspect = inspectProcesses,
@@ -92,8 +90,6 @@ export async function runNativeKernelAcceptance(command, args, {
       if (sampled || inspectionFailure === undefined) {
         process.stderr.write(`Native Kernel startup evidence unavailable (${sampled ? 'stack_capture' : 'process_inspection'}): ${error.code ?? error.name}\n`)
       }
-      // A failed observation during compilation is not a completed sample.
-      // Keep observing this command's descendants; never rerun the test.
       if (!sampled) {
         inspectionFailure ??= {
           schemaVersion: 1, stage: 'process_inspection', count: 0,

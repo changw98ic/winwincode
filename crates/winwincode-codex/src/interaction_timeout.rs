@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Execution-side deadlines for durable Core interactions.
-//!
-//! A Control Plane expiry projection does not answer a Core waiter. Keep a
-//! local timeout intent before submitting the rejection, and retain the
-//! original request as its deadline and recovery authority. This is not a
-//! synthetic Control Plane decision or a permission grant.
-
 use super::{
     CodexPoll, InputResponseMessageStatus, ModelLeaseAuthority, ProductionCodexAdapter,
     ProductionCodexError, ProductionCodexErrorKind, StoredApprovalOperation,
@@ -124,9 +117,6 @@ pub(super) fn input_response_value(
 }
 
 impl ProductionCodexAdapter {
-    /// Retire expired transport frames before registration can replay the
-    /// outbox. Core settlement remains a separate, durable action after the
-    /// exact run has been installed.
     pub(super) fn expire_retained_interactions(
         &mut self,
         now: &Instant,
@@ -225,8 +215,6 @@ impl ProductionCodexAdapter {
                 run.record = record.clone();
             }
         }
-        // Persist the timeout intent before suppressing retransmission. This
-        // acknowledges only the local transport, never a Control Plane decision.
         self.finish_interaction_delivery(request)
     }
 
@@ -368,12 +356,8 @@ impl ProductionCodexAdapter {
                 _ => return Err(conflict()),
             };
             if resolved {
-                // The previous process may have stopped between operation
-                // resolution and transport cleanup. Complete that once here.
                 self.finish_interaction_delivery(&timeout.request)?;
             }
-            // Submission acceptance does not prove a resumed waiter consumed it.
-            // Both approval and input responses wait for the exact Core request.
             timeout.waiting_for_exact_event = true;
         }
         Ok(())
@@ -458,10 +442,6 @@ impl ProductionCodexAdapter {
             if timeout.request != request {
                 return Err(conflict());
             }
-            // A fresh Core session can replay the exact tool after a crash.
-            // Only that exact event re-arms an already-resolved timeout. In
-            // particular, an old input answer must not settle a newer input
-            // waiter which happens to share the same turn.
             timeout.applied_kernel_session_id = None;
             timeout.waiting_for_exact_event = false;
             run.record
@@ -470,8 +450,6 @@ impl ProductionCodexAdapter {
             self.persist_run(&run_key)?;
             return Ok(CodexPoll::Pending);
         }
-        // The exact Core event has recreated this interaction waiter. A retained
-        // request from another waiter stays fenced across session recovery.
         let recovered = run
             .record
             .recovered_interaction_requests
@@ -554,8 +532,6 @@ impl ProductionCodexAdapter {
             if timeout.applied_kernel_session_id.as_deref() == Some(session.as_str()) {
                 continue;
             }
-            // Resolved operations in an older session are historical facts.
-            // Reapply only after the exact Core request event re-arms them.
             if timeout.applied_kernel_session_id.is_some()
                 && self
                     .pending_interaction_digest(run_key, &timeout.request)?
@@ -644,7 +620,6 @@ impl ProductionCodexAdapter {
             run.record.last_activity_at = now.clone();
             added = true;
         }
-        // No Core response is submitted before its immutable timeout intent.
         if added {
             self.persist_run(run_key)?;
         }

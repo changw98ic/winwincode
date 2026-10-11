@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receipt-first ingress for generated Worker `runtime.event` messages.
-//!
-//! The wire message is the only input at this seam.  Product and Delivery
-//! identities are joined from the durable dispatch intent and the current
-//! Delivery snapshot; a Worker cannot provide a second scope or session map.
-//! Accepted events are kept in a dedicated Control Plane state stream so a
-//! runtime append never mutates a Delivery member.
-
 use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
@@ -69,17 +61,9 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_SUMMARY_LENGTH: usize = 2_000;
 const ACK_ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Failure after a runtime event's semantic result was not available.
-///
-/// Rejected Worker input is deliberately returned as a generated
-/// [`RuntimeAckMessage`].  This error therefore represents only storage or
-/// publication infrastructure failures.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeMessageError {
-    /// No runtime ledger mutation was committed.
     Storage(StorageError),
-    /// The accepted ledger row is durable, but its notification remains in
-    /// the outbox for replay.
     PublicationPending {
         ack: Box<RuntimeAckMessage>,
         source: OutboxError,
@@ -87,8 +71,6 @@ pub enum RuntimeMessageError {
 }
 
 impl RuntimeMessageError {
-    /// Returns the acknowledgement that was durably accepted before
-    /// publication failed.
     #[must_use]
     pub fn committed_ack(&self) -> Option<&RuntimeAckMessage> {
         match self {
@@ -118,8 +100,6 @@ impl From<StorageError> for RuntimeMessageError {
     }
 }
 
-/// Executes one generated runtime-event ingress against the durable product
-/// state and its independent runtime ledger stream.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_at(
     storage: &mut dyn ProductStateStorage,
@@ -131,19 +111,12 @@ pub(crate) fn execute_at(
     let scope_key = repository_scope_key(scope)?;
     let phase = RuntimePhase::new(&scope_key, message)?;
 
-    // The receipt is checked before current state so a crash/restart can
-    // replay the original accepted acknowledgement without reinterpreting a
-    // changed live Delivery snapshot.
     match storage.load_receipt(&phase.receipt_identity, &phase.command_digest) {
         Ok(Some(receipt)) => {
             return replay_ack(&receipt, &phase, message).map_err(RuntimeMessageError::from);
         }
         Ok(None) => {}
         Err(error) if error.kind() == StorageErrorKind::RequestConflict => {
-            // A changed body is still a receipt conflict. Ask the storage
-            // seam for the existing receipt rather than loading the current
-            // aggregate, journal, or runtime facts. Adapters that do not
-            // expose this optional helper return a deterministic zero cursor.
             let acknowledged_sequence = prior_receipt_sequence(storage, &phase)?;
             return Ok(rejection_ack(
                 message,
@@ -247,8 +220,6 @@ pub(crate) fn execute_at(
             if context.scope_kind == RuntimeScopeKind::ProductSession
                 && previous.execution_job_id != context.execution_job_id =>
         {
-            // The Controller's immutable dispatch order permits advancing to a
-            // later task, never returning the session head to an older task.
             let (prior_intent, prior_job) =
                 load_runtime_execution_job(storage, &previous.execution_job_id)?;
             if prior_intent.stream_id() != durable.stream_id()
@@ -376,8 +347,6 @@ pub(crate) fn execute_at(
         state,
         events,
     );
-    // Immutable event rows, identity markers, header, receipt and publication
-    // are committed together. Existing snapshot history moves once on append.
     let mut legacy_rows = Vec::with_capacity(retained_events.len().saturating_mul(2));
     for entry in &retained_events {
         let indexed = IndexedRuntimeLedgerEvent::new(entry.clone(), std::mem::take(&mut chain));
@@ -557,10 +526,6 @@ fn prior_receipt_sequence(
     Ok(u64::try_from(accepted_message.event.sequence.0).unwrap_or_default())
 }
 
-/// Loads the immutable dispatch intent without imposing the Delivery-only
-/// scope restriction used by the Delivery command transaction. `ProductSession`
-/// jobs use the same generated `ExecutionJob` DTO and outbox topic, but their
-/// trusted state stream is the `ProductSession` stream.
 fn load_runtime_execution_job(
     storage: &dyn ProductStateStorage,
     job_id: &ExecutionJobId,
@@ -603,10 +568,6 @@ impl RuntimePhase {
         scope_key: &ReceiptScopeKey,
         message: &RuntimeEventMessage,
     ) -> Result<Self, StorageError> {
-        // ProductSession runtime facts have one stable resource stream so the
-        // StrongFlow read-cut can join the ledger with the ProductSession
-        // event cursor from only the requested session id. Delivery runtime
-        // facts remain isolated by repository scope and ExecutionJob id.
         let stream_id = if message.session_identity.work_run_id.is_none() {
             product_session_runtime_stream_id(&message.session_identity.product_session_id)
         } else {
@@ -645,8 +606,6 @@ pub(crate) struct RuntimeLedgerState {
     pub(crate) fencing_token: FencingToken,
     pub(crate) worker_id: WorkerId,
     pub(crate) worker_instance_id: WorkerInstanceId,
-    /// Events from preceding tasks in this `ProductSession` resource stream.
-    /// Existing first-task snapshots have an offset of zero.
     #[serde(default)]
     pub(crate) sequence_offset: u64,
     pub(crate) highest_sequence: u64,
@@ -982,10 +941,6 @@ fn load_current_delivery(
     Ok(delivery)
 }
 
-/// `ProductSession` execution has no hidden Delivery or `WorkRun` aggregate.
-/// Its trusted join is the immutable ProductSession-scoped dispatch intent
-/// plus the scheduler lease; the generated message carries the canonical
-/// `ProductSession` identity and must omit the Delivery-only `WorkRun` attachment.
 fn validate_product_session_binding(
     context: &RuntimeContext,
     message: &RuntimeEventMessage,
@@ -1482,8 +1437,6 @@ fn classify_indexed_event(
     Ok(ledger.classify(event, digest))
 }
 
-/// Reconstructs and verifies the immutable history for an explicit projection
-/// or evidence read. New appends read only their header and exact identity row.
 pub(crate) fn hydrate_runtime_ledger(
     storage: &dyn ProductStateStorage,
     ledger: &mut RuntimeLedgerState,
@@ -1967,9 +1920,6 @@ fn validate_runtime_invalidation(
     Ok(())
 }
 
-/// Replay validates only the stored receipt and public invalidation bytes. It
-/// deliberately does not load current state, an aggregate journal, or the
-/// accepted runtime ledger.
 fn validate_replay_invalidation(
     event: &winwincode_storage::OutboxEvent,
     receipt: &CommitReceipt,

@@ -42,7 +42,6 @@ export type ReadinessItemId =
 
 export type ReadinessItemStatus = 'ready' | 'attention' | 'blocked' | 'unavailable'
 
-/** Closed, secret-safe checklist outcomes; raw server or transport text never reaches this union. */
 export type ReadinessReason =
   | 'signed-out'
   | 'scope-selection-required'
@@ -70,10 +69,6 @@ export interface ReadinessItemState {
   readonly checkedAt: string | null
 }
 
-/**
- * Current browser facts the checklist reads instead of owning authorization state.
- * The application derives it from the one AuthSession and Scope resolution.
- */
 export type ReadinessContext =
   | { readonly status: 'signed-out' }
   | {
@@ -92,7 +87,6 @@ export interface ReadinessViewModelState {
 
 export interface ReadinessViewModelOptions {
   readonly client: ControlPlaneClient
-  /** Current shell connection facts; the checklist owns no second connection monitor. */
   readonly serverStatus: () => GlobalConnectionStatus
   readonly now?: () => string
   readonly nextRequestId: () => RequestId
@@ -196,7 +190,6 @@ function unavailableItem(
   return item(id, 'unavailable', checkedAt, null, 'READINESS_CHECK_FAILED')
 }
 
-/** Build the first-run checklist from existing health, settings, auth, and Scope projections only. */
 export function createReadinessViewModel(
   options: ReadinessViewModelOptions,
 ): ReadinessViewModel {
@@ -338,7 +331,6 @@ export function createReadinessViewModel(
     signal: AbortSignal,
   ): Promise<{
     readonly items: readonly ReadinessItemState[]
-    /** Resolves only when every underlying read settled, so rounds release their cancellation handle late. */
     readonly settled: Promise<unknown>
   }> {
     const checkedAt = now()
@@ -488,8 +480,6 @@ export function createReadinessViewModel(
     const ownGeneration = generation
     const identity = contextIdentity(context)
     if (identity !== lastIdentity) {
-      // Leaving one context detaches this checklist's consumers immediately so the
-      // shared QueryCache can cancel superseded Scope flights without delay.
       for (const active of controllers) active.abort()
       controllers.clear()
     }
@@ -519,9 +509,6 @@ export function createReadinessViewModel(
     publish({ ...currentState, status: 'checking' })
     try {
       const { items, settled } = await evaluate(context, active.signal)
-      // The cancellation handle outlives the published items: reads that are still
-      // in flight must stay abortable until they settle, or a Scope change could
-      // never cancel them through the shared QueryCache.
       const releaseWhenSettled = () => release(active)
       void settled.then(releaseWhenSettled, releaseWhenSettled)
       if (closed || generation !== ownGeneration) return
@@ -548,7 +535,6 @@ export function createReadinessViewModel(
       requireOpen()
       if (lastContext === null) return
       if (lastContext.status === 'ready') {
-        // An explicit recheck must observe Server facts changed since the cached snapshot.
         createQueryCacheLifecycle({
           client: options.client,
           actor: lastContext.actor,

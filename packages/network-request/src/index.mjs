@@ -11,7 +11,6 @@ export class NetworkError extends Error {
   }
 }
 
-// HTTP callers keep their domain error while retaining the request's retry facts.
 export function withResponseFailure(error, response) {
   if (error !== null && typeof error === 'object' && Object.isExtensible(error)) {
     const failure = response.networkError instanceof NetworkError
@@ -124,7 +123,6 @@ export function classifyError(error, { notSent = false, phase = 'response_header
     kind = 'request_invalid'; diagnostic = { code: 'request_uri' }
   } else if (code?.startsWith('HPE_')) diagnostic = { code: 'http_protocol' }
   else if (code === 'UND_ERR_SOCKET') diagnostic = { code: 'io', ioKind: 'unexpected_eof' }
-  // Browser fetch has no trustworthy send-stage evidence.
   return safeFailure({ kind, acceptance: notSent ? 'not_sent' : 'unknown', phase, httpStatus: null, retryAfterMs: null, diagnostic })
 }
 
@@ -176,14 +174,12 @@ export async function wait(delayMs, options = {}) {
   requireActive(options)
 }
 
-// One network attempt per callback. Protocol polling and durable outboxes use decide instead.
 export async function executeRequest(sendOnce, options = {}) {
   let attempt = 1, connections = 0, networkAttempt = 0, lastError
   const attempts = []
   for (;;) {
     try { requireActive(options) } catch (error) { throw withHistory(error, attempts, 'authority_ended', lastError) }
     networkAttempt += 1
-    // Storage failures must prevent sending; they never become network retries.
     try {
       if (options.beforeAttempt !== undefined) await options.beforeAttempt({ attempt, networkAttempt, connectionAttempts: connections })
     } catch (error) { throw withHistory(error, attempts, 'storage_failed', lastError) }
@@ -239,7 +235,6 @@ function randomJitter() {
   return Math.floor(Math.random() * (policy.jitterMs + 1))
 }
 
-// Buffer HTTP bodies inside the attempt so truncated responses use the same retry budget.
 export async function executeFetch(fetcher, input, init, options = {}) {
   try {
     return await executeRequest(async ({ signal }) => {
@@ -258,8 +253,6 @@ export async function executeFetch(fetcher, input, init, options = {}) {
   }
 }
 
-// Read methods may replay exactly. Other HTTP operations need an explicit
-// proof of idempotency before callers opt in to replay_exact.
 export function requestFetch(fetcher, input, init, options = {}) {
   return executeFetch(fetcher, input, init, { replay: ['GET', 'HEAD'].includes(init?.method ?? 'GET') ? 'replay_exact' : 'reconcile_first', ...options })
 }

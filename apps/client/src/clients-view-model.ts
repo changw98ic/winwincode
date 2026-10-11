@@ -8,22 +8,15 @@ import {
   type ControlPlaneDeviceSummary,
 } from './community-control-plane-client.js'
 
-/**
- * The facade-owned wire taxonomy plus the two pre-request shape reasons the
- * view-model detects before a request exists.
- */
 export type ClientsAddFailure =
   | ControlPlaneClientAddFailure
   | 'invalid-client-id'
   | 'invalid-connection-code'
 
-/** Whether, and how, the device list was last read. */
 export type ClientsLoadStatus = 'unloaded' | 'loading' | 'loaded' | 'unavailable'
 
 export interface ClientsConnectInput {
-  /** Raw field value; grouping separators are stripped by the facade. */
   readonly clientId: string
-  /** Raw field value. */
   readonly connectionCode: string
 }
 
@@ -39,9 +32,7 @@ export type ClientsViewModelListener = (state: ClientsViewModelState) => void
 export interface ClientsViewModel {
   readonly state: ClientsViewModelState
   subscribe(listener: ClientsViewModelListener): () => void
-  /** Submit one add-Client attempt; a submission in progress is never repeated. */
   addClient(input: ClientsConnectInput): Promise<void>
-  /** Re-read the device list; a failed read never discards the shown cards. */
   refresh(): Promise<void>
   dismissFailure(): void
   reset(): void
@@ -57,7 +48,6 @@ function state(
   return Object.freeze({ status, failure, devices, devicesStatus })
 }
 
-/** The device digit shape; grouping separators never reach validation. */
 function digitsOf(value: string): string {
   return value.replace(/\D+/gu, '')
 }
@@ -76,20 +66,11 @@ function addFailure(error: unknown): ClientsAddFailure {
   return controlPlaneClientAddFailure(error)
 }
 
-/**
- * §12.1 presence column: one short word, shown separately from the combined
- * Presence×Occupancy state copy.
- */
 export function devicePresenceText(device: ControlPlaneDeviceSummary): string {
   if (device.presence === 'locked') return '已锁定'
   return device.presence === 'online' ? '在线' : '离线'
 }
 
-/**
- * §12.1: the six canonical Presence×Occupancy states each name one explicit
- * copy. Every remaining combination resolves to a total, honest fallback so
- * the card never shows an empty state.
- */
 export function deviceStateText(device: ControlPlaneDeviceSummary): string {
   if (device.presence === 'locked') return '设备已锁定'
   if (device.occupancy === 'recovery-pending') {
@@ -106,7 +87,6 @@ export function deviceStateText(device: ControlPlaneDeviceSummary): string {
   }
 }
 
-/** Non-color tone of the presence badge; the text still carries the meaning. */
 export function deviceStateTone(
   device: ControlPlaneDeviceSummary,
 ): 'info' | 'success' | 'warning' | 'danger' | 'neutral' {
@@ -135,11 +115,6 @@ export function relativeHeartbeatText(lastHeartbeatAt: string, nowMillis: number
   return `${days} 天前收到心跳`
 }
 
-/**
- * Own the add-Client submission and the device list reads for the Clients
- * area. Failure reasons stay in the facade-owned presentation taxonomy, and
- * the device list is Server snapshot state that the browser only displays.
- */
 export function createClientsViewModel(options: {
   readonly client: ControlPlaneClientDirectory
 }): ClientsViewModel {
@@ -195,8 +170,6 @@ export function createClientsViewModel(options: {
         if (closed || epoch !== refreshEpoch) return
         publish(state(current.status, current.failure, devices, 'loaded'))
       } catch {
-        // An unavailable read only marks the list; the shown cards survive so a
-        // transient failure never erases the Server snapshot already displayed.
         if (closed || epoch !== refreshEpoch) return
         publish(state(current.status, current.failure, current.devices, 'unavailable'))
       }

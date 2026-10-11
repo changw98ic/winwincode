@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Repository registry coverage (plan 8.1, 13.1–13.3, 13.5): the
-//! registration check chain against real temporary Git repositories, the
-//! path-free `client.repository.upsert` / `removed` / `status` frames,
-//! launch-time revalidation (including directory removal and symlink
-//! replacement), and concurrent registrations of different directories.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -58,8 +52,6 @@ fn now() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
-/// Fails loudly unless the system git is on PATH: every scenario shells out
-/// to real Git, so a missing binary must fail the suite, not skip it.
 fn require_git() {
     let available = Command::new("git")
         .arg("--version")
@@ -68,7 +60,6 @@ fn require_git() {
     assert!(available, "system git must be available on PATH");
 }
 
-/// Runs one git command with an isolated configuration and fails on error.
 fn git(root: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
         .args(["-C"])
@@ -86,7 +77,6 @@ fn git(root: &Path, arguments: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-/// One real temporary Git repository with a baseline commit.
 struct GitRepository {
     root: PathBuf,
 }
@@ -122,7 +112,6 @@ impl GitRepository {
     }
 }
 
-/// One enrolled device with its own data directory and bound outbox stream.
 struct TestDevice {
     data_directory: PathBuf,
 }
@@ -134,8 +123,6 @@ impl TestDevice {
         Self { data_directory }
     }
 
-    /// Opens the store in the state a first accepted exchange reaches:
-    /// adopted enrollment plus a bound durable outbox stream.
     fn enrolled_store(&self) -> (DeviceStore, String, String) {
         let mut store = DeviceStore::open(&self.data_directory).expect("device store opens");
         ensure_device_identity(&mut store, &seed(), STAMP).expect("identity loads");
@@ -199,7 +186,6 @@ fn revalidate(
     revalidate_repository(store, node, instance, binding_id, now())
 }
 
-/// The `(kind, envelope)` pairs of every pending durable frame, in order.
 fn pending_frames(store: &DeviceStore) -> Vec<(String, ClientToServerEnvelope)> {
     store
         .pending_outbox_envelopes()
@@ -257,7 +243,6 @@ fn registration_of_git_repository_reports_full_projection() {
         "binding id must be canonical Crockford, got {binding_id}"
     );
 
-    // The local path mapping carries the absolute facts.
     let mapping = store.path_mapping(binding_id).expect("mapping read");
     let expected: PathMappingRecord = PathMappingRecord {
         repository_binding_id: binding_id.clone(),
@@ -276,7 +261,6 @@ fn registration_of_git_repository_reports_full_projection() {
     };
     assert_eq!(mapping, Some(expected));
 
-    // The durable scan projection carries the scan facts.
     let scan = store
         .repository_local_state(binding_id)
         .expect("scan read")
@@ -288,7 +272,6 @@ fn registration_of_git_repository_reports_full_projection() {
         Some(repository.head().as_str())
     );
 
-    // The upsert frame is the only pending frame and is path-free.
     let frames = pending_frames(&store);
     assert_eq!(frames.len(), 1);
     let (kind, envelope) = &frames[0];
@@ -320,8 +303,6 @@ fn registration_of_git_repository_reports_full_projection() {
             .starts_with("repository-upsert-")
     );
 
-    // The encoded frame carries no absolute path anywhere, and its stored
-    // payload digest convention still holds.
     let encoded = serde_json::to_string(envelope).expect("frame encodes");
     let root_text = fs::canonicalize(&repository.root)
         .expect("canonicalize")
@@ -364,7 +345,6 @@ fn registration_refuses_non_git_directory_without_confirmation() {
     };
     assert_eq!(rejection.availability, RepositoryAvailability::InvalidGit);
 
-    // A refused registration persists nothing and reports nothing.
     assert!(store.path_mappings().expect("mappings").is_empty());
     assert!(pending_frames(&store).is_empty());
 
@@ -387,8 +367,6 @@ fn registration_with_confirmation_initializes_git() {
     let canonical = fs::canonicalize(&plain).expect("canonicalize");
     assert!(canonical.join(".git").is_dir(), "git init ran");
 
-    // A freshly initialized repository has an unborn branch: a healthy
-    // scan with an empty HEAD.
     let branch = git(&canonical, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     assert_eq!(registration.projection.default_branch, branch);
     assert_eq!(registration.projection.head_commit, "");
@@ -530,8 +508,6 @@ fn revalidate_reports_moved_after_directory_removal() {
     assert!(revalidated.status_outbox_sequence.is_some());
     assert!(!revalidated.detail.is_empty());
 
-    // The durable projection moved to `moved` and a status report rode the
-    // outbox.
     let mapping = store
         .path_mapping(&registration.repository_binding_id)
         .expect("mapping read")
@@ -569,7 +545,6 @@ fn revalidate_detects_symlink_replacement() {
     let (mut store, node, instance) = device.enrolled_store();
     let registration =
         register(&mut store, &node, &instance, &repository.root, false).expect("registration");
-    // Replace the bound directory entry with a symlink to a twin directory.
     let twin = base.join("repo-relocated");
     fs::rename(&repository.root, &twin).expect("directory renamed");
     #[cfg(unix)]
@@ -588,8 +563,6 @@ fn revalidate_detects_symlink_replacement() {
     .expect("revalidation returns the state");
     assert_eq!(revalidated.availability, RepositoryAvailability::Moved);
     assert!(revalidated.status_reported);
-    // The stored canonical path stays authoritative: nothing silently
-    // follows the replacement.
     let mapping = store
         .path_mapping(&registration.repository_binding_id)
         .expect("mapping read")
@@ -743,7 +716,6 @@ fn remove_deletes_binding_and_reports_removal() {
         "removal frame carries a path"
     );
 
-    // Removing again finds no binding.
     let error = remove_repository(
         &mut store,
         &node,
@@ -791,7 +763,6 @@ fn list_bindings_returns_mappings_with_scans() {
 
     let bindings = list_bindings(&store).expect("list");
     assert_eq!(bindings.len(), 2);
-    // Binding-id order.
     let ids: Vec<&str> = bindings
         .iter()
         .map(|binding| binding.mapping.repository_binding_id.as_str())

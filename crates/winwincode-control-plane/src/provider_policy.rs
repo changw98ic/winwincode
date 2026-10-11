@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Model and Provider Policy routing and enforcement over durable retry facts.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -21,7 +19,6 @@ use crate::{
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_POLICY_ROUTES: usize = 16;
 
-/// Provider/model identity used by one routing policy.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderModelSelector {
@@ -29,7 +26,6 @@ pub struct ProviderModelSelector {
     pub model_id: String,
 }
 
-/// One primary or fallback route with its hard attempt bound.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderPolicyRoute {
@@ -37,7 +33,6 @@ pub struct ProviderPolicyRoute {
     pub max_attempts: u64,
 }
 
-/// Route and reasoning constraints for one Agent execution profile.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentProviderPolicy {
@@ -45,11 +40,9 @@ pub struct AgentProviderPolicy {
     pub fallbacks: Vec<ProviderPolicyRoute>,
     pub allowed_models: BTreeSet<ProviderModelSelector>,
     pub allowed_reasoning_efforts: BTreeSet<String>,
-    /// Unknown Provider capacity is used only when this is explicitly true.
     pub allow_unknown_availability: bool,
 }
 
-/// Revisioned primary/fallback policy keyed by stable Agent profile name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderPolicy {
     policy_id: String,
@@ -58,7 +51,6 @@ pub struct ProviderPolicy {
     fingerprint: Sha256Digest,
 }
 
-/// One verified route candidate and its current runtime state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderPolicyCandidate {
     pub authority: FrozenModelRouteAuthority,
@@ -66,11 +58,6 @@ pub struct ProviderPolicyCandidate {
 }
 
 impl ProviderPolicy {
-    /// Builds one immutable policy and rejects ambiguous or unusable profiles.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed, duplicate, or unusable policy data.
     pub fn try_new(
         policy_id: String,
         revision: u64,
@@ -96,12 +83,6 @@ impl ProviderPolicy {
         })
     }
 
-    /// Re-resolves the first route from current availability while preserving
-    /// the same policy and Agent profile revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when policy rejects the profile or no route is usable.
     pub fn resolve(
         &self,
         profile: &AgentProfile,
@@ -260,14 +241,12 @@ fn validate_token(value: &str, max_chars: usize) -> Result<(), ProviderPolicyErr
     }
 }
 
-/// Stable Provider Policy enforcement failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderPolicyErrorKind {
     Rejected,
     Unavailable,
 }
 
-/// Bounded Provider Policy error which retains no model input or Credential.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderPolicyError {
     kind: ProviderPolicyErrorKind,
@@ -278,7 +257,6 @@ impl ProviderPolicyError {
         Self { kind }
     }
 
-    /// Returns the stable failure category.
     #[must_use]
     pub const fn kind(&self) -> ProviderPolicyErrorKind {
         self.kind

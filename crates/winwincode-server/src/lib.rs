@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone public server for the embedded `WinWinCode` Control Plane.
-
 mod application;
 mod auth_session;
 mod client_candidates;

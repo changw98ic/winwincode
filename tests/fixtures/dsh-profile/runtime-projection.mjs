@@ -214,7 +214,6 @@ function turnReason(event) {
     }
     return Object.freeze({ kind: 'blocked' });
 }
-/** Rebuildable DSH chat/session and generic UI projection. */
 export class DshRuntimeProjection {
     sessionId;
     roleId;
@@ -614,7 +613,6 @@ export class DshRuntimeProjection {
         return [];
     }
 }
-/** One-shot bridge from a displayed approval to the exact suspended Codex operation. */
 export class RuntimeApprovalRouter {
     #kernel;
     #projection;

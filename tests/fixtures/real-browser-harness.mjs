@@ -5,12 +5,6 @@ import { createServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { normalize, resolve } from 'node:path'
 
-// Every real-browser test rebuilds the client into the shared
-// `apps/client/dist` tree, and a rebuild empties that tree before writing it
-// again.  A test that serves that tree while another test rebuilds it can
-// therefore observe a missing file for the length of one build.  Waiting a
-// bounded time for the file to come back reads the completed artifact instead
-// of failing inside the request; an asset that never returns still throws.
 const SHARED_CLIENT_READ_TIMEOUT_MILLIS = 60_000
 const SHARED_CLIENT_READ_POLL_MILLIS = 25
 const DEVTOOLS_COMMAND_TIMEOUT_MILLIS = 270_000
@@ -273,9 +267,6 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
         'Content-Type': publicRequest && path.endsWith('.css')
           ? 'text/css; charset=utf-8'
           : 'text/javascript; charset=utf-8',
-        // A fixture may be served several times in one browser profile with a
-        // different route each time, so Chrome must never reuse a module it
-        // already evaluated.
         'Cache-Control': 'no-store',
       })
       const bytes = readSharedClientFile(source)

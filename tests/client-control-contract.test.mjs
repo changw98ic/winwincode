@@ -22,13 +22,6 @@ import {
   parseWorkerLaunchGrant,
 } from '../packages/contracts/dist/index.js'
 
-// Schema-alignment contract for the ClientControlPort TypeScript projection.
-// Authoritative source: schema/winwincode/v1/client-control.schema.json (with
-// its domain.schema.json sibling). Messages are flat: the schema inlines the
-// envelope and command fields into every message, so expectedRevision,
-// idempotencyKey, occupancyLeaseId, and occupancyFencingToken are siblings of
-// `kind`, never members of a payload sub-object.
-
 const T0 = '2026-09-01T09:30:15.000Z'
 const T1 = '2026-09-01T09:41:18.000Z'
 const DIGEST = `sha256:${'a'.repeat(64)}`
@@ -126,8 +119,6 @@ function workerLaunchGrant() {
   }
 }
 
-// Minimal schema-valid extra fields for every kind; the command base and the
-// fencing pair are added by the builders below according to the schema.
 const KIND_EXTRA_FIELDS = Object.freeze({
   'client.repository.register': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-repository-register', expectedRevision: 4, publicKey: 'A'.repeat(88), nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(24) } }),
   'client.repository.registered': () => ({ receipt: { requestId: 'repository-test', outcome: 'registered', repositoryBindingId: crockfordId('rbd') } }),
@@ -237,8 +228,6 @@ const KIND_EXTRA_FIELDS = Object.freeze({
   'client.provider.apply': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-provider-apply', expectedRevision: 4, publicKey: 'BA==', nonce: 'AA==', ciphertext: 'AA==' } }),
 })
 
-// The 8 non-command messages (reports, ack, response, request) and the 8
-// unfenced commands; the 11 fenced commands get their pair from the builders.
 const NON_COMMAND_KINDS = Object.freeze([
   'client.provider.report',
   'client.extension.report',

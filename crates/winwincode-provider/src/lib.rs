@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider IO and stream conversion for the device execution runtime.
-//! This crate does not depend on the Server or Control Plane.
-
 mod chatgpt_oauth;
 mod codex_login;
 pub mod credential_leak_gate;

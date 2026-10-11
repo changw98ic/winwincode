@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end daemon exchange-loop scenarios driven by in-memory fake
-//! transports speaking the endpoint's canonical wire contract: enrollment
-//! adoption, hello, heartbeat, acknowledgement advancement, exponential
-//! backoff after network failures, gap replay, restart recovery from the
-//! durable outbox, and graceful shutdown. Temporary-directory
-//! infrastructure mirrors `crates/winwincode-storage/tests/sqlite.rs`.
-
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,9 +69,6 @@ fn daemon_config(name: &str) -> DaemonConfig {
     }
 }
 
-/// A configuration whose heartbeat cadence stays quiet for the whole test:
-/// scenarios that stage exact crash shapes around the enroll/hello exchange
-/// keep the stream deterministic.
 fn quiet_daemon_config(name: &str) -> DaemonConfig {
     DaemonConfig {
         heartbeat_interval: Duration::from_hours(12),
@@ -103,8 +93,6 @@ fn heartbeat_message(capacity: &ClientCapacityReport) -> ClientToServerMessage {
     })
 }
 
-/// The canonical server-issued enrollment identity the fake endpoint hands
-/// out (`cnd_` + 26 Crockford, 10 public digits, one 32-byte credential).
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
 const ISSUED_SECRET: [u8; 32] = [0xab; 32];
@@ -138,7 +126,6 @@ fn issued_enrollment_with_heartbeat(heartbeat_interval_ms: u32) -> EnrollmentIss
     }
 }
 
-/// One client-to-server frame the fake server received.
 #[derive(Clone, Debug)]
 struct SimFrame {
     node: String,
@@ -156,28 +143,11 @@ struct ServerState {
     assigned: bool,
 }
 
-/// In-memory fake of the canonical exchange endpoint: it records every
-/// frame keyed by the frame envelope's `clientNodeId`, acknowledges the
-/// contiguous sequence prefix, and answers the first `client.enroll`
-/// exchange with the assigned identity and
-/// the one-time credential issuance. Like the real endpoint, the assigned
-/// stream is credited with the settled enroll sequence (the enrollment
-/// settlement starts the assigned node's client-to-server stream at 1).
 struct ServerSim {
     state: Mutex<ServerState>,
-    /// The first exchange is answered with a gap instead of settling (a
-    /// lost batch), forcing the client to replay its durable frames.
     gap_first_exchange: AtomicBool,
-    /// The enrollment issuance names a non-canonical clientNodeId (server
-    /// misbehavior the daemon must refuse fatally).
     corrupt_issuance: AtomicBool,
-    /// After the enrollment settled once, every later enroll exchange is
-    /// refused like the endpoint's uniform authentication rejection.
     enrollment_settled: AtomicBool,
-    /// The heartbeat cadence the enrollment response requests (the daemon adopts it
-    /// over its configured cadence). Tests that stage exact crash shapes
-    /// around the enroll/hello window raise it so the idle daemon stays
-    /// silent while the window is staged.
     enrollment_heartbeat_ms: AtomicU32,
 }
 
@@ -219,7 +189,6 @@ impl ServerSim {
         expected - 1
     }
 
-    /// Settles one canonical exchange request like the endpoint.
     #[allow(clippy::too_many_lines)]
     fn settle(&self, request: &ExchangeRequest) -> Result<Vec<u8>, ExchangeTransportError> {
         let mut issuance = None;
@@ -271,14 +240,9 @@ impl ServerSim {
                 }
             }
             if gap_fired {
-                // The batch was processed but the answer is a gap: the
-                // cursor stays and the client must replay its batch.
                 gap_response = true;
                 ack = 0;
             } else {
-                // First enroll settles: assign the identity, credit the
-                // assigned stream with the settled enroll sequence, and
-                // return the one-time issuance without a downlink frame.
                 if let Some(enroll_node) = state.enroll_node.clone()
                     && !state.assigned
                 {
@@ -298,7 +262,6 @@ impl ServerSim {
                             self.enrollment_heartbeat_ms.load(Ordering::SeqCst),
                         )
                     });
-                    // The enroll settlement starts the assigned stream at 1.
                     state
                         .sequences
                         .entry(ASSIGNED_NODE.to_owned())
@@ -334,9 +297,6 @@ impl ExchangeTransport for ServerSim {
     }
 }
 
-/// Fake transport whose first exchange is processed by the endpoint fake but
-/// whose response is lost in transit — the worst enrollment case, because
-/// the credential material crossed a transport that never delivered it.
 struct LostFirstResponseTransport {
     inner: Arc<ServerSim>,
     first_exchange_done: AtomicBool,
@@ -358,8 +318,6 @@ impl ExchangeTransport for LostFirstResponseTransport {
     }
 }
 
-/// Fake transport whose first calls fail like a network outage before
-/// delegating to the endpoint fake.
 struct FlakyTransport {
     inner: Arc<ServerSim>,
     failures_remaining: AtomicUsize,
@@ -379,8 +337,6 @@ impl ExchangeTransport for FlakyTransport {
     }
 }
 
-/// Fake transport whose next exchange blocks once the test arms it: the
-/// frame is "taken" (in flight) while the test shuts the daemon down.
 struct ArmedBlockingTransport {
     inner: Arc<ServerSim>,
     armed: AtomicBool,
@@ -416,8 +372,6 @@ impl ExchangeTransport for ArmedBlockingTransport {
 
 const DRIVE_SLEEP_CAP: Duration = Duration::from_millis(10);
 
-/// Drives the loop deterministically: at most `max_ticks` exchanges or
-/// waits, advancing the supplied monotonic clock by each scheduled delay.
 fn drive(daemon: &mut DeviceDaemon, shutdown: &AtomicBool, max_ticks: usize) {
     let mut now = Instant::now();
     for _ in 0..max_ticks {
@@ -439,9 +393,6 @@ fn drive(daemon: &mut DeviceDaemon, shutdown: &AtomicBool, max_ticks: usize) {
     }
 }
 
-/// Drives the loop until the enrollment settled, the announcement hello was
-/// exchanged, and every durable frame was delivered (the quiet cadence keeps
-/// the stream empty afterwards).
 fn drive_until_enrolled_and_settled(daemon: &mut DeviceDaemon) {
     for _ in 0..200 {
         if daemon.is_enrolled() && daemon.status().frames_sent >= 2 {
@@ -508,8 +459,6 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
         "the heartbeat cadence must fire: {status:?}"
     );
 
-    // Wire order: enroll first (sequence 1 under the placeholder node), then
-    // the hello at sequence 2 under the assigned node.
     let all_frames = sim.all_frames();
     let enroll = sim
         .frames_with_kind("client.enroll")
@@ -560,7 +509,6 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
         "enrollment creates no downlink message or acknowledgement"
     );
 
-    // The enrollment adoption persisted the server profile.
     let profile = daemon
         .store_mut()
         .server_profile(&config.server_profile_id)
@@ -604,7 +552,6 @@ fn network_errors_back_off_and_recover() {
     assert_eq!(status.current_backoff, Duration::ZERO);
     assert!(daemon.is_enrolled(), "{status:?}");
 
-    // Persist-before-send: nothing was lost across the failures.
     assert_fully_exchanged(&mut daemon);
     let enroll_deliveries = sim.frames_with_kind("client.enroll");
     assert_eq!(
@@ -623,8 +570,6 @@ fn network_errors_back_off_and_recover() {
 fn gap_response_triggers_replay_from_the_hint() {
     let root = temporary_directory("daemon-gap");
     let sim = Arc::new(ServerSim::new());
-    // The first exchange (the enroll batch) is lost: the response is a gap
-    // pointing at sequence 1, so the client must replay the durable batch.
     sim.gap_first_exchange.store(true, Ordering::SeqCst);
     let config = daemon_config("gap");
     let (store, identity) = open_identity(&root);
@@ -656,10 +601,6 @@ fn gap_response_triggers_replay_from_the_hint() {
 fn a_lost_enrollment_response_never_reenrolls_and_stops_at_authentication_rejection() {
     let root = temporary_directory("daemon-enroll-lost");
     let sim = Arc::new(ServerSim::new());
-    // The first enroll exchange settles server-side (the identity was
-    // issued) but its response — carrying the one-time credential material —
-    // is lost in transit. Every retry is then refused like the endpoint's
-    // uniform rejection, because a node with a credential never re-enrolls.
     sim.enrollment_settled.store(true, Ordering::SeqCst);
     let config = daemon_config("enroll-lost");
     let (store, identity) = open_identity(&root);
@@ -697,8 +638,6 @@ fn a_lost_enrollment_response_never_reenrolls_and_stops_at_authentication_reject
         "the refusals back off: {status:?}"
     );
     assert!(status.last_error.is_some(), "{status:?}");
-    // The durable enroll frame redelivers; no second enroll is ever
-    // enqueued, and the identity stays unadopted.
     let enroll_deliveries = sim.frames_with_kind("client.enroll");
     assert!(
         enroll_deliveries.len() >= 2,
@@ -784,11 +723,9 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     let mut daemon = DeviceDaemon::start(config.clone(), store, sim.clone(), &first_identity)
         .expect("daemon start");
 
-    // Enroll and announce hello; the quiet cadence keeps the stream settled.
     drive_until_enrolled_and_settled(&mut daemon);
     assert_eq!(daemon.client_node_id(), ASSIGNED_NODE);
 
-    // Enqueue three frames that are never exchanged: a crash-shaped state.
     let sequences = (0..3)
         .map(|_| {
             daemon
@@ -807,8 +744,6 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     );
     daemon.into_store().close().expect("crash close");
 
-    // Restart: a new process launch rotates clientInstanceId, while the
-    // enrolled identity stays stable.
     let (store, second_identity) = {
         let mut store = DeviceStore::open(&root).expect("restarted store");
         let identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T01:00:00.000Z")
@@ -852,10 +787,6 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
         "the enrolled phase restores from the durable identity without any exchange"
     );
 
-    // The pending frames of the superseded instance keep their stream
-    // sequences and their original launch instance: the server still
-    // accepts them as the current instance, and this launch's announcement
-    // hello takes the instance over right behind them.
     let pending = daemon
         .store_mut()
         .pending_outbox_envelopes()
@@ -916,14 +847,8 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
 fn graceful_shutdown_keeps_taken_frames_durable() {
     let root = temporary_directory("daemon-shutdown");
     let sim = Arc::new(ServerSim::new());
-    // The staged shutdown window must stay quiet: the demanded heartbeat
-    // cadence rises above the window so the idle daemon never injects a
-    // heartbeat frame between the test's three enqueues and the armed
-    // exchange.
     sim.enrollment_heartbeat_ms
         .store(3_600_000, Ordering::SeqCst);
-    // One frame per exchange: the armed transport blocks exactly the first
-    // in-flight frame of the shutdown window.
     let config = DaemonConfig {
         max_frames_per_exchange: 1,
         ..quiet_daemon_config("shutdown")
@@ -941,12 +866,9 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
     let mut daemon = DeviceDaemon::start(config.clone(), store, transport.clone(), &identity)
         .expect("daemon start");
 
-    // Enroll and announce hello; the stream is settled and empty.
     drive_until_enrolled_and_settled(&mut daemon);
     assert_eq!(daemon.client_node_id(), ASSIGNED_NODE);
 
-    // Enqueue three frames, then arm the transport and run the loop: the
-    // first frame is taken (in flight) while the test shuts the daemon down.
     let sequences = (0..3)
         .map(|_| {
             daemon
@@ -960,7 +882,6 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
     thread::scope(|scope| {
         let handle = scope.spawn(|| daemon.run(&shutdown));
 
-        // Wait until the first frame is taken by the transport...
         {
             let (mutex, condvar) = &*started;
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -973,7 +894,6 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
                 flag = next;
             }
         }
-        // ...then shut the daemon down while the frame is in flight.
         shutdown.store(true, Ordering::Relaxed);
         {
             let (mutex, condvar) = &*release;
@@ -986,8 +906,6 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
         assert!(status.is_ok(), "graceful shutdown must not fail");
     });
 
-    // The first in-flight frame was acknowledged and confirmed; the
-    // frames the loop never reached stay durable exactly as they were taken.
     let snapshot = daemon.outbox_snapshot().expect("post-shutdown snapshot");
     assert_eq!(snapshot.ack_sequence, sequences[0]);
     assert_eq!(snapshot.highest_sequence, sequences[2]);
@@ -1001,7 +919,6 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
         "unconfirmed frames survive shutdown untouched"
     );
 
-    // A resumed daemon delivers exactly the surviving frames.
     let resumed_shutdown = AtomicBool::new(false);
     drive(&mut daemon, &resumed_shutdown, 80);
     assert_fully_exchanged(&mut daemon);
@@ -1062,7 +979,6 @@ fn a_failed_downlink_effect_is_not_acknowledged_and_is_replayed_after_restart() 
 
 #[test]
 fn a_slow_enrollment_does_not_mask_a_failed_downlink_effect() {
-    // Exceed the former 20 ms synthetic tick offset deterministically.
     assert_failed_downlink_replays(Duration::from_millis(30));
 }
 
@@ -1081,8 +997,6 @@ fn assert_failed_downlink_replays(enrollment_delay: Duration) {
     assert!(daemon.is_enrolled());
     let connection = rusqlite::Connection::open(&database).expect("fault connection");
     connection.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON client_connection_policy BEGIN SELECT RAISE(FAIL, 'injected policy write failure'); END;").expect("inject failure");
-    // Enrollment resets the retry boundary to its completion time. Sample
-    // again so a slow enrollment cannot turn this fault probe into Waiting.
     let failed = daemon.tick(Instant::now());
     assert!(
         matches!(failed, Err(DaemonError::Store(_))),

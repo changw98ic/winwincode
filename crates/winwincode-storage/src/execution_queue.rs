@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable scheduler queue and its closed execution-job state machine.
-//!
-//! This module owns persistence and admission invariants only. Fair selection,
-//! priority aging, retry policy, and resource reservations remain scheduler
-//! concerns layered on top of the records exposed here.
-
 use std::collections::HashSet;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -82,7 +76,6 @@ const MAX_DEPENDENCIES: usize = 1_024;
 const MAX_DISPATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAGE_SIZE: usize = 100;
 
-/// Exact product scope used for queue isolation and scheduler fairness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionQueueScope {
     pub organization_id: OrganizationId,
@@ -93,7 +86,6 @@ pub struct ExecutionQueueScope {
     pub delivery_id: Option<DeliveryId>,
 }
 
-/// Closed durable lifecycle of one scheduler-owned job.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionJobState {
@@ -133,30 +125,25 @@ impl ExecutionJobState {
     }
 }
 
-/// Durable cancellation intent retained through the terminal transition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobCancellationIntent {
     pub request_id: RequestId,
     pub requested_at: Instant,
 }
 
-/// Input for creating one immutable queue entry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobSubmission {
     pub scope: ExecutionQueueScope,
     pub job_id: ExecutionJobId,
     pub request_id: RequestId,
     pub payload_digest: Sha256Digest,
-    /// Canonical serialized `ExecutionJob` bytes dispatched after admission.
     pub dispatch_payload: Vec<u8>,
     pub attempt: u64,
     pub dependencies: Vec<ExecutionJobId>,
-    /// Delivery stage reservation. `ProductSession` Chat jobs have no `WorkRun`.
     pub work_run_id: Option<WorkRunId>,
     pub submitted_at: Instant,
 }
 
-/// Optimistic, replay-safe request for one legal state transition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobTransitionRequest {
     pub scope: ExecutionQueueScope,
@@ -168,7 +155,6 @@ pub struct ExecutionJobTransitionRequest {
     pub occurred_at: Instant,
 }
 
-/// Replay-safe cancellation command for one queued or active job.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobCancellationRequest {
     pub scope: ExecutionQueueScope,
@@ -178,7 +164,6 @@ pub struct ExecutionJobCancellationRequest {
     pub requested_at: Instant,
 }
 
-/// One complete durable queue record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobRecord {
     pub scope: ExecutionQueueScope,
@@ -196,28 +181,24 @@ pub struct ExecutionJobRecord {
     pub cancellation: Option<ExecutionJobCancellationIntent>,
 }
 
-/// Stored response for a submission, transition, or cancellation request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionJobMutationReceipt {
     pub job: ExecutionJobRecord,
     pub replayed: bool,
 }
 
-/// Stable cursor for an exact scope-local queue page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionJobPageCursor {
     pub submitted_at: Instant,
     pub job_id: ExecutionJobId,
 }
 
-/// One scope-isolated page ordered by submission time and job identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionJobPage {
     pub jobs: Vec<ExecutionJobRecord>,
     pub next_cursor: Option<ExecutionJobPageCursor>,
 }
 
-/// SQLite-backed durable execution queue.
 pub struct ExecutionQueue<'storage> {
     storage: &'storage mut SqliteStorage,
 }
@@ -230,35 +211,18 @@ pub(crate) enum ExecutionJobSubmissionMode {
 }
 
 impl SqliteStorage {
-    /// Opens the durable scheduler queue over this storage connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the queue schema cannot be prepared.
     pub fn execution_queue(&mut self) -> Result<ExecutionQueue<'_>, StorageError> {
         ExecutionQueue::new(self)
     }
 }
 
 impl<'storage> ExecutionQueue<'storage> {
-    /// Opens the queue and creates its tables idempotently.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the queue schema cannot be prepared.
     pub fn new(storage: &'storage mut SqliteStorage) -> Result<Self, StorageError> {
         let queue = Self { storage };
         queue.ensure_schema()?;
         Ok(queue)
     }
 
-    /// Submits exactly one durable job. An exact retry replays its stored
-    /// receipt; a changed body using the same scoped request id is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, missing/cross-scope dependencies, duplicate
-    /// job identities, request conflicts, and `SQLite` failures.
     pub fn submit(
         &mut self,
         request: &ExecutionJobSubmission,
@@ -277,14 +241,6 @@ impl<'storage> ExecutionQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Applies one legal state transition with optimistic revision checking.
-    /// Exact request retries replay the originally committed record even when
-    /// later transitions have already advanced the job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, stale revisions, illegal transitions, blocked
-    /// lease admission, request conflicts, and `SQLite` failures.
     pub fn transition(
         &mut self,
         request: &ExecutionJobTransitionRequest,
@@ -299,13 +255,6 @@ impl<'storage> ExecutionQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Persists a cancellation intent and immediately removes a queued or
-    /// active job from lease admission by moving it to `cancelling`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, stale revisions, terminal/already-cancelling
-    /// jobs, request conflicts, and `SQLite` failures.
     pub fn request_cancellation(
         &mut self,
         request: &ExecutionJobCancellationRequest,
@@ -320,11 +269,6 @@ impl<'storage> ExecutionQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Loads one job only when every supplied scope component matches.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities and `SQLite` failures.
     pub fn load_job(
         &self,
         scope: &ExecutionQueueScope,
@@ -335,13 +279,6 @@ impl<'storage> ExecutionQueue<'storage> {
         load_scoped_job(self.storage.connection()?, scope, job_id)
     }
 
-    /// Returns one exact-scope page ordered deterministically by
-    /// `(submitted_at, job_id)`. An empty state list includes all states.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scopes/cursors, duplicate state filters, invalid page
-    /// sizes, and `SQLite` failures.
     pub fn list_jobs(
         &self,
         scope: &ExecutionQueueScope,
@@ -438,12 +375,6 @@ impl<'storage> ExecutionQueue<'storage> {
         Ok(ExecutionJobPage { jobs, next_cursor })
     }
 
-    /// Reports whether a scoped mutation receipt is durable. This does not
-    /// authorize replay without the original request body.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input and `SQLite` failures.
     pub fn has_request(
         &self,
         scope: &ExecutionQueueScope,

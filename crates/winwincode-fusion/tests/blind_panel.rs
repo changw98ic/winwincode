@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! FUSION-01 acceptance tests for the blind panel contract.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;

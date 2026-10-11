@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Immutable encrypted launch material retained across Server restarts.
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -11,15 +10,11 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Private encrypted material; callers retain only secret-free identities in `SQLite`.
 pub struct PrivateLaunchMaterialStore {
     root: PathBuf,
     key: [u8; 32],
 }
 impl PrivateLaunchMaterialStore {
-    /// Opens the durable private key and encrypted blob directory.
-    /// # Errors
-    /// Returns a secret-free failure for invalid permissions or storage.
     pub fn open(directory: &Path) -> io::Result<Self> {
         let root = directory.join("private-launch-material");
         fs::create_dir_all(&root)?;
@@ -33,8 +28,6 @@ impl PrivateLaunchMaterialStore {
         if !key_path.exists() {
             #[cfg(test)]
             tests::run_after_missing_key_hook();
-            // A concurrent initializer can publish its key and first blob
-            // after the missing-key observation above.
             if root.join("blobs").exists()
                 && fs::read_dir(root.join("blobs"))?.next().is_some()
                 && !key_path.exists()
@@ -57,9 +50,6 @@ impl PrivateLaunchMaterialStore {
         fs::set_permissions(&blobs, fs::Permissions::from_mode(0o700))?;
         Ok(Self { root: blobs, key })
     }
-    /// Retains exact material before its public launch is committed.
-    /// # Errors
-    /// Rejects changed replay material, invalid identity or storage failures.
     pub fn put(&self, id: &str, plain: &[u8]) -> io::Result<()> {
         let path = self.path(id)?;
         if plain.len() > 4096 {
@@ -92,9 +82,6 @@ impl PrivateLaunchMaterialStore {
         }
         Ok(())
     }
-    /// Loads the exact authenticated private launch material.
-    /// # Errors
-    /// Rejects corruption, changed binding, invalid permissions or missing blobs.
     pub fn get(&self, id: &str) -> io::Result<Vec<u8>> {
         let bytes = read_private(&self.path(id)?, 4124)?;
         if bytes.len() < 28 {

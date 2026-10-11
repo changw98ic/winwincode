@@ -1,6 +1,8 @@
+#![cfg(feature = "test-support")]
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "test-support")]
+#[path = "support/test_helper_path.rs"]
+mod test_helper_path;
 
 #[path = "support/canonical_code_mode.rs"]
 mod canonical_code_mode;
@@ -106,13 +108,7 @@ impl Fixture {
         hosted: bool,
         mode: winwincode_codex::ExecutionMode,
     ) -> ProductionCodexAdapter {
-        let helper = std::env::var_os("WWC_TEST_HELPER").map_or_else(
-            || {
-                PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
-                    .join("debug/winwincode-kernel-helper")
-            },
-            PathBuf::from,
-        );
+        let helper = test_helper_path::kernel_helper_path();
         let configuration = ProductionCodexConfig::try_new(ProductionCodexOptions {
             data_directory: self.0.join("worker"),
             helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(),
@@ -689,7 +685,6 @@ async fn prepare_restart_input(root: &Fixture) {
         .unwrap(),
     )
     .unwrap();
-    // Deliberately bypass Drop: emulate loss of the Worker process, not graceful Core cancellation.
     std::process::exit(73);
 }
 

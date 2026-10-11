@@ -8,8 +8,6 @@ thread_local! {
 }
 pub(super) fn audit_record_reader_read(accepted: usize, read: usize) {
     AUDIT_READER_READS.with(|x| x.borrow_mut().push((accepted, read)));
-    // This existing read observer controls one deterministic cancellation
-    // window in a real TLS read. It never substitutes bytes or a reader result.
     AUDIT_READER_READ_ACTION.with(|x| {
         if let Some(action) = x.borrow_mut().as_mut() {
             action(accepted, read);
@@ -66,8 +64,6 @@ fn audit_generic_receipt(adapter: &HttpsSseProviderAdapter) -> ProviderGatewayOp
     }
 }
 
-// Same real TLS/chunked response shape as the preserved MP-C01 cost baseline.
-// A complete protocol terminal ends the model response independently of HTTP EOF.
 #[allow(
     clippy::too_many_lines,
     reason = "Keep the actual TLS exchange, pre-EOF wait and thread cleanup in one bounded fixture"
@@ -124,7 +120,6 @@ fn audit_tls_terminal_boundary(
                     if !heartbeat_tail {
                         continue;
                     }
-                    // An accepted terminal may close the HTTP reader before this tail.
                     if write!(stream, "{:x}\r\n{heartbeat}\r\n", heartbeat.len()).is_err()
                         || stream.flush().is_err()
                     {
@@ -238,7 +233,6 @@ fn audit_responses_invalid_terminal_prefix() -> String {
 }
 
 fn audit_responses_usage_prefix() -> String {
-    // The cap must be crossed while a nonterminal response is still receiving.
     responses_wire(&[
         serde_json::json!({"type":"response.created","response":{"id":"synthetic-usage-response","model":"fixture-model","usage":{"input_tokens":11,"output_tokens":5}}}),
     ])
@@ -626,7 +620,6 @@ fn audit_cached_lifecycle_after_open(
             !cached_after,
             "terminal control must release cached output even when nobody drains again"
         );
-        // This branch deliberately performs no later drain.
     }
     drop(connection);
 }
@@ -780,7 +773,6 @@ fn audit_bounded_cached_receipt_after_open(
     assert_eq!(charge_before.usage.input_tokens, expected_input);
     assert_eq!(charge_before.usage.output_tokens, expected_output);
     assert_eq!(charge_before.actual_cost_micros, expected_cost);
-    // A foreign exchange may neither consume cached output nor observe receipt facts.
     let mut foreign = receipt.clone();
     foreign.model_exchange_id = ModelExchangeId("mdl_00000000000000000000000002".into());
     let unknown = adapter.drain_canonical(&foreign).unwrap_err();
@@ -1208,8 +1200,6 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-// The listener and socket waits are bounded even when the second attempt never
-// arrives. This helper is test-only; the actual Provider reader is unchanged.
 fn audit_bounded_tls_responses(responses: Vec<TestResponse<'_>>) -> TlsFixture {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let CertifiedKey { cert, signing_key } =

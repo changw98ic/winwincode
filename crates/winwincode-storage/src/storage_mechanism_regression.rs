@@ -165,7 +165,6 @@ fn m05_m06_real_receipt_and_audit_methods_keep_fixed_indexed_cost() {
     for size in [1_000_u64, 10_000] {
         let root = temporary_root(size);
         let mut storage = crate::SqliteStorage::open(&root).unwrap();
-        // Build history through the canonical commit and publication methods.
         for seed in 1..=size {
             storage.commit(&commit(seed)).unwrap();
             storage.mark_published(&format!("evt-{seed}")).unwrap();
@@ -237,8 +236,6 @@ fn m05_m06_real_receipt_and_audit_methods_keep_fixed_indexed_cost() {
 }
 
 mod outbound {
-    // The canonical offline authority fixture installs admission, a live lease,
-    // and a retained Worker slot. The test-only self alias preserves its imports.
     include!("../tests/worker_outbound_queue.rs");
     include!("storage_outbound_regression.rs");
 }
@@ -251,7 +248,6 @@ fn indexed_receipt_and_audit_methods_do_not_scan_settled_history() {
     for size in [1_000_u64, 10_000] {
         let root = temporary_root(size);
         let mut storage = crate::SqliteStorage::open(&root).unwrap();
-        // Build history through the canonical commit and publication methods.
         for seed in 1..=size {
             storage.commit(&commit(seed)).unwrap();
             storage.mark_published(&format!("evt-{seed}")).unwrap();

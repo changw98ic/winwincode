@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receipt-first transaction for one generated `session.binding` message.
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -65,7 +63,6 @@ enum SessionBindingCommitPhase {
     CodexThread,
 }
 
-/// Durable receipts for the two canonical `session.bound` revisions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliverySessionBindingCommitReceipt {
     worker_session_receipt: CommitReceipt,
@@ -84,17 +81,13 @@ impl DeliverySessionBindingCommitReceipt {
     }
 }
 
-/// Failure of the two-phase Delivery `SessionBinding` transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliverySessionBindingCommitError {
-    /// No `SessionBinding` phase committed.
     Storage(StorageError),
-    /// `WorkerSession` attachment is durable; a retry resumes at `CodexThread`.
     CodexThreadPhase {
         worker_session_receipt: Box<CommitReceipt>,
         source: StorageError,
     },
-    /// Both phases are durable, but one or more events remain in the outbox.
     PublicationPending {
         commit: Box<DeliverySessionBindingCommitReceipt>,
         source: OutboxError,
@@ -146,10 +139,6 @@ pub(crate) fn execute_at(
     authority: &SchedulerSessionBindingAuthority,
     server_time: &Instant,
 ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
-    // Read the immutable intent first. Phase request identities/digests are
-    // rooted in this event, while queue/replacement state is mutable and is
-    // deliberately deferred until a new or partially committed binding is
-    // proven to need it.
     let (durable, immutable_job) =
         crate::delivery_transaction::load_durable_execution_intent(storage, &message.lease.job_id)?;
     let worker_phase = Phase::new(message, &durable, WORKER_SESSION_PHASE)?;
@@ -162,16 +151,8 @@ pub(crate) fn execute_at(
         worker_replay =
             storage.load_receipt(&worker_phase.receipt_identity, &worker_phase.command_digest)?;
     }
-    // `boundAt`/`sentAt` are Worker causal facts. Delivery mutation and audit
-    // timestamps use the trusted ingress clock so a replay cannot backdate a
-    // replacement or make its revision ordering depend on the message clock.
     let _message_bound_at_millis = validate_message_shape(message)?;
     let mutation_time_millis = instant_millis(server_time)?;
-    // A complete receipt replay still has to identify the current attempt.
-    // Once the scheduler has sealed a successor, an exact old-attempt phase
-    // receipt is historical evidence, not permission to bind the fenced
-    // predecessor again. Read only the durable replacement seal here; do not
-    // inspect or mutate the current Delivery snapshot.
     if let Some(replacement) =
         storage.load_execution_scope_replacement_authority(&message.lease.job_id)?
     {
@@ -187,12 +168,6 @@ pub(crate) fn execute_at(
     if let (Some(worker_session_receipt), Some(codex_thread_receipt)) =
         (worker_replay.as_ref(), codex_replay.as_ref())
     {
-        // The two phase receipts are the complete replay authority. Derive
-        // the predecessor revision from their sealed revision instead of
-        // loading mutable queue, replacement, or Delivery state. This also
-        // permits replay after a successor replacement or a damaged current
-        // snapshot, as long as the original receipts and audit event remain
-        // intact.
         let mut context =
             BindingContext::from_durable(&durable, &immutable_job, mutation_time_millis)?;
         if let Some(replacement) =
@@ -220,8 +195,6 @@ pub(crate) fn execute_at(
         });
     }
 
-    // New and partially committed paths need the scheduler's current attempt
-    // and replacement seal. Only these paths consult mutable queue state.
     let (_, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let snapshot = crate::snapshot_production::snapshot_for_job(storage, &job)?;
     if message.snapshot_id.as_ref()
@@ -235,14 +208,9 @@ pub(crate) fn execute_at(
     }
     validate_durable_job(&durable, &job, message)?;
     let mut context = BindingContext::from_durable(&durable, &job, mutation_time_millis)?;
-    // Validate the frame's internal identity before applying the scheduler
-    // replacement owner phase. A malformed frame must not advance Delivery
-    // merely because it carries the current attempt number.
     validate_message_session_identity(message)?;
     let replacement = replacement_for_job(storage, &job)?;
 
-    // Validate scheduler authority before applying a replacement owner phase.
-    // Partial/new binding paths are the only paths that may mutate Delivery.
     let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
         storage,
         &message.lease,
@@ -257,7 +225,6 @@ pub(crate) fn execute_at(
         accepted_window,
     )
     .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    // Validate the causal ingress clock before any product-state mutation.
     if worker_replay.is_none() && codex_replay.is_none() {
         validate_trusted_lease_time(message, server_time)?;
     }
@@ -634,11 +601,6 @@ fn commit_worker_session(
     phase: &Phase,
     acceptance: &SessionBindingAcceptance<'_>,
 ) -> Result<CommitReceipt, StorageError> {
-    // The immutable Job revision only identifies the outbox intent.  Delivery
-    // may have appended the canonical WorkRun (and other durable facts) after
-    // that intent was published, so bind against the actual current snapshot;
-    // the StateCommit CAS below turns that read into the authoritative phase
-    // revision and the receipt records it for the next phase.
     let current = load_current_delivery_state(storage, context)?;
     validate_current_binding(&current, context, message, BindingProgress::Pending)?;
     let session_identity = session_identity_for_current_binding(&current, context, message)?;
@@ -970,10 +932,6 @@ fn recover_raced_phase_receipt(
     expected_identity: &SessionIdentity,
     source: StorageError,
 ) -> Result<CommitReceipt, StorageError> {
-    // Callers enter here only after this phase was absent at the first receipt
-    // read and their commit attempt lost a race. A second exact receipt proof
-    // resolves that race; ordinary retries use the receipt-first branches in
-    // `execute` instead.
     let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)?
     else {
         return Err(source);
@@ -1240,10 +1198,6 @@ fn validate_complete_replay(
     codex_phase: &Phase,
     expected_identity: &SessionIdentity,
 ) -> Result<(), StorageError> {
-    // Receipt revisions are the durable phase facts.  Never reconstruct them
-    // from the immutable outbox revision: a replacement, an unrelated
-    // Delivery append, or a recovery retry may have advanced the stream
-    // before this exact pair is replayed.
     let worker_revision = worker_receipt.revision;
     let codex_revision = worker_revision
         .checked_add(1)
@@ -1493,11 +1447,6 @@ pub(crate) fn execution_message_request_id(
     lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
     phase: &'static str,
 ) -> Result<RequestId, StorageError> {
-    // Message counters are local to a Worker process. Include its execution
-    // identity so independent roles never share a receipt key.
-    // Mutable message and durable-job facts belong in the phase digest so a
-    // changed payload reaches storage as a request conflict instead of a new
-    // request.
     let mut bytes = Vec::with_capacity(message_id.0.len() + phase.len() + 64);
     bytes.extend_from_slice(b"winwincode.session-binding-phase-request.v2\0");
     append_phase_fact(&mut bytes, phase.as_bytes());
@@ -1535,10 +1484,6 @@ fn canonical_phase_bytes(
     let message = serde_json::to_vec(message).map_err(|error| {
         StorageError::adapter(format!("failed to encode SessionBinding message: {error}"))
     })?;
-    // A phase receipt authorizes exactly one generated message against one
-    // immutable ExecutionJob row and the receipt that owns that row. Binding
-    // every membership field keeps a complete replay independent of current
-    // Delivery state without accepting a re-parented or rewritten job.
     let event = durable.event();
     let receipt = durable.receipt_identity();
     let mut bytes = Vec::with_capacity(message.len() + event.payload.len() + 512);

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// Read-only witness for the fresh, owned mechanism audit directory.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
@@ -45,7 +44,6 @@ export const witnessQueries = Object.freeze({
     length(prepared_payload) AS prepared_payload_bytes,prepared_payload FROM exchanges WHERE exchange_id=?`,
 })
 
-/** Accepts (deviceData, workerInstanceId, jobId), or (deviceData, identity). */
 export function snapshotPendingModelOpen(deviceData, identity, exactJobId) {
   const context = typeof identity === 'string' ? { workerInstanceId: identity, jobId: exactJobId } : identity
   assert.equal(typeof context?.workerInstanceId, 'string')
@@ -115,7 +113,6 @@ export function snapshotPendingModelOpen(deviceData, identity, exactJobId) {
     clockBoundary: 'snapshot UTC is separate from copied ModelOpen sentAt and Provider diagnostic wallclock' }
 }
 
-/** Requests must record actual Idempotency-Key plus actual thread-id hash. */
 export function lookupAfterRequest(snapshot, requests, exactExchangeId) {
   const candidates = snapshot.candidates.filter(value => !exactExchangeId || value.modelExchangeId === exactExchangeId)
   assert.equal(candidates.length, 1, 'mapping requires one exact exchange witness')

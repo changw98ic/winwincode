@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//!
-//! Product-side source hygiene (judge 2026-09-23): extract → sanitize → validate → write.
-//! Never ship truncated / prose-laden / escaped-dump code.
-
-/// Strip markdown fences and analysis prose around a source body.
 #[must_use]
 pub fn sanitize_source(content: &str) -> String {
     let mut text = content.replace("\r\n", "\n");
@@ -99,7 +94,6 @@ pub fn sanitize_source(content: &str) -> String {
     lines[..end].join("\n").trim_end().to_owned()
 }
 
-/// Heuristic gate before write: reject ellipsis dumps and escaped-only payloads.
 #[must_use]
 pub fn looks_like_real_source(content: &str) -> bool {
     if content.trim().len() < 200 {
@@ -114,7 +108,6 @@ pub fn looks_like_real_source(content: &str) -> bool {
     if content.matches("\\n").count() > 5 && !content.contains('\n') {
         return false;
     }
-    // TypeScript `function` does not contain `func ` (trailing space).
     [
         "fn ",
         "def ",
@@ -144,7 +137,6 @@ pub fn looks_like_real_source(content: &str) -> bool {
     .any(|p| content.contains(p))
 }
 
-/// JSONL protocol body for an illegal JSON line (PROTOCOL.md).
 #[must_use]
 pub fn protocol_invalid_json_response() -> &'static str {
     "{\"error\":\"INVALID_JSON\"}"

@@ -1,4 +1,3 @@
-//! Trusted host policy through the real Kernel, Code Mode host and MCP process.
 use super::*;
 use winwincode_kernel::{
     KernelToolResultReadRequest, ToolCoalescingPermission, ToolDependencySnapshot,
@@ -394,14 +393,12 @@ fn native_diagnostic_offer_rollback_preserves_exec_and_retries_on_same_cell_wait
                     database.query_row("SELECT name FROM sqlite_master WHERE name='tool_diagnostic_feedback'",
                         [], |row| row.get::<_, String>(0)).ok().map(|_| database)
                 }).expect("Core state database");
-            // This is a deterministic whole-transaction rollback, not SQLITE_FULL.
             database.execute_batch("CREATE TRIGGER fail_optional_diagnostic_offer BEFORE INSERT ON tool_fact_events WHEN json_extract(NEW.fact_json, '$.kind') = 'diagnostic' AND json_extract(NEW.fact_json, '$.fact.delivery') = 'offered' BEGIN SELECT RAISE(ROLLBACK, 'optional diagnostic offer fixture'); END;").unwrap();
             kernel.submit_turn(&session.session_id, "Inspect shared reads while diagnostic delivery fails".into(),
                 TurnSubmissionOptions::default()).await.unwrap();
             tokio::time::timeout(Duration::from_secs(30), model.output_seen.notified())
                 .await.expect("model received current exec output under diagnostic rollback");
 
-            // Observe the fault before any wait can offer a later diagnostic version.
             let outputs = latest_exec_outputs(&model.script);
             assert_eq!(outputs.len(), 1, "only the current exec has returned");
             let current_output = serde_json::to_string(&outputs[0]).unwrap();
@@ -688,8 +685,6 @@ fn assert_model_receipts(model: &ScriptedModel, facts: &[Value]) {
     let batches = model_receipts(model);
     assert!(!batches.is_empty(), "latest exec received no Core receipts");
     let requests = latest_exec_requests(facts);
-    // Core projects the latest four references at each boundary. These scripts
-    // execute no nested calls after yielding, so exec and wait expose the same four.
     let expected: Vec<_> = requests.keys().rev().take(4).copied().collect();
     for receipts in batches {
         let sequences = receipts

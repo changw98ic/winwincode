@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Atomic CP refusal of a candidate after the immutable Worker terminal.
-
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::candidate_rejection::{CandidateRejectedTransition, CandidateRejectionFact},

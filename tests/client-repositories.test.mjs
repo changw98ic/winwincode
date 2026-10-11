@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, 'apps/client/node_modules/.cache/client-repositories-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -436,8 +434,6 @@ test('repositories view-model keeps shown cards across an unavailable read and n
   assert.equal(model.state.status, 'unavailable')
   assert.deepEqual(model.state.repositories, [repository()], 'a failed read keeps shown cards')
 
-  // A different device selected while its own read hangs in flight: the shown
-  // cards of the previous device must never bleed into the new selection.
   const third = model.showDevice('999999999999')
   await new Promise(resolvePromise => setImmediate(resolvePromise))
   assert.equal(model.state.clientId, '999999999999')
@@ -583,8 +579,6 @@ test('repositories page renders every card field and never renders a path', asyn
   assert.equal(findOne(cards[1], 'wwc-repositories-card-head').textContent, 'HEAD def4567')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-availability').hidden, true)
 
-  // §16.5: the card surface carries display names, branches, dirty state, and
-  // the short HEAD hash only; no absolute path appears anywhere.
   assert.doesNotMatch(renderedText(rootElement), /\/Users\/|\/home\/|\/Volumes\//u)
   model.close()
 })

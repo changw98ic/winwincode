@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lossless mapping from Delivery-owned read models to generated transport DTOs.
-
 use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
@@ -663,12 +661,6 @@ fn verdict(
     })
 }
 
-/// Maps the durable Evidence source identity to the one canonical public id.
-///
-/// Delivery currently derives Evidence identities from a full SHA-256 source
-/// seal. The public contract uses a fixed Crockford identifier, so projection
-/// code deterministically narrows that seal rather than exposing an invalid or
-/// transport-specific identifier. Already-canonical ids remain unchanged.
 pub(super) fn public_evidence_id(source: &EvidenceId) -> EvidenceId {
     if is_public_evidence_id(&source.0) {
         return source.clone();
@@ -1066,10 +1058,6 @@ pub(super) fn runtime_snapshot_for_product_session(
     })
 }
 
-/// Maps the standalone `ProductSession` identity to the generated runtime
-/// session contract. `ProductSession` execution has no Delivery `WorkRun` or
-/// domain `SessionBinding` id; the stable projection key is derived from the
-/// exact ProductSession/ExecutionJob identity retained by the runtime ledger.
 fn runtime_product_session(
     source: &TrustedProductSessionRuntimeSession,
 ) -> Result<api::RuntimeSessionProjection, StrongFlowProjectionError> {

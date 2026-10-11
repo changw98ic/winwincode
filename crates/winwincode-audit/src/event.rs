@@ -15,16 +15,10 @@ use crate::store::AuditError;
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable identity for one immutable audit event.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct AuditEventId(String);
 
 impl AuditEventId {
-    /// Creates the canonical `aud_` identity used by the audit ledger.
-    ///
-    /// # Errors
-    ///
-    /// Rejects values outside the canonical Crockford identifier format.
     pub fn try_new(value: impl Into<String>) -> Result<Self, AuditError> {
         let value = value.into();
         if !canonical_id(&value, "aud") {
@@ -35,11 +29,6 @@ impl AuditEventId {
         Ok(Self(value))
     }
 
-    /// Derives one stable audit identity from an already-canonical SHA-256 digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed digest. The digest bytes themselves are not retained.
     pub fn from_digest(digest: &Sha256Digest) -> Result<Self, AuditError> {
         validate_digest(digest, "audit event identity digest")?;
         let hex = digest
@@ -68,8 +57,6 @@ impl AuditEventId {
     }
 }
 
-/// Stable authenticated actor identity. Authentication proof is deliberately
-/// outside the audit event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditActor {
@@ -78,7 +65,6 @@ pub enum AuditActor {
     System(SystemActorId),
 }
 
-/// Exact tenant scope attached to one audit event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditScope {
@@ -103,22 +89,12 @@ pub enum AuditScope {
 }
 
 impl AuditScope {
-    /// Builds an organization scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical organization identity.
     pub fn organization(organization_id: OrganizationId) -> Result<Self, AuditError> {
         let scope = Self::Organization { organization_id };
         scope.validate()?;
         Ok(scope)
     }
 
-    /// Builds a workspace scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any non-canonical identity.
     pub fn workspace(
         organization_id: OrganizationId,
         workspace_id: WorkspaceId,
@@ -131,11 +107,6 @@ impl AuditScope {
         Ok(scope)
     }
 
-    /// Builds a project scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any non-canonical identity.
     pub fn project(
         organization_id: OrganizationId,
         workspace_id: WorkspaceId,
@@ -150,11 +121,6 @@ impl AuditScope {
         Ok(scope)
     }
 
-    /// Builds a repository scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any non-canonical identity.
     pub fn repository(
         organization_id: OrganizationId,
         workspace_id: WorkspaceId,
@@ -188,8 +154,6 @@ impl AuditScope {
     }
 
     #[must_use]
-    /// Converts a scope that the policy layer already authorized into read
-    /// access. This conversion does not authenticate or authorize a caller.
     pub fn into_access(self) -> AuditAccess {
         AuditAccess { scope: self }
     }
@@ -239,7 +203,6 @@ impl AuditScope {
     }
 }
 
-/// Scope authority supplied by the policy layer for one audit read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditAccess {
     pub(crate) scope: AuditScope,
@@ -252,7 +215,6 @@ impl AuditAccess {
     }
 }
 
-/// Closed action category plus one stable, non-sensitive operation name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuditAction {
     kind: AuditActionKind,
@@ -281,8 +243,6 @@ pub enum AuditActionKind {
     Publication,
 }
 
-/// Secret-safe summary of one model call. Raw prompts, responses, provider
-/// requests, and credentials have no representation in this type.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuditModelInvocation {
     provider_id: String,
@@ -294,12 +254,6 @@ pub struct AuditModelInvocation {
 }
 
 impl AuditModelInvocation {
-    /// Builds one bounded model-call summary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary provider/model text, malformed digests, or usage
-    /// counters outside the exact JSON integer range.
     pub fn try_new(
         provider_id: &str,
         model_id: &str,
@@ -366,57 +320,26 @@ impl AuditModelInvocation {
 }
 
 impl AuditAction {
-    /// Builds a business operation from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn business(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Business, name)
     }
 
-    /// Builds an administrative operation from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn administration(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Administration, name)
     }
 
-    /// Builds a command action from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn command(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Command, name)
     }
 
-    /// Builds an approval action from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn approval(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Approval, name)
     }
 
-    /// Builds a policy action from one stable canonical name or rule ID.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn policy(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Policy, name)
     }
 
-    /// Builds a secret-safe Credential operation from one stable canonical
-    /// name. Credential material has no representation in an audit action.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn credential(
         name: &str,
         credential_reference_id: CredentialReferenceId,
@@ -436,21 +359,10 @@ impl AuditAction {
         })
     }
 
-    /// Builds a Worker lease action from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn worker_lease(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::WorkerLease, name)
     }
 
-    /// Builds a secret-safe Provider operation from one stable canonical
-    /// name. Provider requests and responses remain outside the audit event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn provider(provider_id: &str, name: &str) -> Result<Self, AuditError> {
         validate_token(provider_id, "audit Provider identity")?;
         validate_token(name, "audit action name")?;
@@ -463,20 +375,10 @@ impl AuditAction {
         })
     }
 
-    /// Builds a Delivery state action from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn delivery_state(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::DeliveryState, name)
     }
 
-    /// Builds a Publication action from one stable canonical name.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded text.
     pub fn publication(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::Publication, name)
     }
@@ -492,11 +394,6 @@ impl AuditAction {
         })
     }
 
-    /// Binds a model invocation action to its exact secret-safe summary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid model summary.
     pub fn model_invocation(summary: AuditModelInvocation) -> Result<Self, AuditError> {
         summary.validate()?;
         Ok(Self {
@@ -565,7 +462,6 @@ impl AuditAction {
     }
 }
 
-/// Whether the audited operation changed canonical state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditState {
@@ -579,11 +475,6 @@ pub enum AuditState {
 }
 
 impl AuditState {
-    /// Builds one exact state transition.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or identical before/after digests.
     pub fn changed(before: Option<Sha256Digest>, after: Sha256Digest) -> Result<Self, AuditError> {
         if before.as_ref().is_some_and(|value| value == &after) {
             return Err(AuditError::invalid(
@@ -595,11 +486,6 @@ impl AuditState {
         Ok(state)
     }
 
-    /// Builds an operation that left canonical state unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed current digest.
     pub fn unchanged(current: Option<Sha256Digest>) -> Result<Self, AuditError> {
         let state = Self::Unchanged { current };
         state.validate()?;
@@ -629,8 +515,6 @@ impl AuditState {
     }
 }
 
-/// Closed request origin. Forwarded headers, user agents, and arbitrary source
-/// text never enter the event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditOrigin {
@@ -639,11 +523,6 @@ pub enum AuditOrigin {
 }
 
 impl AuditOrigin {
-    /// Builds a local component origin.
-    ///
-    /// # Errors
-    ///
-    /// Rejects arbitrary or unbounded component text.
     pub fn local(component: &str) -> Result<Self, AuditError> {
         validate_token(component, "audit local component")?;
         Ok(Self::Local {
@@ -664,7 +543,6 @@ impl AuditOrigin {
     }
 }
 
-/// The phase that supplied the accepted binding source fact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditBindingPhase {
@@ -672,9 +550,6 @@ pub enum AuditBindingPhase {
     CodexThread,
 }
 
-/// The narrow source fact for an accepted binding. Binding messages do not
-/// carry an execution-event sequence, so the audit record names the exact
-/// message and binding phase instead of inventing a zero sequence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AuditBindingSource {
@@ -683,11 +558,6 @@ pub struct AuditBindingSource {
 }
 
 impl AuditBindingSource {
-    /// Builds the source fact from the exact accepted `ExecutionPort` message.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuditError`] when the message identity is not canonical.
     pub fn try_new(
         message_id: ExecutionMessageId,
         phase: AuditBindingPhase,
@@ -720,12 +590,6 @@ impl AuditBindingSource {
     }
 }
 
-/// The closed execution identity carried by an accepted binding, runtime, or
-/// terminal audit subject. Every field is required except the Delivery task;
-/// callers cannot represent a partially joined execution identity. Runtime
-/// and terminal facts carry a positive execution acknowledgement sequence.
-/// An accepted binding instead carries [`AuditBindingSource`] because its wire
-/// message has no execution-event sequence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AuditExecutionIdentity {
@@ -749,17 +613,6 @@ pub struct AuditExecutionIdentity {
 }
 
 impl AuditExecutionIdentity {
-    /// Builds one complete runtime or terminal execution identity from the
-    /// canonical domain IDs and a proven execution acknowledgement sequence.
-    ///
-    /// The returned value is suitable for all three execution subject
-    /// branches. It does not mint or persist an identity and does not call the
-    /// Control Plane.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical IDs, a zero or out-of-range attempt, an invalid
-    /// fencing token, or a non-positive/out-of-range source sequence.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         product_session_id: ProductSessionId,
@@ -796,13 +649,6 @@ impl AuditExecutionIdentity {
         Ok(identity)
     }
 
-    /// Builds one complete accepted-binding identity from its exact source
-    /// message and phase. No synthetic execution sequence is accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuditError`] when an identity is not canonical, the attempt
-    /// or fencing token is invalid, or the binding source is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_binding(
         product_session_id: ProductSessionId,
@@ -1051,9 +897,6 @@ impl<'de> Deserialize<'de> for AuditExecutionIdentity {
     }
 }
 
-/// The execution record branch. Keeping this discriminant separate prevents
-/// an accepted binding, runtime event, and terminal outcome from being
-/// represented as an untyped or partially populated subject.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditExecutionSubjectKind {
@@ -1062,8 +905,6 @@ pub enum AuditExecutionSubjectKind {
     Terminal,
 }
 
-/// Closed top-level subject categories. Publication subjects remain on their
-/// own branch; execution subjects never share optional publication fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditSubjectKind {
     References,
@@ -1081,9 +922,6 @@ impl AuditSubjectKind {
     }
 }
 
-/// Product identities joined to an audit event. No raw model or publication
-/// body is accepted. The legacy reference builder remains the publication
-/// branch; execution records use complete typed identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuditSubject {
     References {
@@ -1165,11 +1003,6 @@ impl AuditSubject {
     }
 
     #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics when called on a closed execution subject. Execution subjects
-    /// must be constructed with a complete execution identity.
     pub fn with_delivery(self, delivery_id: DeliveryId) -> Self {
         match self {
             Self::References {
@@ -1210,11 +1043,6 @@ impl AuditSubject {
     }
 
     #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics when called on a closed execution subject. Execution subjects
-    /// must be constructed with a complete execution identity.
     pub fn with_product_session(self, product_session_id: ProductSessionId) -> Self {
         match self {
             Self::References {
@@ -1246,11 +1074,6 @@ impl AuditSubject {
     }
 
     #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics when called on a closed execution subject. Execution subjects
-    /// must be constructed with a complete execution identity.
     pub fn with_lease(self, lease_id: LeaseId) -> Self {
         match self {
             Self::References {
@@ -1280,11 +1103,6 @@ impl AuditSubject {
     }
 
     #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics when called on a closed execution subject. Execution subjects
-    /// must be constructed with a complete execution identity.
     pub fn with_publication(self, publication_id: PublicationId) -> Self {
         match self {
             Self::References {
@@ -1547,8 +1365,6 @@ impl<'de> Deserialize<'de> for AuditSubject {
     }
 }
 
-/// Stable result category. Human-readable errors and remote diagnostics stay
-/// outside the durable event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
@@ -1557,8 +1373,6 @@ pub enum AuditOutcome {
     Failed,
 }
 
-/// Minimum payload retention. The immutable header and its chain digest remain
-/// after a finite payload expires.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "until_millis", rename_all = "snake_case")]
 pub enum AuditRetention {
@@ -1566,7 +1380,6 @@ pub enum AuditRetention {
     Indefinite,
 }
 
-/// One validated immutable audit event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuditEvent {
     event_id: AuditEventId,
@@ -1584,12 +1397,6 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
-    /// Builds a successful business state change.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, unsafe action/result text, unchanged
-    /// digests, or a retention deadline that precedes the event.
     #[allow(clippy::too_many_arguments)]
     pub fn state_change(
         event_id: AuditEventId,
@@ -1627,13 +1434,6 @@ impl AuditEvent {
         Ok(event)
     }
 
-    /// Builds one successful operation that did not change canonical state,
-    /// such as an idempotent replay or a model call observation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, unsafe action/result text, changed state,
-    /// or an invalid retention deadline.
     #[allow(clippy::too_many_arguments)]
     pub fn succeeded(
         event_id: AuditEventId,
@@ -1664,12 +1464,6 @@ impl AuditEvent {
         )
     }
 
-    /// Builds one rejected operation that left canonical state unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, unsafe action/result text, changed state,
-    /// or an invalid retention deadline.
     #[allow(clippy::too_many_arguments)]
     pub fn rejected(
         event_id: AuditEventId,
@@ -1700,12 +1494,6 @@ impl AuditEvent {
         )
     }
 
-    /// Builds one failed operation that left canonical state unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, unsafe action/result text, changed state,
-    /// or an invalid retention deadline.
     #[allow(clippy::too_many_arguments)]
     pub fn failed(
         event_id: AuditEventId,

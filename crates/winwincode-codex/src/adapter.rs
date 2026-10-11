@@ -166,7 +166,6 @@ impl From<ProductionCodexError> for StageCompletionFailure {
     }
 }
 
-/// Unvalidated caller-owned production options.
 pub struct ProductionCodexOptions {
     pub data_directory: PathBuf,
     pub helper_executable: PathBuf,
@@ -182,7 +181,6 @@ pub struct ProductionCodexOptions {
     pub observer_mode: ObserverMode,
 }
 
-/// Validated immutable adapter configuration.
 #[derive(Clone)]
 pub struct ProductionCodexConfig {
     data_directory: PathBuf,
@@ -225,31 +223,24 @@ struct ProductionLifecycleFaults {
     interaction_timeout_exit: bool,
 }
 
-/// Test-only faults injected at the embedded Kernel event boundary.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProductionEventPollFault {
     Closed,
     MalformedEvent,
     KernelError,
-    /// Close the actual Kernel before reading its next event.
     KernelClosed,
-    /// A valid Codex `ErrorEvent` before any `TurnStarted` event.
     ErrorEvent,
-    /// A normal typed Core error with private text that must not cross the boundary.
     CoreError(codex_protocol::protocol::CodexErrorInfo),
 }
 
-/// Test-only crash boundary around the durable submission intent.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionSubmissionFault {
     AfterIntentBeforeKernel,
-    /// Close the real Kernel before its exact-turn reconciliation call.
     KernelClosedBeforeKernel,
 }
 
-/// Test-only crash boundaries around one durable delegated-loop transition.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionDelegatedTransitionFault {
@@ -258,7 +249,6 @@ pub enum ProductionDelegatedTransitionFault {
     AfterKernelBeforeSettlement,
 }
 
-/// Test-only fault at the bounded format-repair reconciliation boundary.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionFormatRepairFault {
@@ -266,13 +256,6 @@ pub enum ProductionFormatRepairFault {
 }
 
 impl ProductionCodexConfig {
-    /// Validates all process-owned paths, model routing, and Worker capability
-    /// inputs before a database or Codex service is opened.
-    ///
-    /// # Errors
-    ///
-    /// Rejects relative or missing paths, blank routing fields, execution
-    /// modes without production routing, and malformed capability discovery.
     pub fn try_new(options: ProductionCodexOptions) -> Result<Self, ProductionCodexError> {
         Self::try_new_with_helper(options, project_helper_checked)
     }
@@ -368,7 +351,6 @@ impl ProductionCodexConfig {
         })
     }
 
-    /// Injects one exact event-boundary fault before the next Kernel poll.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_event_poll_fault(mut self, fault: ProductionEventPollFault) -> Self {
@@ -376,7 +358,6 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Closes the actual Kernel before the first normal session creation call.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_closed_kernel_before_session_start(mut self) -> Self {
@@ -384,23 +365,18 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Registers the benchmark's sealed tool capabilities.
     #[must_use]
     pub fn with_sealed_benchmark_tools(mut self) -> Self {
         self.sealed_benchmark_tools = true;
         self
     }
 
-    /// Assigns tool approval ownership to the existing `ExecutionPort` action gate.
-    /// The host must already hold the operator's task authorization. This does
-    /// not expand sandbox, capability, lease, or receipt authority.
     #[must_use]
     pub fn with_host_action_approvals(mut self) -> Self {
         self.host_action_approvals = true;
         self
     }
 
-    /// Exits a test subprocess after resolving an expired interaction, before delivery cleanup.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn with_test_interaction_timeout_exit(mut self) -> Self {
@@ -408,10 +384,6 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Sets the process-owned reasoning effort recorded in every Agent profile.
-    ///
-    /// # Errors
-    /// Rejects malformed effort values before starting any model execution.
     pub fn with_reasoning_effort(mut self, effort: &str) -> Result<Self, ProductionCodexError> {
         self.reasoning = Some(
             serde_json::from_value(Value::String(effort.to_owned()))
@@ -420,10 +392,6 @@ impl ProductionCodexConfig {
         Ok(self)
     }
 
-    /// Seals authorized blind-panel routes for every new session.
-    ///
-    /// # Errors
-    /// Rejects duplicate or invalid member routes before starting a session.
     pub fn with_fusion(
         mut self,
         settings: winwincode_execution_port::agent_config::AgentFusionSettings,
@@ -434,10 +402,6 @@ impl ProductionCodexConfig {
         Ok(self)
     }
 
-    /// Seals the Device semantic Judge provider for every new session.
-    ///
-    /// # Errors
-    /// Rejects malformed provider identities.
     pub fn with_jev_judge(mut self, provider: String) -> Result<Self, ProductionCodexError> {
         if !valid_route_token(&provider) {
             return Err(invalid_configuration());
@@ -446,10 +410,6 @@ impl ProductionCodexConfig {
         Ok(self)
     }
 
-    /// Seals the Device context provider and retention policy into every new session.
-    ///
-    /// # Errors
-    /// Rejects invalid provider identities or policy thresholds before execution.
     pub fn with_jev_context(
         mut self,
         settings: AgentJevContextSettings,
@@ -463,7 +423,6 @@ impl ProductionCodexConfig {
         Ok(self)
     }
 
-    /// Stops one submission after its sealed intent is durable and before any Kernel call.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_submission_fault(mut self, fault: ProductionSubmissionFault) -> Self {
@@ -471,7 +430,6 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Stops one delegated transition at an exact durable/Core boundary.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_delegated_transition_fault(
@@ -482,8 +440,6 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Fails one exact delegated format-repair reconciliation without opening
-    /// another Provider exchange.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_test_format_repair_fault(mut self, fault: ProductionFormatRepairFault) -> Self {
@@ -496,14 +452,11 @@ impl ProductionCodexConfig {
         &self.data_directory
     }
 
-    /// Absolute project-owned helper passed to both Codex self-exec and
-    /// `ExecServerRuntimePaths` by the embedded Kernel.
     #[must_use]
     pub fn helper_executable(&self) -> &Path {
         &self.helper_executable
     }
 
-    /// Canonical Provider Gateway route used for all model exchanges.
     #[must_use]
     pub const fn gateway_route(&self) -> &ModelGatewayRoute {
         &self.gateway_route
@@ -533,7 +486,6 @@ impl fmt::Debug for ProductionCodexConfig {
     }
 }
 
-/// Concrete Worker governance surfaces installed beside the embedded Kernel.
 pub struct ProductionCodexInstallation {
     capability_catalog: WorkerCapabilityCatalog,
     runtime_trace_outbox: WorkerRuntimeTraceOutbox,
@@ -569,7 +521,6 @@ impl fmt::Debug for ProductionCodexInstallation {
     }
 }
 
-/// Sole production [`CodexCoreAdapter`] for `WorkerMain`.
 pub struct ProductionCodexAdapter {
     config: ProductionCodexConfig,
     device_extension_directory: Option<PathBuf>,
@@ -584,28 +535,11 @@ pub struct ProductionCodexAdapter {
     installation: ProductionCodexInstallation,
     runs: HashMap<String, ActiveRun>,
     thread_to_run: HashMap<String, String>,
-    /// Sequence of the last duplicate model frame accepted by the bridge.
-    /// A duplicate first frame can arrive after the original `ModelOpen` was
-    /// compacted, so its open acknowledgement is an idempotent no-op rather
-    /// than a Worker-fatal missing-row conflict.  Keeping the sequence here
-    /// also prevents a later unrelated frame from consuming that fact.
     last_duplicate_model_chunk_sequence: Option<i64>,
 }
 
 impl ProductionCodexAdapter {
-    /// Opens durable Worker-owned state and links one embedded Kernel to the
-    /// `WorkerModelPortClient` bridge.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when durable state, capability installation, receipt use
-    /// state, or the embedded Kernel cannot be opened.
     pub fn open(mut config: ProductionCodexConfig) -> Result<Self, ProductionCodexError> {
-        // Establish the two process-owned roots before opening any database,
-        // action gate, or Core state.  In particular, do not let
-        // `create_dir_all` follow a caller-provided final symlink and then
-        // chmod an unrelated directory.  The same check is repeated by the
-        // Kernel for its own root and by the store for its database files.
         ensure_private_directory(&config.data_directory)
             .map_err(|_| unavailable().at_bootstrap_stage("CODEX_DATA_ROOT_UNAVAILABLE"))?;
         ensure_private_directory(&config.kernel_home)
@@ -689,8 +623,6 @@ impl ProductionCodexAdapter {
         })
     }
 
-    /// Creates a host-owned Fusion member route through this execution's durable bridge.
-    /// Each request still requires a live binding and an exact sealed member route.
     #[must_use]
     pub fn fusion_provider(
         &self,
@@ -707,12 +639,6 @@ impl ProductionCodexAdapter {
         )
     }
 
-    /// Prepares one durable blind panel using only members from this run's sealed profile.
-    /// Poll the returned work concurrently with the Worker's normal transport loop.
-    /// Completed panels replay their exact results; unfinished panels require reconciliation.
-    ///
-    /// # Errors
-    /// Rejects unknown threads and invalid or absent Fusion configuration.
     pub fn prepare_fusion_panel(
         &self,
         thread_id: &CodexThreadId,
@@ -782,10 +708,6 @@ impl ProductionCodexAdapter {
         ))
     }
 
-    /// Reads Device-owned extensions before each new task on this Worker.
-    ///
-    /// # Errors
-    /// Rejects relative Device configuration paths.
     pub fn with_device_extensions(
         mut self,
         directory: PathBuf,
@@ -809,8 +731,6 @@ impl ProductionCodexAdapter {
         let Some(directory) = &self.device_extension_directory else {
             return Ok(());
         };
-        // ponytail: production Workers run one Job at a time. Per-task homes/catalogs
-        // are required before enabling concurrent Jobs with live Device extensions.
         if !self.runs.is_empty() {
             return Err(conflict());
         }
@@ -891,8 +811,6 @@ impl ProductionCodexAdapter {
         {
             return Ok(false);
         }
-        // Fusion evaluates the frozen candidate inside the existing read-only
-        // review role. It must not become a second candidate-generation pass.
         if run.record.snapshot_id.is_none()
             || run.record.job.workspace.write_mode != ExecutionWorkspaceWriteMode::ReadOnly
         {
@@ -997,9 +915,6 @@ impl ProductionCodexAdapter {
         match submission {
             ExactTurnReconciliation::Started { turn_id, .. } if turn_id == submission_id => {}
             ExactTurnReconciliation::Completed(terminal) => {
-                // Core reconstructs the terminal token snapshot from the
-                // durable rollout, so restart reconciliation preserves usage
-                // even when the adapter never observed the TokenCount event.
                 let last_tokens = terminal
                     .token_usage
                     .as_ref()
@@ -1068,12 +983,6 @@ impl ProductionCodexAdapter {
         self.retain_runtime_trace_at(run_key, state, summary, None, Vec::new())
     }
 
-    /// Retains a lifecycle trace, optionally at an identity already committed
-    /// to the terminal record.  The fixed identity is required when recovery
-    /// finds `terminal_trace_pending`: a process may have appended the exact
-    /// stopped frame and then stopped before recording the final phase.  A
-    /// fresh `highest + 1` identity in that window would turn an exact replay
-    /// into a false conflict (or emit a second stopped event).
     fn retain_runtime_trace_at(
         &mut self,
         run_key: &str,
@@ -1143,10 +1052,6 @@ impl ProductionCodexAdapter {
             RuntimeTraceRetention::Ready {
                 message, duplicate, ..
             } => {
-                // A replay duplicate may already be acknowledged in the
-                // runtime stream.  Re-inserting it into the adapter outbox
-                // would resend an event that has a durable source frame and
-                // violate exact ACK/restart semantics.
                 if !duplicate {
                     self.outbox
                         .retain(&ExecutionPortMessage::RuntimeEventMessage(
@@ -1315,12 +1220,6 @@ impl ProductionCodexAdapter {
                 return Err(conflict());
             }
         };
-        // A replay duplicate already exists in the durable runtime stream.
-        // Its adapter-outbox row may have been acknowledged and compacted, so
-        // retaining it again here would create a second transport attempt for
-        // an event whose source marker is already durable.  Pending replay
-        // rows are rebuilt from the runtime stream at restart; only the first
-        // projection needs a new outbox row.
         if !duplicate {
             self.outbox
                 .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
@@ -1343,13 +1242,6 @@ impl ProductionCodexAdapter {
         if should_persist {
             self.persist_run(run_key)?;
         }
-        // A crash can occur after the projector appends its frame but before
-        // the source marker is committed to `StoredRun`.  The replay store is
-        // already the durable source of truth in that case: the pending frame
-        // is loaded into `ActiveRun.replay`, or it has already been
-        // acknowledged.  Returning the duplicate here would send the same
-        // sequence twice and make Worker cursor validation fail, so only the
-        // first retention returns a frame to the poller.
         Ok((!duplicate).then_some(message))
     }
 
@@ -1498,7 +1390,6 @@ impl ProductionCodexAdapter {
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
-        // Replayed completion events cannot spend another repair round.
         if run.record.terminal.is_none()
             && run
                 .record
@@ -1573,10 +1464,6 @@ impl ProductionCodexAdapter {
         Ok(CodexPoll::Pending)
     }
 
-    /// Converts a rejected semantic stage product into the normal durable
-    /// terminal path.  The Worker only sees this path after the stopped trace
-    /// is retained, so a malformed model result can never be mistaken for a
-    /// successful `Outcome`, and a poll retry does not keep invoking Codex.
     fn retain_stage_failure(
         &mut self,
         run_key: &str,
@@ -1671,8 +1558,6 @@ impl ProductionCodexAdapter {
             return Ok(None);
         };
         if phase == StoredRunPhase::TerminalTracePending {
-            // Optional performance projection is separate from retained business facts.
-            // A corrupt/missing report must not turn completion into infrastructure failure.
             let baseline_retained = self
                 .store
                 .load_performance_projection(run_key)
@@ -1686,8 +1571,6 @@ impl ProductionCodexAdapter {
             if let Ok(trace) = self.retain_terminal_trace(run_key, terminal.trace_summary()) {
                 return Ok(Some(CodexPoll::RuntimeTrace(trace)));
             }
-            // The terminal itself is already durable. Auxiliary trace retention can fail
-            // independently; do not delay or rewrite that authoritative outcome.
         }
         terminal.into_poll().map(Some)
     }
@@ -1867,7 +1750,6 @@ impl ProductionCodexAdapter {
         code: &'static str,
     ) -> Result<(), ProductionCodexError> {
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
-        // Preserve the historical audit field and publish through the shared diagnostic path.
         let mut changed = false;
         if run.record.infrastructure_failure_code.is_none() {
             run.record.infrastructure_failure_code = Some(code.to_owned());
@@ -1943,9 +1825,6 @@ impl ProductionCodexAdapter {
             .ok_or_else(unavailable)
     }
 
-    /// Converts a failed exact submission into the same durable terminal path
-    /// used by event-poll failures. The Worker can then flush the retained
-    /// `Stopped` trace before retaining the final infrastructure outcome.
     async fn retain_submission_failure(
         &mut self,
         run_key: &str,
@@ -2035,10 +1914,6 @@ impl ProductionCodexAdapter {
         } else {
             Ok(())
         };
-        // A model-port task can finish its in-flight open while Core is
-        // shutting down.  Discard once more after the shutdown barrier so a
-        // late ModelOpen/ModelAck cannot escape a terminal infrastructure
-        // path.
         let _ = self.bridge.discard_messages_for_thread(&thread_id);
         closed?;
         self.runs
@@ -2109,14 +1984,8 @@ impl ProductionCodexAdapter {
             self.apply_complete_input_call(run_key, &digest).await?;
         }
         if is_error_event && result.is_ok() {
-            // A terminal ErrorEvent can arrive before the first TurnStarted
-            // frame.  Quiesce the bridge before WorkerMain flushes queued
-            // model frames so that this pre-start fault has no Provider side
-            // effect and cannot leave a live Core session behind.
             self.quiesce_infrastructure_run(run_key, now).await?;
         }
-        // Runtime traces already retained by this event keep their original
-        // delivery order. A direct terminal must first drain the final Core cut.
         if result.is_ok()
             && !matches!(&result, Ok(CodexPoll::RuntimeTrace(_) | CodexPoll::Pending))
             && let Some(fact) = self.poll_final_tool_facts(run_key, now).await?
@@ -2219,8 +2088,6 @@ impl ProductionCodexAdapter {
                     })
                 });
         }
-        // Errors here come exclusively from auxiliary tool metrics. A known
-        // metrics-only event remains consumed when its best-effort write fails.
         if self
             .record_standalone_performance_event(run_key, &event.msg, now)
             .unwrap_or(true)
@@ -2258,11 +2125,6 @@ impl ProductionCodexAdapter {
                     run.record.last_activity_at = now.clone();
                 }
                 self.persist_run(run_key)?;
-                // Core emits the terminal TurnComplete event after the final
-                // AgentMessage.  Keep this observation durable, then let the
-                // terminal event perform the role-specific stage projection so
-                // a transient final-message frame cannot close a turn before
-                // Core has committed its exact terminal record.
                 Ok(CodexPoll::Pending)
             }
             CodexEventMsg::ExecCommandEnd(command_end) => {
@@ -2393,8 +2255,6 @@ impl ProductionCodexAdapter {
             .phase = StoredRunPhase::RuntimeStarted;
         self.persist_run(run_key)?;
         Ok(stage.map_or(CodexPoll::RuntimeTrace(trace), |stage| {
-            // WorkerMain flushes the generic trace after forwarding this
-            // semantic stage event; do not retain another in-memory copy.
             CodexPoll::RuntimeTrace(Box::new(stage))
         }))
     }
@@ -2790,8 +2650,6 @@ impl ProductionCodexAdapter {
                 }
                 self.persist_run(run_key)?;
                 self.retain_stage_turn_started(run_key, &repair.1, now)?;
-                // Commit the delivery cursor only after durable submission. If this
-                // future is cancelled earlier, exact-turn reconciliation owns replay.
                 self.runs
                     .get_mut(run_key)
                     .ok_or_else(unknown_thread)?
@@ -3293,11 +3151,6 @@ impl ProductionCodexAdapter {
             .load_input_operation(&input_request_id)
             .map_err(map_store_error)?;
         let operation = if let Some(existing) = existing {
-            // A resumed Core turn can replay the exact tool call after the
-            // host response was durably accepted. The call's private answer
-            // intent is reapplied after this exact event recreates its waiter.
-            // Keep all request fields immutable and suppress only this exact,
-            // already-answered product question; changed requests conflict.
             if existing.run_key != run_key
                 || (!timed_out
                     && existing.kernel_session_id != run.record.kernel_session_id
@@ -3369,8 +3222,6 @@ impl ProductionCodexAdapter {
         Ok(Some(self.original_input_request(generated, timed_out)?))
     }
 
-    /// A business outcome is sealed by its authority, original frame and Core cut.
-    /// Optional lifecycle traces are not prerequisites for restoring that outcome.
     fn validate_retained_outcome(
         &mut self,
         run_key: &str,
@@ -3531,10 +3382,6 @@ impl ProductionCodexAdapter {
         self.action_gate
             .install_tool_dependencies(&binding, &self.config.kernel_home, &record.workspace)
             .map_err(|_| unavailable())?;
-        // Core may have emitted an approval event immediately before the
-        // process stopped.  The durable operation is the source of truth for
-        // the resumed action-gate queue; terminal runs must not resurrect a
-        // stale approval after their outcome has been retained.
         if record.terminal.is_none() {
             for operation in self
                 .store
@@ -3577,8 +3424,6 @@ impl ProductionCodexAdapter {
                 pending_fusion: None,
             },
         );
-        // Complete the reserved Core transport frame before assigning any later
-        // post-action or lifecycle frame a sequence in this same replay stream.
         if let Some(CodexPoll::RuntimeTrace(message)) = self.retain_pending_tool_fact(run_key)? {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             if !run
@@ -3622,7 +3467,6 @@ impl ProductionCodexAdapter {
         request: &codex_protocol::approvals::ElicitationRequestEvent,
     ) -> Result<ApprovalRequestMessage, ProductionCodexError> {
         let digest = private_payload_digest(b"winwincode.mcp-elicitation-request.v1", request)?;
-        // A JSON tuple preserves both the server and string/integer callback id.
         let operation_id =
             serde_json::to_string(&(&request.server_name, &request.id)).map_err(|_| conflict())?;
         let detail = mcp_approval_detail(request, &digest);
@@ -3646,10 +3490,6 @@ impl ProductionCodexAdapter {
             .clone()
             .unwrap_or_else(|| request.call_id.clone());
         let turn_id = non_empty(request.turn_id.clone());
-        // Core creates a fresh observation timestamp when the same exact
-        // callback is replayed. That timestamp is not permission authority.
-        // Keep every command, target, scope and policy field in the digest;
-        // the original outbox frame remains the immutable deadline authority.
         let mut authority_request = request.clone();
         authority_request.started_at_ms = 0;
         let request_digest =
@@ -4402,8 +4242,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             let Ok(current) = current.format(&format) else {
                 return false;
             };
-            // The shared source recognises exact retained requests under legitimate
-            // renewal, and rechecks root/child lineage at the time of first invocation.
             let Ok(cursor) =
                 crate::model_port_client::ModelCursorStore::load(&mut store.clone(), &stream)
             else {
@@ -4415,8 +4253,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 return false;
             }
             let current = Instant(current);
-            // One durable proof source for Core, child roles and Observer. Exact
-            // equality also rejects altered payloads under the same exchange ID.
             if ExecutionOutbox::model_start_request_allowed(&store, &original) != Ok(true) {
                 return false;
             }
@@ -4448,8 +4284,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     ) -> Result<bool, Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-        // A recovered terminal Core stays closed while Worker finishes delivery.
-        // Its durable result still owns the same lease; renewal cannot reopen it.
         let retained_result = run.record.terminal.is_some()
             || run.record.final_candidate_freeze.is_some()
             || run.record.delegated_stop.is_some();
@@ -4747,11 +4581,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         goal: &str,
     ) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
-        // The Worker normally supplies this prompt, but the adapter remains
-        // the final boundary for the sealed stage input.  Comparing against
-        // the Job persisted by `ensure_thread` prevents a caller from
-        // changing the role prompt or smuggling mutable stage state into a
-        // retry after the session has been opened.
         let expected_goal = {
             let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
             crate::stage_product::snapshot_bound_prompt(
@@ -5113,8 +4942,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         settlement: DelegatedObserverSettlement,
     ) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
-        // Current batch admission applies to the first settlement. An exact
-        // retained receipt remains consumable after A transitions to B or stops.
         if let Some(previous) = self
             .store
             .observer_settlement(&run_key, &settlement.batch_id.0)
@@ -5168,8 +4995,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .store
             .delegated_performance_totals(&run_key)
             .map_err(map_store_error)?;
-        // Seal terminal counters only after the latest Primary and Observer
-        // operations have crossed their durable settlement seam.
         if totals.pending_model_calls > 0 {
             return Err(conflict());
         }
@@ -5327,9 +5152,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }) {
             return Ok(CodexPoll::Pending);
         }
-        // A TurnComplete observed before the command/test Artifact's final
-        // ACK is a durable wait state. Do not let a later Core close/error
-        // turn that wait into an infrastructure terminal outcome.
         if self
             .runs
             .get(&run_key)
@@ -5347,9 +5169,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 .await?
                 .unwrap_or(CodexPoll::Pending));
         }
-        // A durable terminal decision takes precedence over earlier operation
-        // intents. Retain those facts for audit, but never replay a batch or
-        // submit a continuation after cancellation or failure has settled.
         if let Some(terminal) = self.poll_retained_terminal(&run_key)? {
             return Ok(terminal);
         }
@@ -5579,8 +5398,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         self.retain_infrastructure_failure_code(&run_key, "EXECUTION_DELIVERY_REJECTED")?;
         let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-        // Preserve existing immutable terminal authority. Worker can report the
-        // transport failure while retaining the actual completed Core/candidate facts.
         if run.record.terminal.is_none()
             && run.record.final_candidate_freeze.is_none()
             && run.record.delegated_stop.is_none()
@@ -5604,11 +5421,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             && chunk.sequence.0 == 1
             && self.last_duplicate_model_chunk_sequence.take() == Some(chunk.sequence.0)
         {
-            // The bridge has already validated and delivered this exact
-            // duplicate through the durable model cursor.  Compact the open
-            // when it is still present (for a crash between chunk delivery
-            // and the first acknowledgement), while treating an already
-            // compacted open as the expected idempotent replay.
             self.outbox
                 .record_applied_response(acknowledgement)
                 .map_err(map_store_error)?;
@@ -5737,16 +5549,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             return Err(conflict());
         }
         if let Some(existing) = &run.record.final_candidate_freeze {
-            // Accounting can advance after completion. Keep the originally
-            // frozen counters, while still rejecting changed business facts.
             let mut replay = fact.clone();
             replay.counters = existing.counters.clone();
             if replay != *existing {
                 return Err(conflict());
             }
             let retained = existing.clone();
-            // Retry the durable evidence write if the process stopped after
-            // freeze persistence and before retaining its baseline trace.
             let _ = self.retain_performance_baseline_trace(&run_key);
             return Ok(retained);
         }
@@ -5754,8 +5562,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .store
             .delegated_performance_totals(&run_key)
             .map_err(map_store_error)?;
-        // A validated final result starts no additional paid call. Missing
-        // usage cannot prevent its freeze; the terminal retains unknown totals.
         if totals.primary_model_calls < 1 {
             return Err(conflict());
         }
@@ -5895,9 +5701,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             codex_thread_id: run.binding.canonical_thread_id.clone(),
         };
         self.observe_now(&outcome.sent_at)?;
-        // Candidate acceptance, delegated stops and Worker shutdown can reach
-        // this entry without another ordinary poll. Retain the final Core cut
-        // before the outcome so closing the run cannot strand late receipts.
         loop {
             match self
                 .poll_final_tool_facts(&run_key, &outcome.sent_at)
@@ -5926,9 +5729,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let mut finalized = run.record.clone();
         let binding = run.binding.clone();
         let kernel_live = run.kernel_live;
-        // The caller owns the authenticated current lease, but an earlier
-        // terminal frame still owns its original lease period and ACK identity.
-        // Validate its authority and final Core cut before reusing that frame.
         let canonical_outcome = if let Some(original) =
             self.validate_retained_outcome(&run_key, &finalized, &binding, kernel_live)?
         {
@@ -6015,16 +5815,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let sealed = run.record.delegated_stop.is_some()
             || run.record.final_candidate_freeze.is_some()
             || run.record.terminal_message_id.is_some();
-        // Advance the action-gate generation before awaiting Core.  A receipt
-        // that arrives while interrupt is in flight must not authorize a
-        // side effect after the caller has cancelled this session.
         self.action_gate
             .cancel_session(&session)
             .map_err(|_| unavailable())?;
-        // A prior terminal outcome can already have closed this exact
-        // Kernel session while its durable terminal trace is still pending.
-        // Cancel the retained bridge and authority without interrupting a
-        // session that has already been unregistered.
         if !sealed && !awaiting_panel && kernel_live {
             self.kernel
                 .interrupt(&session)
@@ -6035,9 +5828,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .cancel_thread(thread_id, interrupted_at)
             .await
             .map_err(map_bridge_error)?;
-        // A sealed delegated stop, final candidate or retained JobOutcome owns
-        // the original terminal authority. Fence later actions/models, then
-        // let Worker deliver that fact rather than add a conflicting terminal.
         if sealed {
             return Ok(());
         }
@@ -6082,9 +5872,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let terminal = self
             .retain_terminal_trace(&run_key, "embedded Codex turn cancelled")
             .ok();
-        // Cancellation retains these frames outside poll. Surface their
-        // original sequence identities before poll allocates newer Core facts,
-        // even when the bounded transport flush cannot deliver the outbox yet.
         let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
         for message in [baseline, terminal].into_iter().flatten() {
             if !run
@@ -6114,10 +5901,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let _ = self
             .bridge
             .discard_messages_for_thread(&run.binding.canonical_thread_id);
-        // Closing embedded Core is independent from draining the durable
-        // Worker outbox. Keep the exact lease/session lineage available so a
-        // final RuntimeEvent or JobOutcome ACK arriving after this close is
-        // still validated against the original run.
         self.bridge
             .detach_binding(&run.binding)
             .map_err(map_bridge_error)?;
@@ -6275,10 +6058,6 @@ fn patch_approval_detail(
     request_digest: &str,
     workspace: &Path,
 ) -> Option<ApprovalActionSanitizedDetail> {
-    // Core resolves patch targets to absolute paths, including patches submitted
-    // through exec_command. Only expose labels relative to this validated
-    // checkout. Labels describe the request; Worker write enforcement remains
-    // responsible for permission and filesystem checks.
     let label = |path: &Path| {
         let relative = if path.is_absolute() {
             path.strip_prefix(workspace).ok()?
@@ -6338,14 +6117,12 @@ fn safe_approval_text(value: &str) -> bool {
 }
 
 struct ActiveRun {
-    // The registered Core incarnation changes even when resume keeps its thread UUID.
     input_waiter_incarnation: String,
     record: StoredRun,
     post_action_trace_positions: HashMap<String, usize>,
     binding: ModelRunBinding,
     replay: VecDeque<RuntimeEventMessage>,
     kernel_live: bool,
-    // Process-local close progress; durable final authority remains in StoredRun.
     kernel_close_pending: bool,
     recovered: bool,
     batch_intent_emission: OperationDelivery,
@@ -6385,12 +6162,6 @@ fn index_post_action_traces(
     Ok(positions)
 }
 
-// A delivery cursor is scoped to one durable logical operation. A new
-// operation never inherits another operation's consumed flag. In-flight work
-// uses exclusive adapter ownership; no latch survives cancellation or error.
-// This cursor is only an optimization. Durable intent and Core exact-turn
-// reconciliation remain authoritative after restart. One-use action receipts
-// and terminal ACKs have separate permanent consumption records.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct OperationDelivery(Option<String>);
 
@@ -6411,9 +6182,6 @@ fn load_stored_run(
     store.load_run(run_key).map_err(map_store_error)
 }
 
-/// Consumes the pre-v2 role-policy shape exactly once while the durable store
-/// is opening. After this transaction commits, every runtime load parses only
-/// [`StoredRun`] and therefore only the canonical v2 policy.
 fn migrate_stored_run_role_policies_v1_to_v2(
     store: &AdapterStore,
 ) -> Result<(), ProductionCodexError> {
@@ -6453,8 +6221,6 @@ fn migrate_stored_run_role_policies_v1_to_v2(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
-    /// Bounded advisory state derived from actual Core events. This is stored
-    /// beside the execution record, never used to authorize product writes.
     #[serde(default)]
     task_handoff: Option<winwincode_execution_port::task_handoff::TaskHandoffRecord>,
     #[serde(default)]
@@ -6496,17 +6262,10 @@ struct StoredRun {
     core_tool_final_cursor: Option<i64>,
     #[serde(default)]
     tool_runtime_contract: Option<ToolRuntimeContract>,
-    /// Durable single-writer intent emitted by a delegated Composer instead
-    /// of terminalizing the execution Job.
     #[serde(default)]
     batch_intent: Option<StoredBatchIntent>,
-    /// At most one schema-preserving repair turn for malformed delegated
-    /// output. The repair prompt never authorizes workspace side effects.
     #[serde(default)]
     format_repair: Option<StoredFormatRepair>,
-    /// Bounded exact-turn intents retained in source-batch order. Retaining
-    /// completed/stopped entries makes a Worker restart an exact replay rather
-    /// than a new Primary Model call.
     #[serde(default)]
     delegated_transitions: Vec<StoredDelegatedTransition>,
     #[serde(default)]
@@ -6515,8 +6274,6 @@ struct StoredRun {
     delegated_budget: Option<winwincode_execution_port::generated::RepairLoopBudget>,
     #[serde(default)]
     delegated_stop: Option<DelegatedLoopStopFact>,
-    /// Original terminal `JobOutcome` message id, retained across CP ACK
-    /// compaction so exact terminal replay does not allocate a new id.
     #[serde(default)]
     terminal_message_id: Option<ExecutionMessageId>,
     #[serde(default, skip_serializing)]
@@ -6525,8 +6282,6 @@ struct StoredRun {
     pending_completion: Option<StoredPendingCompletion>,
     #[serde(default)]
     interaction_timeouts: Vec<StoredInteractionTimeout>,
-    /// Requests retained across restart wait for their exact Core event.
-    /// Keep the existing persisted name while both interaction kinds share this fence.
     #[serde(default, rename = "recoveredInputRequests")]
     recovered_interaction_requests: Vec<ExecutionMessageId>,
 }
@@ -6549,8 +6304,6 @@ struct StoredPendingCompletion {
     kind: StoredPendingTerminalKind,
 }
 
-// Reading terminal telemetry is optional. Budget admission still uses the
-// authoritative ledger and propagates its errors before starting paid work.
 fn terminal_outcome_usage(
     store: &AdapterStore,
     run_key: &str,
@@ -6590,9 +6343,6 @@ fn terminal_performance_runtime(
         ))
 }
 
-// A cancellation can supersede a retained stop before its JobOutcome exists.
-// The prior trace remains immutable in runtime replay; the new terminal fact
-// receives its own event identity instead of reusing that trace's bytes.
 fn set_retained_terminal(record: &mut StoredRun, terminal: StoredTerminal) {
     if record
         .terminal
@@ -6847,8 +6597,6 @@ fn sealed_benchmark_mcp_server(
     let Some(input) = &job.work_input else {
         return Ok(None);
     };
-    // The benchmark harness seals the source session's server in the objective.
-    // Executor/reviewer/verifier scope sessions are different identities.
     let mut servers = input
         .work_contract
         .objective
@@ -7519,10 +7267,6 @@ fn interactive_input_choice_replay_keys(
     let mut replay_keys = Vec::with_capacity(options.len());
     for option in options {
         if !option_identities.insert((option.label.as_str(), option.description.as_str())) {
-            // Upstream options have no identity separate from their public
-            // label and private description. Exact duplicates would leave
-            // no stable semantic discriminator, so fail closed before the
-            // ambiguous operation is retained.
             return Err(conflict());
         }
         let occurrence = label_occurrences
@@ -7537,10 +7281,6 @@ fn interactive_input_choice_replay_keys(
 fn allocate_interactive_input_choice_identities(
     replay_keys: &[(String, u64)],
 ) -> Vec<StoredInputChoiceIdentity> {
-    // IDs are opaque server allocations. No request, prompt, option, or
-    // credential bytes participate in the public `ich_*` value. The
-    // secret-free replay keys only attach each allocation to its public
-    // occurrence when the durable operation is reopened.
     let mut allocated = HashSet::with_capacity(replay_keys.len());
     replay_keys
         .iter()
@@ -7706,8 +7446,6 @@ const SEALED_HELPER_NAME: &str = "winwincode-kernel-helper";
 #[cfg(unix)]
 static HELPER_VALIDATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-// Older bubblewrap re-executes argv0. A real sandbox filename lets Core
-// preserve its absolute path while the general helper keeps its other modes.
 #[cfg(all(unix, any(target_os = "linux", test)))]
 fn install_linux_sandbox_alias(helper: &Path) -> Result<PathBuf, ProductionCodexError> {
     use std::os::unix::fs::MetadataExt as _;
@@ -7807,10 +7545,6 @@ fn project_helper_in_release_checked(
     }
 }
 
-/// Opens and copies the already-validated helper through one file descriptor,
-/// then runs all probes against the sealed bytes.  A later replacement of the
-/// caller path cannot affect Kernel self-exec because the Kernel receives only
-/// this private installation.
 fn seal_helper(
     source: &Path,
     validated_source: Option<&[u8]>,
@@ -7874,10 +7608,6 @@ fn seal_helper(
         .ok_or_else(invalid_configuration)
 }
 
-/// Crash fixtures and some archive restore tools preserve private bytes but
-/// lose the executable mode bit. Repair only that metadata after the sealed
-/// regular-file bytes and digest have already matched; a symlink or changed
-/// helper is still rejected.
 #[cfg(unix)]
 fn repair_sealed_helper_permissions(path: &Path, manifest: &HelperReleaseManifest) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
@@ -7936,10 +7666,8 @@ fn read_helper_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(if cfg!(target_os = "macos") {
-        // Darwin O_NOFOLLOW.
         0x100
     } else {
-        // Linux O_NOFOLLOW.  Release targets are Darwin and Linux.
         0x20_000
     });
     let mut file = options.open(path)?;
@@ -8082,8 +7810,6 @@ fn bounded_helper_probe(path: &Path, argument: &str, expected: &[u8]) -> bool {
     use std::os::unix::process::CommandExt as _;
 
     const OUTPUT_LIMIT: u64 = 4096;
-    // Cold executable validation on supported macOS volumes can exceed two seconds.
-    // Keep startup bounded while allowing the signed image to begin execution.
     const TIMEOUT: Duration = Duration::from_secs(30);
     const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -8197,7 +7923,6 @@ fn decode_kernel_event(payload_json: &str) -> Result<CodexEvent, ProductionCodex
     serde_json::from_str(payload_json).map_err(|_| kernel_error())
 }
 
-/// Stable adapter failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionCodexErrorKind {
     InvalidConfiguration,
@@ -8210,7 +7935,6 @@ pub enum ProductionCodexErrorKind {
     UnknownThread,
 }
 
-/// Secret-safe adapter failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductionCodexError {
     kind: ProductionCodexErrorKind,
@@ -8240,7 +7964,6 @@ impl ProductionCodexError {
         self
     }
 
-    /// Returns a secret-safe stable bootstrap diagnostic when available.
     #[must_use]
     pub const fn diagnostic_code(&self) -> Option<&'static str> {
         self.diagnostic_code
@@ -9031,8 +8754,6 @@ mod tests {
         let mut job = executor_job();
         job.work_input.as_mut().expect("work input").work_contract.objective =
             "本任务只能调用 MCP server benchmark_public_smoke_source_session 的 public_smoke；其他任务的工具没有授权。".to_owned();
-        // Scope and role prompts deliberately refer to another session's server.
-        // Neither may replace the source identity sealed in the WorkContract.
         job.goal = "benchmark_public_smoke_role_session".to_owned();
         for role in ["executor", "reviewer", "verifier"] {
             job.execution_profile = role.to_owned();
@@ -9259,8 +8980,6 @@ mod tests {
                     invalid = fact.clone();
                     invalid.candidate_artifact_ref.digest.0 = format!("sha256:{}", "9".repeat(64));
                     assert!(adapter.retain_final_candidate_freeze(&session.thread_id, &invalid).is_err());
-                    // The final freeze reaches Worker completion without another adapter poll.
-                    // Retaining its outcome must close the real Core session and seal its source cut.
                     let binding = adapter.runs[&key].binding.clone();
                     let authority = binding.authority.clone();
                     let outcome: winwincode_execution_port::generated::JobOutcomeMessage = serde_json::from_value(serde_json::json!({
@@ -9295,8 +9014,6 @@ mod tests {
         if std::env::var("WWC_SESSION_END_TEST_CHILD").as_deref() == Ok(test_name) {
             return false;
         }
-        // Keep user shell initialization outside the one-second shutdown seam.
-        // Only this test child receives the isolated shell environment.
         let directory = test_root(&format!(
             "session-end-shell-environment-{}",
             test_name.replace(':', "_")
@@ -9360,8 +9077,6 @@ mod tests {
         let key = run_key.canonical_digest().unwrap().0;
         let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
         let mut config = diagnostic_adapter_config(&root);
-        // SessionEnd follows real Code Mode shutdown, so the handshake-only
-        // diagnostic shim cannot stand in for the executable Core host here.
         let helper = std::env::current_exe()
             .unwrap()
             .parent()
@@ -9401,8 +9116,6 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        // Match hooks/discovery.rs's normalized identity and config/fingerprint.rs's
-        // sorted JSON SHA256. The marker assertion below rejects a stale trust hash.
         let identity = format!(
             "{{\"event_name\":\"session_end\",\"hooks\":[{{\"async\":false,\"command\":{},\"timeout\":3,\"type\":\"command\"}}],\"matcher\":\"other\"}}",
             serde_json::to_string(&command).unwrap()
@@ -9420,7 +9133,6 @@ mod tests {
         .unwrap();
         let mut options = KernelOptions::new(home, adapter.config.helper_executable.clone());
         assert_eq!(options.shutdown_timeout, Duration::from_secs(5));
-        // A stricter existing Kernel option exposes the real 3s-bounded hook seam.
         options.shutdown_timeout = Duration::from_secs(1);
         #[cfg(target_os = "linux")]
         {
@@ -9473,8 +9185,6 @@ mod tests {
                 assert_eq!(*message, original);
             }
         } else {
-            // Exercise the real terminal acceptance boundary. Provider generation
-            // and Worker candidate verification are covered by production_vertical.
             adapter
                 .accept_turn_complete(
                     &key,
@@ -9613,8 +9323,6 @@ mod tests {
             .record
             .kernel_session_id
             .clone();
-        // Seed the Core store at the failing adapter boundary: a recorded
-        // closed-cell fact exists while the same Core awaits SessionEnd.
         let home = &fixture.adapter.config.kernel_home;
         let database = std::fs::read_dir(home)
             .unwrap()
@@ -9755,8 +9463,6 @@ mod tests {
                 .pending_completion
                 .is_none()
         );
-        // Completed authorizes Worker verification, whose failure remains valid.
-        // This adapter fixture does not synthesize successful candidate acceptance.
         let outcome = JobOutcomeMessage {
             kind: JobOutcomeMessageKind::JobOutcome,
             lease: binding.authority.lease.clone(),
@@ -9785,8 +9491,6 @@ mod tests {
             worker_session_id: binding.authority.worker_session_id.clone(),
         };
         if direct_retention {
-            // Independent fixture: one 1s close wait fits below the real hook's 3s
-            // cap. A Pending busy loop exceeds this bound instead of turning green.
             let first = tokio::time::timeout(
                 Duration::from_secs(2),
                 fixture
@@ -10017,7 +9721,6 @@ mod tests {
         assert!(stored.terminal_message_id.is_none());
         assert!(adapter.outbox.terminal_outcome(&key).unwrap().is_none());
         let terminal = serde_json::to_vec(&stored.terminal).unwrap();
-        // Worker can crash after the failure authority is durable but before finish_job.
         drop(adapter);
 
         let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
@@ -10163,7 +9866,6 @@ mod tests {
                     content: "completed patch".into(),
                 },
             )]);
-            // The real tool effect exists independently of the optional metrics tables.
             std::fs::write(workspace.join("result.rs"), "completed patch").unwrap();
             let events = [
                 CodexEventMsg::ExecCommandBegin(ExecCommandBeginEvent {
@@ -10740,7 +10442,6 @@ mod tests {
         adapter
             .retain_delegated_observer_settlement(&thread, settlement.clone())
             .unwrap();
-        // This is the persisted seam after a delegated transition consumes A.
         adapter.runs.get_mut(&key).unwrap().record.batch_intent = None;
         adapter.persist_run(&key).unwrap();
         if legacy {
@@ -10848,7 +10549,6 @@ mod tests {
         budget.max_total_tokens = None;
         budget.max_total_cost_microunits = Some(50);
         assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
-        // A prior-version SQLite file has no independent completeness proof.
         store
             .lock()
             .unwrap()
@@ -11481,7 +11181,6 @@ mod tests {
         assert!(adapter.runs[&key].pending_fusion.is_some());
         assert!(adapter.runs[&key].record.current_turn_id.is_none());
         assert!(adapter.poll_fusion_panel(&thread).await.unwrap());
-        // The shared transport mutex can yield between member opens.
         for _ in 0..4 {
             assert!(adapter.poll_fusion_panel(&thread).await.unwrap());
             adapter.take_execution_messages().unwrap();
@@ -11764,7 +11463,6 @@ mod tests {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: now.clone(),
         };
-        // Reproduce a durable Core write completed before the in-memory owner advances.
         let mut committed_binding = adapter.runs[&key].binding.clone();
         committed_binding.authority.lease = extended.clone();
         adapter
@@ -13557,8 +13255,6 @@ mod tests {
             0o700
         );
 
-        // A crash/archive restore may leave exact bytes with a stale mode.
-        // Re-open repairs only that metadata after re-validating the bytes.
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o600))
             .expect("remove executable mode from crash snapshot");
         assert_eq!(

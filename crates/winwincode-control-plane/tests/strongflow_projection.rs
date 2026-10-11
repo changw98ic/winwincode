@@ -129,11 +129,6 @@ enum PositiveTerminalDisposition {
     Settled { delivery_revision: u64 },
 }
 
-// PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
-// Missing sources return TRUSTED_FACTS_UNAVAILABLE.
-// WebSocket `runtime-projection.invalidated.v1` is only an invalidation; these reads
-// expose complete committed snapshots.
-
 #[derive(Clone)]
 struct JournalStorage {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
@@ -973,9 +968,6 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
 }
 
 fn normalize_projection_read_revision(delivery: &Delivery) -> Delivery {
-    // The read harness accepts one seeded journal record at revision one. The
-    // production transitions have already established the lifecycle facts;
-    // only the isolated query coordinate is normalized here.
     let mut snapshot = delivery.clone().into_snapshot();
     snapshot.revision = 1;
     Delivery::try_from_snapshot(snapshot).expect("projection read fixture")
@@ -2877,8 +2869,6 @@ fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
         Some(&session.work_run_id)
     );
 
-    // This test-only trusted source seals a different lease; the public read
-    // still has to compare it against the persisted accepted assignment.
     let binding = accepted_binding(
         &f.delivery,
         &session.id,

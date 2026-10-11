@@ -1,18 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `LocalCandidateReceipt` / `LocalApplyReceipt` application service over the
-//! durable Server-side candidate receipt ledger.
-//!
-//! The Device Client owns the local git facts of candidate delivery (plan
-//! 5.6): it freezes a candidate commit under a stable local ref and reports
-//! `client.candidate.retained`, then answers every create-branch / apply /
-//! discard attempt with `client.candidate.apply_result`. This service is the
-//! Control Plane's audit authority over those client-issued receipts: it
-//! appends retentions idempotently, settles every apply attempt exactly once
-//! behind the frozen contract 6/8 state machine, and keeps the apply history
-//! immutable so retries append new receipts instead of rewriting old ones.
-//! Absolute filesystem paths never enter this surface.
-
 use std::fmt;
 
 use winwincode_domain::Instant;
@@ -21,44 +8,26 @@ use winwincode_storage::{
     LocalCandidateStoreErrorKind, SqliteStorage,
 };
 
-/// Re-exported so service consumers can name the frozen receipt records and
-/// result vocabulary without importing the storage crate directly.
 pub use winwincode_storage::{LocalApplyReceiptRecord, LocalCandidateReceiptRecord};
 pub use winwincode_storage::{LocalApplyResult, LocalApplyStrategy, LocalCandidateReceiptState};
 
-/// Stable service failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCandidateServiceErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// No repository binding matches the requested identity.
     UnknownRepositoryBinding,
-    /// No local candidate receipt matches the requested identity.
     UnknownLocalCandidate,
-    /// No local apply receipt matches the requested identity.
     UnknownLocalApplyReceipt,
-    /// The candidate is already retained under a different identity or with
-    /// different facts.
     LocalCandidateConflict,
-    /// The apply receipt id is already used with different fields.
     ApplyReceiptConflict,
-    /// The candidate already reached its `applied` or `discarded` terminal.
     TerminalCandidateConflict,
-    /// The settlement identity does not match the retained candidate.
     CandidateIdentityMismatch,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost an impossible race.
     RevisionConflict,
-    /// A durable row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free local candidate service error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCandidateServiceError {
     kind: LocalCandidateServiceErrorKind,
@@ -127,28 +96,16 @@ impl From<LocalCandidateStoreError> for LocalCandidateServiceError {
     }
 }
 
-/// Local candidate receipt application service over one storage connection.
 pub struct LocalCandidateService<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl<'storage> LocalCandidateService<'storage> {
-    /// Builds one service over the sole product-state storage authority.
     #[must_use]
     pub fn new(storage: &'storage mut SqliteStorage) -> Self {
         Self { storage }
     }
 
-    /// Records a `client.candidate.retained` report idempotently (plan 5.6,
-    /// contract 6): replays of the same receipt and duplicate reports of an
-    /// already retained candidate ref return the original row unchanged;
-    /// any fact disagreement fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical command, an unknown client node or repository
-    /// binding, a candidate ref retained with different facts, a receipt id
-    /// reused for a different candidate, or storage failure.
     pub fn record_retained(
         &mut self,
         retained: &LocalCandidateRetained,
@@ -160,18 +117,6 @@ impl<'storage> LocalCandidateService<'storage> {
             .record_retained(retained, now)?)
     }
 
-    /// Records a `client.candidate.apply_result` settlement (contract 8):
-    /// appends exactly one immutable receipt, projects the frozen result
-    /// code onto the candidate state machine, and returns both rows.
-    /// Replays of a settled receipt id are accepted idempotent no-ops;
-    /// terminal candidates refuse further settlements.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical command, an unknown candidate, an identity
-    /// mismatch against the retained candidate, a receipt id reused with
-    /// different fields, a terminal candidate, an illegal result projection,
-    /// or storage failure.
     pub fn record_apply_result(
         &mut self,
         settlement: &LocalApplySettlement,
@@ -184,12 +129,6 @@ impl<'storage> LocalCandidateService<'storage> {
             .record_apply_result(settlement, now)?)
     }
 
-    /// Returns one durable local candidate receipt projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity, corrupt stored rows, or
-    /// storage failure.
     pub fn candidate_snapshot(
         &mut self,
         local_candidate_receipt_id: &str,
@@ -200,13 +139,6 @@ impl<'storage> LocalCandidateService<'storage> {
             .candidate_snapshot(local_candidate_receipt_id)?)
     }
 
-    /// Returns the candidate receipt for one client-local candidate ref, if
-    /// any.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or candidate ref, or
-    /// storage failure.
     pub fn candidate_for_ref(
         &mut self,
         client_node_id: &str,
@@ -218,11 +150,6 @@ impl<'storage> LocalCandidateService<'storage> {
             .candidate_for_ref(client_node_id, candidate_ref)?)
     }
 
-    /// Returns one immutable local apply receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity or storage failure.
     pub fn apply_receipt(
         &mut self,
         local_apply_receipt_id: &str,
@@ -233,12 +160,6 @@ impl<'storage> LocalCandidateService<'storage> {
             .apply_receipt(local_apply_receipt_id)?)
     }
 
-    /// Returns the full immutable apply history of one candidate, oldest
-    /// first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity or storage failure.
     pub fn apply_history_for_candidate(
         &mut self,
         local_candidate_receipt_id: &str,
@@ -294,8 +215,6 @@ mod tests {
     const COMMIT: &str = "00112233445566778899aabbccddeeff00112233";
     const RESULTING: &str = "1234567890abcdef1234567890abcdef12345678";
 
-    /// Seeds one registered client node and one repository binding and
-    /// returns their identities.
     fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> (String, String) {
         let node = format!("cnd_{}", crockford(seed));
         let registration = winwincode_storage::ClientNodeRegistration::try_new(
@@ -391,7 +310,6 @@ mod tests {
         assert_eq!(retained_record.state, LocalCandidateReceiptState::Retained);
         assert_eq!(retained_record.revision, 1);
 
-        // A failure keeps the candidate retryable...
         let failure = settlement(
             11,
             receipt_id.as_str(),
@@ -406,7 +324,6 @@ mod tests {
             .expect("failure settlement");
         assert_eq!(failed.state, LocalCandidateReceiptState::Failed);
 
-        // ...and the retry applies.
         let retry = settlement(
             12,
             receipt_id.as_str(),
@@ -423,7 +340,6 @@ mod tests {
         assert_eq!(apply_receipt.resulting_commit.as_deref(), Some(RESULTING));
         assert_eq!(applied.state, LocalCandidateReceiptState::Applied);
 
-        // Read projections agree with the settled facts.
         let snapshot = service
             .candidate_snapshot(receipt_id.as_str())
             .expect("snapshot")
@@ -453,7 +369,6 @@ mod tests {
         let (node, binding) = seed_fixture(&mut storage, 30);
         let mut service = LocalCandidateService::new(&mut storage);
 
-        // An unknown candidate identity maps to the precise service kind.
         let unknown = settlement(
             41,
             "lcr_00000000000000000000000000",
@@ -471,8 +386,6 @@ mod tests {
             LocalCandidateServiceErrorKind::UnknownLocalCandidate
         );
 
-        // Non-canonical command inputs map to InvalidInput; a local
-        // filesystem path can never pass as a candidate ref.
         let error = LocalCandidateRetained::try_new(
             "lcr_not-canonical",
             node.as_str(),

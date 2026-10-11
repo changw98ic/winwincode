@@ -76,7 +76,6 @@ async fn status_response(status: u16) -> (String, Vec<u8>, tokio::task::JoinHand
                 }
             }
         }
-        // A non-200 response must retain its status even if its body is incomplete.
         let response = format!(
             "HTTP/1.1 {status} Fixture\r\nContent-Length: 999\r\nRetry-After: 2\r\nConnection: close\r\n\r\nSYNTHETIC_PRIVATE_RESPONSE"
         );

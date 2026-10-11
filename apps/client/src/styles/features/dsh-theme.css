@@ -43,7 +43,6 @@
   --shiki-token-link: #90bfff;
 }
 
-/* Shiki token classes keep highlighting within the app CSP. */
 .wwc-syntax-color-text { color: var(--shiki-color-text); }
 .wwc-syntax-token-constant { color: var(--shiki-token-constant); }
 .wwc-syntax-token-string { color: var(--shiki-token-string); }

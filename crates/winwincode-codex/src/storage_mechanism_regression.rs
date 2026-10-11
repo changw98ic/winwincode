@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Offline measurements of production storage methods at the frozen audit commit.
-
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]

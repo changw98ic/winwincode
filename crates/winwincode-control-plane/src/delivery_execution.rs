@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Atomic Delivery-to-ExecutionPort dispatch composition.
-//!
-//! This module maps one Delivery-owned pending effect into generated public
-//! types. It neither schedules Codex work nor treats an uncommitted effect as
-//! HTTP success. The transaction adapter must commit Delivery journal state,
-//! request receipt, and the immutable job outbox intent together before the
-//! dispatcher is called.
-
 use std::{error::Error, fmt};
 
 #[cfg(test)]
@@ -30,10 +22,6 @@ use winwincode_execution_port::generated::{
     JobCancelAckMessageStatus, WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
 };
 
-/// Builds a WorkRun-shaped dispatch intent before a Worker lease exists.
-///
-/// # Errors
-/// Rejects stale identities, invalid role/workspace bindings or malformed request/job fields.
 #[allow(clippy::too_many_lines)]
 pub fn prepare_workrun_start(
     request_id: &RequestId,
@@ -212,9 +200,6 @@ fn deterministic_workrun_id(
     format!("wrn_{value}")
 }
 
-/// Validates the canonical `WorkRun` execution shape before queue publication.
-/// `WorkRun` identity and its embedded contract/item are the sole dispatch
-/// authority for the new path.
 pub(crate) fn validate_workrun_execution_job(
     job: &ExecutionJob,
 ) -> Result<(), DeliveryExecutionError> {
@@ -346,16 +331,12 @@ pub struct DeliveryExecutionConfig {
     pub device_target: Option<winwincode_execution_port::generated::ExecutionDeviceTarget>,
     pub model_selection: Option<winwincode_execution_port::generated::ExecutionModelSelection>,
     pub payload_digest: Sha256Digest,
-    /// Exact frozen source candidate for verification and authorized rework Jobs.
     pub candidate_ref: Option<String>,
     pub workspace: ExecutionWorkspace,
     pub limits: ExecutionLimits,
-    /// Server-side managed-app facts sealed by the task authority. This is
-    /// intentionally absent when the confirmed task did not request an app.
     pub managed_app_run_config: Option<ManagedAppRunConfig>,
 }
 
-/// Delivery mutation and generated job waiting for one outer transaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingDeliveryExecution {
     request_id: RequestId,
@@ -432,41 +413,19 @@ impl fmt::Display for DeliveryExecutionPortError {
 
 impl Error for DeliveryExecutionPortError {}
 
-/// Adapter seam for the transaction completed by phase 2.3.1.
-///
-/// Implementations must atomically commit the Delivery journal publication,
-/// request receipt, and `job.dispatch` outbox intent. A replay receipt means
-/// the same request was already committed and must not append another intent.
 pub trait DeliveryExecutionTransaction {
-    /// Commits the pending Delivery and job intent as one authoritative change.
-    ///
-    /// # Errors
-    ///
-    /// Returns without dispatch when the outer transaction cannot commit.
     fn commit_delivery_and_job_intent(
         &mut self,
         pending: &PendingDeliveryExecution,
     ) -> Result<DeliveryExecutionCommitReceipt, DeliveryExecutionPortError>;
 
-    /// Marks the exact durable outbox event published after dispatch succeeds.
-    ///
-    /// # Errors
-    ///
-    /// Leaves the event pending for startup/outbox replay when acknowledgement
-    /// cannot be committed.
     fn mark_job_dispatched(
         &mut self,
         outbox_event_id: &str,
     ) -> Result<(), DeliveryExecutionPortError>;
 }
 
-/// `ExecutionPort` adapter called only after the outer transaction commits.
 pub trait ExecutionJobDispatcher: Send {
-    /// Sends or offers one immutable generated `ExecutionJob`.
-    ///
-    /// # Errors
-    ///
-    /// Leaves the committed outbox intent pending for replay.
     fn dispatch(&mut self, job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError>;
 }
 
@@ -548,13 +507,6 @@ impl fmt::Display for DeliveryExecutionError {
 
 impl Error for DeliveryExecutionError {}
 
-/// Commits state and outbox intent, then dispatches at most once for this call.
-///
-/// # Errors
-///
-/// Returns [`DeliveryExecutionError::Commit`] when nothing committed, or
-/// [`DeliveryExecutionError::DispatchAfterCommit`] when durable replay must
-/// finish publication.
 pub fn commit_and_dispatch(
     pending: &PendingDeliveryExecution,
     transaction: &mut dyn DeliveryExecutionTransaction,
@@ -610,10 +562,6 @@ fn validate_commit_receipt(
     Ok(())
 }
 
-/// Acknowledges the exact leased cancellation and returns its Delivery transition.
-///
-/// # Errors
-/// Rejects forged, stale or mismatched acknowledgements and lease identities.
 pub fn acknowledge_job_cancel(
     delivery: &Delivery,
     intent: &CancelIntent,

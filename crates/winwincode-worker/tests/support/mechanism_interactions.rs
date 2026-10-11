@@ -154,7 +154,6 @@ fn m12_changed_owner_fence_and_late_answers_do_not_settle_original_waiter() {
             };
             let mut response = input_response_at(&request, clock.clone());
             if let wire::ExecutionPortMessage::InputResponseMessage(value) = &mut response {
-                // Present the current expires_at so each negative independently reaches its identity/deadline check.
                 value.lease = worker.active_jobs()[0].lease.clone();
                 match change {
                     "owner" => {

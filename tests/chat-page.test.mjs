@@ -460,8 +460,6 @@ test('empty Chat does not show WinWinCode system diagrams as project data', () =
   assert.equal(findByClass(rootElement, 'wwc-chat-messages').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').placeholder,
     '描述你的想法…')
-  // Project architecture/flow diagrams belong to Delivery solution review in
-  // StrongFlow, not the Chat empty state.
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram').length, 0)
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-tab').length, 0)
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-label').length, 0)
@@ -506,7 +504,6 @@ test('Chat keeps the Session decisions on the first screen and retires the card 
   assert.notEqual(findByClass(rootElement, 'wwc-chat-decisions').getAttribute('aria-hidden'), 'true')
   const items = findAllByClass(rootElement, 'wwc-contextual-decision-item')
   assert.equal(items.length, 2)
-  // The blocking tool approval is the first row of the card.
   assert.equal(items[0].dataset.kind, 'approval')
   assert.equal(items[0].dataset.urgency, 'blocking')
   assert.match(
@@ -514,7 +511,6 @@ test('Chat keeps the Session decisions on the first screen and retires the card 
     /Run the approved test command/u,
   )
   assert.equal(items[1].dataset.kind, 'input')
-  // The card is not a second announcement channel: Chat keeps one polite status.
   assert.equal(findByClass(card, 'wwc-contextual-decision-note').getAttribute('aria-live'), null)
 
   model.publish(state())
@@ -545,7 +541,6 @@ test('Chat decides an approval and answers an input through its own commands', (
     'approve',
     'Reviewed the exact command.',
   ])
-  // The typed reason survives until the server stops listing the decision.
   assert.equal(reason.value, 'Reviewed the exact command.')
 
   const inputRow = items.find(row => row.dataset.kind === 'input')
@@ -557,7 +552,6 @@ test('Chat decides an approval and answers an input through its own commands', (
     { mode: 'single_choice', value: 'candidate' },
   ])
 
-  // A read-only Chat renders the decisions but submits nothing.
   const sealedRoot = document.createElement('main')
   const sealed = mountChatPage({
     root: sealedRoot,
@@ -747,8 +741,6 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   const modelContext = findByClass(rootElement, 'wwc-chat-convert-model')
   const confirmation = findByClass(rootElement, 'wwc-chat-convert-confirm')
   assert.equal(confirmationPanel.hidden, false)
-  // UI-604: the confirmation is a named dialog that takes focus on open and
-  // hands it back to the trigger on Escape.
   assert.equal(confirmationPanel.getAttribute('role'), 'dialog')
   assert.equal(confirmationPanel.getAttribute('aria-modal'), 'false')
   const labelledBy = confirmationPanel.getAttribute('aria-labelledby')
@@ -793,7 +785,6 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     ],
   }])
 
-  // A created Delivery surfaces as the in-flow receipt line of design 03b.
   deliveryCreator.publish({ status: 'created', error: null, deliveryId: 'dlv_00000000000000000000000001' })
   const receipt = findByClass(rootElement, 'wwc-chat-delegation-receipt')
   assert.equal(receipt.hidden, false)

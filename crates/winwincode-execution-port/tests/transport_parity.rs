@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Contract tests for the business-neutral local/remote `ExecutionPort` seam.
-//!
-//! The tests freeze the seam: both adapters accept the same typed frame, the
-//! remote adapter uses one canonical JSON envelope, and neither adapter
-//! interprets lease, dedupe, or execution outcomes.
-
 use std::collections::VecDeque;
 
 use serde_json::{Value, json};

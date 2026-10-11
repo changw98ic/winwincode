@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
 use std::fs;

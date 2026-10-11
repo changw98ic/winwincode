@@ -105,11 +105,12 @@ test('one canonical schema generation is deterministic and TypeScript output com
     typescript,
     /export type ReviewProjection = \{[\s\S]+\} & \(\{[\s\S]+"reviewerId": null[\s\S]+"status": "pending"[\s\S]+\} \| \{[\s\S]+"reviewerId": string[\s\S]+"status": "approved"/u,
   )
-  assert.match(
-    typescript,
-    /\/\*\*\n \* Read-only data shown by the fixture client\.\n \* It exercises multiline generated documentation\.\n \*\//u,
-  )
-  assert.doesNotMatch(typescript, /\n\/\*\* It exercises multiline/u)
+  for (const content of firstContents) {
+    if (!content.startsWith('// SPDX-License-Identifier: Apache-2.0')) continue
+    for (const line of content.split('\n').slice(1)) {
+      assert.equal(/^\s*(?:\/\/|\/\*)/u.test(line), false, line)
+    }
+  }
 
   const schemaCollection = JSON.parse(firstContents[2])
   const openapi = JSON.parse(firstContents[3])
@@ -226,7 +227,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
   )
   assert.match(cargoManifest, /license\.workspace = true/u)
   assert.doesNotMatch(cargoManifest, /publish = false/u)
-  assert.match(cargoManifest, /include = \["src\/\*\*", "Cargo\.toml", "README\.md"\]/u)
+  assert.match(cargoManifest, /include = \["src\/\*\*", "Cargo\.toml"\]/u)
   assert.equal(existsAtProductPath('packages/api-client'), false)
   assert.equal(existsAtProductPath('packages/contracts/src/generated'), false)
 })
