@@ -590,7 +590,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
             .expect("old schema");
         if version < 6 {
-            db.execute_batch("ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open;").expect("old schema");
+            db.execute_batch("DROP TRIGGER IF EXISTS prepared_model_payload_immutable; DROP TRIGGER IF EXISTS model_response_update; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open;").expect("old schema");
         }
         if version < 5 {
             db.execute_batch("DROP TABLE jev_settings;")
@@ -607,7 +607,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         if version >= 4 {
             db.execute("INSERT INTO jev_context_exchanges VALUES ('retained-operation', 'retained-digest', 'retained-result')", []).unwrap();
         }
-        db.execute("INSERT INTO exchanges (exchange_id, digest, chunks) VALUES ('old-exchange', 'old-digest', '[]')", []).unwrap();
+        db.execute("INSERT INTO exchanges (exchange_id, digest, chunks) VALUES ('old-exchange', 'old-digest', NULL)", []).unwrap();
         db.pragma_update(None, "user_version", version)
             .expect("old version");
         drop(db);
@@ -620,12 +620,12 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 13);
-        let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
+        assert_eq!(upgraded, 14);
+        let old: (String, Option<String>, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).unwrap();
-        assert_eq!(old, ("old-digest".into(), "[]".into(), None, None));
+        assert_eq!(old, ("old-digest".into(), None, None, None));
         let entries: i64 = db
             .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| {
                 row.get(0)
