@@ -69,7 +69,7 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
         .encryption_public_key;
     drop(store);
     let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("v1 fixture");
-    db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
+    db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; DROP TRIGGER IF EXISTS prepared_model_payload_immutable; DROP TRIGGER IF EXISTS model_response_update; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
     let config = json!({"providerId":"retained","displayName":"Retained","endpoint":"https://example.com/v1/messages","protocol":"anthropic_messages","modelIds":["model"],"enabled":true});
     db.execute(
         "INSERT INTO providers VALUES (?1,?2,?3)",
