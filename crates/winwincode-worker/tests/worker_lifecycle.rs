@@ -896,7 +896,9 @@ impl CodexCoreAdapter for FakeCodex {
                         && existing.bytes == upload.bytes
                         && existing.digest == upload.digest
                 });
-            if existing != upload && !replacement_matches {
+            let mut restamped = upload.clone();
+            restamped.created_at = existing.created_at.clone();
+            if existing != &restamped && !replacement_matches {
                 return Err(());
             }
             return Ok(RetainedCandidateArtifact {
