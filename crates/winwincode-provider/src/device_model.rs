@@ -1005,8 +1005,12 @@ impl DeviceProviderStore {
         allow_insert: bool,
     ) -> Result<bool, DeviceProviderError> {
         use crate::model_response_store::{insert_model_response_index, validate_model_response};
-        self.connection
-            .execute_batch("SAVEPOINT persist_model_response")?;
+        let owns_transaction = self.connection.is_autocommit();
+        self.connection.execute_batch(if owns_transaction {
+            "BEGIN IMMEDIATE; SAVEPOINT persist_model_response"
+        } else {
+            "SAVEPOINT persist_model_response"
+        })?;
         let result = (|| -> Result<bool, DeviceProviderError> {
             let previous: Option<(Option<String>, Option<String>, bool)> = self
                 .connection
@@ -1060,14 +1064,24 @@ impl DeviceProviderStore {
         })();
         match result {
             Ok(value) => {
-                self.connection
-                    .execute_batch("RELEASE persist_model_response")?;
+                if let Err(error) = self.connection.execute_batch(if owns_transaction {
+                    "RELEASE persist_model_response; COMMIT"
+                } else {
+                    "RELEASE persist_model_response"
+                }) {
+                    if owns_transaction {
+                        let _ = self.connection.execute_batch("ROLLBACK");
+                    }
+                    return Err(error.into());
+                }
                 Ok(value)
             }
             Err(error) => {
-                let _ = self.connection.execute_batch(
-                    "ROLLBACK TO persist_model_response; RELEASE persist_model_response",
-                );
+                let _ = self.connection.execute_batch(if owns_transaction {
+                    "ROLLBACK"
+                } else {
+                    "ROLLBACK TO persist_model_response; RELEASE persist_model_response"
+                });
                 Err(error)
             }
         }
