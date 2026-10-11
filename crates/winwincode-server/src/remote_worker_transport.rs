@@ -415,22 +415,15 @@ type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
 struct RemoteDeliveryQueue {
     pending: Mutex<Vec<RemoteDelivery>>,
     authorities: Mutex<HashMap<(WorkerId, WorkerInstanceId), RemoteWorkerPrincipal>>,
-    /// Re-sent idempotent controls (currently `job.cancel`) that this exact
-    /// Worker instance has already confirmed. The scheduler replays every
-    /// outstanding cancellation on each drive; re-delivering a confirmed one
-    /// to the same instance only keeps the Worker's control inbox non-empty,
-    /// which starves the poll that produces the Job's terminal outcome.
     confirmed: Mutex<HashMap<(WorkerId, WorkerInstanceId), ConfirmedControls>>,
 }
 
-/// Bounded FIFO set of confirmed delivery identities for one Worker instance.
 #[derive(Default)]
 struct ConfirmedControls {
     ids: std::collections::HashSet<ExecutionMessageId>,
     order: std::collections::VecDeque<ExecutionMessageId>,
 }
 
-/// Confirmed identities remembered per Worker instance.
 const MAX_CONFIRMED_CONTROLS: usize = 4_096;
 
 impl ConfirmedControls {
@@ -451,8 +444,6 @@ fn confirmed_redelivery_frame(frame: &[u8]) -> bool {
         .is_ok_and(|frame| suppress_confirmed_redelivery(frame.message()))
 }
 
-/// Controls whose exact re-delivery after confirmation carries no new
-/// information for the same Worker instance.
 fn suppress_confirmed_redelivery(message: &ExecutionPortMessage) -> bool {
     matches!(message, ExecutionPortMessage::JobCancelMessage(_))
 }
@@ -1193,7 +1184,6 @@ mod tests {
         queue
             .acknowledge(&worker, &instance, &[page[0].delivery_id.clone()])
             .unwrap();
-        // The scheduler replays the outstanding cancellation every drive.
         for _ in 0..3 {
             queue
                 .enqueue_for(&worker, &instance, cancel_message(7))
@@ -1203,8 +1193,6 @@ mod tests {
             queue.snapshot(&worker, &instance).unwrap().is_empty(),
             "a confirmed cancel must not keep the Worker inbox busy"
         );
-        // A different cancellation still flows, and a new instance still
-        // receives the replay.
         queue
             .enqueue_for(&worker, &instance, cancel_message(8))
             .unwrap();
@@ -1213,7 +1201,6 @@ mod tests {
             .enqueue_for(&worker, &next, cancel_message(7))
             .unwrap();
         assert_eq!(queue.snapshot(&worker, &next).unwrap().len(), 1);
-        // Unconfirmed cancels and other controls keep their replay semantics.
         queue
             .enqueue_for(&worker, &instance, queue_message(9, &worker, &instance, 0))
             .unwrap();
