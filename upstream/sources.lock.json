@@ -1665,6 +1665,15 @@
       "targets": [
         "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst"
       ]
+    },
+    {
+      "id": "codex-tool-review-output-result-reference",
+      "file": "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+      "planned": false,
+      "patchSha256": "64a3193096549a116926a95f4745f192a869fb23b974f87dec0be041a917b134",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_execution.rs"
+      ]
     }
   ],
   "licenseObligations": {
