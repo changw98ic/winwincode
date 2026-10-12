@@ -1,12 +1,3 @@
-// UI-608 component-state visual fixture.
-//
-// Mounts the real UI primitives — plus the Candidate Diff viewer — in every
-// state the decision names, and reports one visual fingerprint per state.  The
-// mounts are the product's own mount functions, so what the baseline pins is
-// what ships.  Determinism comes from the harness, not from the components: a
-// fixed font stack, no transitions or animations, no scrollbars, and fixture
-// data with fixed identifiers and fixed timestamps.
-
 import {
   captureVisualFingerprint,
   compareVisualFingerprints,
@@ -93,11 +84,6 @@ const selectedDiffContent = [
 ].join('\n')
 
 
-// ---------------------------------------------------------------------------
-// Gallery entries.  Every entry mounts the production component and returns the
-// element the fingerprint is taken from.
-// ---------------------------------------------------------------------------
-
 const buttonVariants = Object.freeze([
   ['default', {}],
   ['primary', { variant: 'primary' }],
@@ -124,7 +110,6 @@ const connectionStates = Object.freeze([
 
 const ENTRIES = Object.freeze([
 
-  // Buttons: default, busy, disabled, and the destructive variant.
   ...buttonVariants.map(([name, variant]) => [`button/${name}`, document => {
     const view = mountButton({
       document,
@@ -137,7 +122,6 @@ const ENTRIES = Object.freeze([
     return view.root
   }]),
 
-  // Status badges: the delivery tones every stage and state maps onto.
   ...badgeTones.map(([tone, label]) => [`status-badge/${tone}`, document => {
     const view = mountStatusBadge({ document, props: { label, tone } })
     register(view)
@@ -387,7 +371,6 @@ const ENTRIES = Object.freeze([
     return view.root
   }],
 
-  // Connection states: the offline and stale presentations the shell shows.
   ...connectionStates.map(([name, status]) => [`connection-bar/${name}`, document => {
     const view = mountConnectionBar({
       document,
@@ -430,11 +413,6 @@ const ENTRIES = Object.freeze([
   }],
 ])
 
-// ---------------------------------------------------------------------------
-// StrongFlow Delivery list. Current Delivery states are pinned
-// through the real list and Kanban views, driven by a ready model state.
-// ---------------------------------------------------------------------------
-
 const DELIVERY_STATES = Object.freeze(['draft', 'clarifying', 'ready', 'reworking', 'needs-attention', 'ready-to-deliver', 'delivered'])
 
 const stageDeliveries = DELIVERY_STATES.map((status, index) => ({
@@ -460,8 +438,6 @@ const stageDeliveries = DELIVERY_STATES.map((status, index) => ({
   },
 }))
 
-/** A ready list model.  The gallery changes no state, so nothing else is needed. */
-
 function textParagraph(document, text) {  const node = document.createElement('p')
   node.textContent = text
   return node
@@ -475,17 +451,11 @@ function textSection(document, text) {
   return section
 }
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
 const mountedViews = []
 function register(...views) {
   mountedViews.push(...views)
 }
 
-// The harness serves a `style-src 'self'` policy, so the determinism controls
-// are installed through CSSOM, which that policy does not block.
 const determinism = new CSSStyleSheet()
 determinism.replaceSync(FONT_OVERRIDE)
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, determinism]
@@ -507,7 +477,6 @@ async function captureEntry(id, mount) {
   main.replaceChildren(host)
   const root = mount(document)
   host.append(root)
-  // Force one layout so boxes are measured after the mount, not during it.
   void host.getBoundingClientRect()
   const fingerprint = captureVisualFingerprint({
     document,
@@ -533,7 +502,6 @@ globalThis.captureComponentStates = async () => {
     viewport: { ...VIEWPORT },
     fontStack: VISUAL_REGRESSION_FONT_STACK,
     fingerprints,
-    // One JSON document, so the credential gate can scan the capture directly.
     capturedText: JSON.stringify(fingerprints),
     entryIds: ENTRIES.map(([id]) => id),
   }
@@ -547,7 +515,6 @@ globalThis.inspectGalleryReadiness = () => ({
     .trim(),
 })
 
-/** Compares one capture against the committed baseline and renders the report. */
 globalThis.compareComponentStates = (baseline, fingerprints) => {
   const committed = new Map(baseline.map(entry => [entry.id, entry]))
   const differences = fingerprints.flatMap(fingerprint => {

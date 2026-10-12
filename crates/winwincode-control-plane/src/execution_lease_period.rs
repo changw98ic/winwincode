@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared claim/renewal proof for immutable pending Worker frames.
-
 use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
 use winwincode_domain::{Instant, Sha256Digest};
 use winwincode_execution_port::generated::ExecutionLeaseStamp;
 use winwincode_storage::{ExecutionLeaseRecord, ProductStateStorage, StorageError};
 
-/// Checks a retained message timestamp without treating renewal as a new stream.
-/// The caller separately checks current execution authority and trusted Server time.
 pub(crate) fn retained_message_within_lease(
     storage: &mut dyn ProductStateStorage,
     lease: &ExecutionLeaseStamp,

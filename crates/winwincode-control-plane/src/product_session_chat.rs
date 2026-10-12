@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Chat ledger, exact cancellation routing, and public reads for the canonical
-//! [`super::ProductSessionService`].
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,7 +33,6 @@ const MAX_MESSAGES_PER_SESSION: usize = 10_000;
 const MAX_PAGE_SIZE: usize = 200;
 const MAX_CURSOR_BYTES: usize = 2_048;
 
-/// One accepted user message and the schedulable turn it created.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubmitChatMessageCommand {
     pub context: ProductSessionCommandContext,
@@ -47,11 +43,6 @@ pub struct SubmitChatMessageCommand {
 }
 
 impl SubmitChatMessageCommand {
-    /// Converts one generated `chat.submit` command into the canonical service command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid command-envelope authority or revision facts.
     pub fn from_api(
         command: ChatSubmitCommand,
         event_id: winwincode_domain::ControlPlaneEventId,
@@ -96,8 +87,6 @@ impl AssistantMessageState {
     }
 }
 
-/// One ordered public assistant-text update bound to an exact live runtime.
-/// Provider responses, reasoning, and tool payloads are intentionally absent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppendAssistantMessageCommand {
     pub context: ProductSessionCommandContext,
@@ -113,8 +102,6 @@ pub struct AppendAssistantMessageCommand {
     pub terminal_outcome: Option<ProductSessionTurnTerminalOutcome>,
 }
 
-/// Immutable terminal Worker facts for one exact bound Chat turn.
-/// Public assistant text is deliberately absent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordAssistantTerminalCommand {
     pub context: ProductSessionCommandContext,
@@ -127,7 +114,6 @@ pub struct RecordAssistantTerminalCommand {
     pub terminal_outcome: ProductSessionTurnTerminalOutcome,
 }
 
-/// Exact authenticated cancellation of one current session revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CancelProductSessionCommand {
     pub context: ProductSessionCommandContext,
@@ -137,11 +123,6 @@ pub struct CancelProductSessionCommand {
 }
 
 impl CancelProductSessionCommand {
-    /// Converts one generated `session.cancel` command into the canonical service command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid command-envelope authority or revision facts.
     pub fn from_api(
         command: SessionCancelCommand,
         event_id: winwincode_domain::ControlPlaneEventId,
@@ -165,7 +146,6 @@ impl CancelProductSessionCommand {
     }
 }
 
-/// Turn state retained beside the public user message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductSessionTurnState {
     Pending,
@@ -175,8 +155,6 @@ pub enum ProductSessionTurnState {
     Failed,
 }
 
-/// Immutable Worker terminal facts retained beside the one public assistant
-/// message. The Worker summary is intentionally absent.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProductSessionTurnTerminalOutcome {
@@ -188,7 +166,6 @@ pub struct ProductSessionTurnTerminalOutcome {
     pub finished_at: Instant,
 }
 
-/// Secret-safe scheduler intent produced atomically by `chat.submit`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionTurnIntent {
     pub request_id: RequestId,
@@ -203,7 +180,6 @@ pub struct ProductSessionTurnIntent {
     pub terminal_outcome: Option<ProductSessionTurnTerminalOutcome>,
 }
 
-/// Replay-safe `chat.submit` result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatSubmitMutationReceipt {
     pub mutation: ProductSessionMutationReceipt,
@@ -211,28 +187,24 @@ pub struct ChatSubmitMutationReceipt {
     pub turn_intent: ProductSessionTurnIntent,
 }
 
-/// Replay-safe public assistant update result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssistantMessageMutationReceipt {
     pub mutation: ProductSessionMutationReceipt,
     pub message: ChatMessageProjection,
 }
 
-/// Replay-safe session cancellation with exact queue, Worker, and model routes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionCancellationReceipt {
     pub mutation: ProductSessionMutationReceipt,
     pub routing: winwincode_session::SessionCancellationReceipt,
 }
 
-/// Stable public read page request. Limits match the generated HTTP contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductSessionPageRequest {
     pub cursor: Option<OpaqueCursor>,
     pub limit: u16,
 }
 
-/// One stable page of sessions in ProductSession-id order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionPageRead {
     pub items: Vec<ProductSessionRecord>,
@@ -245,11 +217,6 @@ impl ProductSessionPageRead {
         self.next_cursor.is_some()
     }
 
-    /// Converts the service page into the generated public result and page metadata.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a durable session revision outside the generated public range.
     pub fn into_api(self) -> Result<(ProductSessionPage, PageInfo), ProductSessionServiceError> {
         let has_more = self.has_more();
         let items = self
@@ -270,7 +237,6 @@ impl ProductSessionPageRead {
     }
 }
 
-/// One stable page of public messages in sequence order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionMessagePage {
     pub items: Vec<ChatMessageProjection>,
@@ -283,7 +249,6 @@ impl ProductSessionMessagePage {
         self.next_cursor.is_some()
     }
 
-    /// Converts the public-only ledger page into the generated query result.
     #[must_use]
     pub fn into_api(self) -> (ChatMessagePage, PageInfo) {
         let has_more = self.has_more();
@@ -318,11 +283,6 @@ impl TryFrom<PageRequest> for ProductSessionPageRequest {
     }
 }
 
-/// Parses the generated `session.list` state labels into the domain lifecycle enum.
-///
-/// # Errors
-///
-/// Rejects unknown labels even if a malformed request bypassed schema validation.
 pub fn product_session_state_filters(
     states: &[String],
 ) -> Result<Vec<ProductSessionState>, ProductSessionServiceError> {
@@ -570,12 +530,6 @@ enum PageCursorKind {
 }
 
 impl ProductSessionService<'_> {
-    /// Appends one public user message and creates exactly one schedulable turn.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale revisions, unsafe/unbounded text, invalid lifecycle state,
-    /// changed-body replays, and storage failures.
     pub fn submit_chat(
         &mut self,
         command: &SubmitChatMessageCommand,
@@ -724,12 +678,6 @@ impl ProductSessionService<'_> {
         Ok(())
     }
 
-    /// Appends one ordered, already public assistant-text delta.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale Worker/lease/fence/model identities before writing, gaps
-    /// or duplicate stream sequences, unsafe text, and invalid terminal state.
     #[allow(clippy::too_many_lines)]
     pub fn append_assistant_message(
         &mut self,
@@ -948,13 +896,6 @@ impl ProductSessionService<'_> {
         assistant_receipt(mutation, binding.model_exchange_id())
     }
 
-    /// Records immutable Worker terminal facts beside the one public assistant
-    /// message without treating the Worker summary as public text.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale runtime authority, changed replay, invalid Usage, or an
-    /// outcome that differs from the exact bound Chat turn.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn record_assistant_terminal(
         &mut self,
@@ -1054,7 +995,6 @@ impl ProductSessionService<'_> {
     }
 
     /// Records an accepted failed/cancelled turn before its first public model reply.
-    /// The ingress has already checked the staged Worker binding and dispatch.
     pub(crate) fn record_unstarted_terminal(
         &mut self,
         context: &ProductSessionCommandContext,
@@ -1200,12 +1140,6 @@ impl ProductSessionService<'_> {
             .unwrap_or(0))
     }
 
-    /// Cancels one exact current revision and returns only exact route commands.
-    ///
-    /// # Errors
-    ///
-    /// Rejects actor/scope/revision/runtime mismatches and changed-body replays
-    /// before changing the session or emitting any cancellation route.
     #[allow(
         clippy::too_many_lines,
         reason = "The cancellation command durably retains its exact routes before publication"
@@ -1356,12 +1290,6 @@ impl ProductSessionService<'_> {
         Ok(())
     }
 
-    /// Reads a stable filtered session page. A cursor from another scope,
-    /// filter, or catalog revision is rejected rather than silently drifting.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid/stale cursors, invalid limits, corrupt state, and storage failures.
     pub fn list_page(
         &self,
         scope: &ReceiptScopeKey,
@@ -1420,11 +1348,6 @@ impl ProductSessionService<'_> {
         })
     }
 
-    /// Reads a stable public-only message page for one exact session.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown session, invalid/stale cursor, corrupt state, or storage failure.
     pub fn messages_page(
         &self,
         scope: &ReceiptScopeKey,
@@ -1597,8 +1520,6 @@ impl ProductSessionService<'_> {
                 "unbound Chat turn has no active ExecutionJob",
             ));
         }
-        // The scheduler owns any accepted Worker lease, including the interval before
-        // the first model call binds the public conversation. It resolves the cancel target.
         Ok(vec![ExecutionRoute {
             product_session_id: persisted.session.id().clone(),
             work_contract_id: None,

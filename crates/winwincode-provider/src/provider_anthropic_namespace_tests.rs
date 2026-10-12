@@ -226,8 +226,6 @@ fn captured_mimo_empty_exec_object_reaches_core_as_function_feedback() {
         options(),
     )
     .expect("prepare advertised custom exec binding");
-    // Minimized from the 2026-10-08 real response. Opaque IDs are replaced and
-    // unrelated blocks/metadata omitted. The tool block had no argument delta.
     let response = concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\",\"message\":{\"id\":\"mimo-response\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mimo-v2.6-pro\",\"usage\":{\"input_tokens\":13568,\"output_tokens\":0}}}\n\n",

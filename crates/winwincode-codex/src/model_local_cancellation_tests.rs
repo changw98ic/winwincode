@@ -92,8 +92,6 @@ async fn mechanism_actual_cancellation_closes_all_calls_without_response_seals()
         calls.push((call, request, live, open));
     }
     bridge.take_messages().unwrap();
-    // Recover the exact Applied-before-ledger boundary for one member while the
-    // other three remain active. The thread operation must finish all four.
     let recovered = &calls[1].3;
     let metadata = ModelMessageMetadata {
         message_id: super::execution_message_id(b"model-cancel", &recovered.model_exchange_id.0),

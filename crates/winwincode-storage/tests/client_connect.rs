@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable connect-code, access-grant, and connect-attempt contract tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -61,7 +59,6 @@ fn open(path: PathBuf) -> SqliteStorage {
     SqliteStorage::open(path).expect("storage")
 }
 
-/// Seeds one enrolled-enough client node so connect rows can reference it.
 fn seed_client_node(storage: &mut SqliteStorage, seed: u64) -> String {
     let registration = winwincode_storage::ClientNodeRegistration::try_new(
         node_id(seed),
@@ -166,7 +163,6 @@ fn publishes_connect_code_digest_and_enforces_publication_rules() {
         .expect("code");
     assert_eq!(by_digest, published);
 
-    // The same digest cannot be registered twice.
     let duplicate_digest = ConnectCodePublication::try_new(
         code_id(11),
         digest(10),
@@ -182,7 +178,6 @@ fn publishes_connect_code_digest_and_enforces_publication_rules() {
         ClientConnectStoreErrorKind::ConnectCodeDigestConflict,
     );
 
-    // The same code id cannot be reused.
     let duplicate_id = ConnectCodePublication::try_new(
         code_id(10),
         digest(11),
@@ -198,7 +193,6 @@ fn publishes_connect_code_digest_and_enforces_publication_rules() {
         ClientConnectStoreErrorKind::ConnectCodeIdConflict,
     );
 
-    // An unknown client node is rejected.
     let orphan = ConnectCodePublication::try_new(
         code_id(12),
         digest(12),
@@ -214,7 +208,6 @@ fn publishes_connect_code_digest_and_enforces_publication_rules() {
         ClientConnectStoreErrorKind::UnknownClientNode,
     );
 
-    // An already-expired code cannot be published.
     expect_kind(
         ledger.publish(&publication(13, &client, T0, 3), &instant(T1)),
         ClientConnectStoreErrorKind::InvalidInput,
@@ -226,7 +219,6 @@ fn rejects_malformed_connect_code_publications() {
     let mut storage = open(temporary_directory("malformed"));
     let client = seed_client_node(&mut storage, 1);
 
-    // Malformed facts never reach durable storage.
     expect_kind(
         ConnectCodePublication::try_new(
             code_id(14),
@@ -285,13 +277,11 @@ fn refresh_and_revoke_follow_frozen_transitions() {
     assert_eq!(revoked.state, ConnectCodeState::Revoked);
     assert_eq!(revoked.revision, 2);
 
-    // Revoking an already-revoked code is an idempotent replay.
     let replay = ledger
         .revoke_code(&ConnectCodeRevocation::try_new(code_id(20), 2).expect("revocation"))
         .expect("revoke replay");
     assert_eq!(replay.revision, 2);
 
-    // Refreshing a revoked code is not a legal transition.
     let replacement = publication(21, &client, T3, 3);
     expect_kind(
         ledger.refresh_code(
@@ -302,8 +292,6 @@ fn refresh_and_revoke_follow_frozen_transitions() {
         ClientConnectStoreErrorKind::IllegalStateTransition,
     );
 
-    // Refreshing an active code revokes it and publishes the replacement in
-    // one transaction.
     let second = ledger
         .publish(&publication(22, &client, T3, 3), &instant(T0))
         .expect("publish");
@@ -322,8 +310,6 @@ fn refresh_and_revoke_follow_frozen_transitions() {
         .expect("snapshot")
         .expect("old code");
     assert_eq!(old.state, ConnectCodeState::Revoked);
-    // Refreshing a refreshed (revoked) code under its current revision is
-    // not a legal transition either.
     expect_kind(
         ledger.refresh_code(
             &ConnectCodeRevocation::try_new(code_id(22), 2).expect("revocation"),
@@ -351,7 +337,6 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
         .publish(&publication(30, &client, T1, 3), &instant(T0))
         .expect("publish");
 
-    // A wrong presented digest is indistinguishable from an unknown code.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(31), 30),
@@ -360,7 +345,6 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
         ),
         ClientConnectStoreErrorKind::UnknownConnectCode,
     );
-    // The Server consumes exactly the stored publication generation.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(30), 29),
@@ -369,7 +353,6 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
         ),
         ClientConnectStoreErrorKind::GenerationMismatch,
     );
-    // Consuming at or after the expiry is rejected.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(30), 30),
@@ -378,7 +361,6 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
         ),
         ClientConnectStoreErrorKind::ConnectCodeExpired,
     );
-    // The grant must reference the same client as the consumed code.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(30), 30),
@@ -414,7 +396,6 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
     assert_eq!(receipt.grant.state, AccessGrantState::Active);
     assert_eq!(receipt.grant.expires_at, None);
 
-    // Replaying the consume never creates a second grant.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(30), 30),
@@ -453,7 +434,6 @@ fn consume_checks_current_device_policy_without_spending_the_code_on_rejection()
     let alice = user_id(2);
     let issuance = issuance(40, &client, &alice, &alice, GrantTrustMode::Trusted, None);
 
-    // Another connection changes the policy after the caller has read the code.
     let mut device_reports = open(directory);
     for (accepting, lock, kind) in [
         (
@@ -533,7 +513,6 @@ fn later_users_receive_use_only_and_one_active_grant_is_unique() {
     assert_eq!(second.grant.permissions, GrantPermissions::USE);
     assert_eq!(second.grant.expires_at, Some(instant(T2)));
 
-    // While Bob's grant is active, a new active grant for Bob conflicts.
     expect_kind(
         ledger.create_grant(
             &issuance(62, &client, &bob, &alice, GrantTrustMode::Trusted, None),
@@ -544,7 +523,6 @@ fn later_users_receive_use_only_and_one_active_grant_is_unique() {
         ClientConnectStoreErrorKind::AccessGrantConflict,
     );
 
-    // A failed consume rolls back atomically: the code stays active.
     ledger
         .publish(&publication(52, &client, T3, 3), &instant(T0))
         .expect("publish");
@@ -565,7 +543,6 @@ fn later_users_receive_use_only_and_one_active_grant_is_unique() {
         ConnectCodeState::Active
     );
 
-    // Even after revocation, a reconnecting user is a later user.
     ledger
         .revoke_grant(&first.grant.client_access_grant_id, 1)
         .expect("revoke first grant");
@@ -614,7 +591,6 @@ fn failed_attempts_decrement_and_exhaust_the_code_budget() {
         ledger.record_failed_attempt(&code_id(70), 3),
         ClientConnectStoreErrorKind::AttemptsExhausted,
     );
-    // Consuming an exhausted code is rejected even inside the window.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(70, &digest(70), 70),
@@ -669,7 +645,6 @@ fn expire_codes_due_projects_only_due_active_codes() {
         ConnectCodeState::Active
     );
 
-    // The sweep is idempotent once every due code is terminal.
     assert!(
         ledger
             .expire_codes_due(&instant(T2))
@@ -677,7 +652,6 @@ fn expire_codes_due_projects_only_due_active_codes() {
             .is_empty()
     );
 
-    // Consumed and revoked codes are never swept.
     ledger
         .publish(&publication(92, &client, T1, 3), &instant(T0))
         .expect("publish");
@@ -731,7 +705,6 @@ fn standalone_grants_reject_connect_code_source_and_validate_expiry() {
     let alice = user_id(2);
     let bob = user_id(3);
 
-    // The connect-code source belongs to the atomic consume path only.
     expect_kind(
         ledger.create_grant(
             &issuance(100, &client, &alice, &alice, GrantTrustMode::Trusted, None),
@@ -870,7 +843,6 @@ fn grant_revocation_is_immediate() {
         .expect("revoke");
     assert_eq!(revoked.state, AccessGrantState::Revoked);
     assert_eq!(revoked.revision, 2);
-    // Revocation is immediately visible to the query surface.
     assert!(
         ledger
             .active_grant(&client, &alice)
@@ -902,7 +874,6 @@ fn temporary_grant_expiry_is_terminal_and_trusted_grants_persist() {
     let alice = user_id(2);
     let bob = user_id(3);
 
-    // A temporary grant expires by time judgement, and expired is terminal.
     let temporary = ledger
         .create_grant(
             &issuance(
@@ -943,7 +914,6 @@ fn temporary_grant_expiry_is_terminal_and_trusted_grants_persist() {
             .is_empty()
     );
 
-    // Trusted grants without an expiry never expire.
     let durable = ledger
         .create_grant(
             &issuance(112, &client, &bob, &alice, GrantTrustMode::Trusted, None),
@@ -974,7 +944,6 @@ fn connect_attempt_windows_are_fixed_per_dimension_and_subject() {
     let mut ledger = storage.client_connect_ledger().expect("ledger");
     let alice = user_id(2);
 
-    // The window anchor floors the instant onto the window grid.
     assert_eq!(
         connect_attempt_window_anchor(&instant("2026-01-01T00:00:37.000Z"), 60).expect("anchor"),
         instant("2026-01-01T00:00:00.000Z")
@@ -1020,7 +989,6 @@ fn connect_attempt_windows_are_fixed_per_dimension_and_subject() {
             .expect("blocked")
     );
 
-    // A different subject and a different dimension each count from zero.
     assert_eq!(
         ledger
             .connect_failure_count(AttemptDimension::User, &user_id(3), &window)
@@ -1034,7 +1002,6 @@ fn connect_attempt_windows_are_fixed_per_dimension_and_subject() {
         0
     );
 
-    // The next window reads as zero and resets the counter on first failure.
     let next_window = instant("2026-01-01T00:01:00.000Z");
     assert_eq!(
         ledger
@@ -1048,7 +1015,6 @@ fn connect_attempt_windows_are_fixed_per_dimension_and_subject() {
     assert_eq!(reset.failed_attempts, 1);
     assert_eq!(reset.window_started_at, next_window);
 
-    // The user dimension only accepts canonical user ids.
     expect_kind(
         ledger.record_connect_failure(AttemptDimension::User, "alice", &window),
         ClientConnectStoreErrorKind::InvalidInput,
@@ -1058,7 +1024,6 @@ fn connect_attempt_windows_are_fixed_per_dimension_and_subject() {
         ClientConnectStoreErrorKind::InvalidInput,
     );
 
-    // A backwards clock resets the counter to the current window.
     let earlier_window = instant("2026-01-01T00:00:00.000Z");
     let backwards = ledger
         .record_connect_failure(AttemptDimension::User, &alice, &earlier_window)

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Terminal lease authority joined to Worker heartbeat and Fleet projections.
-
 use std::{
     fs,
     path::PathBuf,

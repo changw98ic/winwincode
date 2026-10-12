@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Finite, secret-safe classifications for the embedded Core failure boundary.
-
 use codex_protocol::protocol::CodexErrorInfo;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -33,7 +31,6 @@ impl CodexFailureStage {
     }
 }
 
-/// A bounded classification. Original error text is never accepted or retained.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexFailureDiagnostic {
@@ -118,7 +115,6 @@ impl CodexFailureDiagnostic {
         )
     }
 
-    /// Adds only the retained constant classification to an existing safe message.
     #[must_use]
     pub fn append_to(&self, message: &str) -> String {
         let suffix = format!("[stage={}; cause={}]", self.stage.as_str(), self.cause);
@@ -279,7 +275,6 @@ const FUSION_FAILURE_CAUSES: &[&str] = &[
     "FUSION_INVALID_USAGE",
 ];
 
-/// Returns only a known constant, never a caller's error text or code suffix.
 pub(crate) fn fusion_failure_cause(code: &str) -> Option<&'static str> {
     FUSION_FAILURE_CAUSES
         .iter()

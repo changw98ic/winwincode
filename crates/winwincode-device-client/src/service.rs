@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Foreground Device Client service and its local CLI control files.
-
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
@@ -42,7 +40,6 @@ const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
 const MANAGED_APP_EXECUTABLE_ALLOWLIST_ENVIRONMENT: &str =
     "WWC_DEVICE_MANAGED_APP_EXECUTABLE_ALLOWLIST";
 
-/// Runtime configuration supplied by the native service manager.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceServiceConfig {
     pub data_directory: PathBuf,
@@ -51,7 +48,6 @@ pub struct DeviceServiceConfig {
     pub device_display_name: String,
 }
 
-/// Secret-free service process status.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceServiceStatus {
@@ -60,7 +56,6 @@ pub struct DeviceServiceStatus {
     pub restart_pending: bool,
 }
 
-/// Device service startup or local-control failure.
 #[derive(Debug)]
 pub enum DeviceServiceError {
     InvalidConfig(String),
@@ -174,14 +169,6 @@ impl ManagedAppRepositorySource for ServiceWorkerLaunchMaterial {
     }
 }
 
-/// Runs the Device Client in the foreground until its native service manager
-/// stops the process. A local restart request rotates only the daemon session;
-/// durable outbox and occupancy state stay in the same SQLite store.
-///
-/// # Errors
-///
-/// Fails on invalid HTTPS configuration, a second live service process, or a
-/// fatal local store/daemon error.
 pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServiceError> {
     run_device_service_until(config, || false)
 }
@@ -204,9 +191,6 @@ fn run_device_service_until(
         Some(path) => Some(fs::read(path)?),
         None => None,
     };
-    // The registry is deliberately empty until the managed-run contract can
-    // publish an authorized candidate HTTP socket. Worker PID/data facts are
-    // not sufficient evidence and must never be converted into a port.
     let preview_registry = AuthorizedPreviewSourceRegistry::default();
 
     loop {
@@ -409,8 +393,6 @@ fn service_worker_supervisor_config(
         server_origin: server_origin.to_owned(),
         model_route: None,
         worker_binary_path: None,
-        // Zero disables only the Supervisor's additional local cap. The
-        // capacity report still uses the contract's positive technical bound.
         max_concurrent_worker_sessions: 0,
         stop_grace_period: Duration::from_secs(10),
     }
@@ -478,7 +460,6 @@ fn canonical_worker_session_id(value: &str) -> bool {
     })
 }
 
-/// Reads the live process status from the private pid file.
 #[must_use]
 pub fn device_service_status(data_directory: &Path) -> DeviceServiceStatus {
     let pid = fs::read_to_string(data_directory.join(PID_FILE))
@@ -492,12 +473,6 @@ pub fn device_service_status(data_directory: &Path) -> DeviceServiceStatus {
     }
 }
 
-/// Requests an in-process daemon-session restart from the running service.
-///
-/// # Errors
-///
-/// Returns [`DeviceServiceError::NotRunning`] if no live pid owns the data
-/// directory, and an I/O error if the private request file cannot be written.
 pub fn request_device_service_restart(data_directory: &Path) -> Result<(), DeviceServiceError> {
     if !device_service_status(data_directory).running {
         return Err(DeviceServiceError::NotRunning);
@@ -508,11 +483,6 @@ pub fn request_device_service_restart(data_directory: &Path) -> Result<(), Devic
     )
 }
 
-/// Returns the last `line_limit` bounded, redacted service log lines.
-///
-/// # Errors
-///
-/// Returns an I/O error when an existing log cannot be read.
 pub fn device_service_logs(
     data_directory: &Path,
     line_limit: usize,
@@ -653,7 +623,7 @@ fn private_options() -> OpenOptions {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    Command::new("kill")
+    Command::new("/bin/kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

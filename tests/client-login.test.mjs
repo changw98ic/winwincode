@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, 'apps/client/node_modules/.cache/client-login-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }

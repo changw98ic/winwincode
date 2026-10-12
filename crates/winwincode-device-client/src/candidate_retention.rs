@@ -1,71 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Candidate retention policy, discard, and garbage collection (GIT-100.9).
-//!
-//! One module that closes the candidate lifecycle the registry opened: it
-//! decides how long each locally retained candidate is kept, executes the
-//! discard decision, and reclaims the stable Git refs of finished candidates.
-//! The five plan 15 retention classes map onto the registry states and this
-//! module's rules as follows:
-//!
-//! - **In use / pending review** (`retained`, `branch_created`): kept, and
-//!   bounded per repository binding by [`CandidateRetentionPolicy::
-//!   max_active_per_binding`] — when a binding holds more active candidates
-//!   than the limit, [`enforce_retention_policy`] discards the oldest ones
-//!   (by first retention stamp) through exactly the same discard vertical a
-//!   user discard takes. The default limit is deliberately conservative and
-//!   `failed` rows are never counted nor touched: they belong to the
-//!   apply/settlement lane.
-//! - **Applied / discarded** (terminal): the frozen ref
-//!   `refs/winwincode/candidates/<commit>` is still needed as the audit
-//!   anchor until the Control Plane has settled every receipt, so
-//!   [`collect_expired_candidates`] reclaims a terminal candidate's ref only
-//!   when (a) its first retention stamp is older than
-//!   [`CandidateRetentionPolicy::terminal_retention`], (b) every uplink
-//!   frame the device ever enqueued for the candidate is acknowledged by the
-//!   server (`published = 1` in the durable outbox — a candidate the server
-//!   has never heard of, or not yet acknowledged, is *pending attention*
-//!   and is never collected), and (c) the ref still resolves exactly to the
-//!   recorded candidate commit — a drifted ref is reported, never deleted.
-//!   Only refs this device created (registry rows) are ever deleted; stray
-//!   refs inside the namespace (for example from another device sharing the
-//!   repository) are invisible to the collection scan.
-//! - **Expired**: a terminal candidate past its retention window whose
-//!   collection already ran is durably recorded in the
-//!   `candidate_gc_collections` table, so a later run skips it instead of
-//!   re-examining it.
-//!
-//! The discard vertical ([`discard_candidate`]) is one fail-closed
-//! sequence: request shapes, the registry row (unknown candidate, foreign
-//! binding, and an `applied` terminal all refuse before any mutation), the
-//! occupancy mirror (a discard that could not be reported is not executed —
-//! the same discipline as the branch engine), then the durable
-//! created-branch deletion, the durable discard record, the registry
-//! transition to `discarded` along the contract 6 transition table, and the
-//! `client.candidate.apply_result` frame with result `discarded` stamped
-//! `C + L` from the mirror. Repeating a discard is an idempotent duplicate
-//! that re-reports the identical receipt under the identical idempotency
-//! key; a crash between any two steps leaves a state the next call resumes
-//! from (a branch already deleted is simply confirmed gone).
-//!
-//! The collection vertical is equally idempotent and crash-resumable: the
-//! ref deletion (`git update-ref -d`) is confirmed by an exact re-read and
-//! the durable collected record is written after it, so a crash before the
-//! deletion simply re-runs and a crash after the deletion (but before the
-//! bookkeeping) resumes from the absent-ref answer on the next run. The
-//! receipt-versus-ref ordering is fixed by construction: the Control Plane's
-//! acknowledgements are asserted *before* the ref disappears, so the server
-//! ledger (GIT-100.6) always outlives the local ref it audits. Object
-//! pruning (`git prune --expire=now`) runs only when
-//! [`CandidateRetentionPolicy::prune_objects`] is enabled — the default is
-//! `false`, so the conservative default never removes a single object from
-//! the user's repository; deleting the ref already makes the objects
-//! collectable by Git's own expiry.
-//!
-//! Local-data boundary: the discard and collection scans read the binding's
-//! canonical local checkout to run Git, but no path enters any durable row,
-//! any wire frame, or any error this module returns.
-
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -92,53 +26,27 @@ use crate::candidate_registry::{
 use crate::daemon::DeviceDaemon;
 use crate::store::{DeviceStore, DeviceStoreError};
 
-/// Outbox kind of the retained-candidate uplink frame.
 const RETAINED_KIND: &str = "client.candidate.retained";
 
-/// Outbox kind of the apply-result uplink frame.
 const APPLY_RESULT_KIND: &str = "client.candidate.apply_result";
 
 const MAX_ID_BYTES: usize = 200;
 
-/// Smallest retention window a policy may configure; anything shorter would
-/// let a misconfiguration reclaim candidates the user never had a chance to
-/// see.
 const MIN_TERMINAL_RETENTION: Duration = Duration::from_mins(1);
 
-/// Largest active-candidate limit a policy may configure.
 const MAX_ACTIVE_LIMIT: u32 = 10_000;
 
-/// Whether a candidate's uplink is settled: every frame the device ever
-/// enqueued for it is acknowledged by the server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateUplinkState {
-    /// Every candidate frame of this candidate is acknowledged.
     Settled,
-    /// At least one frame is still awaiting the server acknowledgement.
     Unsettled,
-    /// No frame was ever enqueued — the candidate is pending attention: the
-    /// server does not know it exists, so it must never be reclaimed.
     NeverReported,
 }
 
-/// The retention policy for one device ([`CandidateRetentionPolicy::default`]
-/// is the conservative shipped configuration).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CandidateRetentionPolicy {
-    /// How many active (`retained` / `branch_created`) candidates are kept
-    /// per repository binding; the oldest beyond the limit are auto-
-    /// discarded by [`enforce_retention_policy`].
     pub max_active_per_binding: u32,
-    /// How long a terminal (`applied` / `discarded`) candidate's stable ref
-    /// is kept before [`collect_expired_candidates`] may reclaim it. The
-    /// window is measured from the first retention stamp, which is never
-    /// later than the terminal transition, so the effective retention is
-    /// always at least this long.
     pub terminal_retention: Duration,
-    /// Whether the collection may run `git prune --expire=now` after
-    /// deleting refs. The conservative default is `false`: the ref deletion
-    /// alone already makes objects collectable by Git's own expiry, and a
-    /// forced prune touches unreachable objects this feature does not own.
     pub prune_objects: bool,
 }
 
@@ -153,15 +61,6 @@ impl Default for CandidateRetentionPolicy {
 }
 
 impl CandidateRetentionPolicy {
-    /// Fails closed on a policy outside the safe bounds: the limit must keep
-    /// at least one active candidate, and the retention window must be at
-    /// least one minute (and encodable as a signed span).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CandidateRetentionErrorKind::InvalidInput`] for a zero
-    /// limit, a limit beyond [`MAX_ACTIVE_LIMIT`], or a retention window
-    /// below one minute or beyond the encodable range.
     pub fn ensure_valid(&self) -> Result<(), CandidateRetentionError> {
         if self.max_active_per_binding == 0 {
             return Err(CandidateRetentionError::invalid(
@@ -186,7 +85,6 @@ impl CandidateRetentionPolicy {
         Ok(())
     }
 
-    /// The validated retention window as a signed span.
     fn retention_span(&self) -> Result<time::Duration, CandidateRetentionError> {
         time::Duration::try_from(self.terminal_retention).map_err(|_| {
             CandidateRetentionError::invalid(
@@ -196,28 +94,15 @@ impl CandidateRetentionPolicy {
     }
 }
 
-/// Bounded retention/discard/GC failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateRetentionErrorKind {
-    /// A request or policy input violated the frozen shapes; nothing was
-    /// read or written.
     InvalidInput,
-    /// Fail closed: a diverging fact was met (foreign binding, drifted
-    /// created branch, an `applied` candidate, a branch checked out in a
-    /// worktree). Every conflict is stable: the same request retries to the
-    /// same verdict.
     Conflict,
-    /// The device holds no occupancy mirror, so the discard uplink cannot
-    /// stamp its lease (fail closed; nothing was mutated).
     NoOccupancyMirror,
-    /// Fail closed: the candidate is not retained on this device, or the
-    /// binding maps no local checkout.
     CandidateMissing,
-    /// The durable store or the Git execution failed.
     Store,
 }
 
-/// Retention failure with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRetentionError {
     kind: CandidateRetentionErrorKind,
@@ -253,7 +138,6 @@ impl CandidateRetentionError {
         }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> CandidateRetentionErrorKind {
         self.kind
@@ -326,92 +210,41 @@ impl From<crate::candidate_branch::CandidateBranchError> for CandidateRetentionE
     }
 }
 
-/// One discard command: retire the candidate named by `candidate_ref`
-/// (the stable `refs/winwincode/candidates/<commit>` reference) on the
-/// binding it was retained against, delete its created local branch if one
-/// exists, and report the discard upstream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateDiscardRequest {
-    /// Repository binding the candidate was retained against.
     pub repository_binding_id: String,
-    /// Stable candidate reference
-    /// (`refs/winwincode/candidates/<candidate commit>`).
     pub candidate_ref: String,
-    /// RFC 3339 stamp of the request; the durable discard record keeps the
-    /// first one it ever saw.
     pub requested_at: String,
 }
 
-/// The stable facts of one discard.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateDiscardFacts {
-    /// Candidate identity (the frozen commit).
     pub candidate_id: String,
-    /// Repository binding the candidate was retained against.
     pub repository_binding_id: String,
-    /// Stable candidate reference.
     pub candidate_ref: String,
-    /// Name of the created `winwincode/` branch that was (or had already
-    /// been) deleted, when the candidate ever grew one.
     pub deleted_branch: Option<String>,
 }
 
-/// Whether this call executed the discard or met it as already done.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CandidateDiscardOutcome {
-    /// This call retired the candidate.
     Discarded(CandidateDiscardFacts),
-    /// The candidate was already discarded (an idempotent replay); the
-    /// original facts are returned and the identical receipt is re-reported
-    /// under the identical idempotency key.
     Duplicate(CandidateDiscardFacts),
 }
 
-/// The result of one full discard vertical.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateDiscardReport {
-    /// Whether this call discarded the candidate or met it as a duplicate.
     pub outcome: CandidateDiscardOutcome,
-    /// Outbox sequence of the `client.candidate.apply_result` frame.
     pub frame_sequence: u64,
 }
 
-/// The durable device-local record of one discard — the facts the
-/// `client.candidate.apply_result` receipt is derived from, so every report
-/// of the same discard encodes identical receipt fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateDiscardRecord {
-    /// Candidate identity the discard retired.
     pub candidate_id: String,
-    /// Repository binding the candidate was retained against.
     pub repository_binding_id: String,
-    /// Wire `targetBranch` of the receipt: the deleted branch name, or the
-    /// candidate's own stable local ref when no branch ever existed.
     pub target_branch: String,
-    /// RFC 3339 stamp of the first discard; never rewritten.
     pub created_at: String,
 }
 
-/// Executes one candidate discard (the full vertical).
-///
-/// See the module documentation for the whole sequence and its guarantees.
-/// Idempotent: a repeated request returns the original discard as a
-/// [`CandidateDiscardOutcome::Duplicate`] and re-reports the identical
-/// receipt under the identical idempotency key. A retired (`applied`)
-/// candidate is a delivered fact and refuses to be discarded; every failure
-/// leaves the repository, the registry row, and the durable records in
-/// their prior state.
-///
-/// # Errors
-///
-/// Returns [`CandidateRetentionErrorKind::InvalidInput`] for a malformed
-/// request, [`CandidateRetentionErrorKind::CandidateMissing`] for an
-/// unknown candidate or an absent checkout that still holds a created
-/// branch, [`CandidateRetentionErrorKind::Conflict`] for a foreign binding,
-/// an applied candidate, or a created branch that no longer holds the
-/// candidate (or is checked out in a worktree),
-/// [`CandidateRetentionErrorKind::NoOccupancyMirror`] when the device holds
-/// no occupancy mirror, and a store failure for durable or Git failures.
 pub fn discard_candidate(
     daemon: &mut DeviceDaemon,
     request: &CandidateDiscardRequest,
@@ -436,8 +269,6 @@ pub fn discard_candidate(
              fact and cannot be discarded"
         )));
     }
-    // The uplink stamp exists before anything is mutated: a discard that
-    // could not be reported is not executed.
     if daemon.occupancy_mirror().is_none() {
         return Err(CandidateRetentionError {
             kind: CandidateRetentionErrorKind::NoOccupancyMirror,
@@ -447,9 +278,6 @@ pub fn discard_candidate(
         });
     }
 
-    // The created branch (if any) is deleted while it still holds exactly
-    // the candidate commit; a missing checkout with a live branch record
-    // refuses because the branch could not be verified.
     let branch = created_branch_record(daemon.store_mut(), &candidate_id)?;
     if let Some(branch) = &branch {
         if branch.repository_binding_id != request.repository_binding_id {
@@ -465,9 +293,6 @@ pub fn discard_candidate(
     }
     let deleted_branch = branch.map(|branch| branch.branch_name);
 
-    // Durable discard record first: the receipt facts exist before the
-    // lifecycle moves, so a crash anywhere leaves a resumable state whose
-    // eventual receipt is byte-identical.
     let target_branch = deleted_branch
         .clone()
         .unwrap_or_else(|| record.local_git_ref.clone());
@@ -502,7 +327,6 @@ pub fn discard_candidate(
     })
 }
 
-/// Builds the deterministic canonical `lar_` receipt id for a discard event.
 fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     let hex: String = candidate_id
         .chars()
@@ -513,14 +337,6 @@ fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     format!("lar_{hex}{tag}")
 }
 
-/// Enqueues the durable `client.candidate.apply_result` frame for a discarded
-/// candidate.
-///
-/// # Errors
-///
-/// Returns [`CandidateRetentionErrorKind::NoOccupancyMirror`] when no
-/// occupancy mirror is held, or a store error when appending the outbox frame
-/// fails.
 pub fn enqueue_candidate_discarded(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -540,9 +356,6 @@ pub fn enqueue_candidate_discarded(
         repository_binding_id: record.repository_binding_id.clone(),
         target_branch: durable.target_branch.clone(),
         expected_head: record.candidate_commit.clone(),
-        // The wire vocabulary has no discard strategy; the receipt is tied
-        // to the branch-creation delivery the discard undoes (or would have
-        // been served by), so `create_branch` is the stable spelling.
         strategy: ApplyStrategy::CreateBranch,
         result: ApplyResult::Discarded,
         resulting_commit: None,
@@ -571,12 +384,6 @@ pub fn enqueue_candidate_discarded(
         })
 }
 
-/// Loads the durable discard record of one candidate, if any.
-///
-/// # Errors
-///
-/// Returns a store failure when the read fails, the store is closed, or the
-/// stored row disagrees with its shape.
 pub fn candidate_discard_record(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -602,8 +409,6 @@ pub fn candidate_discard_record(
         .map_err(CandidateRetentionError::from)
 }
 
-/// Persists the discard record; the first discard's stamp wins, and a stored
-/// record for another binding or target fails closed.
 fn write_discard_record(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -642,8 +447,6 @@ fn write_discard_record(
     Ok(stored)
 }
 
-/// Creates the `candidate_discards` table on first use; the table is
-/// additive and idempotent, so no store schema migration is involved.
 fn ensure_discard_schema(store: &mut DeviceStore) -> Result<(), CandidateRetentionError> {
     store
         .connection_mut()?
@@ -659,78 +462,37 @@ fn ensure_discard_schema(store: &mut DeviceStore) -> Result<(), CandidateRetenti
     Ok(())
 }
 
-/// Why one terminal candidate was not collected in this run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GcDeferralReason {
-    /// The candidate's uplink is not fully acknowledged (or was never
-    /// reported at all): pending attention, never reclaimed.
     PendingUplinkAck,
-    /// The terminal retention window has not elapsed yet.
     RetentionPending,
-    /// The stable ref no longer resolves to the recorded candidate commit.
     RefDrifted,
-    /// The binding currently maps no local checkout, so the ref could not
-    /// be verified.
     CheckoutUnavailable,
 }
 
-/// One reclaimed candidate ref.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectedCandidate {
-    /// Candidate identity (the frozen commit).
     pub candidate_id: String,
-    /// Repository binding whose checkout held the ref.
     pub repository_binding_id: String,
-    /// The stable candidate reference that was reclaimed.
     pub candidate_ref: String,
-    /// Whether the ref was still present in this run (a resumed run after a
-    /// crash between deletion and bookkeeping sees `false`).
     pub ref_was_present: bool,
 }
 
-/// One terminal candidate this run deliberately left alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeferredCandidate {
-    /// Candidate identity (the frozen commit).
     pub candidate_id: String,
-    /// Why the candidate was not collected.
     pub reason: GcDeferralReason,
 }
 
-/// The result of one collection run.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GcReport {
-    /// Terminal candidates examined (already-collected rows excluded).
     pub examined: usize,
-    /// Terminal candidates found already durably collected by an earlier
-    /// run.
     pub already_collected: usize,
-    /// Candidates whose stable ref was reclaimed in this run.
     pub collected: Vec<CollectedCandidate>,
-    /// Candidates deliberately left alone, with the reason.
     pub deferred: Vec<DeferredCandidate>,
-    /// Bindings whose checkout was pruned (only when the policy enables
-    /// pruning and a ref was actually reclaimed there).
     pub pruned_bindings: Vec<String>,
 }
 
-/// Reclaims the stable refs of expired terminal candidates.
-///
-/// Only registry rows in the terminal `applied` / `discarded` states are
-/// examined, only refs this device created are ever deleted, and every
-/// candidate must pass all three gates before its ref disappears: the
-/// retention window has elapsed, the uplink is fully acknowledged (pending
-/// attention is never reclaimed), and the ref still resolves exactly to the
-/// recorded commit. Any Git execution failure aborts the whole run with an
-/// error instead of guessing — the run is idempotent, so the caller simply
-/// retries.
-///
-/// # Errors
-///
-/// Returns [`CandidateRetentionErrorKind::InvalidInput`] for an invalid
-/// policy and a store failure for durable or Git execution failures; in
-/// every error case the already-collected refs stay collected and the rest
-/// stays untouched.
 pub fn collect_expired_candidates(
     store: &mut DeviceStore,
     policy: &CandidateRetentionPolicy,
@@ -777,8 +539,6 @@ pub fn collect_expired_candidates(
             });
             continue;
         }
-        // The ref must be exactly the identity the registry recorded before
-        // this module may delete it.
         let canonical_ref = format!("{CANDIDATE_REF_PREFIX}{}", record.candidate_id);
         if record.local_git_ref != canonical_ref || record.candidate_ref != canonical_ref {
             return Err(CandidateRetentionError::store(format!(
@@ -822,8 +582,6 @@ pub fn collect_expired_candidates(
     Ok(report)
 }
 
-/// The wire/storage spelling of one plan 15 lifecycle state, matching the
-/// registry's vocabulary; an unknown value fails closed.
 fn parse_local_state_wire(value: &str) -> rusqlite::Result<LocalCandidateState> {
     match value {
         "retained" => Ok(LocalCandidateState::Retained),
@@ -839,8 +597,6 @@ fn parse_local_state_wire(value: &str) -> rusqlite::Result<LocalCandidateState> 
     }
 }
 
-/// Loads every terminal registry row (`applied` / `discarded`) in candidate
-/// id order — the collection scan's input.
 fn terminal_candidates(
     store: &DeviceStore,
 ) -> Result<Vec<CandidateLocalRefRecord>, CandidateRetentionError> {
@@ -868,8 +624,6 @@ fn terminal_candidates(
     Ok(records)
 }
 
-/// Creates the `candidate_gc_collections` table on first use and returns the
-/// ids already durably collected by an earlier run.
 fn ensure_gc_schema(
     store: &mut DeviceStore,
 ) -> Result<std::collections::BTreeSet<String>, CandidateRetentionError> {
@@ -898,7 +652,6 @@ fn ensure_gc_schema(
     Ok(ids)
 }
 
-/// Durably records one collected candidate; the first collection stamp wins.
 fn record_gc_collection(
     store: &mut DeviceStore,
     record: &CandidateLocalRefRecord,
@@ -921,10 +674,6 @@ fn record_gc_collection(
     Ok(())
 }
 
-/// Classifies one candidate's uplink against the durable outbox: a frame is
-/// settled exactly when the server acknowledged it (`published = 1`, the
-/// durable mark the acknowledgement state machine writes). A candidate with
-/// no frames at all is `NeverReported`.
 fn candidate_uplink_state(
     store: &DeviceStore,
     candidate_ref: &str,
@@ -964,9 +713,6 @@ fn candidate_uplink_state(
     }
 }
 
-/// Extracts the receipt's candidate reference from one stored outbox frame;
-/// `None` when the frame belongs to another candidate. A frame whose kind
-/// and payload disagree is corrupt state and fails closed.
 fn frame_candidate_ref(
     kind: &str,
     payload: &[u8],
@@ -1001,22 +747,6 @@ fn frame_candidate_ref(
     }
 }
 
-/// The per-binding retention sweep: discards the oldest active candidates
-/// beyond the policy limit.
-///
-/// Only `retained` / `branch_created` rows count as active (`failed` rows
-/// belong to the apply/settlement lane and are never counted nor touched);
-/// ordering is by first retention stamp with the candidate id as the
-/// deterministic tie-break, and a stamp that does not parse fails closed.
-/// Each excess candidate is discarded through [`discard_candidate`], so the
-/// sweep is exactly as fail-closed and idempotent as a user discard: the
-/// first failure stops the sweep (everything before it stays durably done)
-/// and a re-run resumes where it stopped.
-///
-/// # Errors
-///
-/// Returns the failure of an invalid policy, an unparsable durable stamp,
-/// or the first discard that could not complete.
 pub fn enforce_retention_policy(
     daemon: &mut DeviceDaemon,
     repository_binding_id: &str,
@@ -1060,24 +790,15 @@ pub fn enforce_retention_policy(
     Ok(report)
 }
 
-/// The result of one retention-policy sweep.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetentionSweepReport {
-    /// Repository binding the policy was enforced for.
     pub repository_binding_id: String,
-    /// The configured active-candidate limit.
     pub limit: u32,
-    /// Active candidates found before the sweep.
     pub active_before: usize,
-    /// Facts of every candidate the sweep discarded.
     pub discarded: Vec<CandidateDiscardFacts>,
-    /// Active candidates left after the sweep (equals `limit` only when the
-    /// sweep completed; a failed sweep stops early).
     pub active_remaining: usize,
 }
 
-/// Lists one binding's active (`retained` / `branch_created`) registry rows
-/// oldest-first, failing closed on an unparsable stamp.
 fn active_candidates(
     store: &DeviceStore,
     repository_binding_id: &str,
@@ -1120,9 +841,6 @@ fn row_to_candidate_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Candidat
     })
 }
 
-/// Resolves one binding's canonical local checkout; a binding that maps no
-/// existing checkout is the candidate-missing verdict, exactly as the
-/// registry's reconciliation treats it.
 fn bound_repository_path(
     store: &mut DeviceStore,
     repository_binding_id: &str,
@@ -1140,12 +858,6 @@ fn bound_repository_path(
     Ok(mapping.canonical_path)
 }
 
-/// Deletes one candidate's created branch when — and only when — it still
-/// resolves exactly to the frozen candidate commit: an already-deleted
-/// branch is the idempotent success answer, a drifted branch and a branch
-/// checked out in any worktree fail closed with a stable conflict, and any
-/// other Git failure is a store failure. The deletion is confirmed by an
-/// exact re-read.
 fn delete_created_branch(
     repository_path: &str,
     branch: &CreatedBranchRecord,
@@ -1171,8 +883,6 @@ fn delete_created_branch(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stderr = stderr.trim();
-                // Git spells the checked-out refusal either way depending on
-                // the version; both mean a worktree holds the branch.
                 if stderr.contains("checked out") || stderr.contains("used by worktree") {
                     return Err(CandidateRetentionError::conflict(format!(
                         "the branch {} is checked out in a worktree; discard refuses \
@@ -1200,10 +910,6 @@ fn delete_created_branch(
     }
 }
 
-/// Defense-in-depth re-check of a durable created-branch name before any
-/// deletion: the name must still be inside the `winwincode/` namespace with
-/// a canonical shape (the branch engine validated it at creation; this
-/// re-check keeps a corrupt durable row from ever naming a user branch).
 fn is_engine_branch_name(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix(WINWINCODE_BRANCH_PREFIX) else {
         return false;
@@ -1224,9 +930,6 @@ fn is_engine_branch_name(name: &str) -> bool {
         })
 }
 
-/// Deletes one stable candidate ref with `git update-ref -d` and confirms
-/// the deletion by an exact re-read. The ref name is validated as the
-/// canonical candidate ref of the record before this call.
 fn delete_candidate_ref(
     repository_path: &str,
     ref_name: &str,
@@ -1252,8 +955,6 @@ fn delete_candidate_ref(
     Ok(())
 }
 
-/// Runs `git prune --expire=now` in one binding's checkout; only reachable
-/// from the explicit `prune_objects` policy switch.
 fn prune_binding_objects(
     store: &mut DeviceStore,
     repository_binding_id: &str,
@@ -1274,9 +975,6 @@ fn prune_binding_objects(
     Ok(())
 }
 
-/// Runs `git rev-parse --verify --quiet` for one ref: a status of 1 is the
-/// missing-ref answer, success must yield exactly one identity, anything
-/// else is an error.
 fn read_git_ref(
     repository_path: &str,
     ref_name: &str,
@@ -1321,7 +1019,6 @@ fn git_command(repository_path: &str) -> Command {
     command
 }
 
-/// Validates one discard request before anything is read.
 fn validate_discard_request(
     request: &CandidateDiscardRequest,
 ) -> Result<(), CandidateRetentionError> {
@@ -1330,8 +1027,6 @@ fn validate_discard_request(
     validate_candidate_ref(&request.candidate_ref)
 }
 
-/// Extracts the candidate id (the frozen commit) from a validated candidate
-/// reference.
 fn candidate_id_of(candidate_ref: &str) -> String {
     candidate_ref
         .strip_prefix(CANDIDATE_REF_PREFIX)
@@ -1339,8 +1034,6 @@ fn candidate_id_of(candidate_ref: &str) -> String {
         .to_owned()
 }
 
-/// Validates the canonical stable candidate reference:
-/// `refs/winwincode/candidates/<full lowercase git commit id>`.
 fn validate_candidate_ref(candidate_ref: &str) -> Result<(), CandidateRetentionError> {
     let Some(suffix) = candidate_ref.strip_prefix(CANDIDATE_REF_PREFIX) else {
         return Err(CandidateRetentionError::invalid(format!(
@@ -1374,7 +1067,6 @@ fn require_non_empty(value: &str, label: &str) -> Result<(), CandidateRetentionE
     Ok(())
 }
 
-/// Parses one durable RFC 3339 stamp, failing closed on a corrupted value.
 fn parse_durable_stamp(
     value: &str,
     label: &str,

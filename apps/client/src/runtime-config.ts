@@ -8,7 +8,6 @@ export interface WinWinCodeClientRuntimeConfig {
   readonly serverUrl: string
 }
 
-/** Read deployment configuration without baking an environment address into browser assets. */
 export function readWinWinCodeClientRuntimeConfig(
   source: unknown = Reflect.get(globalThis, RUNTIME_CONFIG_KEY),
 ): WinWinCodeClientRuntimeConfig {

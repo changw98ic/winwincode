@@ -672,8 +672,6 @@ fn second_replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     successor
 }
 
-// Its only caller is the `test-support` parallel-cleaning test below; the
-// default feature set would otherwise flag this helper as dead code.
 #[cfg(feature = "test-support")]
 fn second_active_job() -> ActiveJob {
     let mut active = active_job();
@@ -734,7 +732,6 @@ fn crash_recovery_keeps_original_checkout_and_freezes_one_candidate() {
     let original_source_commit = git_output(&fixture.repository(), &["rev-parse", "HEAD"]);
     std::fs::write(checkout.join("fixture.txt"), b"candidate\n").expect("write candidate change");
 
-    // Dropping a non-terminal runtime preserves the checkout for exact restart.
     drop(first);
     std::fs::write(fixture.repository().join("upstream.txt"), b"new source\n")
         .expect("advance source bytes");

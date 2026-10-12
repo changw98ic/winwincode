@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Model exchanges execute on the Device, with local replay records before network effects.
-
 #[cfg(test)]
 #[path = "device_model_recovery_tests.rs"]
 mod recovery_tests;
@@ -376,12 +374,6 @@ fn model_auxiliary<T>(result: Result<T, DeviceProviderError>, stage: &'static st
 }
 
 impl DeviceProviderStore {
-    /// Executes a model request using this Device's configuration and secret.
-    /// Exact terminal responses replay locally. A durable retry decision resumes
-    /// a new physical attempt; an unfinished unknown invocation fails explicitly.
-    ///
-    /// # Errors
-    /// Rejects conflicting exchange identities and unavailable durable storage.
     pub fn execute_model(
         &self,
         open: &ModelOpenMessage,
@@ -389,11 +381,6 @@ impl DeviceProviderStore {
         self.execute_model_authorized(open, || true)
     }
 
-    /// Restores exact previous exchanges, but gates every new Provider invocation
-    /// on the Worker's current lease deadline, including time spent preparing input.
-    ///
-    /// # Errors
-    /// Rejects conflicting exchange identities and unavailable durable storage.
     pub fn execute_model_authorized(
         &self,
         open: &ModelOpenMessage,
@@ -410,12 +397,6 @@ impl DeviceProviderStore {
         })
     }
 
-    /// Recovers transient failures within this logical model step. Each actual
-    /// invocation has a separate durable receipt; terminal exchange replay never
-    /// opens a new network request. Admission is released before every wait.
-    ///
-    /// # Errors
-    /// Rejects changed exchange identities or unavailable durable storage.
     pub fn execute_model_recovering_authorized(
         &self,
         open: &ModelOpenMessage,
@@ -430,9 +411,6 @@ impl DeviceProviderStore {
 
     /// Executes one physical attempt and yields a durable retry to the Worker.
     /// The Worker closes this store and reopens the exact exchange after its wake time.
-    ///
-    /// # Errors
-    /// Rejects changed exchange identities or unavailable durable storage.
     pub fn execute_model_recovering_step_authorized(
         &self,
         open: &ModelOpenMessage,
@@ -456,7 +434,6 @@ impl DeviceProviderStore {
     }
 
     /// Acquires a real slot while checking cancellation and current execution authority.
-    /// # Errors
     /// Stops when authority ends or durable cancellation/storage rejects an attempt.
     pub fn wait_model_attempt_permit(
         &self,
@@ -480,11 +457,6 @@ impl DeviceProviderStore {
         }
     }
 
-    /// Retains a bounded terminal failure when Provider admission storage is unavailable.
-    /// This never invokes the Provider; exact replays recover the same failure.
-    ///
-    /// # Errors
-    /// Rejects conflicting exchange identities and unavailable durable storage.
     pub fn reject_model_start(
         &self,
         open: &ModelOpenMessage,
@@ -494,10 +466,6 @@ impl DeviceProviderStore {
         })
     }
 
-    /// Checks exact durable exchange identity without creating a first-start record.
-    ///
-    /// # Errors
-    /// Rejects a reused identity with different content or unavailable storage.
     pub fn model_start_recorded(
         &self,
         open: &ModelOpenMessage,
@@ -592,8 +560,6 @@ impl DeviceProviderStore {
         }
         if inserted == 0 {
             if active.contains_key(&key) {
-                // A concurrent replay must never overwrite the active call or
-                // detach its cancellation authority.
                 return Err(DeviceProviderError::StateInvalid);
             }
             if self.model_retry_state(open)?.is_none() {
@@ -642,7 +608,6 @@ impl DeviceProviderStore {
             "DELETE FROM model_retry_state WHERE exchange_id=?1",
             [&open.model_exchange_id.0],
         )?;
-        // Paid receipts survive cancellation even when runtime replay is fenced.
         self.connection.execute("UPDATE exchanges SET accounting_chunks=?1 WHERE exchange_id=?2 AND accounting_chunks IS NULL",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
         self.persist_model_response(&open.model_exchange_id.0, &chunks)?;
         terminal.commit()?;
@@ -758,9 +723,6 @@ impl DeviceProviderStore {
             return Err(DeviceModelFailure::Unavailable);
         }
         if let Some(prepared) = self.prepared_model_retry_payload(open)? {
-            // A deferred retry resumes the exact adapter input retained before
-            // its first request. Context preparation may itself perform paid
-            // work, so it must not run again after the durable retry decision.
             payload = prepared;
         } else if request.get("winwincodeJevContext").is_some()
             || request.get("winwincodeJevTask").is_some()
@@ -1238,8 +1200,6 @@ impl DeviceProviderStore {
         Ok(())
     }
 
-    // Retain the exact adapter input before any network side effect. Prepared does
-    // not mean sent or accepted; terminal chunks separately describe the outcome.
     fn retain_prepared_payload(
         &self,
         open: &ModelOpenMessage,
@@ -1283,10 +1243,6 @@ impl DeviceProviderStore {
         Ok(Some(payload))
     }
 
-    /// Durably fences later opens and replay after Worker cancellation.
-    ///
-    /// # Errors
-    /// Returns a bounded storage failure.
     pub fn cancel_model(&self, exchange_id: &str) -> Result<(), DeviceProviderError> {
         self.connection.execute("INSERT INTO exchanges (exchange_id, digest, cancelled) VALUES (?1, '', 1) ON CONFLICT(exchange_id) DO UPDATE SET cancelled=1", [exchange_id])?;
         let key = (
@@ -1344,10 +1300,6 @@ impl DeviceProviderStore {
         self.active_cancellation(exchange)
     }
 
-    /// Checks the durable cancellation fence.
-    ///
-    /// # Errors
-    /// Returns a bounded storage failure.
     pub fn model_cancelled(&self, exchange_id: &str) -> Result<bool, DeviceProviderError> {
         Ok(self
             .connection
@@ -1360,13 +1312,6 @@ impl DeviceProviderStore {
             .unwrap_or(false))
     }
 
-    /// Durably stores Provider response chunks for one exchange identity.
-    ///
-    /// Used by recovery paths and tests that must reconstruct the exact
-    /// Device-side replay ledger without re-invoking a Provider adapter.
-    ///
-    /// # Errors
-    /// Rejects conflicting exchange identities and unavailable storage.
     pub fn retain_stored_model_exchange_chunks(
         &self,
         open: &ModelOpenMessage,
@@ -1503,10 +1448,6 @@ impl DeviceProviderStore {
         }
     }
 
-    /// Lists exchange identities that currently store Provider response chunks.
-    ///
-    /// # Errors
-    /// Rejects unavailable durable storage.
     pub fn list_stored_model_exchanges(&self) -> Result<Vec<String>, DeviceProviderError> {
         let mut statement = self.connection.prepare(
             "SELECT exchange_id FROM exchanges WHERE cancelled = 0 AND chunks IS NOT NULL AND chunks != '' ORDER BY exchange_id",
@@ -1519,21 +1460,12 @@ impl DeviceProviderStore {
         Ok(exchanges)
     }
 
-    /// Changes committed by another Device connection since the previous poll.
-    /// The Worker retains one connection so an empty poll reads no response data.
-    ///
-    /// # Errors
-    /// Rejects unavailable durable storage or unreadable query results.
     pub fn model_data_version(&self) -> Result<i64, DeviceProviderError> {
         Ok(self
             .connection
             .query_row("PRAGMA data_version", [], |row| row.get(0))?)
     }
 
-    /// Lists only stored responses owned by the specified Worker identity.
-    ///
-    /// # Errors
-    /// Rejects unavailable durable storage or unreadable query results.
     pub fn model_exchanges_for_owner(
         &self,
         worker_session_id: Option<&str>,
@@ -1555,18 +1487,11 @@ impl DeviceProviderStore {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Reads a local replay from a requested sequence, without making a network request.
-    ///
-    /// # Errors
-    /// Rejects invalid persisted data.
     pub fn replay_model(
         &self,
         exchange_id: &str,
         from: i64,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
-        // A WAL writer may revoke a seal between the metadata and suffix
-        // queries. Keep both in one read snapshot. A savepoint also preserves
-        // an existing caller transaction instead of committing its work.
         self.connection
             .execute_batch("SAVEPOINT model_response_read")?;
         let result = self.replay_model_in_read_snapshot(exchange_id, from);
@@ -1712,7 +1637,6 @@ fn provider_error_message(kind: crate::HttpsSseProviderErrorKind) -> &'static st
     }
 }
 
-/// A stable terminal failure that cannot contain Provider diagnostics or credentials.
 pub fn model_failure(open: &ModelOpenMessage, message: &'static str) -> ModelChunkMessage {
     let mut chunk = model_chunk(open, 1);
     chunk.error = Some(ExecutionPortError {
@@ -1750,10 +1674,6 @@ fn model_chunk(open: &ModelOpenMessage, sequence: i64) -> ModelChunkMessage {
     }
 }
 
-/// Keeps the ordered public text projection; provider events, reasoning, and tool payloads stay local.
-///
-/// # Errors
-/// Rejects malformed stored payloads and mismatched digests.
 pub fn public_model_chunk(
     chunk: &ModelChunkMessage,
 ) -> Result<ModelChunkMessage, DeviceProviderError> {
@@ -2001,15 +1921,10 @@ mod tests {
             })
             .unwrap();
 
-        // Pause the actual accounting SELECT while its SQLite transaction is open.
-        // Only this fixture connection replaces JSON extraction; returned values are exact.
         let (scanning, scanned) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let released = Mutex::new(released);
         let paused = AtomicBool::new(false);
-        // Recovery probes run before the financial snapshot. Observe BEGIN on
-        // this connection so the fixture pauses the subsequent transactional
-        // receipt scan, preserving the original stale-WAL-snapshot regression.
         let transaction_started = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&transaction_started);
         accounting
@@ -2241,7 +2156,6 @@ mod tests {
         let conflict = store.execute_model_with(&changed, &|| true, invoke);
         assert!(conflict.is_err());
         assert_eq!(calls.get(), 1);
-        // Expiry after durable admission still prevents the first network invocation.
         let mut delayed = open.clone();
         delayed.model_exchange_id.0.push('Y');
         let checks = Cell::new(0);
@@ -2575,8 +2489,6 @@ fn append_network_failure(
         }),
     )?;
     if let Some(error) = chunk.error.as_mut() {
-        // Complete facts are already durable in model_attempt_diagnostics.
-        // The bounded wire message carries a compact view, never partial JSON.
         let mut wire = failure;
         let Ok(mut facts) = serde_json::to_string(&wire) else {
             return Ok(());

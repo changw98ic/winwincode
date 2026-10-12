@@ -33,9 +33,7 @@ const SCHEMA_VERSION = 'winwincode/v1' as const
 const LIST_PAGE_SIZE = 200
 const MAX_PAGES = 10
 
-/** A health fact older than this is presented as stale instead of current. */
 export const USAGE_HEALTH_STALE_AFTER_MILLIS = 5 * 60 * 1000
-/** Bounded number of ProductSessions whose runtime usage one read covers. */
 export const USAGE_HEALTH_SESSION_LIMIT = 12
 
 const CANONICAL_TOKEN_METRICS: readonly string[] = Object.freeze([
@@ -59,10 +57,6 @@ export type UsageHealthStatus =
 
 export type UsageHealthDimension = 'delivery' | 'work-run' | 'role' | 'model' | 'provider'
 
-/**
- * Where a token total comes from. `unattributed` rows must present routing facts
- * only; the runtime publishes no per-Provider or per-Model token attribution.
- */
 export type UsageAttribution = 'session' | 'unattributed'
 
 export interface UsageMetricValue {
@@ -85,9 +79,7 @@ export interface UsageAggregate {
   readonly metrics: readonly UsageMetricValue[]
   readonly unknownMetrics: readonly string[]
   readonly tokensKnown: boolean
-  /** Role rows share one WorkRun total across every Role that ran inside it. */
   readonly overlaps: boolean
-  /** The runtime projection publishes no elapsed time per WorkRun or Role. */
   readonly durationMillis: null
   readonly durationKnown: false
   readonly asOf: Instant | null
@@ -399,7 +391,6 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
-/** Usage totals are published name-sorted; the summary keeps that canonical order. */
 function metricsOf(session: RuntimeSessionProjection): readonly UsageMetricValue[] {
   return Object.freeze((session.usage?.totals ?? []).map(metric => Object.freeze({
     name: metric.name,
@@ -736,8 +727,6 @@ function buildState(input: {
     })
     .sort((left, right) => left.key.localeCompare(right.key)))
 
-  // Capacity derived from a Worker projection that could not be read must not be
-  // reported as a shortage, so an unavailable Worker read yields no capacity claim.
   const enabledCapacity = input.workers
     .filter(worker => worker.state === 'enabled')
     .reduce((total, worker) => total + worker.capacity, 0)
@@ -829,7 +818,6 @@ function buildState(input: {
   })
 }
 
-/** Read-only Usage, Provider routing, Credential and Worker health summary for one repository Scope. */
 export function createUsageHealthViewModel(
   options: UsageHealthViewModelOptions,
 ): UsageHealthViewModel {
@@ -979,11 +967,6 @@ export function createUsageHealthViewModel(
     }))
   }
 
-  /**
-   * One projection that cannot be read marks only its own section. A health
-   * summary must stay readable when a single Server projection is unavailable,
-   * and it must name that fact instead of showing an empty list.
-   */
   async function settle<T>(
     source: UsageHealthSource,
     read: () => Promise<T>,
@@ -1007,7 +990,6 @@ export function createUsageHealthViewModel(
     }
   }
 
-  /** Resolves to the runtime usage observations, or the code of the read that failed. */
   async function usageProjections(
     selected: readonly ProductSessionSummary[],
     signal: AbortSignal,
@@ -1079,8 +1061,6 @@ export function createUsageHealthViewModel(
       : { routes: [], isDefault: () => false }
     const concurrencyLimit = settings.state === 'ok' ? settings.value : null
 
-    // The runtime usage read belongs to the same source as the session list, so a
-    // failure there marks the usage sections unavailable instead of failing the read.
     const scopedSessions = sessionItems
       .filter(sessionProjection => sessionProjection.projectId === options.scope.projectId
         && sessionProjection.repositoryId === options.scope.repositoryId)
@@ -1144,8 +1124,6 @@ export function createUsageHealthViewModel(
         })
         return
       }
-      // Previously published facts stay on screen next to the failure so an
-      // operator always knows which numbers are the last ones the Server gave.
       patch({ status: statusForError(normalized), error: normalized })
     } finally {
       controllers.delete(active)

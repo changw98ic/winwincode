@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url'
 
 import { validateRuntime } from './check-runtime.mjs'
 
-// Data digest from the Cargo.lock-verified deno_core_icudata 0.77.0 archive.
 const ICU_DATA_SHA256 = '1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612'
 
 export function runNinja(arguments_, expectedDataSha256 = ICU_DATA_SHA256) {

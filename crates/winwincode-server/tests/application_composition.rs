@@ -1374,6 +1374,7 @@ mod remote_worker_upload;
 #[cfg(feature = "local-worker")]
 #[allow(clippy::too_many_lines, clippy::large_futures)]
 mod heartbeat_gap {
+
     // SPDX-License-Identifier: Apache-2.0
 
     use std::{
@@ -1577,8 +1578,6 @@ mod heartbeat_gap {
             state.lock().unwrap().successful_heartbeat_sequences,
             vec![2, 1, 2]
         );
-        // The next real heartbeat carries the confirmations for the recovered
-        // frames. Its own new acknowledgement is the only remaining downlink.
         worker.heartbeat(now.clone()).await.unwrap();
         assert_eq!(
             state.lock().unwrap().successful_heartbeat_sequences,

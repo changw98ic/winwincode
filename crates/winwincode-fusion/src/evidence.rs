@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Evidence provenance gates for model-led Fusion investigations.
-//!
-//! Model prose is retained as a hypothesis, while a source receipt records a
-//! machine-locatable observation and a claim verification records an
-//! independent conclusion about one proposition, scope and version. The
-//! ledger deliberately keeps those three layers separate.
-
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The machine source classes accepted by the provenance contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceReceiptKind {
     Command,
@@ -20,7 +12,6 @@ pub enum SourceReceiptKind {
     IndependentReview,
 }
 
-/// The direction of an independently checked claim verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerificationConclusion {
     Support,
@@ -28,15 +19,12 @@ pub enum VerificationConclusion {
 }
 
 impl VerificationConclusion {
-    /// Compatibility spelling used by callers that speak in claim-position terms.
     #[allow(non_upper_case_globals)]
     pub const Supports: Self = Self::Support;
-    /// Compatibility spelling for a checked counter conclusion.
     #[allow(non_upper_case_globals)]
     pub const Refuted: Self = Self::Counter;
 }
 
-/// A model-authored assertion kept separate from machine-produced evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelClaim {
     pub claim_id: String,
@@ -47,7 +35,6 @@ pub struct ModelClaim {
     pub source_receipt_ids: Vec<String>,
 }
 
-/// The exact target checked by a claim verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimTarget {
     pub proposition: String,
@@ -55,7 +42,6 @@ pub struct ClaimTarget {
     pub version: String,
 }
 
-/// A machine source receipt. It proves a source exists, not a proposition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceReceipt {
     pub id: String,
@@ -66,7 +52,6 @@ pub struct SourceReceipt {
     pub content_digest: String,
 }
 
-/// An independent verification result for one exact claim target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimVerification {
     pub id: String,
@@ -78,7 +63,6 @@ pub struct ClaimVerification {
     pub verifier: String,
 }
 
-/// The result of checking a model claim against registered source receipts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelClaimAdmission {
     pub claim_id: String,
@@ -89,7 +73,6 @@ pub struct ModelClaimAdmission {
     pub validated_verification_ids: Vec<String>,
 }
 
-/// Errors are explicit so an invalid or unbound receipt can never become evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvidenceError {
     InvalidReceipt(String),
@@ -115,7 +98,6 @@ impl std::fmt::Display for EvidenceError {
 
 impl std::error::Error for EvidenceError {}
 
-/// A target can be supplied as a model claim or as a plain verification target.
 pub trait ClaimTargetLike {
     fn target(&self) -> ClaimTarget;
 }
@@ -136,7 +118,6 @@ impl ClaimTargetLike for ClaimTarget {
     }
 }
 
-/// Source receipts, independent verifications and increment accounting.
 #[derive(Debug, Default)]
 pub struct EvidenceLedger {
     receipts: BTreeMap<String, SourceReceipt>,
@@ -146,10 +127,6 @@ pub struct EvidenceLedger {
 }
 
 impl EvidenceLedger {
-    /// Register a machine receipt after checking its immutable identity bindings.
-    ///
-    /// # Errors
-    /// Rejects malformed receipts and duplicate receipt identities.
     pub fn register_source_receipt(
         &mut self,
         receipt: SourceReceipt,
@@ -163,8 +140,6 @@ impl EvidenceLedger {
         Ok(registered)
     }
 
-    /// Mark a receipt unavailable. Existing derived support/counter status is
-    /// recomputed from live receipts and therefore becomes invalid automatically.
     pub fn invalidate_source_receipt(&mut self, receipt_id: &str) -> bool {
         if self.receipts.contains_key(receipt_id) {
             self.invalid_receipts.insert(receipt_id.to_owned())
@@ -173,11 +148,6 @@ impl EvidenceLedger {
         }
     }
 
-    /// Record an independent verification. A model claim cannot call this with
-    /// a prose-only explanation: all cited receipts must already be machine facts.
-    ///
-    /// # Errors
-    /// Rejects invalid or duplicate verifications and missing or mismatched receipts.
     pub fn record_claim_verification(
         &mut self,
         verification: ClaimVerification,
@@ -202,8 +172,6 @@ impl EvidenceLedger {
         Ok(registered)
     }
 
-    /// Resolve a model claim. Prose and unknown receipt IDs remain auditable but
-    /// never satisfy `produced_new_evidence`.
     pub fn admit_model_claim(&mut self, claim: ModelClaim) -> ModelClaimAdmission {
         let mut resolved = Vec::new();
         let mut rejected = Vec::new();
@@ -243,9 +211,6 @@ impl EvidenceLedger {
                 let Some(receipt) = self.receipts.get(receipt_id) else {
                     continue;
                 };
-                // Content identity is global: changing a receipt ID, source
-                // label, claim wording, or verification wrapper does not make
-                // the same output a new observation.
                 let content_identity = receipt.content_digest.to_ascii_lowercase();
                 if self.consumed_content_digests.insert(content_identity) {
                     produced_new_evidence = true;
@@ -263,7 +228,6 @@ impl EvidenceLedger {
         }
     }
 
-    /// A valid counter must match the target exactly and cite live machine facts.
     pub fn has_valid_counter<T: ClaimTargetLike>(&self, target: &T) -> bool {
         let target = target.target();
         self.verifications.values().any(|verification| {
@@ -286,13 +250,10 @@ impl EvidenceLedger {
         })
     }
 
-    /// Alias used by state transitions; a model opinion alone never passes it.
     pub fn can_refute<T: ClaimTargetLike>(&self, target: &T) -> bool {
         self.has_valid_counter(target)
     }
 
-    /// Exact support lookup used by confirmation gates. Scope and version are
-    /// part of the target and are never inferred from a majority or model text.
     pub fn has_verified_support<T: ClaimTargetLike>(&self, target: &T) -> bool {
         let target = target.target();
         self.verifications.values().any(|verification| {

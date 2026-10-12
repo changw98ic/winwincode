@@ -38,10 +38,6 @@ impl<'storage> PublicationReadStorageAdapter<'storage> {
     }
 }
 
-/// Copies an already canonical product-state receipt into the Publication port.
-///
-/// # Errors
-/// Rejects an incomplete receipt identity.
 pub fn publication_receipt_identity(
     identity: &ReceiptIdentity,
 ) -> Result<PublicationReceiptIdentity, PublicationStorageError> {

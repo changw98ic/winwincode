@@ -27,7 +27,6 @@ export interface KeyedCollectionView<
   close(): void
 }
 
-/** Maintain one bounded DOM node per stable business identity. */
 export function mountKeyedCollection<
   Item,
   Key extends KeyedCollectionKey,

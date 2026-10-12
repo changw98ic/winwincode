@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transport adapters for the canonical [`ExecutionPortMessage`] union.
-//!
-//! This module owns only the transport seam.  The [`ExecutionPortCore`]
-//! implementation remains responsible for lease, deduplication, ordering,
-//! and execution decisions.  The local and remote adapters therefore forward
-//! exactly the same typed message to that core after validating the frame.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -15,18 +8,12 @@ use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
 
 use crate::generated::ExecutionPortMessage;
 
-/// Maximum canonical frame size accepted by the remote exchange endpoint.
 pub const MAX_REMOTE_FRAME_BYTES: usize = 256 * 1024;
-/// A v1 byte-array frame can occupy four JSON bytes per original byte.
 pub const MAX_REMOTE_REQUEST_BYTES: usize = 4 * MAX_REMOTE_FRAME_BYTES + 64 * 1024;
-/// Bound the encoded response, independently of its delivery count.
 pub const MAX_REMOTE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-/// Maximum number of delivery acknowledgements accepted in one exchange.
 pub const MAX_REMOTE_ACKNOWLEDGEMENTS: usize = 128;
-/// Maximum number of Control Plane deliveries returned by one exchange.
 pub const MAX_REMOTE_DELIVERIES: usize = 128;
 
-/// One Worker request to the authenticated remote Execution Port exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteExchangeRequest {
@@ -38,12 +25,6 @@ pub struct RemoteExchangeRequest {
 }
 
 impl RemoteExchangeRequest {
-    /// Creates one bounded request. The frame must be one canonical
-    /// Worker-to-Control Plane frame.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid frame direction and unbounded acknowledgement batches.
     pub fn new(
         worker_id: WorkerId,
         worker_instance_id: WorkerInstanceId,
@@ -76,7 +57,6 @@ impl RemoteExchangeRequest {
         Ok(request)
     }
 
-    /// Opts into explicit upstream acceptance receipts and backlog draining.
     #[must_use]
     pub fn with_acceptance_receipt(mut self) -> Self {
         "execution-port.remote-exchange.v2".clone_into(&mut self.schema_version);
@@ -88,11 +68,6 @@ impl RemoteExchangeRequest {
         self.schema_version == "execution-port.remote-exchange.v2"
     }
 
-    /// Decodes and validates one bounded JSON request body.
-    ///
-    /// # Errors
-    ///
-    /// Rejects oversized, malformed, version-skewed, or wrong-direction input.
     pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
         if bytes.is_empty() {
             return Err(FrameError::Malformed("remote request is empty".into()));
@@ -122,11 +97,6 @@ impl RemoteExchangeRequest {
         Ok(checked)
     }
 
-    /// Encodes the bounded request for HTTPS transport.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if the request cannot be represented.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         bounded_encoding(self, MAX_REMOTE_REQUEST_BYTES)
     }
@@ -152,7 +122,6 @@ impl RemoteExchangeRequest {
     }
 }
 
-/// One replay-stable Control Plane delivery returned to a remote Worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteExchangeDelivery {
@@ -160,7 +129,6 @@ pub struct RemoteExchangeDelivery {
     pub frame: Vec<u8>,
 }
 
-/// One bounded response from the authenticated remote exchange.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteExchangeResponse {
@@ -171,12 +139,6 @@ pub struct RemoteExchangeResponse {
 }
 
 impl RemoteExchangeResponse {
-    /// Creates one bounded response containing only canonical Control Plane to
-    /// Worker frames.
-    ///
-    /// # Errors
-    ///
-    /// Rejects oversized batches, frames, and mismatched delivery identities.
     pub fn new(deliveries: Vec<RemoteExchangeDelivery>) -> Result<Self, FrameError> {
         if deliveries.len() > MAX_REMOTE_DELIVERIES {
             return Err(FrameError::TooLarge);
@@ -210,9 +172,6 @@ impl RemoteExchangeResponse {
         Ok(response)
     }
 
-    /// Emits a v2 receipt: false means only ACKs and pulls were processed.
-    /// # Errors
-    /// Rejects deliveries or the final encoding exceeding the wire budget.
     pub fn with_acceptance(
         deliveries: Vec<RemoteExchangeDelivery>,
         accepted: bool,
@@ -234,11 +193,6 @@ impl RemoteExchangeResponse {
         self.frame_accepted.is_some()
     }
 
-    /// Decodes and validates one bounded JSON response.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, version-skewed, wrong-direction, or oversized input.
     pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
         if bytes.is_empty() {
             return Err(FrameError::Malformed("remote response is empty".into()));
@@ -264,11 +218,6 @@ impl RemoteExchangeResponse {
         Ok(checked)
     }
 
-    /// Encodes this response for HTTPS transport.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if the response cannot be represented.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         bounded_encoding(self, MAX_REMOTE_RESPONSE_BYTES)
     }
@@ -288,11 +237,6 @@ fn bounded_encoding(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, Fra
     Ok(bytes)
 }
 
-/// Returns the generated message identity used for transport confirmation.
-///
-/// # Errors
-///
-/// Rejects a generated value without its canonical `messageId` field.
 pub fn execution_message_id(
     message: &ExecutionPortMessage,
 ) -> Result<ExecutionMessageId, FrameError> {
@@ -318,28 +262,15 @@ impl ExecutionPortCore for NoopCore {
     }
 }
 
-/// The direction encoded in an `ExecutionPort` frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameDirection {
-    /// A message sent by the worker to the Control Plane.
     #[serde(rename = "worker-to-control-plane")]
     WorkerToControlPlane,
-    /// A message sent by the Control Plane to the worker.
     #[serde(rename = "control-plane-to-worker")]
     ControlPlaneToWorker,
 }
 
 impl FrameDirection {
-    /// Resolves the canonical direction for one generated message.
-    ///
-    /// The generated union is intentionally untagged.  Inspecting its
-    /// canonical `kind` field keeps this module independent of message body
-    /// details while still making the direction table exhaustive at runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a message cannot be serialized to an object with
-    /// a known string `kind`.
     pub fn for_message(message: &ExecutionPortMessage) -> Result<Self, FrameError> {
         let value = serde_json::to_value(message)
             .map_err(|error| FrameError::Serialization(error.to_string()))?;
@@ -384,12 +315,9 @@ impl FrameDirection {
     }
 }
 
-/// The endpoint at which an adapter is operating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointSide {
-    /// The Control Plane consumes worker-to-Control Plane messages.
     ControlPlane,
-    /// The worker consumes Control Plane-to-worker messages.
     Worker,
 }
 
@@ -402,7 +330,6 @@ impl EndpointSide {
     }
 }
 
-/// A generated message paired with its validated transport direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFrame {
     direction: FrameDirection,
@@ -410,12 +337,6 @@ pub struct TypedFrame {
 }
 
 impl TypedFrame {
-    /// Creates a frame after checking the direction against the message kind.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FrameError::DirectionMismatch`] when the declared direction
-    /// is not the direction assigned to the message kind.
     pub fn new(
         direction: FrameDirection,
         message: ExecutionPortMessage,
@@ -430,38 +351,27 @@ impl TypedFrame {
         Ok(Self { direction, message })
     }
 
-    /// Returns the validated direction.
     #[must_use]
     pub const fn direction(&self) -> FrameDirection {
         self.direction
     }
 
-    /// Returns the generated message carried by this frame.
     #[must_use]
     pub const fn message(&self) -> &ExecutionPortMessage {
         &self.message
     }
 }
 
-/// Errors raised while validating or decoding an `ExecutionPort` frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
-    /// A deterministic frame or encoded body resource limit was exceeded.
     TooLarge,
-    /// The JSON envelope or generated message is malformed.
     Malformed(String),
-    /// The declared direction differs from the canonical message direction.
     DirectionMismatch {
-        /// Direction declared by the frame.
         declared: FrameDirection,
-        /// Direction required by the message kind.
         expected: FrameDirection,
     },
-    /// A transport error frame was received instead of an executable message.
     ErrorFrame,
-    /// The message kind is not part of the generated union's direction table.
     UnknownMessageKind(String),
-    /// The generated message could not be converted to the wire form.
     Serialization(String),
 }
 
@@ -492,12 +402,9 @@ impl fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// Error returned by an adapter before or while invoking the shared core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError<CoreError> {
-    /// The frame was rejected at the transport seam.
     Frame(FrameError),
-    /// The shared business core rejected the generated message.
     Core(CoreError),
 }
 
@@ -519,45 +426,24 @@ impl<CoreError: std::error::Error + 'static> std::error::Error for AdapterError<
     }
 }
 
-/// Business-neutral execution core shared by both adapters.
-///
-/// Implementations own all execution semantics.  In particular, this trait
-/// is the only place that decides whether a message is accepted, duplicated,
-/// conflicting, out of order, expired, stale, or requires reacquisition.
 pub trait ExecutionPortCore {
-    /// Result returned for an accepted message.
     type Output;
-    /// Business error returned for a rejected message.
     type Error;
 
-    /// Accepts one already-decoded generated message.
-    ///
-    /// # Errors
-    ///
-    /// Returns the core's business error when the message is rejected by the
-    /// shared execution implementation.
     fn accept(&mut self, message: &ExecutionPortMessage) -> Result<Self::Output, Self::Error>;
 }
 
-/// Local same-process adapter for the shared execution core.
 pub struct LocalWorkerAdapter<'core, Core: ExecutionPortCore + ?Sized> {
     core: &'core mut Core,
     side: EndpointSide,
 }
 
 impl<'core, Core: ExecutionPortCore + ?Sized> LocalWorkerAdapter<'core, Core> {
-    /// Creates a local adapter for one endpoint side.
     #[must_use]
     pub fn new(core: &'core mut Core, side: EndpointSide) -> Self {
         Self { core, side }
     }
 
-    /// Validates and forwards one typed frame to the shared core.
-    ///
-    /// # Errors
-    ///
-    /// Returns a frame error when the frame is for the other endpoint, or the
-    /// core's error when the shared execution implementation rejects it.
     pub fn accept(
         &mut self,
         frame: &TypedFrame,
@@ -580,28 +466,17 @@ impl<'core, Core: ExecutionPortCore + ?Sized> LocalWorkerAdapter<'core, Core> {
     }
 }
 
-/// Remote JSON adapter for the shared execution core.
 pub struct RemoteTransportAdapter<'core, Core: ExecutionPortCore + ?Sized> {
     core: &'core mut Core,
     side: EndpointSide,
 }
 
 impl<'core, Core: ExecutionPortCore + ?Sized> RemoteTransportAdapter<'core, Core> {
-    /// Creates a remote adapter for one endpoint side.
     #[must_use]
     pub fn new(core: &'core mut Core, side: EndpointSide) -> Self {
         Self { core, side }
     }
 
-    /// Encodes a validated typed frame as the canonical JSON message envelope.
-    ///
-    /// The generated message remains the only source of message fields; this
-    /// envelope adds only transport direction and frame type.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if the generated message cannot be
-    /// represented as JSON.
     pub fn encode(frame: &TypedFrame) -> Result<Vec<u8>, FrameError> {
         let wire = WireFrame::Message {
             direction: frame.direction,
@@ -610,13 +485,6 @@ impl<'core, Core: ExecutionPortCore + ?Sized> RemoteTransportAdapter<'core, Core
         serde_json::to_vec(&wire).map_err(|error| FrameError::Serialization(error.to_string()))
     }
 
-    /// Decodes and validates one JSON frame without invoking a core.
-    ///
-    /// # Errors
-    ///
-    /// Returns a malformed-frame error for invalid JSON, unknown envelope
-    /// fields, or an invalid generated message; returns [`FrameError::ErrorFrame`]
-    /// for a well-formed transport error frame.
     pub fn decode(bytes: &[u8]) -> Result<TypedFrame, FrameError> {
         let value: Value = serde_json::from_slice(bytes)
             .map_err(|error| FrameError::Malformed(error.to_string()))?;
@@ -630,13 +498,6 @@ impl<'core, Core: ExecutionPortCore + ?Sized> RemoteTransportAdapter<'core, Core
         }
     }
 
-    /// Decodes one remote frame and forwards its message to the shared core.
-    ///
-    /// # Errors
-    ///
-    /// Returns a frame error before the core is called when decoding, direction,
-    /// or error-frame validation fails; otherwise returns the core's business
-    /// error when the shared execution implementation rejects the message.
     pub fn accept(&mut self, bytes: &[u8]) -> Result<Core::Output, AdapterError<Core::Error>> {
         let frame = Self::decode(bytes).map_err(AdapterError::Frame)?;
         let expected = self.side.expected_direction();

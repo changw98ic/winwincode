@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Worker registration, heartbeat, and execution-lease state.
-//!
-//! This module deliberately depends only on the shared domain value objects.
-//! Generated `ExecutionPort` messages are decoded by the Control Plane adapter;
-//! this store owns the durable authority that those adapters must consult.
-
 use std::collections::HashSet;
 
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -153,7 +147,6 @@ const MAX_WORKER_PAGE_SIZE: usize = 200;
 const WORKER_MANAGEMENT_STREAM_PREFIX: &str = "worker-management:";
 const WORKER_MANAGEMENT_RECEIPT_TOPIC: &str = "worker.management.receipt.v1";
 
-/// Status returned by Worker and lease mutations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseWriteStatus {
@@ -166,7 +159,6 @@ pub enum LeaseWriteStatus {
     RejectedWorkerInstance,
 }
 
-/// Status returned by a Worker registration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerRegistrationStatus {
@@ -175,7 +167,6 @@ pub enum WorkerRegistrationStatus {
     RejectedConflict,
 }
 
-/// Recovery required after registering a new process instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseRecovery {
@@ -183,7 +174,6 @@ pub enum LeaseRecovery {
     ReacquireRequired,
 }
 
-/// Durable Worker identity and its latest heartbeat snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerRecord {
     pub worker_id: WorkerId,
@@ -204,10 +194,6 @@ pub struct WorkerRecord {
     pub available_slots: u64,
 }
 
-/// Authenticator-sealed pool placement for one exact Worker process.
-///
-/// This record is attribution authority only. Pool capacity and session slots
-/// remain owned by their existing scheduler and slot stores.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthenticatedWorkerPlacement {
     pub worker_id: WorkerId,
@@ -219,7 +205,6 @@ pub struct AuthenticatedWorkerPlacement {
     pub placed_at: Instant,
 }
 
-/// Immutable pool attribution copied beside one accepted Registry lease.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeasePlacement {
     pub job_id: ExecutionJobId,
@@ -231,7 +216,6 @@ pub struct ExecutionLeasePlacement {
     pub claimed_at: Instant,
 }
 
-/// Replay-safe operator mutation committed beside its public invalidation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerManagementCommand {
     pub receipt_identity: ReceiptIdentity,
@@ -244,7 +228,6 @@ pub struct WorkerManagementCommand {
     pub public_event: NewOutboxEvent,
 }
 
-/// Exact durable result of one Worker management command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerManagementReceipt {
@@ -263,7 +246,6 @@ struct WorkerManagementRecord {
     updated_at: Instant,
 }
 
-/// Worker registration input independent of generated wire DTOs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerRegistrationRequest {
     pub authentication_identity: WorkerAuthenticationIdentity,
@@ -281,7 +263,6 @@ pub struct WorkerRegistrationRequest {
     pub worker_instance_id: WorkerInstanceId,
 }
 
-/// Durable result of one Worker registration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerRegistrationReceipt {
     pub status: WorkerRegistrationStatus,
@@ -290,7 +271,6 @@ pub struct WorkerRegistrationReceipt {
     pub worker: WorkerRecord,
 }
 
-/// A lease progress item reported by a Worker heartbeat.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActiveLeaseSummary {
     pub job_id: ExecutionJobId,
@@ -299,7 +279,6 @@ pub struct ActiveLeaseSummary {
     pub fencing_token: FencingToken,
 }
 
-/// Worker liveness input independent of generated wire DTOs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerHeartbeatRequest {
     pub active_leases: Vec<ActiveLeaseSummary>,
@@ -314,7 +293,6 @@ pub struct WorkerHeartbeatRequest {
     pub worker_instance_id: WorkerInstanceId,
 }
 
-/// Durable result of one Worker heartbeat.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerHeartbeatReceipt {
     pub status: LeaseWriteStatus,
@@ -322,7 +300,6 @@ pub struct WorkerHeartbeatReceipt {
     pub worker: Option<WorkerRecord>,
 }
 
-/// Scheduler input for claiming one already durable execution Job.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeaseClaim {
     pub expires_at: Instant,
@@ -338,7 +315,6 @@ pub struct ExecutionLeaseClaim {
     pub attempt: u64,
 }
 
-/// Scheduler input for renewing one exact current lease.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeaseRenewal {
     pub expires_at: Instant,
@@ -354,7 +330,6 @@ pub struct ExecutionLeaseRenewal {
     pub attempt: u64,
 }
 
-/// Durable authority for one Job attempt and Worker instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeaseRecord {
     pub job_id: ExecutionJobId,
@@ -368,11 +343,6 @@ pub struct ExecutionLeaseRecord {
     pub expires_at: Instant,
 }
 
-/// Immutable authority retained only after the Registry accepted an exact
-/// Worker dispatch result under the current lease.
-///
-/// Fields stay private so a downstream adapter cannot turn an untrusted
-/// `session.binding`, runtime event, or outcome frame into scheduler authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionDispatchAuthority {
     lease: ExecutionLeaseRecord,
@@ -381,7 +351,6 @@ pub struct ExecutionDispatchAuthority {
     accepted_at: Instant,
 }
 
-/// Proof that an accepted dispatch still matches the canonical queue Job payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionDispatchWorkRunProof {
     authority: ExecutionDispatchAuthority,
@@ -392,14 +361,6 @@ pub struct ExecutionDispatchWorkRunProof {
 }
 
 impl ExecutionDispatchWorkRunProof {
-    /// Returns the validated execution profile from the private queued Job.
-    ///
-    /// The profile is read from the payload retained by the scheduler rather
-    /// than inferred from a public stage or resource name.
-    ///
-    /// # Errors
-    /// Rejects malformed payloads or a profile outside the canonical bounded
-    /// execution-profile shape.
     pub fn execution_profile(&self) -> Result<String, StorageError> {
         let value: serde_json::Value = serde_json::from_slice(&self.payload)
             .map_err(|_| StorageError::invalid_input("queued Job payload is not JSON"))?;
@@ -420,10 +381,6 @@ impl ExecutionDispatchWorkRunProof {
         Ok(profile.to_owned())
     }
 
-    /// Checks the run against the accepted lease and its persisted queue scope.
-    ///
-    /// # Errors
-    /// Rejects a run or payload that differs from the accepted queue record.
     pub fn verify_work_run(&self, run: &WorkRun, delivery_id: &str) -> Result<(), StorageError> {
         let lease = self.authority.lease();
         let value: serde_json::Value = serde_json::from_slice(&self.payload)
@@ -493,7 +450,6 @@ impl ExecutionDispatchAuthority {
     }
 }
 
-/// Terminal outcome which removes an immutable lease from active capacity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionLeaseTerminalOutcome {
@@ -512,7 +468,6 @@ impl ExecutionLeaseTerminalOutcome {
     }
 }
 
-/// Exact fenced authority for terminalizing one immutable execution lease.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeaseTerminalRequest {
     pub job_id: ExecutionJobId,
@@ -532,7 +487,6 @@ struct ExecutionLeaseTerminalRecord {
     terminal_at: Instant,
 }
 
-/// Durable result of a claim or renewal mutation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLeaseReceipt {
     pub status: LeaseWriteStatus,
@@ -540,8 +494,6 @@ pub struct ExecutionLeaseReceipt {
     pub replayed: bool,
 }
 
-/// Status returned after one Worker dispatch result is joined to durable
-/// Worker and lease authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchResultStatus {
@@ -555,7 +507,6 @@ pub enum DispatchResultStatus {
     RejectedWorkerInstance,
 }
 
-/// Stable error code for a dispatch-result authority decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchResultErrorCode {
@@ -567,14 +518,12 @@ pub enum DispatchResultErrorCode {
     WorkerInstanceChanged,
 }
 
-/// Error details returned by the dispatch-result authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DispatchResultError {
     pub code: DispatchResultErrorCode,
     pub retryable: bool,
 }
 
-/// Durable result of one dispatch-result request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DispatchResultReceipt {
     pub status: DispatchResultStatus,
@@ -582,7 +531,6 @@ pub struct DispatchResultReceipt {
     pub replayed: bool,
 }
 
-/// Worker dispatch-result input independent of generated wire DTOs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchResultRequest {
     pub checked_at: Instant,
@@ -597,31 +545,17 @@ pub struct DispatchResultRequest {
     pub sent_at: Instant,
     pub status: DispatchResultStatus,
     pub attempt: u64,
-    /// Canonical serialized incoming error, if the Worker supplied one.
-    ///
-    /// The registry treats this as request data for idempotency only; the
-    /// Control Plane owns its generated error DTO semantics.
     pub error: Option<String>,
     pub worker_id: WorkerId,
     pub worker_instance_id: WorkerInstanceId,
     pub worker_session_id: Option<WorkerSessionId>,
 }
 
-/// SQLite-backed Worker Registry and execution-lease authority.
 pub struct ExecutionRegistry<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the Worker Registry view over this storage connection.
-    ///
-    /// The registry tables are created idempotently and are kept separate from
-    /// the product-state schema so older product snapshots are never decoded as
-    /// Worker authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the registry schema cannot be created.
     pub fn execution_registry(&mut self) -> Result<ExecutionRegistry<'_>, StorageError> {
         let registry = ExecutionRegistry { storage: self };
         registry.ensure_schema()?;
@@ -630,26 +564,12 @@ impl SqliteStorage {
 }
 
 impl<'storage> ExecutionRegistry<'storage> {
-    /// Creates the durable Worker tables if they do not exist yet.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the registry schema cannot be created.
     pub fn new(storage: &'storage mut SqliteStorage) -> Result<Self, StorageError> {
         let registry = Self { storage };
         registry.ensure_schema()?;
         Ok(registry)
     }
 
-    /// Registers one embedded Community Worker in the canonical local scope.
-    ///
-    /// Fleet and other remotely scoped adapters must call
-    /// [`Self::register_worker_for_scope`] with their authenticated scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for a malformed request or an adapter error for
-    /// a failed `SQLite` read/write.
     pub fn register_worker(
         &mut self,
         request: &WorkerRegistrationRequest,
@@ -657,13 +577,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         self.register_worker_for_scope(request, &WorkerRegistryScope::local_default())
     }
 
-    /// Registers one Worker in an exact tenant scope using the same registry
-    /// transaction as identity and instance registration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for a malformed request/scope or an adapter
-    /// error for a failed `SQLite` read/write.
     #[allow(clippy::too_many_lines)]
     pub fn register_worker_for_scope(
         &mut self,
@@ -909,17 +822,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
-    /// Persists the authenticated pool placement for one registered process.
-    ///
-    /// The caller supplies the identity returned by the transport
-    /// authenticator. This method joins it to the current Worker registration
-    /// before saving the secret-free placement receipt. Exact retries replay;
-    /// any changed identity or pool is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, stale, foreign, or changed placement facts and
-    /// `SQLite` failures.
     pub fn record_authenticated_worker_placement(
         &mut self,
         placement: &AuthenticatedWorkerPlacement,
@@ -975,11 +877,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(placement.clone())
     }
 
-    /// Loads the authenticated pool placement for one exact Worker process.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, corrupt receipts, and `SQLite` failures.
     pub fn load_authenticated_worker_placement(
         &self,
         worker_id: &WorkerId,
@@ -994,12 +891,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         )
     }
 
-    /// Applies one contiguous Worker heartbeat without creating a Job dispatch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for a malformed request or an adapter error for
-    /// a failed `SQLite` read/write.
     #[allow(clippy::too_many_lines)]
     pub fn record_heartbeat(
         &mut self,
@@ -1179,12 +1070,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
-    /// Claims one durable Job for the currently registered Worker instance.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for a malformed request or an adapter error for
-    /// a failed `SQLite` read/write.
     #[allow(clippy::too_many_lines)]
     pub fn claim_execution_job(
         &mut self,
@@ -1193,14 +1078,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         self.claim_execution_job_internal(request, false)
     }
 
-    /// Claims one Job only through a persisted transport-authenticated pool
-    /// placement and freezes that placement beside the accepted lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input/adapter error for malformed or corrupt authority. A
-    /// missing authenticated placement returns `RejectedWorkerInstance` before
-    /// a lease row is written.
     pub fn claim_execution_job_with_authenticated_placement(
         &mut self,
         request: &ExecutionLeaseClaim,
@@ -1228,12 +1105,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
-    /// Renews one exact current lease without changing its attempt or fence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for a malformed request or an adapter error for
-    /// a failed `SQLite` read/write.
     pub fn renew_execution_lease(
         &mut self,
         request: &ExecutionLeaseRenewal,
@@ -1248,16 +1119,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
-    /// Marks an exact fenced lease attempt terminal while retaining its
-    /// immutable terminal fact for replay and forensic joins.
-    ///
-    /// Exact request replay returns `false`. Changed identities or outcomes
-    /// fail closed and never change active capacity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, foreign, stale-fence, or conflicting
-    /// terminal requests and propagates `SQLite` failures.
     pub fn finish_execution_lease(
         &mut self,
         request: &ExecutionLeaseTerminalRequest,
@@ -1272,18 +1133,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(inserted)
     }
 
-    /// Records one dispatch result after joining every lease identity to the
-    /// current durable Worker and lease rows.
-    ///
-    /// The accepted receipt is the only new row this operation creates.  A
-    /// duplicate or changed-body replay is decided from that receipt before
-    /// reading current authority, so a restart or lease replacement cannot
-    /// turn an accepted result into a second state transition.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for malformed identities or an adapter error
-    /// for a failed `SQLite` read/write.
     pub fn record_dispatch_result(
         &mut self,
         request: &DispatchResultRequest,
@@ -1298,20 +1147,11 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
-    /// Loads the current durable Worker record.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the `SQLite` read fails.
     pub fn load_worker(&self, worker_id: &WorkerId) -> Result<Option<WorkerRecord>, StorageError> {
         validate_id(&worker_id.0, "wrk_", "workerId")?;
         load_worker_in_transaction(self.storage.connection()?, worker_id)
     }
 
-    /// Reads the queue Job and current accepted dispatch in one read transaction.
-    ///
-    /// # Errors
-    /// Rejects stale dispatch authority, a missing queue Job, or inconsistent scope.
     pub fn load_dispatch_work_run_proof(
         &self,
         authority: &ExecutionDispatchAuthority,
@@ -1367,15 +1207,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(proof)
     }
 
-    /// Loads the accepted dispatch authority for one exact current Job lease.
-    ///
-    /// The record exists only after an accepted or exact duplicate dispatch
-    /// result joined the registered Worker, current lease, and `WorkerSession` in
-    /// the same Registry transaction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/corrupt authority and propagates `SQLite` failures.
     pub fn load_dispatch_authority(
         &self,
         job_id: &ExecutionJobId,
@@ -1384,17 +1215,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         load_dispatch_authority_in_transaction(self.storage.connection()?, job_id)
     }
 
-    /// Marks one exact Worker process instance offline after its authenticated
-    /// transport disconnects.
-    ///
-    /// A stale connection for a replaced process returns `None` and cannot
-    /// change the current instance. Repeating the exact disconnect returns the
-    /// same timed-out Worker record without creating another identity source.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for malformed identities or an adapter error when
-    /// the single registry transaction fails.
     pub fn mark_worker_disconnected(
         &mut self,
         worker_id: &WorkerId,
@@ -1440,12 +1260,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(Some(worker))
     }
 
-    /// Loads one secret-free Worker management projection in an exact scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope, Worker, or observation time and fails closed
-    /// when durable Worker management state is corrupt.
     pub fn load_managed_worker(
         &self,
         scope: &WorkerRegistryScope,
@@ -1466,15 +1280,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         management_snapshot(connection, &worker, &record, observed_at).map(Some)
     }
 
-    /// Returns a stable exact-scope Worker page ordered by Worker identity.
-    ///
-    /// The first page seals an upper Worker identity; later registrations do
-    /// not enter that walk. State filters are applied before the page limit.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed scope, cursor, filters, page size, or observation
-    /// time and fails closed on corrupt durable state.
     pub fn list_managed_workers(
         &self,
         scope: &WorkerRegistryScope,
@@ -1541,16 +1346,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         })
     }
 
-    /// Atomically changes placement state, saves an exact scoped receipt, and
-    /// appends the caller-produced public Worker-health invalidation.
-    ///
-    /// The public event producer remains a Control Plane boundary because
-    /// storage does not depend on generated WebSocket DTOs.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, foreign, repeated-state, stale, or conflicting
-    /// commands and propagates durable commit failures.
     pub fn manage_worker(
         &mut self,
         command: &WorkerManagementCommand,
@@ -1621,14 +1416,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         decode_management_receipt(&receipt.events, receipt.idempotent_replay)
     }
 
-    /// Replays one exact Worker management receipt without rebuilding its
-    /// public event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a request conflict when the scoped request identity already
-    /// exists with a different command digest, and fails closed on corrupt
-    /// durable receipt data.
     pub fn replay_worker_management(
         &self,
         receipt_identity: &ReceiptIdentity,
@@ -1640,14 +1427,6 @@ impl<'storage> ExecutionRegistry<'storage> {
             .transpose()
     }
 
-    /// Marks stale current instances timed out and returns one atomic capacity
-    /// view. Lease and fencing rows are read or written by their existing
-    /// methods only; this snapshot cannot mint or replace lease authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input error for invalid times or an adapter error when the
-    /// snapshot transaction fails.
     pub fn refresh_worker_capacity_snapshot(
         &mut self,
         observed_at: &Instant,
@@ -1740,11 +1519,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         })
     }
 
-    /// Loads the current durable Job lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the `SQLite` read fails.
     pub fn load_lease(
         &self,
         job_id: &ExecutionJobId,
@@ -1753,10 +1527,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         load_lease_in_transaction(self.storage.connection()?, job_id)
     }
 
-    /// Loads current authority only while its lease is live and nonterminal.
-    ///
-    /// # Errors
-    /// Rejects malformed identities/timestamps and propagates storage failures.
     pub fn load_live_lease(
         &self,
         job_id: &ExecutionJobId,
@@ -1775,13 +1545,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(Some(lease))
     }
 
-    /// Resolves an accepted historical lease period to its still-live current lease.
-    /// Every identity and payload field must remain identical; both periods must
-    /// occur in accepted claim/renewal receipts. An arbitrary earlier expiry is
-    /// not authority, and neither a terminal nor expired lease can be revived.
-    ///
-    /// # Errors
-    /// Rejects malformed records and propagates corrupt receipt or `SQLite` errors.
     pub fn load_live_lease_for_period(
         &self,
         period: &ExecutionLeaseRecord,
@@ -1794,13 +1557,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         self.load_accepted_lease_for_period(period)
     }
 
-    /// Proves an accepted lease period against the current lease, including after
-    /// terminal settlement or expiry. This proves identity only; starting new
-    /// execution separately requires current live authority. Message owners
-    /// retain their own receipt, content and product-state checks.
-    ///
-    /// # Errors
-    /// Rejects malformed records and propagates corrupt receipt or `SQLite` errors.
     pub fn load_accepted_lease_for_period(
         &self,
         period: &ExecutionLeaseRecord,
@@ -1819,10 +1575,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         .then_some(current))
     }
 
-    /// Loads and validates all accepted claim/renewal evidence for an explicit audit.
-    ///
-    /// # Errors
-    /// Propagates storage or corrupt retained receipt errors.
     pub fn accepted_lease_history(
         &self,
         job_id: &ExecutionJobId,
@@ -1830,12 +1582,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         accepted_lease_history(self.storage.connection()?, job_id)
     }
 
-    /// Loads the authenticated pool placement frozen beside the current lease.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, corrupt placement receipts, and
-    /// `SQLite` failures.
     pub fn load_lease_placement(
         &self,
         job_id: &ExecutionJobId,
@@ -1850,11 +1596,6 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(placement)
     }
 
-    /// Reports whether one exact lease request receipt exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the `SQLite` read fails.
     pub fn has_request(
         &self,
         operation: &str,
@@ -3665,8 +3406,6 @@ pub(crate) fn load_dispatch_authority_in_transaction(
                 "dispatch authority differs from the current lease",
             ));
         }
-        // Keep the original accepted dispatch immutable; expose its proven
-        // current lease to first-seen execution owners after renewal.
         authority.lease = current;
     }
     Ok(Some(authority))
@@ -3809,7 +3548,6 @@ pub(crate) fn accepted_lease_period(
     Ok(accepted)
 }
 
-/// Reads only accepted, immutable claim/renewal receipts for one job.
 pub(crate) fn accepted_lease_history(
     connection: &rusqlite::Connection,
     job_id: &ExecutionJobId,
@@ -3846,7 +3584,6 @@ pub(crate) fn accepted_lease_history(
     Ok(leases)
 }
 
-/// Shared by the registry and the atomic renewal/outbound write.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn renew_execution_lease_in_transaction(
     connection: &rusqlite::Connection,

@@ -5,7 +5,6 @@ import { resolve } from 'node:path'
 
 const MAX_HELPER_BYTES = 64 * 1024 * 1024
 
-// Development products use the same authenticated image limit as releases.
 export function prepareCompactKernelHelper({ root, targetDirectory, environment, offline = false }) {
   const helper = resolve(targetDirectory, 'debug/winwincode-kernel-helper')
   if (statSync(helper).size > MAX_HELPER_BYTES) {

@@ -1,5 +1,3 @@
-//! Embedded Codex Core ownership boundary.
-
 mod model_port;
 #[cfg(test)]
 mod task_handoff_tests;
@@ -95,7 +93,6 @@ mod tool_facts;
 pub use result_read::KernelToolResultReadRequest;
 pub use tool_facts::KernelToolRuntimeEvent;
 
-/// Host-owned tool request observed before Codex Core enters the tool handler.
 #[derive(Clone, Eq, PartialEq)]
 pub struct KernelActionRequest {
     pub session_id: String,
@@ -106,9 +103,6 @@ pub struct KernelActionRequest {
     pub payload: KernelActionPayload,
 }
 
-/// Host receipt retained from admission through the final Core execution
-/// boundary. The optional executable is the only program identity a delegated
-/// read may launch.
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct KernelActionAuthorization {
     request_binding: String,
@@ -145,8 +139,6 @@ impl KernelActionAuthorization {
     }
 }
 
-/// Canonical absolute executable and opaque immutable identity selected by the
-/// host action authority.
 #[derive(Clone, Eq, PartialEq)]
 pub struct KernelExecutableAuthorization {
     canonical_absolute_path: String,
@@ -191,10 +183,8 @@ impl KernelExecutableAuthorization {
     }
 }
 
-/// Exact Codex tool payload retained only for in-process pre-action authorization.
 #[derive(Clone, Eq, PartialEq)]
 pub enum KernelActionPayload {
-    /// Core-certified orchestration. Nested operations require independent admission.
     CoreControl {
         input: String,
     },
@@ -285,7 +275,6 @@ impl fmt::Debug for KernelActionPayload {
     }
 }
 
-/// Required host admission boundary for every embedded Codex tool call.
 pub use codex_core_api::ToolCallGatePayload as ToolInputGatePayload;
 pub use codex_core_api::ToolCallGateRequest as ToolInputGateRequest;
 pub use codex_core_api::{
@@ -294,7 +283,6 @@ pub use codex_core_api::{
 };
 
 pub trait KernelActionGate: Send + Sync {
-    /// Host-recognized adapter policy and dependencies for the effective request.
     fn freeze_tool_input(
         &self,
         _context: ToolInputContext,
@@ -308,8 +296,6 @@ pub trait KernelActionGate: Send + Sync {
         Box::pin(async { None })
     }
 
-    /// Grant current read access to one accepted Core receipt. Hosts that do
-    /// not implement a read policy reject recovery by default.
     fn authorize_result_read(
         &self,
         _request: KernelToolResultReadRequest,
@@ -335,7 +321,6 @@ pub trait KernelActionGate: Send + Sync {
     ) -> BoxFuture<'static, KernelResult<()>>;
 }
 
-/// Explicit fail-closed gate for surfaces that have not installed an action authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RejectingKernelActionGate;
 
@@ -554,13 +539,9 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
     }
 }
 
-/// Exact embedded Codex source commit.
 pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
-/// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
-/// Native contract version, independent of the application package version.
 pub const INTERFACE_VERSION: u32 = 12;
-/// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
@@ -674,53 +655,33 @@ const MIN_EVENT_CAPACITY: usize = 16;
 const MAX_EVENT_CAPACITY: usize = 4096;
 const DEFAULT_SHUTDOWN_TIMEOUT_MILLIS: u64 = 5_000;
 
-/// Static identity of the single execution authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelDescriptor {
-    /// Stable kernel name.
     pub name: &'static str,
-    /// Execution authority count. `WinWinCode` deliberately has exactly one.
     pub execution_authorities: u8,
 }
 
-/// Runtime build identity exposed to TypeScript and release diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBuildInfo {
-    /// Native interface version.
     pub interface_version: u32,
-    /// Upstream release tag.
     pub codex_tag: &'static str,
-    /// Full upstream commit.
     pub codex_commit: &'static str,
-    /// Ordered applied patch paths.
     pub patch_set: Vec<&'static str>,
-    /// Configured bounded event capacity per session.
     pub event_capacity: u32,
 }
 
-/// Construction options for one embedded kernel instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelOptions {
-    /// Absolute data directory owned by `WinWinCode`.
     pub home: PathBuf,
-    /// Bundled helper executable used for sandbox and filesystem child operations.
     pub helper_executable: PathBuf,
-    /// Number of unconsumed ordered events retained per session.
     pub event_capacity: usize,
-    /// Maximum graceful shutdown time per thread.
     pub shutdown_timeout: Duration,
-    /// Optional bundled Linux sandbox helper.
     pub linux_sandbox_executable: Option<PathBuf>,
 }
 
 impl KernelOptions {
-    /// Create options with bounded defaults.
     #[must_use]
     pub fn new(home: PathBuf, helper_executable: PathBuf) -> Self {
-        // The bundled helper dispatches `codex-linux-sandbox` by argv0. Linux
-        // command execution must receive that sealed helper explicitly;
-        // otherwise Codex Core selects seccomp but has no executable with
-        // which to enter the sandbox.
         let linux_sandbox_executable = cfg!(target_os = "linux").then(|| helper_executable.clone());
         Self {
             home,
@@ -732,27 +693,15 @@ impl KernelOptions {
     }
 }
 
-/// Options shared by create, resume, and fork operations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionOptions {
-    /// Absolute workspace path.
     pub cwd: PathBuf,
-    /// Exact Kernel model provider route.
     pub provider: String,
-    /// Exact model identifier within the Kernel provider route.
     pub model: String,
-    /// Optional `StrongFlow` role policy applied through Codex Core before thread startup.
     pub role_policy: Option<RoleSessionPolicy>,
-    /// Immutable Agent identity and effective configuration for this Session.
     pub agent_config: AgentSessionConfigSnapshot,
 }
 
-/// Parses the generated canonical role envelope at the native boundary.
-///
-/// # Errors
-///
-/// Returns a typed failure when the JSON is invalid, incomplete, contains
-/// extra fields, or does not use the current role-policy schema version.
 pub fn parse_role_session_policy(value: &str) -> KernelResult<RoleSessionPolicy> {
     let policy: RoleSessionPolicy = serde_json::from_str(value).map_err(|error| {
         KernelFailure::new(
@@ -769,141 +718,86 @@ pub fn parse_role_session_policy(value: &str) -> KernelResult<RoleSessionPolicy>
     Ok(policy)
 }
 
-/// Optional configuration replacements applied while forking a live session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkOptions {
-    /// Optional replacement workspace path.
     pub cwd: Option<PathBuf>,
-    /// Optional replacement Kernel provider route. Must be supplied with `model`.
     pub provider: Option<String>,
-    /// Optional replacement model.
     pub model: Option<String>,
 }
 
-/// Codex approval callback family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalKind {
-    /// Command execution approval.
     Exec,
-    /// Patch application approval.
     Patch,
-    /// MCP elicitation; operation id is a JSON (server, request id) tuple.
     Mcp,
 }
 
-/// Human decision sent back to one suspended Codex operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
-    /// Permit this operation once.
     Approved,
-    /// Permit this operation and equivalent prompts for this session.
     ApprovedForSession,
-    /// Reject this operation while allowing the turn to continue.
-    Denied {
-        /// Human-readable reason returned to the model.
-        rejection: String,
-    },
-    /// Reject this operation and stop the active turn.
+    Denied { rejection: String },
     Abort,
 }
 
-/// Exact identity and decision for one pending Codex approval callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResponse {
-    /// Live kernel session that emitted the request.
     pub session_id: String,
-    /// Callback family selected by the source event.
     pub kind: ApprovalKind,
-    /// Effective approval id, never a UI-generated identity.
     pub operation_id: String,
-    /// Source turn for command approvals, when Codex supplied it.
     pub turn_id: Option<String>,
-    /// Human decision.
     pub decision: ApprovalDecision,
 }
 
-/// One registered Codex session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
-    /// Codex thread identifier.
     pub session_id: String,
-    /// Durable rollout path when persistence is available.
     pub rollout_path: Option<String>,
 }
 
-/// One bounded, ordered event returned to TypeScript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelEvent {
-    /// Monotonically increasing sequence within this session subscription.
     pub sequence: u64,
-    /// Stable Codex event kind.
     pub kind: String,
-    /// Lossless serialized Codex event envelope.
     pub payload_json: String,
 }
 
-/// Outcome of polling one session's ordered event stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventPoll {
-    /// One event was available before the deadline.
     Event(KernelEvent),
-    /// No event was available before the requested deadline.
     Timeout,
-    /// The producer ended and no later event can arrive.
     Closed,
 }
 
-/// Result of a start-or-steer submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionInfo {
-    /// `started`, `steered`, or `not_submitted`.
     pub status: &'static str,
-    /// Active turn identifier when accepted.
     pub turn_id: Option<String>,
-    /// Core-provided reason when not accepted.
     pub reason: Option<String>,
 }
 
-/// Immutable options that identify one submitted turn independently of its
-/// prompt text. Every Kernel submission entry point requires this value so a
-/// structured-output turn cannot be started or steered through an untyped
-/// fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSubmissionOptions {
-    /// Validated user images forwarded as native Codex image input.
     pub image_urls: Vec<String>,
-    /// Exact JSON Schema passed to Codex Core for the final model output.
-    /// Ordinary React turns use `None`.
     pub final_output_json_schema: Option<Value>,
-    /// Enable the terminal delegated `ChangeBatch` handoff tool.
     pub submit_change_batch: bool,
 }
 
-/// Typed result of reconciling one host-reserved turn against durable rollout state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExactTurnReconciliation {
-    /// Core accepted the exact turn identity for execution or recovery.
     Started { turn_id: String, recovered: bool },
-    /// Core remained idle because the exact turn could not be started now.
     NotSubmitted { reason: String },
-    /// The rollout already contains the original successful terminal facts.
     Completed(DurableTurnTerminal),
-    /// The rollout already contains the original unsuccessful terminal facts.
     Failed(DurableTurnTerminal),
 }
 
-/// Result of an all-session shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownInfo {
-    /// Threads that shut down and were removed.
     pub completed: Vec<String>,
-    /// Threads whose shutdown operation could not be submitted.
     pub submit_failed: Vec<String>,
-    /// Threads that exceeded the shutdown deadline.
     pub timed_out: Vec<String>,
 }
 
-/// Stable failure crossing the Rust/TypeScript boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionEnforcementFailureKind {
     Unavailable,
@@ -931,8 +825,6 @@ impl KernelFailure {
         }
     }
 
-    /// Creates the fixed failure returned when the host action authority does
-    /// not permit a tool call before its handler starts.
     #[must_use]
     pub fn action_rejected() -> Self {
         Self::action_enforcement(ActionEnforcementFailureKind::Rejected)
@@ -958,13 +850,11 @@ impl KernelFailure {
         )
     }
 
-    /// Stable machine-readable error code.
     #[must_use]
     pub const fn code(&self) -> &'static str {
         self.code
     }
 
-    /// Human-readable error detail.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -979,13 +869,10 @@ impl fmt::Display for KernelFailure {
 
 impl std::error::Error for KernelFailure {}
 
-/// Kernel-local result.
 pub type KernelResult<T> = Result<T, KernelFailure>;
 
 /// Closes abandoned tool calls through the same Core state authority. Live
 /// threads are protected by process-held OS locks and are skipped.
-///
-/// # Errors
 /// Returns a storage failure when pending calls cannot be closed durably.
 pub async fn recover_interrupted_tool_calls(kernel_home: &Path) -> KernelResult<u64> {
     let sqlite = codex_core_api::SqliteConfig::from_sqlite_home(
@@ -1095,7 +982,6 @@ const fn workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) -> &'static 
     }
 }
 
-/// Process-local embedded Codex kernel.
 pub struct Kernel {
     options: KernelOptions,
     model_port: Arc<dyn ModelPort>,
@@ -1106,12 +992,6 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    /// Validate ownership options without starting background services.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the home path is not absolute, the shutdown timeout is zero,
-    /// the helper path is unusable, or the home directory cannot be created.
     pub fn new(
         mut options: KernelOptions,
         model_port: Arc<dyn ModelPort>,
@@ -1192,16 +1072,12 @@ impl Kernel {
         })
     }
 
-    /// Assign approval ownership to the installed host action gate. The host
-    /// must hold task authorization; sandbox and exact action receipts remain
-    /// enforced. Explicit per-tool human approval settings remain effective.
     #[must_use]
     pub fn with_host_action_approvals(mut self, enabled: bool) -> Self {
         self.host_action_approvals = enabled;
         self
     }
 
-    /// Return static and configured build identity.
     #[must_use]
     pub fn build_info(&self) -> KernelBuildInfo {
         KernelBuildInfo {
@@ -1213,20 +1089,11 @@ impl Kernel {
         }
     }
 
-    /// Return whether explicit shutdown has begun.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Re-applies the private runtime permissions after Core creates rollout,
-    /// state, or child-thread files.  This is intentionally explicit so the
-    /// Worker can invoke it at every externally visible turn boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `KernelFailure` when a runtime-owned path cannot be
-    /// restricted to the private permission policy.
     pub fn enforce_private_permissions(&self) -> KernelResult<()> {
         restrict_private_tree(&self.options.home).map_err(|_| {
             KernelFailure::new(
@@ -1280,15 +1147,7 @@ impl Kernel {
             config.analytics_enabled = Some(false);
             config.feedback_enabled = false;
             config.check_for_update_on_startup = false;
-            // The Kernel exposes portable JSON-schema tools, not provider-native Responses web
-            // search.
-            // Search remains available through ordinary host/MCP function tools.
             config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
-            // The product ExecutionPort contract exposes RequestUserInput in
-            // the default collaboration mode.  Codex keeps this feature
-            // disabled by default, so the embedded Kernel must pin it on at
-            // runtime instead of allowing the model to receive an
-            // "unavailable" tool result with no CP interaction.
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
@@ -1299,7 +1158,6 @@ impl Kernel {
                     )
                 })?;
             config.experimental_request_user_input_enabled = true;
-            // One product tool surface covers built-in, MCP and host operations.
             config
                 .features
                 .enable(Feature::CodeModeOnly)
@@ -1309,7 +1167,6 @@ impl Kernel {
                         format!("Code Mode tool surface could not be enabled: {error}"),
                     )
                 })?;
-            // User interruption closes Code Mode cells before the next turn.
             config
                 .features
                 .enable(Feature::CodeModeInterrupt)
@@ -1325,12 +1182,11 @@ impl Kernel {
                 .clone_from(&self.options.linux_sandbox_executable);
 
             let state_db = init_state_db(&config).await;
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /* enable_codex_api_key_env */ false)
-                    .await
-                    .map_err(|error| {
-                        KernelFailure::new("AUTH_INITIALIZATION_FAILED", error.to_string())
-                    })?;
+            let auth_manager = AuthManager::shared_from_config(&config, false)
+                .await
+                .map_err(|error| {
+                    KernelFailure::new("AUTH_INITIALIZATION_FAILED", error.to_string())
+                })?;
             let runtime_paths = ExecServerRuntimePaths::new(
                 self.options.helper_executable.clone(),
                 self.options.linux_sandbox_executable.clone(),
@@ -1374,12 +1230,12 @@ impl Kernel {
                     environment_manager,
                     extensions.build().into(),
                     user_instructions_provider,
-                    /* analytics_events_client */ None,
+                    None,
                     Arc::clone(&thread_store),
                     local_agent_graph_store_from_state_db(state_db.as_ref()),
                     installation_id,
-                    /* attestation_provider */ None,
-                    /* external_time_provider */ None,
+                    None,
+                    None,
                 )
                 .with_model_stream_transport(Arc::new(KernelModelStreamTransport::new(Arc::clone(
                     &self.model_port,
@@ -1429,10 +1285,6 @@ impl Kernel {
         }
         let mut config = runtime.base_config.clone();
         Self::apply_task_state_compaction_policy(&mut config)?;
-        // A Worker outlives a chat task. Read the newly installed user layer for
-        // each session while retaining host-owned model and permission settings.
-        // Resolve from the private home, as at startup: candidate repository
-        // config must not redirect a Device-authorized MCP server.
         let current = ConfigBuilder::default()
             .codex_home(config.codex_home.to_path_buf())
             .fallback_cwd(Some(config.codex_home.to_path_buf()))
@@ -1451,8 +1303,6 @@ impl Kernel {
         config.mcp_servers = current.mcp_servers;
         runtime.manager.skills_service().clear_cache();
         set_workspace(&mut config, &options.cwd)?;
-        // Resolve unspecified stdio working directories from this immutable Session checkout.
-        // The private home remains the source of configuration, never the execution directory.
         let mut servers = config.mcp_servers.get().clone();
         for server in servers.values_mut() {
             if let codex_core_api::McpServerTransportConfig::Stdio { cwd, .. } =
@@ -1520,28 +1370,20 @@ impl Kernel {
     }
 
     fn apply_task_state_compaction_policy(config: &mut Config) -> KernelResult<()> {
-        // The upstream token-budget experiment bypasses compact_prompt.
-        // Product sessions use the same task-state compaction policy.
         config.features.disable(Feature::TokenBudget).map_err(|_| {
             KernelFailure::new(
                 "SESSION_POLICY_UNAVAILABLE",
                 "Task-state compaction policy could not be applied",
             )
         })?;
-        // Manual and automatic local compaction use this field. Create/resume
-        // apply the template; fork inherits the source configuration.
         config.compact_prompt =
             Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_COMPACT_PROMPT.to_owned());
-        // The total is checked inside Core after generation. It is not a model
-        // instruction or a fixed limit on the summary or original user tail.
         config.compact_context_max_tokens =
             Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_CONTEXT_MAX_TOKENS);
         Ok(())
     }
 
     fn apply_host_action_approvals(config: &mut Config) -> KernelResult<()> {
-        // The host gate owns action approval and validates every side effect.
-        // Preserve role sandbox, escalation, and explicit human boundaries.
         let mut servers = config.mcp_servers.get().clone();
         for server in servers.values_mut() {
             let mode = serde_json::to_value(server.default_tools_approval_mode).map_err(|_| {
@@ -1617,7 +1459,6 @@ impl Kernel {
             Constrained::allow_only(if workspace_write {
                 AskForApproval::OnRequest
             } else {
-                // Read-only sessions must not escalate out of the frozen checkout.
                 AskForApproval::Never
             }),
             Constrained::allow_only(permission_profile),
@@ -1630,12 +1471,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// Create and register a fresh Codex session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when runtime initialization, workspace validation, or Codex thread
-    /// creation fails.
     pub async fn create_session(&self, options: SessionOptions) -> KernelResult<SessionInfo> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -1651,12 +1486,6 @@ impl Kernel {
         .await
     }
 
-    /// Resume a durable Codex rollout.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the rollout path or workspace is invalid, runtime
-    /// initialization fails, or Codex rejects the rollout.
     pub async fn resume_session(
         &self,
         rollout_path: PathBuf,
@@ -1676,7 +1505,7 @@ impl Kernel {
                 config.clone(),
                 rollout_path,
                 Arc::clone(&runtime.auth_manager),
-                /* parent_trace */ None,
+                None,
                 ClientMcpExtensions::default(),
             ))
             .await
@@ -1686,12 +1515,6 @@ impl Kernel {
         .await
     }
 
-    /// Fork a live session from its current persisted boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the source session or rollout is unavailable, when workspace
-    /// validation fails, or when Codex cannot create the fork.
     pub async fn fork_session(
         &self,
         source_session_id: &str,
@@ -1735,8 +1558,8 @@ impl Kernel {
                 ForkSnapshot::Interrupted,
                 config.clone(),
                 rollout_path,
-                /* thread_source */ None,
-                /* parent_trace */ None,
+                None,
+                None,
             ))
             .await
             .map_err(|error| KernelFailure::new("SESSION_FORK_FAILED", error.to_string()))?;
@@ -1745,12 +1568,6 @@ impl Kernel {
         .await
     }
 
-    /// Start a turn when idle or steer the active turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for empty input, an unknown session, a closed kernel, or a Codex
-    /// submission failure.
     pub async fn submit_turn(
         &self,
         session_id: &str,
@@ -1778,15 +1595,6 @@ impl Kernel {
         .await
     }
 
-    /// Reconciles one host-reserved turn identity against durable rollout state.
-    /// The original user input is submitted only when the identity is absent;
-    /// an already-persisted interrupted turn resumes without a duplicate input.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when the session or durable history is
-    /// unavailable, the exact identity is invalid, or Codex Core rejects the
-    /// create-or-recover submission.
     pub async fn reconcile_turn_exact(
         &self,
         session_id: &str,
@@ -1854,12 +1662,6 @@ impl Kernel {
         .await
     }
 
-    /// Steer only the expected active turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for empty input, an unknown session, a closed kernel, or a Codex
-    /// steering failure.
     pub async fn steer(
         &self,
         session_id: &str,
@@ -1888,12 +1690,6 @@ impl Kernel {
         .await
     }
 
-    /// Interrupt the active turn without destroying the session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session is unknown, the kernel is closed, or Codex rejects
-    /// the interrupt operation.
     pub async fn interrupt(&self, session_id: &str) -> KernelResult<String> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -1912,12 +1708,6 @@ impl Kernel {
         .await
     }
 
-    /// Resolve one pending command or patch approval by its source operation identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session or operation identity is invalid, the kernel is
-    /// closed, or Codex rejects the response submission.
     pub async fn resolve_approval(&self, response: ApprovalResponse) -> KernelResult<String> {
         Self::guard(async {
             let session_id = response.session_id.clone();
@@ -1938,16 +1728,6 @@ impl Kernel {
         .await
     }
 
-    /// Resolve one pending Codex user-input request by its source turn identity.
-    ///
-    /// The response is submitted through the embedded thread rather than through a host-side
-    /// callback. This keeps the kernel as the sole owner of the live Codex session and makes the
-    /// operation safe to replay after a durable execution-port acknowledgement is lost.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session or request identity is invalid, the kernel is
-    /// closed, or Codex rejects the response submission.
     pub async fn resolve_user_input(
         &self,
         session_id: &str,
@@ -1990,12 +1770,6 @@ impl Kernel {
         .await
     }
 
-    /// Read the next ordered event and distinguish timeout from stream closure.
-    ///
-    /// # Errors
-    ///
-    /// A session that has already been unregistered is a closed stream. Returns a typed failure
-    /// only when the kernel itself is closed.
     pub async fn next_event(
         &self,
         session_id: &str,
@@ -2026,11 +1800,6 @@ impl Kernel {
         .await
     }
 
-    /// Return currently registered session identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the kernel is closed or runtime initialization fails.
     pub async fn list_sessions(&self) -> KernelResult<Vec<String>> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -2047,12 +1816,6 @@ impl Kernel {
         .await
     }
 
-    /// Gracefully close and unregister one session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session is unknown or does not shut down before the
-    /// configured deadline.
     pub async fn close_session(&self, session_id: &str) -> KernelResult<()> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -2087,11 +1850,6 @@ impl Kernel {
         .await
     }
 
-    /// Shut down all sessions and reject later work.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed panic failure if the embedded shutdown path panics.
     pub async fn shutdown(&self) -> KernelResult<ShutdownInfo> {
         Self::guard(async {
             if self.closed.swap(true, Ordering::AcqRel) {
@@ -2243,7 +2001,6 @@ impl Kernel {
         })
     }
 
-    /// Best-effort shutdown used by the native object's finalizer.
     #[must_use]
     pub fn best_effort_shutdown(&self) -> Option<BoxFuture<'static, ()>> {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -2292,7 +2049,6 @@ fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
             restrict_private_tree(&entry?.path())?;
         }
     } else if metadata.is_file() {
-        // Imported skill scripts retain owner execution while remaining private.
         let mode = 0o600 | (metadata.permissions().mode() & 0o100);
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
     } else {
@@ -2306,7 +2062,6 @@ fn restrict_private_tree(_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Return the static kernel descriptor.
 #[must_use]
 pub const fn descriptor() -> KernelDescriptor {
     KernelDescriptor {
@@ -3123,7 +2878,6 @@ mod tests {
     fn prepare_chat_permission_workspace(workspace: &std::path::Path, home: &std::path::Path) {
         std::fs::create_dir_all(workspace).expect("create workspace");
         std::fs::create_dir_all(home).expect("create home");
-        // Candidate-controlled config is outside the Device extension authority.
         std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
         std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
         std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
@@ -3193,7 +2947,6 @@ mod tests {
                 role_policy: None,
                 agent_config,
             };
-            // The same Kernel must pick up both adding and removing an MCP service.
             std::fs::write(
                 runtime.base_config.codex_home.join("config.toml"),
                 if writer {

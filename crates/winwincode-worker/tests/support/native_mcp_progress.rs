@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Offline input drives the production Worker/Core consumer. The fake Control
-//! Plane only accepts real HTTPS frames and supplies exact signed controls.
-
 use super::*;
 use std::collections::{BTreeSet, VecDeque};
 use std::convert::Infallible;
@@ -33,8 +30,6 @@ use winwincode_worker::remote_transport::{
 type NativeWorker =
     winwincode_worker::WorkerMain<ScriptedLocalModelPort, winwincode_codex::ProductionCodexAdapter>;
 
-/// Models remain a scripted local boundary. Production `DeviceModels` consumes
-/// these same two message families before consulting the remote Server port.
 struct ScriptedLocalModelPort {
     remote: RemoteWorkerPort,
     models: RecordedPort,
@@ -86,8 +81,6 @@ impl ControlPlaneApiPort for SlowQuery {
     fn query(&self, _: &AuthenticatedPrincipal, _: Value) -> Result<Value, ApiError> {
         *self.started.lock().unwrap() = Some(WallInstant::now());
         self.entered.notify_one();
-        // The independent timer bounds cleanup even on the original blocked
-        // current-thread Server. It does not release the gate on test success.
         std::thread::sleep(Duration::from_secs(2));
         self.completed.store(true, Ordering::SeqCst);
         Ok(json!({"ok": true}))
@@ -446,8 +439,6 @@ pub(super) async fn run() {
     let (stop_sender, stop) = tokio::sync::oneshot::channel();
     let server_slow = Arc::clone(&slow);
     let server_boundary = Arc::clone(&boundary);
-    // The separated Worker/Core runtime cannot be blocked directly by Server
-    // CPU work. A regression must cross the real HTTPS/outbox wait boundary.
     let server_thread = std::thread::Builder::new()
         .name("native-mcp-independent-server".to_owned())
         .stack_size(8 * 1024 * 1024)
@@ -596,10 +587,6 @@ pub(super) async fn run() {
     );
     let final_model_sequence = chunks.last().unwrap().sequence.0;
     for chunk in chunks {
-        // Device model input is local. Generated model.chunk is an outbound
-        // accounting frame, so it cannot be replayed as a Server delivery.
-        // This is the same exact local ModelPort intake used by the existing
-        // production verticals; Core approval events remain native output.
         worker
             .accept_control(
                 &ExecutionPortMessage::ModelChunkMessage(chunk),
@@ -732,8 +719,6 @@ pub(super) async fn run() {
         })
     );
     assert_eq!(slow_status.as_u16(), 200);
-    // This regression verifies ordering while the slow query is blocked.
-    // Durations are observations; one second is not a product approval SLA.
     assert!(
         completed_before_query,
         "slow Server query stalled the real Worker/Core MCP consumer: approval={approval_elapsed:?}, tools/call={call_elapsed:?}, before_query={completed_before_query}"

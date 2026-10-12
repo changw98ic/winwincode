@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Network facts contain no URLs, credentials, request bodies or upstream text.
-
 use serde::{Deserialize, Serialize};
 use std::{sync::OnceLock, time::Duration};
 
@@ -37,9 +35,7 @@ pub enum Acceptance {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Replay {
-    /// Provider calls retain a finite budget once the request may have been sent.
     RetryInference,
-    /// Durable control messages retry temporary failures until authority ends.
     ReplayExact,
     ReconcileFirst,
 }
@@ -55,7 +51,6 @@ pub enum Phase {
     Persist,
 }
 
-/// Safe error metadata for both attempt ledgers and protocol adapters.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkFailure {
@@ -139,10 +134,6 @@ pub struct Defaults {
     pub transient_kinds: Vec<ErrorKind>,
 }
 
-/// Returns the build-time request policy shared with JavaScript.
-///
-/// # Panics
-/// Panics if the embedded, checked policy artifact is malformed.
 pub fn defaults() -> &'static Defaults {
     static DEFAULTS: OnceLock<Defaults> = OnceLock::new();
     DEFAULTS.get_or_init(|| {
@@ -161,8 +152,6 @@ pub enum RetryDecision {
     Stop,
 }
 
-/// A pure decision; queue adapters persist the chosen delay before rescheduling.
-/// `connection_attempt` counts only failures with trusted proof that nothing was sent.
 pub fn decide(
     failure: NetworkFailure,
     replay: Replay,
@@ -182,8 +171,6 @@ pub fn decide(
             failure.kind,
             ErrorKind::ConnectionUnavailable | ErrorKind::Timeout
         );
-    // Exact control frames have durable idempotency and live authority checks.
-    // A temporary outage must not terminate their owning Device or Worker.
     let durable_control = replay == Replay::ReplayExact;
     if !disconnected && !durable_control && attempt >= max_attempts.max(1) {
         return RetryDecision::Stop;
@@ -226,8 +213,6 @@ pub fn retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> 
     if let Ok(at) = httpdate::parse_http_date(value.trim()) {
         return Some(at.duration_since(now).unwrap_or_default());
     }
-    // httpdate rejects dates before the Unix epoch. A valid past date still
-    // means that the server's cooldown has already elapsed.
     let at =
         time::OffsetDateTime::parse(value.trim(), &time::format_description::well_known::Rfc2822)
             .ok()?;
@@ -240,7 +225,6 @@ pub fn retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> 
     Some(at.duration_since(now).unwrap_or_default())
 }
 
-/// A whole-second lower bound for protocols that persist integer cooldowns.
 pub fn retry_after_seconds(value: &str) -> Option<u64> {
     retry_after(value, std::time::SystemTime::now()).map(|delay| {
         delay
@@ -340,7 +324,6 @@ pub fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Classifies reqwest errors from trusted transport facts, never from provider text.
 #[cfg(feature = "reqwest")]
 pub fn classify_reqwest(error: &reqwest::Error, phase: Phase) -> NetworkFailure {
     use std::error::Error as _;

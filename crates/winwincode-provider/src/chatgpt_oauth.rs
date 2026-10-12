@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-local Sign in with `ChatGPT`, using the official open-source public-client flow.
-
 #[cfg(test)]
 #[path = "chatgpt_oauth_diagnostics.test.rs"]
 mod diagnostics_tests;
@@ -33,7 +31,6 @@ const DIRECT_SCOPE: &str = "chatgpt.tokens.use.direct";
 const CALLBACK: &str = "/auth/callback";
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(3);
 
-/// Only the protected Device database serializes this record.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Credentials {
@@ -98,7 +95,6 @@ impl Credentials {
         load_keys: impl FnOnce() -> Result<JwkSet, DeviceProviderError>,
         exchange: impl FnOnce(&str, &str) -> Result<TokenResponse, DeviceProviderError>,
     ) -> Result<(), DeviceProviderError> {
-        // Discover identity keys before sending a grant that can rotate the refresh token.
         let keys = load_keys()?;
         let response = exchange(&self.client_id, &self.refresh_token)?;
         self.accept_refresh(&response, Some(&keys))
@@ -118,7 +114,6 @@ impl Credentials {
         if !has_permission(scope) {
             return Err(DeviceProviderError::StateInvalid);
         }
-        // Refresh responses may omit the ID token. A supplied identity must remain bound.
         if let Some(id) = response.id_token.as_deref() {
             let claims = validate_identity(
                 id,
@@ -239,7 +234,6 @@ fn token_request(
     agent: &ureq::Agent,
     fields: &[(&str, &str)],
 ) -> Result<TokenResponse, DeviceProviderError> {
-    // A grant can rotate credentials. An unknown response must not replay it.
     let response = winwincode_network::http::execute_http_once(
         agent,
         |agent| agent.post(TOKEN).send_form(fields.iter().copied()),
@@ -605,7 +599,6 @@ fn credentials(
     })
 }
 
-/// Account-specific catalog. Only slugs cross the Device projection boundary.
 pub(crate) fn models(record: &Credentials) -> Result<Vec<String>, DeviceProviderError> {
     #[derive(Deserialize)]
     struct Catalog {
@@ -654,7 +647,6 @@ pub(crate) fn models(record: &Credentials) -> Result<Vec<String>, DeviceProvider
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Synthetic signing fixture, unrelated to any OpenAI credential.
     const TEST_KEY: &str = r"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAjXqQw3jyx2AJ16NBOGq2a/YKudnHD9Kk+Oghcc+LlL6lM4sl
 WzysF3+61nHEah4BY6/FikToRBW0XJkkdgPVtXmvRxL1RmNpRxlQQt9BgHrz8Yzx

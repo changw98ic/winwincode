@@ -1,17 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generated Worker management commands and queries over the canonical registry.
-//!
-//! Community product boundary: this is local Device Client/Worker management
-//! for the single local Owner, not Cloud/Enterprise multi-user administration.
-//! Scope keys may still carry organization-shaped protocol identifiers; they
-//! are not a Community org-admin product surface.
-//!
-//! [`WorkerManagementService`] maps public DTOs to the single durable
-//! [`ExecutionRegistry`](winwincode_storage::ExecutionRegistry). Public event
-//! construction is injected so the storage adapter and this application seam
-//! can land independently from the scope-stream schema migration.
-
 use std::collections::HashSet;
 use std::fmt;
 
@@ -40,14 +28,12 @@ use winwincode_storage::{
 
 use crate::{command_receipt, command_receipt_identity, public_event_actor, public_event_scope};
 
-/// Canonical public topic emitted after a Worker management transition.
 pub const WORKER_HEALTH_CHANGED_TOPIC: &str = "worker-health.changed.v1";
 
 const SERVICE_COMPONENT: &str = "worker-management-service";
 const CURSOR_SCHEMA: &str = "winwincode.worker-page.v1";
 const MAX_CURSOR_BYTES: usize = 2_048;
 
-/// Complete secret-free input for the scope-stream event adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerHealthEventRequest {
     pub event_id: ControlPlaneEventId,
@@ -57,14 +43,12 @@ pub struct WorkerHealthEventRequest {
     pub source: PublicEventSource,
 }
 
-/// Event adapter failure category with no provider or credential detail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerHealthEventPortErrorKind {
     InvalidEvent,
     Unavailable,
 }
 
-/// Bounded failure returned by the scope-stream event adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerHealthEventPortError {
     kind: WorkerHealthEventPortErrorKind,
@@ -102,21 +86,13 @@ impl fmt::Display for WorkerHealthEventPortError {
 
 impl std::error::Error for WorkerHealthEventPortError {}
 
-/// Produces the canonical public scope-stream outbox event.
 pub trait WorkerHealthEventPort {
-    /// Returns one validated event that storage appends beside the state and
-    /// command receipt in the same transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error when the canonical scope stream cannot be used.
     fn prepare_worker_health_event(
         &self,
         request: &WorkerHealthEventRequest,
     ) -> Result<NewOutboxEvent, WorkerHealthEventPortError>;
 }
 
-/// Canonical scope-stream event adapter used by Server composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScopeWorkerHealthEventPort;
 
@@ -140,7 +116,6 @@ impl WorkerHealthEventPort for ScopeWorkerHealthEventPort {
     }
 }
 
-/// Stable application-service failure categories for HTTP mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerManagementServiceErrorKind {
     InvalidRequest,
@@ -152,7 +127,6 @@ pub enum WorkerManagementServiceErrorKind {
     Storage,
 }
 
-/// Bounded Worker management error safe for a public error envelope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerManagementServiceError {
     kind: WorkerManagementServiceErrorKind,
@@ -206,7 +180,6 @@ impl fmt::Display for WorkerManagementServiceError {
 
 impl std::error::Error for WorkerManagementServiceError {}
 
-/// Narrow generated-DTO adapter over the single durable Worker Registry.
 pub struct WorkerManagementService<'storage, 'events> {
     storage: &'storage mut SqliteStorage,
     events: &'events dyn WorkerHealthEventPort,
@@ -221,13 +194,6 @@ impl<'storage, 'events> WorkerManagementService<'storage, 'events> {
         Self { storage, events }
     }
 
-    /// Drains one exact scoped Worker and returns the durable projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, foreign, stale, repeated-state, or conflicting
-    /// commands. Public event preparation must succeed before the atomic
-    /// registry transaction begins.
     pub fn drain(
         &mut self,
         command: &WorkerDrainCommand,
@@ -257,12 +223,6 @@ impl<'storage, 'events> WorkerManagementService<'storage, 'events> {
         })
     }
 
-    /// Enables one exact scoped Worker and returns the durable projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, foreign, stale, repeated-state, or conflicting
-    /// commands and event preparation failures.
     pub fn enable(
         &mut self,
         command: &WorkerEnableCommand,
@@ -291,12 +251,6 @@ impl<'storage, 'events> WorkerManagementService<'storage, 'events> {
         })
     }
 
-    /// Lists a scope-local, filter-bound, stable Worker page.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid actors, scopes, filters, limits, or foreign/stale
-    /// cursors and propagates durable registry failures.
     pub fn list(
         &mut self,
         query: &WorkerListQuery,
@@ -345,12 +299,6 @@ impl<'storage, 'events> WorkerManagementService<'storage, 'events> {
         })
     }
 
-    /// Loads one exact Worker projection from one exact scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects paginated exact reads, invalid identity/scope, missing Workers,
-    /// and durable registry failures.
     pub fn get(
         &mut self,
         query: &WorkerGetQuery,

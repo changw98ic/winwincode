@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Source-bound financial statements exported independently of runtime replay.
-
 use crate::{DeviceProviderError, DeviceProviderStore};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{OptionalExtension as _, params};
@@ -25,7 +23,6 @@ pub struct DevicePrimaryModelUsage {
 
 impl DeviceProviderStore {
     /// Reads all physical charge facts without changing their immutable frames.
-    /// # Errors
     /// Rejects another original request, corrupt receipts, or unavailable storage.
     pub fn model_primary_usage(
         &self,
@@ -119,10 +116,6 @@ impl DeviceProviderStore {
         Ok(usage)
     }
 
-    /// Freezes a Server-confirmed finished/fenced attempt and exports only durable
-    /// Provider receipts. Missing response or price facts remain unknown.
-    /// # Errors
-    /// Rejects changed identities, corrupt sources, and unavailable storage.
     #[allow(clippy::too_many_lines)]
     pub fn accounting_statement(
         &self,
@@ -133,9 +126,6 @@ impl DeviceProviderStore {
         for exchange_id in cancelled {
             self.settle_abandoned_model_accounting(&exchange_id)?;
         }
-        // Receipt scans and validation must not reserve the Device's writer
-        // while another task is starting a call or retaining a paid response.
-        // A changed WAL snapshot refuses the final upgrade and retries accounting.
         self.connection.execute_batch("BEGIN DEFERRED")?;
         let result = (|| {
             let mut query = self.connection.prepare("SELECT digest,request_open,COALESCE(accounting_chunks,chunks) FROM exchanges WHERE request_open IS NOT NULL AND json_extract(request_open,'$.lease.jobId')=?1 AND json_extract(request_open,'$.lease.attempt')=?2 ORDER BY exchange_id")?;
@@ -264,8 +254,6 @@ impl DeviceProviderStore {
             statement
                 .sign(key)
                 .map_err(|_| DeviceProviderError::StateInvalid)?;
-            // Freeze only the fully checked snapshot. Keep its write transaction
-            // limited to this insert and commit; failed upgrades export nothing.
             self.connection.execute(
                 "INSERT OR IGNORE INTO accounting_closed_attempts VALUES(?1,?2,?3)",
                 params![lease.job_id.0, lease.attempt, lease.lease_id.0],

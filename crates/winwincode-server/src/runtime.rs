@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Supervised local execution runtime owned by the Server composition.
-//!
-//! The supervisor does not create a second Control Plane, `SQLite` connection,
-//! queue, or event hub. Callers inject the already-composed [`ExecutionPort`] core
-//! into [`LocalLauncher`], and this module only serializes launcher lifecycle,
-//! periodic liveness work, and ordered shutdown.
-
 use winwincode_control_plane::{
     execution_admission_boundaries as admission_boundaries,
     execution_admission_deferred as deferred_admission_error, execution_admission_job,
@@ -88,7 +81,6 @@ const LOCAL_SLOT_RESOURCES: WorkerSlotResources = WorkerSlotResources {
     process_slots: 1,
 };
 
-/// Stable failure categories for the supervised local runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSupervisorErrorKind {
     InvalidConfiguration,
@@ -98,7 +90,6 @@ pub enum RuntimeSupervisorErrorKind {
     Shutdown,
 }
 
-/// Secret-free runtime supervisor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeSupervisorError {
     kind: RuntimeSupervisorErrorKind,
@@ -131,19 +122,11 @@ impl fmt::Display for RuntimeSupervisorError {
 
 impl std::error::Error for RuntimeSupervisorError {}
 
-/// Read-only health port installed on the public application.
 pub trait RuntimeHealthPort: Send + Sync {
-    /// Returns `true` while every supervised runtime task is healthy.
     #[must_use]
     fn is_healthy(&self) -> bool;
 }
 
-/// Health implementation used before a local runtime is attached.
-///
-/// The composition root replaces this value with [`RuntimeHealthHandle`] once
-/// the launcher has started. Keeping the default explicit means an application
-/// built for command/query-only tests remains available while production code
-/// can opt into fail-closed supervised health.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HealthyRuntimeHealth;
 
@@ -153,7 +136,6 @@ impl RuntimeHealthPort for HealthyRuntimeHealth {
     }
 }
 
-/// Stable error categories for the Server-owned execution-port core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerExecutionPortErrorKind {
     ApplicationUnavailable,
@@ -162,8 +144,6 @@ pub enum ServerExecutionPortErrorKind {
     Publication,
 }
 
-/// Secret-free error returned when the Server's shared application state cannot
-/// accept a Worker frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerExecutionPortError {
     kind: ServerExecutionPortErrorKind,
@@ -189,46 +169,20 @@ impl fmt::Display for ServerExecutionPortError {
 
 impl std::error::Error for ServerExecutionPortError {}
 
-/// Synchronous scheduler hook executed by the supervised local driver.
-///
-/// The hook only performs short durable work and enqueues typed messages on
-/// the supplied local port. It must not retain the port or start an async task;
-/// the supervisor remains the sole owner of the Worker lifecycle.
 #[cfg(feature = "local-worker")]
 pub trait LocalRuntimeScheduler: Send + 'static {
-    /// Claims/replays pending work and enqueues exact CP-to-Worker messages.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable driver failure when durable scheduling cannot make
-    /// progress.
     fn drive(
         &mut self,
         now: Instant,
         execution_port: &LocalExecutionPortHandle,
     ) -> Result<(), RuntimeSupervisorError>;
 
-    /// Acknowledges Control Plane-to-Worker interaction frames after the local
-    /// launcher has accepted the queued batch. Implementations may retain
-    /// claimed frames across a failed drive so restart replays the exact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable driver failure when an interaction acknowledgement
-    /// cannot be committed.
     fn complete(&mut self, _now: Instant) -> Result<(), RuntimeSupervisorError> {
         Ok(())
     }
 }
 
-/// Minimal Control Plane-to-Worker queue used by both the same-process
-/// launcher and the authenticated remote exchange.
 pub trait RuntimeControlOutbound {
-    /// Retains one canonical control message until its transport accepts it.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded runtime error when the transport queue is unavailable.
     fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError>;
 }
 
@@ -244,13 +198,6 @@ impl RuntimeControlOutbound for LocalExecutionPortHandle {
     }
 }
 
-/// Durable repository scheduler used by the production local driver.
-///
-/// The scheduler owns no queue or worker state. It borrows the one
-/// `ApplicationState` only for the duration of a synchronous drive, asks the
-/// canonical repository scheduler for exact receipts, and puts the returned
-/// `job.dispatch`/`job.cancel` messages on the launcher's typed CP-to-Worker
-/// queue. It never creates a Job or a terminal outcome itself.
 pub struct RepositoryRuntimeScheduler {
     state: Arc<StdMutex<Option<ApplicationState>>>,
     hub: Arc<crate::DurableEventHub>,
@@ -271,12 +218,6 @@ pub struct RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
-    /// Creates a scheduler over one already-composed application authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-repository scope, empty process identities, or a zero
-    /// lease duration before the driver starts.
     pub fn from_application(
         application: &StandaloneControlPlaneApplication,
         scope: RepositoryScope,
@@ -335,16 +276,6 @@ impl RepositoryRuntimeScheduler {
         })
     }
 
-    /// Adopts the durable active Owner as the local admission identity once
-    /// one exists.
-    ///
-    /// The composition root resolves the Owner once at process startup, so a
-    /// Server initialized after startup (browser bootstrap) would otherwise
-    /// keep the stable default subject for its whole lifetime and reserve
-    /// admission under an identity that can never pass the active-account
-    /// check. Adoption re-reads the account ledger on every drive until the
-    /// default is replaced; a lookup failure leaves the identity untouched so
-    /// admission simply defers.
     fn refresh_admission_identity(&mut self, storage: &mut winwincode_storage::SqliteStorage) {
         if self.user_id.0 != DEFAULT_RUNTIME_USER_ID {
             return;
@@ -359,16 +290,6 @@ impl RepositoryRuntimeScheduler {
         }
     }
 
-    /// Installs the authenticated local user and the one configured Worker
-    /// pool used by operational execution admission.  These identities are
-    /// carried into the durable reservation; Worker frames cannot replace
-    /// them. The user identity is the initializing Owner's durable userId
-    /// once the Server is initialized; an uninitialized Server keeps the
-    /// stable default until initialization assigns the Owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when either identity is outside the canonical format.
     pub fn with_admission_identity(
         mut self,
         user_id: Option<UserId>,
@@ -395,7 +316,6 @@ impl RepositoryRuntimeScheduler {
         Ok(self)
     }
 
-    /// Returns the scheduler's immutable repository scope.
     #[must_use]
     pub const fn scope(&self) -> &RepositorySchedulerScope {
         &self.scope
@@ -436,12 +356,6 @@ impl RepositoryRuntimeScheduler {
     ) -> Result<bool, RuntimeSupervisorError> {
         let (job, runtime_limit_millis) =
             execution_admission_job(record).map_err(|_| scheduler_failure())?;
-        // Never reserve under an identity that is not an active durable
-        // account: an uninitialized Server still carries the stable default
-        // subject, and a reservation created under it could never pass the
-        // active-account check below. Leave the Job queued (and the
-        // supervisor healthy) until the Owner exists and
-        // `refresh_admission_identity` adopts it.
         if !admission_user_is_active(storage, &self.user_id)? {
             return Ok(false);
         }
@@ -472,22 +386,12 @@ impl RepositoryRuntimeScheduler {
             reservation
         };
         self.ensure_reservation_identity(record, &reservation)?;
-        // Admission admits reservations from any active user account instead
-        // of one fixed process subject: every browser session now carries its
-        // own durable userId, so the reservation subject may differ per user.
-        // The stable default subject is the embedded local runtime's own
-        // pre-initialization identity rather than an account: it can never
-        // resolve through the ledger, so reservations it created (a Server
-        // that queued work before its first Owner existed) stay admissible
-        // for the local pool instead of faulting the supervisor on every
-        // restart.
         let reservation_user = reservation.user_id.clone();
         let reservation_state = reservation.state;
         let reservation_revision = reservation.revision;
         let reservation_updated_at = reservation.updated_at.clone();
         let reservation_scope = reservation.scope.clone();
         let reservation_pool = reservation.worker_pool_id.clone();
-        // The first admission borrow ends here; the reopen below shadows it.
         if reservation_user.0 != DEFAULT_RUNTIME_USER_ID
             && !admission_user_is_active(storage, &reservation_user)?
         {
@@ -502,12 +406,6 @@ impl RepositoryRuntimeScheduler {
         })?;
         match reservation_state {
             ExecutionReservationState::Queued => {
-                // A command may commit a new queued Job after this driver's
-                // tick captured its clock value.  Admission intentionally
-                // rejects an operation timestamp that precedes the durable
-                // reservation; leave the Job queued and retry on the next
-                // tick instead of faulting the supervisor or claiming a
-                // dispatch without a running reservation.
                 if now.0 < reservation_updated_at.0 {
                     return Ok(false);
                 }
@@ -677,14 +575,6 @@ impl RepositoryRuntimeScheduler {
         })
     }
 
-    /// Configures and reads the durable slot table before claiming work.
-    ///
-    /// Repository scheduling persists a lease before the Worker can accept a
-    /// dispatch.  Without this preflight a full local Worker would leave a
-    /// durable job in `Leased`, then `ensure_worker_slot` would turn ordinary
-    /// capacity pressure into a supervisor fault.  The slot table is the
-    /// authoritative source here because it is updated in the same durable
-    /// lifecycle as the dispatch and terminal outcome.
     fn ensure_worker_capacity(
         &self,
         storage: &mut winwincode_storage::SqliteStorage,
@@ -767,8 +657,6 @@ impl RepositoryRuntimeScheduler {
                 .iter()
                 .any(|record| record.job_id == authority.slot.job_id)
         });
-        // A Server restart loses the in-memory delivery targets. Rebuild only
-        // this authenticated process's live, accepted dispatches from storage.
         for record in active {
             let registry = storage
                 .execution_registry()
@@ -871,7 +759,6 @@ impl RepositoryRuntimeScheduler {
                 .load_dispatch_authority(&authority.slot.job_id)
                 .map_err(|_| scheduler_failure())?
             else {
-                // The initial dispatch may still be awaiting Worker acceptance.
                 continue;
             };
             let lease = dispatch.lease();
@@ -893,8 +780,6 @@ impl RepositoryRuntimeScheduler {
             {
                 return Err(scheduler_failure());
             }
-            // The registry proves the accepted renewal chain; only its expiry
-            // changes. The original queued frame and acknowledgement ID stay intact.
             authority.lease_expires_at = lease.expires_at.clone();
         }
         Ok(())
@@ -979,8 +864,6 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("list queued jobs", &error);
                 scheduler_failure()
             })?;
-        // Local/fleet Workers skip device jobs. A Device Worker selects only
-        // the job whose sealed launch facts name this exact process.
         let mut matching_head = None;
         for record in &queued {
             let device_facts = {
@@ -1033,8 +916,6 @@ impl RepositoryRuntimeScheduler {
         Ok(admission_ready)
     }
 
-    /// y2es: on the first drive after process start, replay any durable
-    /// `ProductSession` cancel routes whose queue cancel never committed.
     fn reconcile_cancel_routes_once(&mut self, state: &mut ApplicationState) {
         if self.session_cancel_routes_reconciled {
             return;
@@ -1109,7 +990,6 @@ impl RepositoryRuntimeScheduler {
             } else {
                 false
             };
-            // A released Device lease confirms its Workers stopped and also revokes remote ingress.
             if device_released
                 || lease
                     .as_ref()
@@ -1253,12 +1133,6 @@ impl RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
-    /// Drives the canonical repository scheduler into a separated Worker
-    /// transport without changing its durable queue, lease, or slot owners.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same durable scheduling failures as the local driver.
     pub fn drive_remote(
         &mut self,
         now: &Instant,
@@ -1267,12 +1141,6 @@ impl RepositoryRuntimeScheduler {
         self.drive_outbound(now, outbound, true)
     }
 
-    /// Drives one authenticated remote process using its transport-bound
-    /// worker and pool identities.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same durable scheduling failures as the local driver.
     pub fn drive_remote_for(
         &mut self,
         now: &Instant,
@@ -1293,12 +1161,6 @@ impl RepositoryRuntimeScheduler {
         result
     }
 
-    /// Commits only interaction receipts explicitly confirmed by the remote
-    /// Worker. Unconfirmed messages remain claimed for exact replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a durable queue failure without dropping remaining receipts.
     pub fn acknowledge_remote(
         &mut self,
         now: &Instant,
@@ -1347,8 +1209,6 @@ impl RepositoryRuntimeScheduler {
                 .iter()
                 .any(|receipt| &receipt.message_id == id)
         });
-        // A cleanup failure is safe to retry: the exact receipt is already
-        // durable. Unconfirmed controls are never acknowledged by this path.
         Ok(())
     }
 
@@ -1399,7 +1259,6 @@ impl RepositoryRuntimeScheduler {
     }
 }
 
-/// Reports whether the reservation subject resolves to the durable Owner.
 fn admission_user_is_active(
     storage: &mut winwincode_storage::SqliteStorage,
     user_id: &UserId,
@@ -1442,13 +1301,6 @@ impl LocalRuntimeScheduler for RepositoryRuntimeScheduler {
     }
 }
 
-/// The one Worker-to-Control Plane core used by a local Server launcher.
-///
-/// It borrows no application state across an await: each synchronous typed
-/// frame obtains the shared `ApplicationState` lock, runs the canonical durable
-/// ingress, publishes pending public events through the same hub, and releases
-/// the lock before returning. A second Control Plane, storage, hub, or queue is
-/// never constructed here.
 pub struct ServerExecutionPortCore<Delegate> {
     state: Arc<StdMutex<Option<ApplicationState>>>,
     hub: Arc<crate::DurableEventHub>,
@@ -1459,10 +1311,6 @@ pub struct ServerExecutionPortCore<Delegate> {
 }
 
 impl<Delegate> ServerExecutionPortCore<Delegate> {
-    /// Creates a core over the exact state and hub owned by one application.
-    ///
-    /// # Errors
-    /// Rejects a zero or unrepresentable execution lease duration.
     pub fn from_application(
         application: &StandaloneControlPlaneApplication,
         repository_scope: RepositoryScope,
@@ -1608,8 +1456,6 @@ fn renew_heartbeat_leases(
         else {
             continue;
         };
-        // An old expiry means the Worker has not applied the previous renewal.
-        // Wait for that exact frame to arrive instead of extending again.
         if lease.worker_id != heartbeat.worker_id
             || lease.worker_instance_id != heartbeat.worker_instance_id
             || lease.lease_id != summary.lease_id
@@ -1698,7 +1544,6 @@ impl RuntimeHealthState {
     }
 }
 
-/// Cloneable health handle for an application and its HTTP health endpoint.
 #[derive(Clone)]
 #[cfg(feature = "local-worker")]
 pub struct RuntimeHealthHandle {
@@ -1720,7 +1565,6 @@ impl RuntimeHealthPort for RuntimeHealthHandle {
     }
 }
 
-/// One running local Worker and its supervised liveness driver.
 #[cfg(feature = "local-worker")]
 pub struct LocalRuntimeSupervisor<Core, Codex>
 where
@@ -1741,15 +1585,6 @@ where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Starts the local launcher and then its supervised heartbeat/poll driver.
-    ///
-    /// The injected `Core` must already contain the Server's canonical
-    /// Control Plane, `SQLite`, interaction outbox, repository scope, and event
-    /// hub. No runtime-owned replacement is created here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when launcher startup or runtime configuration fails.
     pub async fn start(
         config: LocalLauncherConfig,
         worker_config: WorkerConfig,
@@ -1770,11 +1605,6 @@ where
         .await
     }
 
-    /// Starts the launcher with one supervised scheduler hook.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the polling interval is invalid or launcher startup fails.
     pub async fn start_with_scheduler(
         config: LocalLauncherConfig,
         worker_config: WorkerConfig,
@@ -1840,23 +1670,16 @@ where
         })
     }
 
-    /// Returns the read-only health handle used by `StandaloneControlPlaneApplication`.
     #[must_use]
     pub fn health_handle(&self) -> RuntimeHealthHandle {
         self.health.clone()
     }
 
-    /// Returns the supervisor polling interval.
     #[must_use]
     pub const fn tick(&self) -> Duration {
         self.tick
     }
 
-    /// Runs one CP-to-Worker message through the sole local launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or the launcher rejects the frame.
     pub async fn accept_control(
         &self,
         message: ExecutionPortMessage,
@@ -1871,11 +1694,6 @@ where
             .map_err(|_| self.mark_faulted(RuntimeSupervisorErrorKind::Launcher))
     }
 
-    /// Runs one explicit launcher drive cycle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or the launcher drive fails.
     pub async fn drive(&self, now: Instant) -> Result<usize, RuntimeSupervisorError> {
         self.ensure_healthy()?;
         let mut launcher = self.launcher.lock().await;
@@ -1886,11 +1704,6 @@ where
             .map_err(|_| self.mark_faulted(RuntimeSupervisorErrorKind::Launcher))
     }
 
-    /// Returns the same CP-to-Worker queue handle used by the launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn execution_port(&self) -> Result<LocalExecutionPortHandle, RuntimeSupervisorError> {
         self.ensure_healthy()?;
         let launcher = self.launcher.lock().await;
@@ -1900,11 +1713,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Returns the same shared Control Plane endpoint used by the launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn control_plane(
         &self,
     ) -> Result<SharedControlPlaneHandle<Core>, RuntimeSupervisorError> {
@@ -1916,11 +1724,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Reports the current Worker lifecycle state through a short lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn worker_lifecycle(
         &self,
     ) -> Result<winwincode_worker::WorkerLifecycleState, RuntimeSupervisorError> {
@@ -1932,11 +1735,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Stops the driver, drains the Worker/ACK queue, and releases the CP lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the driver or local launcher does not stop cleanly.
     pub async fn shutdown(mut self) -> Result<(), RuntimeSupervisorError> {
         let _ = self.stop.send(true);
         let driver_error = if let Some(driver) = self.driver.take() {
@@ -1950,9 +1748,6 @@ where
             None
         };
 
-        // Take the launcher before awaiting its shutdown so the async mutex is
-        // never held across Worker/Core cleanup. Cleanup still runs when the
-        // driver join failed, preserving the single owned resource boundary.
         let launcher = self.launcher.lock().await.take();
         let now = self.clock.now_instant();
         let now_millis = self.clock.now_millis();
@@ -2029,11 +1824,6 @@ async fn run_driver<Core, Codex>(
                     return;
                 }
                 let heartbeat_now = clock.now_instant();
-                // Publish the Worker capacity observation before processing
-                // any durable commands from the preceding tick.  Heartbeat
-                // is replay-safe, so it is the first durable operation on
-                // every tick and keeps liveness visible while the launcher
-                // drains its control queue.
                 if let Err(error) = launcher.heartbeat(heartbeat_now.clone()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                         eprintln!("runtime driver heartbeat failed: {error}");
@@ -2048,12 +1838,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Poll the Codex adapter before making the next durable
-                // scheduling decision.  `poll_codex` removes terminal jobs,
-                // closes their Worker slots, and synchronously commits the
-                // terminal outcome through the same Core.  This snapshot is
-                // therefore the point at which a just-finished job becomes
-                // eligible for the next claim.
                 let active_jobs_before_poll = launcher.active_job_count();
                 if let Err(error) = launcher.poll_codex(clock.now_instant()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
@@ -2062,10 +1846,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Keep the regular one-heartbeat-per-tick cadence when no
-                // capacity changed, but immediately publish a fresh Worker
-                // capacity observation after terminal polling.  The scheduler
-                // below must not wait another tick to see the slot released.
                 if launcher.active_job_count() != active_jobs_before_poll
                     && let Err(error) = launcher.heartbeat(clock.now_instant()).await
                 {
@@ -2085,9 +1865,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Scheduler dispatches are queued on the same local port.  A
-                // second drive applies the exact durable command before the
-                // next tick's Codex poll, preserving command ordering.
                 if let Err(error) = launcher.drive(scheduler_now.clone()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                         eprintln!("runtime driver post-scheduler control drive failed: {error}");
@@ -2884,8 +2661,6 @@ mod tests {
                 })
                 .expect("slot");
         }
-        // Simulate restart: cache and pending receipts recover the original
-        // dispatch while the durable registry has already accepted renewal.
         Box::new(storage).close().expect("close");
         let mut storage = SqliteStorage::open(&root).expect("reopen");
         scheduler.remember_worker_authority(original.clone());
@@ -2979,7 +2754,6 @@ mod tests {
                 at(expected_expiry)
             );
         };
-        // Early heartbeats, exact replay and a rejected instance cannot renew.
         run_heartbeat(
             heartbeat(1, 5, 9),
             5,
@@ -3006,7 +2780,6 @@ mod tests {
             WorkerHeartbeatAckMessageStatus::Accepted,
             11,
         );
-        // A new heartbeat still reporting the old expiry cannot chain renewals.
         run_heartbeat(
             heartbeat(3, 9, 9),
             9,
@@ -3019,7 +2792,6 @@ mod tests {
             WorkerHeartbeatAckMessageStatus::Accepted,
             13,
         );
-        // Worker time is not authority: a delayed heartbeat cannot revive expiry.
         run_heartbeat(
             heartbeat(5, 12, 13),
             13,
@@ -3052,8 +2824,6 @@ mod tests {
             assert_eq!(message.lease.fencing_token, lease.fencing_token);
         }
         outbound.close().expect("close outbound");
-        // Exercise the real remote receipt entry and driver, with cleanup
-        // failing after the Worker has already supplied its transport ACK.
         let scope: RepositoryScope = serde_json::from_value(serde_json::json!({
             "kind":"repository", "organizationId":test_scope().organization_id,
             "workspaceId":test_scope().workspace_id, "projectId":test_scope().project_id,
@@ -3107,8 +2877,6 @@ mod tests {
         fault
             .execute_batch("DROP TRIGGER fail_interaction_cleanup")
             .expect("release fault");
-        // No repeated Worker ACK is supplied. Even an unrelated admission
-        // failure must not prevent the driver from cleaning proven receipts.
         let _ = scheduler.drive_remote(&at(12), &NoControls);
         let retained: i64 = fault
             .query_row(
@@ -3168,8 +2936,6 @@ mod tests {
         let (record, _) = queued_job_record(&scope);
         let default_user = UserId(DEFAULT_RUNTIME_USER_ID.to_owned());
         poison_reservation_with_user(&mut storage, &scope, &record.job_id, &default_user);
-        // The restarted Server resolves a durable Owner at startup (the
-        // browser bootstrap ran before the previous shutdown).
         create_active_owner(&mut storage);
 
         let mut scheduler =

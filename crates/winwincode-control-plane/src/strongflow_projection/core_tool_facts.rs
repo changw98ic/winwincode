@@ -8,8 +8,6 @@ use winwincode_delivery::projection::runtime::{
 };
 use winwincode_execution_port::generated::{CoreToolRuntimeFactPayload, ExecutionEventRecord};
 
-/// Read-only projection of versioned Core receipts. Recorded running/live states
-/// do not prove that an earlier Core owner or external handle is still alive.
 #[derive(Default)]
 pub(super) struct CoreToolProjector {
     relations: super::core_tool_relations::CoreToolRelations,

@@ -350,8 +350,6 @@ fn incremental_verification_turn_start_uses_constant_policy_reads_after_history_
                     .unwrap(),
             );
         }
-        // Renewal changes the accepted time period, while the owner, attempt,
-        // fence and immutable policy source continue to address the same stream.
         fixture.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
         ready(
             projector

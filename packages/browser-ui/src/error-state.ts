@@ -11,7 +11,6 @@ export interface ErrorStateProps {
   readonly actions?: readonly HTMLElement[]
   readonly visible?: boolean
   readonly className?: string
-  /** UI-604: follow the level of the panel the state nests inside. */
   readonly headingLevel?: ErrorStateHeadingLevel
 }
 

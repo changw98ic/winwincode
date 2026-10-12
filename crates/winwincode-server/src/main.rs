@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![recursion_limit = "256"]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
 use std::env;
@@ -86,8 +85,6 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
     )?;
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
     let auth_bootstrap = AuthSessionBootstrap::new(bootstrap_proof)?;
-    // Community local loopback defaults to unlocked access; password auth is
-    // required for lock mode or any non-loopback listener.
     let local_open = match env::var("WWC_SERVER_AUTH_MODE") {
         Ok(mode) if mode == "local-open" => true,
         Ok(mode) if mode == "password" => false,
@@ -111,8 +108,6 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
     })
 }
 
-/// Opens the durable account authority, session manager, and resolves the
-/// first Owner account behind the initialization marker.
 type OpenedAccountsAuthority = (Arc<SqliteAuthSessionManager>, Option<UserAccount>);
 
 #[allow(clippy::type_complexity)]
@@ -137,11 +132,6 @@ fn open_accounts_authority(
     ))
 }
 
-/// The local Server exposes one configured repository, but the browser's
-/// post-login shell also reads the canonical organization, project, and
-/// request-pool streams for that repository. Keep those exact ancestor
-/// scopes in the session authority so every generated request and
-/// subscription is authorized by the same initialized Owner session.
 fn local_session_authority(repository: &RepositoryScope) -> Vec<Scope> {
     vec![
         Scope::OrganizationScope(OrganizationScope {
@@ -191,9 +181,6 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    // Worker artifact.open/chunk must settle on the Control Plane Artifact
-    // store. start_local leaves artifact_store unset; install the production
-    // catalog before any Device Worker exchange can arrive.
     let mut control_plane = control_plane;
     let execution_artifact_objects =
         LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
@@ -257,7 +244,6 @@ fn open_production_application(
     })
 }
 
-/// Resolves the durable first Owner account behind the initialization marker.
 fn resolved_owner(
     auth_sessions: &SqliteAuthSessionManager,
     accounts: &UserAccountService,
@@ -272,7 +258,6 @@ fn resolved_owner(
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Reject missing trust configuration before opening or mutating runtime state.
     let _ = configured_action_signing_key()?;
     let startup = load_production_startup()?;
     let composition = open_production_application(startup)?;
@@ -306,9 +291,6 @@ async fn run_composed_server(
         "WWC_SERVER_WORKER_ID",
         "wrk_00000000000000000000000001",
     )?);
-    // A process restart must enter the scheduler as a new Worker instance and
-    // generation. Stable defaults would make a restarted process look like
-    // the predecessor and would suppress the repository replacement path.
     let worker_instance_id =
         WorkerInstanceId(runtime_identity("WWC_SERVER_WORKER_INSTANCE_ID", "wki_")?);
     let scheduler_generation = runtime_identity("WWC_SERVER_SCHEDULER_GENERATION", "gen_")?;
@@ -339,7 +321,6 @@ async fn run_composed_server(
     .await
 }
 
-/// Model payloads and Provider credentials stay in the Device process.
 struct DeviceModelBoundary;
 impl winwincode_control_plane::DurableExecutionPortDelegate for DeviceModelBoundary {
     fn accept(
@@ -500,8 +481,6 @@ fn compose_production_application(
     )?));
     let artifact_objects =
         LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
-    // Collaboration inbox keeps its own catalog handle; the execution-port
-    // Control Plane owns the canonical artifact-catalog installed above.
     let artifact_store = ArtifactStore::open(
         config
             .data_directory()

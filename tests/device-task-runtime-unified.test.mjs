@@ -170,8 +170,6 @@ test('registered active recovery uses the factory contract and drives anchors an
     anchors.push(id)
     return { workerSessionId: runs.find(run => run.id === id).workerSessionId }
   }
-  // This is the actual factory's public task contract. No obsolete repeat guard
-  // is installed by the fixture or its ProductSession view.
   const devicePath = { launchAnchor,
     forProductSession: () => ({ launchAnchor }) }
   const api = {
@@ -361,7 +359,6 @@ test('ledger rejects failed, changed, and conflicting retained completion import
 })
 
 function refreshRecordHash(entry) {
-  // Keep the real invalid-record hash when isolating status/identity boundaries.
   if (entry.provenance.recordSha256 !== 'b'.repeat(64)) {
     entry.provenance.recordSha256 = createHash('sha256').update(JSON.stringify(entry.record)).digest('hex')
   }

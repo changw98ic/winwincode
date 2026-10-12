@@ -1,38 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server-side `WorkerLaunchGrant` ledger and its launch audit trail.
-//!
-//! The Control Plane is the authoritative owner of Worker launch grants (plan
-//! 7.8, 14.3, 17.2): exactly one grant backs one `WorkerSession`, it binds
-//! every identity the launch depends on (client node and device instance,
-//! occupancy lease and fencing token, repository binding, worker session,
-//! worker, and worker instance), and any field inconsistency refuses the
-//! settlement. A grant is created `issued` after the issue gate validated the
-//! caller is the occupancy lease holder, the lease is `occupied` or
-//! `draining`, the binding belongs to the leased client and is visible to the
-//! holder (an active `use` client access grant plus an active repository
-//! access grant), and the client still has a free worker-session slot. The
-//! Device Client's `client.worker.launch_ack` settles the grant exactly once:
-//! an accepted acknowledgement consumes it, a rejection keeps it `issued`
-//! with the rejection reason recorded in the launch audit trail, and a replay
-//! of an already consumed grant is an accepted idempotent no-op.
-//!
-//! Uniqueness: at most one non-terminal (`issued` or `consumed`) grant may
-//! exist per `worker_session_id` — the partial unique index is the durable
-//! backstop behind the issue-time conflict check, so one worker session can
-//! never carry two live worker launches (plan 14, one `WorkerSession` one
-//! `Worker`).
-//!
-//! Credentials: only the `sha256:` digest of the one-time worker credential
-//! is stored. The raw 32-byte material never enters this ledger; it crosses
-//! the launch response and the device chain once and is dropped.
-//!
-//! Audit: every issuance, consumption, rejection, revocation, and expiry is
-//! appended to `worker_launch_grant_audit` inside the same transaction as the
-//! state change. Audit identities are derived deterministically from the
-//! grant suffix and the action, so each of the at-most-once transitions
-//! records exactly one row without the storage layer drawing entropy.
-
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -112,16 +79,11 @@ CREATE TABLE IF NOT EXISTS worker_launch_grant_exits (
 );
 ";
 
-/// Lifecycle state of one `WorkerLaunchGrant` (plan 7.8).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerLaunchGrantState {
-    /// Created and waiting for the Device Client launch acknowledgement.
     Issued,
-    /// The Device Client accepted the launch and spawned the worker.
     Consumed,
-    /// Terminal: the grant was revoked before the device accepted.
     Revoked,
-    /// Terminal: the expiry deadline passed before the device accepted.
     Expired,
 }
 
@@ -149,8 +111,6 @@ impl WorkerLaunchGrantState {
         }
     }
 
-    /// True while the grant still holds the worker session's single live
-    /// launch slot.
     #[must_use]
     pub const fn is_non_terminal(self) -> bool {
         matches!(self, Self::Issued | Self::Consumed)
@@ -163,18 +123,12 @@ impl fmt::Display for WorkerLaunchGrantState {
     }
 }
 
-/// Launch decision recorded in the launch audit trail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LaunchAuditAction {
-    /// The grant was issued after the gate passed.
     Issued,
-    /// An accepted launch acknowledgement consumed the grant.
     Consumed,
-    /// The device rejected the launch; the grant stayed `issued`.
     LaunchRejected,
-    /// The grant was revoked before consumption.
     Revoked,
-    /// The expiry sweep terminated the grant.
     Expired,
 }
 
@@ -191,10 +145,6 @@ impl LaunchAuditAction {
     }
 }
 
-/// Validated atomic issue command (plan 14.3 step 4, 17.2).
-///
-/// The `_id` postfix on every field is the plan's own domain vocabulary, so
-/// the lint against repeated field suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchGrantIssuance {
@@ -215,13 +165,6 @@ pub struct LaunchGrantIssuance {
 }
 
 impl LaunchGrantIssuance {
-    /// Builds one validated issue command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a fencing token outside the durable
-    /// range, a non-`sha256:` credential digest, or a non-canonical expiry
-    /// before any durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         worker_launch_grant_id: impl Into<String>,
@@ -312,10 +255,6 @@ impl LaunchGrantIssuance {
     }
 }
 
-/// Validated `client.worker.launch_ack` settlement command (plan 14.3 step
-/// 10, contract `client-control-port-v1.md`). Every bound field the device
-/// echoes must match the grant exactly; any inconsistency refuses the
-/// settlement without a state change (plan 17.2).
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchAckSettlement {
@@ -330,17 +269,6 @@ pub struct LaunchAckSettlement {
 }
 
 impl LaunchAckSettlement {
-    /// Builds one validated settlement command.
-    ///
-    /// The `_id` postfix on every field is the plan's own domain vocabulary,
-    /// so the lint against repeated field suffixes is intentionally allowed;
-    /// the wire payload simply carries this many identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a fencing token outside the durable
-    /// range, a missing rejection reason on a rejected acknowledgement, or an
-    /// out-of-bounds reason text.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         worker_launch_grant_id: impl Into<String>,
@@ -396,111 +324,60 @@ impl LaunchAckSettlement {
     }
 }
 
-/// Outcome of one settled `client.worker.launch_ack`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchAckOutcome {
-    /// This acknowledgement consumed the grant: `issued -> consumed`.
     Consumed(Box<WorkerLaunchGrantRecord>),
-    /// The grant was already consumed by an earlier acknowledgement; the
-    /// replay is an accepted idempotent no-op.
     AlreadyConsumed,
-    /// The device rejected the launch: the grant stays `issued` and the
-    /// rejection reason landed in the launch audit trail.
     KeptIssued(Box<WorkerLaunchGrantRecord>),
 }
 
-/// Durable `WorkerLaunchGrant` row (plan 7.8).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerLaunchGrantRecord {
-    /// Stable grant identifier.
     pub worker_launch_grant_id: String,
-    /// Client node the worker launches on.
     pub client_node_id: String,
-    /// Device instance identity the launch is bound to.
     pub client_instance_id: String,
-    /// Occupancy holder the grant belongs to.
     pub holder_user_id: String,
-    /// Occupancy lease authorizing the launch.
     pub occupancy_lease_id: String,
-    /// Fencing token of the occupancy lease at issue time.
     pub occupancy_fencing_token: u64,
-    /// Repository the worker runs against.
     pub repository_binding_id: String,
-    /// Worker session the grant backs; one live grant per session.
     pub worker_session_id: String,
-    /// Worker identity.
     pub worker_id: String,
-    /// Worker instance identity.
     pub worker_instance_id: String,
-    /// `sha256:` digest of the one-time worker credential; never the
-    /// material itself.
     pub credential_digest: String,
-    /// Product session the launch belongs to, when known.
     pub product_session_id: Option<String>,
-    /// `WorkRun` the launch belongs to, when known.
     pub work_run_id: Option<WorkRunId>,
-    /// Deadline after which the grant may no longer be consumed.
     pub expires_at: Instant,
-    /// Lifecycle state.
     pub state: WorkerLaunchGrantState,
-    /// Consumption instant; set exactly on `issued -> consumed`.
     pub consumed_at: Option<Instant>,
-    /// Terminal instant; set on `revoked` and `expired`.
     pub ended_at: Option<Instant>,
-    /// Instant the grant was issued.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Stable launch-grant ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerLaunchGrantStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// The client node presence is not `online`.
     PresenceNotOnline,
-    /// The client node is `locked`.
     ClientLocked,
-    /// No occupancy lease matches the requested identity.
     UnknownOccupancyLease,
-    /// The lease belongs to a user other than the grant holder.
     NotLeaseHolder,
-    /// The lease is neither `occupied` nor `draining`.
     OccupancyNotConfirmed,
-    /// The command carried a fencing token other than the bound token.
     FencingTokenMismatch,
-    /// No repository binding matches the requested identity.
     UnknownRepositoryBinding,
-    /// The binding belongs to a client node other than the leased one.
     BindingForeignClient,
-    /// The holder has no visible binding (missing `use` client grant or
-    /// missing active repository grant).
     BindingNotVisible,
-    /// The client node has no free worker-session slot.
     CapacityExhausted,
-    /// The worker session already carries a non-terminal grant.
     LaunchGrantConflict,
-    /// The grant's expiry deadline passed before the acknowledgement.
     GrantExpired,
-    /// No launch grant matches the requested identity.
     UnknownLaunchGrant,
-    /// An echoed settlement field does not match the grant binding.
     FieldMismatch,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race that should be impossible inside
-    /// one immediate transaction.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free launch-grant ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerLaunchGrantStoreError {
     kind: WorkerLaunchGrantStoreErrorKind,
@@ -522,19 +399,11 @@ impl fmt::Display for WorkerLaunchGrantStoreError {
 
 impl std::error::Error for WorkerLaunchGrantStoreError {}
 
-/// Worker launch grant ledger borrowing the sole product-state `SQLite`
-/// authority.
 pub struct WorkerLaunchGrantLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable worker launch grant ledger on this same product-state
-    /// database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn worker_launch_grant_ledger(
         &mut self,
     ) -> Result<WorkerLaunchGrantLedger<'_>, WorkerLaunchGrantStoreError> {
@@ -552,23 +421,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Atomically issues one worker launch grant (plan 14.3 step 4).
-    ///
-    /// Inside one immediate transaction the gate validates, in order: the
-    /// client node is `online` and unlocked, the named occupancy lease exists
-    /// on that node, is `occupied` or `draining`, belongs to the holder, and
-    /// carries exactly the stamped fencing token; the repository binding
-    /// exists, belongs to the leased node, and is visible to the holder (an
-    /// active `use` client access grant plus an active repository access
-    /// grant); the node still has a free worker-session slot counting its
-    /// non-terminal grants (plan 14.5 durable reservation view); and the
-    /// worker session carries no other non-terminal grant. On success the
-    /// `issued` grant and its `issued` audit row commit together.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any failed gate condition, a reused grant id, or storage
-    /// failure.
     #[allow(clippy::too_many_lines)]
     pub fn issue(
         &mut self,
@@ -578,9 +430,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         self.issue_replacement(issuance, None, now)
     }
 
-    /// Issues a unique successor launch only after an exact trusted Device exit.
-    /// # Errors
-    /// Rejects changed Device authority, duplicate successor launches or storage errors.
     #[allow(clippy::too_many_lines)]
     pub fn issue_replacement(
         &mut self,
@@ -594,21 +443,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         Ok(stored)
     }
 
-    /// Settles one `client.worker.launch_ack` (plan 14.3 step 10).
-    ///
-    /// The bound lease, fencing token, worker session, worker, and worker
-    /// instance echoed by the device must all match the grant; any mismatch
-    /// refuses the settlement with no state change. An accepted
-    /// acknowledgement consumes an `issued` grant exactly once (its expiry
-    /// deadline must still be open); a replay against an already `consumed`
-    /// grant is an accepted idempotent no-op. A rejected acknowledgement
-    /// keeps the grant `issued` and records the rejection reason in the
-    /// launch audit trail.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a field mismatch, a stale token, an expired
-    /// grant, an illegal transition, or storage failure.
     #[allow(clippy::too_many_lines)]
     pub fn settle_launch_ack(
         &mut self,
@@ -618,9 +452,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         self.settle_launch_ack_checked(settlement, None, now)
     }
 
-    /// Settles a Device report only for the authenticated physical node.
-    /// # Errors
-    /// Rejects cross-Device reports without changing grant or audit state.
     pub fn settle_device_launch_ack(
         &mut self,
         node_id: &str,
@@ -702,14 +533,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
-    /// Revokes an `issued` grant before the device accepted it (plan 18
-    /// recovery family). A consumed grant is a live worker and leaves
-    /// through the stop flow, not through revocation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a non-`issued` grant, an over-long reason,
-    /// or storage failure.
     pub fn revoke(
         &mut self,
         worker_launch_grant_id: &str,
@@ -759,12 +582,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         Ok(revoked)
     }
 
-    /// Expires every `issued` grant whose expiry deadline is at or before
-    /// `cutoff` (plan 7.8 `expired`). Returns the expired grant ids.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire(&mut self, cutoff: &Instant) -> Result<Vec<String>, WorkerLaunchGrantStoreError> {
         validate_instant(cutoff, "expiry cutoff")?;
         let transaction = self.transaction()?;
@@ -810,12 +627,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         Ok(expired)
     }
 
-    /// Returns one durable launch grant projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot(
         &self,
         worker_launch_grant_id: &str,
@@ -824,11 +635,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         load_launch_grant(self.connection()?, worker_launch_grant_id)
     }
 
-    /// Records a process exit reported by the authenticated current Device.
-    /// The exact grant, instance and current occupancy must still agree; an
-    /// idle Chat has no execution binding and needs the same durable closure.
-    /// # Errors
-    /// Rejects malformed identities or storage failures. Stale reports return false.
     pub fn observe_trusted_exit(
         &mut self,
         node_id: &str,
@@ -875,9 +681,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         Ok(accepted)
     }
 
-    /// Whether a trusted Device exit durably closed this grant's process.
-    /// # Errors
-    /// Rejects malformed identities or unavailable storage.
     pub fn has_trusted_exit(&self, grant_id: &str) -> Result<bool, WorkerLaunchGrantStoreError> {
         validate_worker_launch_grant_id(grant_id)?;
         Ok(self
@@ -892,9 +695,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
             .is_some())
     }
 
-    /// Follows the unique successor lineage of an exited launch.
-    /// # Errors
-    /// Rejects a malformed grant identity or corrupt stored lineage.
     pub fn recovery_launch_for_grant(
         &self,
         grant_id: &str,
@@ -906,14 +706,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
             .map(Option::flatten)
     }
 
-    /// Returns the one non-terminal grant of a worker session, if any.
-    ///
-    /// More than one non-terminal row is a corrupt database and fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity, a corrupt active
-    /// set, or storage failure.
     pub fn active_grant_for_session(
         &self,
         worker_session_id: &str,
@@ -942,15 +734,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
-    /// Returns the newest launch grant anchored to one product session, if
-    /// any, regardless of its lifecycle state: the anchor proves the session
-    /// was bound to device execution and stays the permission anchor of the
-    /// session after the grant itself ends.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical product session identity, a corrupt stored
-    /// row, or storage failure.
     pub fn newest_grant_for_product_session(
         &self,
         product_session_id: &str,
@@ -973,15 +756,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
-    /// Returns the newest launch grant anchored to one `StrongFlow` `WorkRun`,
-    /// if any, regardless of its lifecycle state (`FLOW-100.5`): the per-WorkRun
-    /// anchor routes that role's job to the exact `WorkerSession` the Client
-    /// launched for it, so distinct roles never share a `CodexThread`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `WorkRun` identity, a corrupt stored row, or
-    /// storage failure.
     pub fn newest_grant_for_work_run(
         &self,
         work_run_id: &str,
@@ -1004,14 +778,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
-    /// Counts the non-terminal (`issued` plus `consumed`) grants of one
-    /// client node under an active occupancy — released leases no longer reserve slots;
-    /// this is the durable reservation view capacity is judged against
-    /// (plan 14.5).
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn non_terminal_count_for_node(
         &self,
         client_node_id: &str,
@@ -1021,11 +787,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         reserved_worker_sessions(connection, client_node_id)
     }
 
-    /// Returns every durable launch audit entry of one grant, oldest first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity or storage failure.
     pub fn audit_trail(
         &self,
         worker_launch_grant_id: &str,
@@ -1078,7 +839,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
     }
 }
 
-/// Shared durable capacity count for the claim, binding and launch gates.
 pub(crate) fn reserved_worker_sessions(
     connection: &rusqlite::Connection,
     client_node_id: &str,
@@ -1113,24 +873,15 @@ fn ensure_worker_launch_grant_schema(
     Ok(())
 }
 
-/// One launch audit row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchAuditEntry {
-    /// Stable audit identity.
     pub audit_id: String,
-    /// Recorded action.
     pub action: LaunchAuditAction,
-    /// Grant the entry refers to.
     pub worker_launch_grant_id: String,
-    /// Client node the grant launches on.
     pub client_node_id: String,
-    /// Holder the grant belongs to.
     pub holder_user_id: String,
-    /// User that drove the transition.
     pub actor_user_id: String,
-    /// Machine-readable reason, when one exists.
     pub reason: Option<String>,
-    /// Instant the entry was recorded.
     pub occurred_at: Instant,
 }
 
@@ -1184,9 +935,6 @@ impl LaunchAuditEntry {
     }
 }
 
-/// Applies the issue gate inside the caller's transaction (plan 14.3 step 3,
-/// 17.2). Conditions are judged in the plan order: device facts, occupancy,
-/// binding visibility, capacity, and the one-live-grant-per-session rule.
 fn ensure_issue_gate(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
@@ -1198,8 +946,6 @@ fn ensure_issue_gate(
     Ok(())
 }
 
-/// Judges the device facts: the client node exists, is `online`, is
-/// unlocked, and returns its worker-session capacity.
 fn ensure_device_facts(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
@@ -1244,9 +990,6 @@ fn ensure_device_facts(
     from_sql_integer(max_slots, "client worker session capacity")
 }
 
-/// Judges the occupancy facts (plan 17.2): the lease exists on the leased
-/// node, is confirmed by the device (`occupied` or `draining`), belongs to
-/// the holder, and carries the exact stamped fencing token.
 fn ensure_occupancy_facts(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
@@ -1294,9 +1037,6 @@ fn ensure_occupancy_facts(
     Ok(())
 }
 
-/// Judges the binding facts (plan 13.4): the binding exists, belongs to the
-/// leased node, and is visible to the holder — an active `use` client access
-/// grant plus an active repository access grant.
 fn ensure_binding_visibility(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
@@ -1348,8 +1088,6 @@ fn ensure_binding_visibility(
     Ok(())
 }
 
-/// Judges capacity (plan 14.5, no overselling) and the one-live-grant-per-
-/// worker-session rule; the partial unique index is the durable backstop.
 fn ensure_capacity_and_session_uniqueness(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
@@ -1380,9 +1118,6 @@ fn ensure_capacity_and_session_uniqueness(
     Ok(())
 }
 
-/// Validates that every echoed settlement field matches the grant binding
-/// (plan 17.2: any field inconsistency refuses). The occupancy stamp is
-/// judged first so a stale token reports precisely.
 fn ensure_settlement_matches(
     record: &WorkerLaunchGrantRecord,
     settlement: &LaunchAckSettlement,
@@ -1408,9 +1143,6 @@ fn ensure_settlement_matches(
     }
 }
 
-/// Appends one launch audit row inside the caller's transaction. Audit
-/// identities derive from the grant suffix and the action code, so each of
-/// the at-most-once transitions records exactly one row.
 #[allow(clippy::too_many_arguments)]
 fn insert_audit(
     transaction: &Transaction<'_>,
@@ -1450,7 +1182,6 @@ fn insert_audit(
     Ok(())
 }
 
-/// Hashes the complete grant identity and action; no suffix bits are discarded.
 fn audit_identity(
     action: LaunchAuditAction,
     worker_launch_grant_id: &str,
@@ -1721,9 +1452,6 @@ fn validate_worker_instance_id(value: &str) -> Result<(), WorkerLaunchGrantStore
 }
 
 fn validate_product_session_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    // A launch may bind either a launch-minted device session (`ps_`) or a
-    // chat-surface session (`psn_`); both share the 26 character identity
-    // suffix, which is what lets a Chat session anchor to device execution.
     if validate_crockford_id(value, "ps_", "product session id").is_ok() {
         return Ok(());
     }
@@ -1734,7 +1462,6 @@ fn validate_work_run_id(value: &WorkRunId) -> Result<(), WorkerLaunchGrantStoreE
     validate_crockford_id(&value.0, "wrn_", "WorkRun id")
 }
 
-/// Validates the canonical `sha256:` + 64 lowercase hex digest shape.
 fn validate_credential_digest(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(error(
@@ -1756,7 +1483,6 @@ fn validate_credential_digest(value: &str) -> Result<(), WorkerLaunchGrantStoreE
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), WorkerLaunchGrantStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1818,9 +1544,6 @@ fn map_grant_insert_sql(sql: &rusqlite::Error) -> WorkerLaunchGrantStoreError {
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the one-live-grant-per-
-            // session partial index; a grant id reuse shares the extended
-            // code family and fails closed as a conflict too.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 WorkerLaunchGrantStoreErrorKind::LaunchGrantConflict,
                 "the worker session already carries a non-terminal launch grant",
@@ -1846,7 +1569,6 @@ fn grant_missing_after_write() -> WorkerLaunchGrantStoreError {
     )
 }
 
-/// Loads one grant or fails with the unknown-grant category.
 fn require_launch_grant(
     connection: &rusqlite::Connection,
     worker_launch_grant_id: &str,
@@ -2028,7 +1750,6 @@ mod tests {
         client_node_id
     }
 
-    /// Stages an active `use` client access grant for the user.
     fn stage_client_grant(storage: &mut SqliteStorage, node: &str, user: &str, seed: u64) {
         let issuance = AccessGrantIssuance::try_new(
             format!("cag_{}", crockford(seed)),
@@ -2051,8 +1772,6 @@ mod tests {
             .expect("grant");
     }
 
-    /// Claims occupancy and walks the lease to `occupied` (or `draining`)
-    /// through the real ledger.
     fn stage_occupied_lease(
         storage: &mut SqliteStorage,
         node: &str,
@@ -2082,8 +1801,6 @@ mod tests {
         (lease.occupancy_lease_id, lease.fencing_token)
     }
 
-    /// Stages one visible repository binding with an active `use` grant for
-    /// the user.
     fn stage_visible_binding(
         storage: &mut SqliteStorage,
         node: &str,
@@ -2183,8 +1900,6 @@ mod tests {
         .expect("settlement")
     }
 
-    /// Seeds the full happy-path fixture: an online node with an active use
-    /// grant, an occupied lease for the holder, and one visible binding.
     fn seed_happy_path(
         storage: &mut SqliteStorage,
         seed: u64,
@@ -2197,9 +1912,6 @@ mod tests {
         (node, lease_id, binding, token)
     }
 
-    /// Builds an issuance command from a fixed valid identity set, with the
-    /// grant id, fencing token, and credential digest parameterized for the
-    /// rejection cases.
     fn issuance_command(
         grant: &str,
         fencing_token: u64,
@@ -2371,7 +2083,6 @@ mod tests {
         let (node, lease_id, binding, token) = seed_happy_path(&mut storage, 1, &holder);
         {
             let mut ledger = storage.worker_launch_grant_ledger().expect("ledger");
-            // A lease that belongs to another user.
             let error = ledger
                 .issue(
                     &issuance(
@@ -2391,7 +2102,6 @@ mod tests {
                 error.kind(),
                 WorkerLaunchGrantStoreErrorKind::NotLeaseHolder
             );
-            // A fencing token that does not match the lease.
             let error = ledger
                 .issue(
                     &issuance(
@@ -2412,9 +2122,6 @@ mod tests {
                 WorkerLaunchGrantStoreErrorKind::FencingTokenMismatch
             );
         }
-        // A lease the holder released no longer authorizes a launch (a node
-        // holds at most one active lease, so the confirmed lease itself is
-        // released to exercise the unconfirmed state).
         {
             let mut occupancy = storage.client_occupancy_ledger().expect("ledger");
             occupancy
@@ -2446,7 +2153,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantStoreErrorKind::OccupancyNotConfirmed
         );
-        // An unknown lease.
         let error = ledger
             .issue(
                 &issuance(
@@ -2473,8 +2179,6 @@ mod tests {
         let mut storage = SqliteStorage::open(temporary_directory("binding")).expect("storage");
         let holder = user_id(7);
         let (node, lease_id, binding, token) = seed_happy_path(&mut storage, 1, &holder);
-        // A second node with its own occupied lease, plus two bindings the
-        // second holder cannot see (no client grant, no repository grant).
         let other_holder = user_id(9);
         let other_node = seed_online_node(&mut storage, 60);
         stage_client_grant(&mut storage, &other_node, &other_holder, 62);
@@ -2505,7 +2209,6 @@ mod tests {
         }
 
         let mut ledger = storage.worker_launch_grant_ledger().expect("ledger");
-        // The binding belongs to another client node.
         let error = ledger
             .issue(
                 &issuance(
@@ -2525,7 +2228,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantStoreErrorKind::BindingForeignClient
         );
-        // The binding has no active repository grant for the holder.
         let error = ledger
             .issue(
                 &issuance(
@@ -2545,7 +2247,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantStoreErrorKind::BindingNotVisible
         );
-        // An unknown binding.
         let error = ledger
             .issue(
                 &issuance(
@@ -2573,7 +2274,6 @@ mod tests {
         let mut storage = SqliteStorage::open(temporary_directory("capacity")).expect("storage");
         let holder = user_id(7);
         let (node, lease_id, binding, token) = seed_happy_path(&mut storage, 1, &holder);
-        // Capacity zero: the durable reservation view has no free slot.
         storage
             .connection_mut()
             .expect("connection")
@@ -2605,8 +2305,6 @@ mod tests {
                 WorkerLaunchGrantStoreErrorKind::CapacityExhausted
             );
         }
-        // Restore capacity and issue; a second live grant for the same
-        // worker session must conflict.
         storage
             .connection_mut()
             .expect("connection")
@@ -2693,7 +2391,6 @@ mod tests {
         assert_eq!(consumed.state, WorkerLaunchGrantState::Consumed);
         assert!(consumed.consumed_at.is_some());
         assert_eq!(consumed.revision, 2);
-        // A replay is an accepted idempotent no-op that changes nothing.
         let outcome = ledger
             .settle_launch_ack(
                 &settlement(11, &lease_id, token, 20, true, None),
@@ -2706,7 +2403,6 @@ mod tests {
             .expect("snapshot")
             .expect("grant");
         assert_eq!(replayed.revision, 2, "the replay never rewrote the row");
-        // Exactly two audit rows: issued plus consumed.
         let trail = ledger
             .audit_trail(&consumed.worker_launch_grant_id)
             .expect("trail");
@@ -2769,8 +2465,6 @@ mod tests {
             trail[1].reason.as_deref(),
             Some("rejected_capacity_exhausted")
         );
-        // After the rejection the grant can still be consumed by a later
-        // accepted acknowledgement.
         let outcome = ledger
             .settle_launch_ack(
                 &settlement(11, &lease_id, token, 20, true, None),
@@ -2804,7 +2498,6 @@ mod tests {
                 .expect("issue");
         }
         let mut ledger = storage.worker_launch_grant_ledger().expect("ledger");
-        // A mismatched worker instance refuses with no state change.
         let mismatched = LaunchAckSettlement::try_new(
             grant_id(11),
             lease_id.clone(),
@@ -2820,7 +2513,6 @@ mod tests {
             .settle_launch_ack(&mismatched, &unit_instant("2026-01-01T00:03:00.000Z"))
             .expect_err("a field mismatch must refuse");
         assert_eq!(error.kind(), WorkerLaunchGrantStoreErrorKind::FieldMismatch);
-        // A stale fencing token refuses with no state change.
         let error = ledger
             .settle_launch_ack(
                 &settlement(11, &lease_id, token + 1, 20, true, None),
@@ -2831,7 +2523,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantStoreErrorKind::FencingTokenMismatch
         );
-        // An acknowledgement after the expiry deadline refuses.
         let error = ledger
             .settle_launch_ack(
                 &settlement(11, &lease_id, token, 20, true, None),
@@ -2896,7 +2587,6 @@ mod tests {
             .expect("revoke");
         assert_eq!(revoked.state, WorkerLaunchGrantState::Revoked);
         assert!(revoked.ended_at.is_some());
-        // A consumed grant cannot be revoked.
         ledger
             .settle_launch_ack(
                 &settlement(12, &lease_id, token, 30, true, None),
@@ -2915,7 +2605,6 @@ mod tests {
             error.kind(),
             WorkerLaunchGrantStoreErrorKind::IllegalStateTransition
         );
-        // The expiry sweep terminates every issued grant past the cutoff.
         let expired = ledger
             .expire(&unit_instant("2026-01-01T02:00:00.000Z"))
             .expect("expire");
@@ -2969,7 +2658,6 @@ mod tests {
             .expect("grant");
         assert_eq!(record.state, WorkerLaunchGrantState::Expired);
         assert!(record.ended_at.is_some());
-        // An expired grant is terminal: no acknowledgement changes it.
         let error = ledger
             .settle_launch_ack(
                 &settlement(11, &lease_id, token, 20, true, None),
@@ -3521,8 +3209,6 @@ mod tests {
         .expect("positive control retains the exact existing successor");
         assert_eq!(retained, published);
         assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
-        // This is the only changed request field. Credential identity stays
-        // consistently bound to the request so only the original guard rejects it.
         retry
             .worker_instance_id
             .clone_from(&predecessor.worker_instance_id);
@@ -3545,8 +3231,6 @@ mod tests {
     }
 }
 
-/// Rechecks one already-published identity under the bundle's writer transaction.
-/// Fresh issuance still owns capacity and all publication writes.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn reusable_launch_in_transaction(
     transaction: &Transaction<'_>,
@@ -3559,8 +3243,6 @@ pub(crate) fn reusable_launch_in_transaction(
     if issuance.product_session_id.is_none() && issuance.work_run_id.is_none() {
         return Ok(None);
     }
-    // Find the whole live scope before checking lineage. A different
-    // predecessor must not disguise an existing Worker as a fresh launch.
     let mut statement = transaction
         .prepare(
             "SELECT g.worker_launch_grant_id FROM worker_launch_grants g
@@ -3606,7 +3288,6 @@ pub(crate) fn reusable_launch_in_transaction(
     {
         return Ok(None);
     }
-    // Reuse consumes no additional slot, but never bypasses current authority.
     ensure_device_facts(transaction, issuance)?;
     ensure_occupancy_facts(transaction, issuance)?;
     ensure_binding_visibility(transaction, issuance)?;
@@ -3808,7 +3489,6 @@ pub(crate) fn issue_launch_in_transaction(
     Ok(record)
 }
 
-/// An authenticated Device's exact local process closure. Models never issue it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DeviceLaunchProcessClosure {
     pub worker_launch_grant_id: String,
@@ -3819,10 +3499,6 @@ pub struct DeviceLaunchProcessClosure {
     pub process_boot_digest: Option<String>,
 }
 impl WorkerLaunchGrantLedger<'_> {
-    /// Closes an exact original launch after current Device attestation.
-    /// Rebooted Devices must supply the original boot-bound process closure.
-    /// # Errors
-    /// Rejects changed closure replays, foreign Device, occupancy or instance facts.
     pub fn observe_device_process_closure(
         &mut self,
         node_id: &str,
@@ -3919,9 +3595,6 @@ impl WorkerLaunchGrantLedger<'_> {
         tx.commit().map_err(|e| sql_error(&e))?;
         Ok(true)
     }
-    /// Whether the retained closure was attested by the current Device instance.
-    /// # Errors
-    /// Rejects malformed grant identity or unavailable storage.
     pub fn closed_for_device_instance(
         &self,
         grant_id: &str,

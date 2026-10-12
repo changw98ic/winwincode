@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use http::Uri;
 
-/// Public-listener TLS mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerTls {
     Disabled,
@@ -18,7 +17,6 @@ pub enum ServerTls {
     },
 }
 
-/// Complete standalone server configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerConfig {
     bind_address: SocketAddr,
@@ -31,12 +29,6 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Validate and construct one public-origin configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid/mismatched URL, empty origin allowlist or storage
-    /// path, a zero shutdown window, and incomplete TLS paths.
     pub fn new(
         bind_address: SocketAddr,
         public_url: impl Into<String>,
@@ -104,12 +96,6 @@ impl ServerConfig {
         &self.allowed_origins
     }
 
-    /// Enables the isolated preview origin served by this listener.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed origin, a scheme that differs from the listener,
-    /// or reuse of the main application origin.
     pub fn with_preview_public_url(
         mut self,
         preview_public_url: impl Into<String>,
@@ -149,7 +135,6 @@ impl ServerConfig {
     }
 }
 
-/// Configuration validation failure with no secret values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerConfigError {
     message: String,

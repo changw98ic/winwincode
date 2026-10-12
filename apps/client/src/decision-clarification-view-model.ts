@@ -26,7 +26,6 @@ export interface ClarificationCriterion {
   readonly id: string
   readonly title: string
   readonly required: boolean
-  /** Verification is selected by the trusted repository adapter, not the browser. */
   readonly verificationMethod: string | null
 }
 
@@ -73,7 +72,6 @@ export interface ClarificationState {
   readonly conflicts: readonly DraftFieldConflict[]
   readonly notice: string | null
   readonly lastRequestId: RequestId | null
-  /** Changes only when controls must be rebuilt, so typing never loses focus. */
   readonly formRevision: number
 }
 
@@ -186,7 +184,6 @@ function snapshotFrom(
   })
 }
 
-/** The existing delivery.get/update_spec contract is the only persistence path. */
 export function clarificationUpdateCommand(
   input: ClarificationSaveInput,
   actor: Actor,

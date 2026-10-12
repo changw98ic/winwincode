@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Private advisory task records shared by persistence and model compaction.
-//! Product state and execution authority remain owned by the Controller.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::generated::ExecutionJob;
 
-/// Host-only budget for the complete context at a compaction checkpoint.
 pub const TASK_HANDOFF_CONTEXT_MAX_TOKENS: usize = 30_000;
 
-/// The same prompt is used by manual and automatic embedded Core compaction.
 pub const TASK_HANDOFF_COMPACT_PROMPT: &str = r"Compress the conversation into a concise task-state handoff for the next agent.
 Output only YAML with these seven top-level fields, in this order:
 Task: current task identity, goal and active conversational scope
@@ -31,85 +26,56 @@ Current host execution bindings, role instructions, constraints and authorizatio
 The handoff is advisory. It does not advance product state or grant execution authority.
 ";
 
-/// Stable task identity and the source revision of this execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandoffTask {
-    /// Exact execution Job, rather than an inferred conversational label.
     pub job_id: String,
-    /// Current `WorkItem`, when the execution belongs to a `WorkRun`.
     pub work_item_id: Option<String>,
-    /// Sealed goal; later conversational scope remains in Core history.
     pub goal: String,
-    /// Execution role, kept separate from task completion authority.
     pub role: String,
-    /// Checkout source revision, not a claim about subsequent file changes.
     pub source_revision: String,
-    /// Latest advisory internal checklist, copied from Core's plan event.
     pub plan: Option<serde_json::Value>,
 }
 
-/// An observed successful patch operation, not a semantic implementation claim.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandoffChange {
-    /// Create, modify, delete or move, derived from Core's patch result.
     pub operation: String,
-    /// Exact Core turn/tool call that produced this observation.
     pub source_id: String,
-    /// Workspace-relative destination of an observed move, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
 }
 
-/// One completed command check; it never implies independent acceptance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandoffCheck {
-    /// Exact Core turn/tool call that produced this result.
     pub source_id: String,
-    /// Bounded command label; raw output stays in existing receipts.
     pub command: String,
-    /// Actual command working directory, so checks retain their execution scope.
     pub cwd: String,
-    /// Actual terminal command state.
     pub status: String,
-    /// Actual observed process exit code.
     pub exit_code: i32,
 }
 
-/// Verification observations kept separate from product acceptance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandoffValidation {
-    /// This local record does not contain a Controller acceptance verdict.
     pub acceptance: String,
-    /// Most recent bounded checks, in observation order.
     pub checks: Vec<HandoffCheck>,
 }
 
-/// Latest structured internal task record, persisted in the existing run store.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct TaskHandoffRecord {
-    /// Exact task and execution identity.
     pub task: HandoffTask,
-    /// Advisory execution status; completed checklists do not change it.
     pub status: String,
-    /// Actual checkout path for relative file references.
     pub workspace: String,
-    /// Recorded checks and explicitly separate acceptance state.
     pub validation: HandoffValidation,
-    /// Latest observed successful patch per file.
     pub changes: BTreeMap<String, HandoffChange>,
-    /// Sealed `WorkItem` dependencies; no speculative files are added.
     pub dependencies: Vec<String>,
-    /// Outstanding operations and bounded-view omissions.
     pub unverified: BTreeMap<String, String>,
 }
 
 impl TaskHandoffRecord {
-    /// Seeds an advisory record directly from the sealed execution input.
     #[must_use]
     pub fn from_job(job: &ExecutionJob, workspace: &str) -> Self {
         Self {
@@ -143,12 +109,7 @@ impl TaskHandoffRecord {
         }
     }
 
-    /// Renders valid YAML using JSON values, avoiding a second serialization dependency.
-    ///
-    /// # Errors
-    /// Returns a serialization error rather than an incomplete handoff.
     pub fn to_yaml(&self) -> Result<String, serde_json::Error> {
-        // Struct order is part of the human-facing template.
         let values = [
             ("Task", serde_json::to_value(&self.task)?),
             ("Status", serde_json::to_value(&self.status)?),

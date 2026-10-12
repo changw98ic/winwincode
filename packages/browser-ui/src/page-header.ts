@@ -8,7 +8,6 @@ export interface PageHeaderProps {
   readonly title: string
   readonly description?: string
   readonly eyebrow?: string
-  /** Fixed for the lifetime of one mounted header. */
   readonly headingLevel?: PageHeadingLevel
   readonly className?: string
 }

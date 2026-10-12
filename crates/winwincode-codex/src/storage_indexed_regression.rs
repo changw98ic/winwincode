@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Migration and transaction fault cases use the actual private `SQLite` store.
 use super::*;
 
 fn root(label: &str) -> PathBuf {
@@ -22,7 +21,6 @@ fn frame(sequence: u64) -> ReplayFrame {
 }
 fn install_legacy(store: &AdapterStore, stream: &ReplayStreamKey, snapshot: &ReplaySnapshot) {
     let conn = store.lock().unwrap();
-    // Construct an old-layout owned DB; the fixture never disables a real runtime guard.
     conn.execute_batch("DROP TRIGGER runtime_replay_block_legacy_insert;DROP TRIGGER runtime_replay_block_legacy_update;").unwrap();
     conn.execute(
         "INSERT INTO runtime_replay VALUES (?1,?2)",

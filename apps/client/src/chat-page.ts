@@ -57,11 +57,8 @@ export interface ChatPageOptions {
   readonly deliveries?: HomeDeliveryListViewModel
   readonly scope?: RepositoryScope
   readonly settingsHref?: string
-  /** Deterministic clock for the contextual decision card; defaults to Date.now. */
   readonly nowMillis?: () => number
-  /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
-  /** Renderer seams for deterministic DOM tests; production uses the DSH renderers. */
   readonly mountAttachments?: typeof mountChatAttachments
   readonly mountMarkdown?: typeof mountChatMarkdown
 }
@@ -322,7 +319,6 @@ function focusableElement(value: Element | null | undefined): HTMLElement | null
     : null
 }
 
-/** Mount the default, keyboard-accessible Chat page against the read/write view-model only. */
 export function mountChatPage(options: ChatPageOptions): ChatPage {
   const readOnly = options.readOnly === true
   const nowMillis = options.nowMillis ?? Date.now
@@ -330,15 +326,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const scopedHref = (href: string): string => options.scope === undefined ? href : scopeHash(href, options.scope)
   const layout = element(document, 'div', 'wwc-chat')
   const conversation = element(document, 'section', 'wwc-chat-conversation')
-  // Design pages 03a/03b: the page header carries only the delegation entry
-  // chip; the 「winwincode ∨」 project dropdown at the top left is the shell's
-  // Scope selector, not a second Chat-owned control.
   const header = element(document, 'header', 'wwc-chat-page-header')
   const projectContext = element(document, 'a', 'wwc-chat-project-context')
   projectContext.href = scopedHref('#/projects')
   const heading = element(document, 'h2', 'wwc-chat-heading')
   const status = element(document, 'p', 'wwc-chat-status')
-  // Design page 03b: the delegation entry is the accent chip on the top right.
   const delegationChip = mountButton({
     document,
     props: {
@@ -507,12 +499,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   let conversionSessionId: ProductSessionId | null = null
   let conversionFocusReturn: HTMLElement | null = null
 
-  // UI-502: the Session's own pending inputs and approvals, decided in place
-  // through this page's view-model commands. The card is a projection of this
-  // page's snapshot, so it
-  // cannot drift from the state the rest of the page renders.
-  // The card mounts into this detached root, so a hidden card adds no node to
-  // the conversation and the page layout stays byte-identical when idle.
   const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
     root: decisionRoot,
     id: 'wwc-chat-decisions',
@@ -538,7 +524,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   heading.textContent = '新对话'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  // 设计稿 03a:模型选择即下拉本身,不再渲染可见的静态标签。
   modelLabel.textContent = ''
   modelLabel.htmlFor = 'wwc-chat-model'
   modelSelect.setAttribute('aria-label', '默认模型')
@@ -571,10 +556,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   cancel.type = 'button'
   cancel.textContent = '停止'
   send.type = 'submit'
-  // Design page 03a: the composer sends through an accent square carrying the
-  // paper-plane glyph; the spoken name stays the state-dependent action label.
-  // 源码安全扫描禁止本文件出现字面 URL;SVG 命名空间是 W3C 固定常量,
-  // 在运行时拼装。
   const svgNs = ['http', '://', 'www.w3.org/2000/svg'].join('')
   const sendIcon = typeof document.createElementNS === 'function'
     ? (() => {
@@ -604,8 +585,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   form.append(composerLabel, composer, controls, modelNotice, modelSettings)
   header.append(projectContext, delegationChip.root, delegationPanel)
   conversion.hidden = true
-  // UI-604: the panel is a dialog in fact but was announced as plain page content,
-  // opened without moving focus, and could only be dismissed with the pointer.
   conversion.setAttribute('role', 'dialog')
   conversion.setAttribute('aria-modal', 'false')
   conversionHeading.id = CONVERSION_DIALOG_HEADING_ID
@@ -766,8 +745,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         return
       }
       const candidate = item.candidate
-      // Community: one model name is enough. Provider IDs, default flags, and
-      // availability jargon belong in Settings, not the Chat composer.
       option.textContent = candidate.modelDisplayName
       option.disabled = !modelRouteReady(candidate)
     },
@@ -892,8 +869,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       row.append(renderRuntimeActivity(document, activity))
       runtimeActivities.append(row)
     }
-    // 设计稿 03b:侧栏高亮当前会话行,并抑制「新对话」的重复高亮。
-    // 列表由外壳渲染,这里只按当前会话标记激活行(FakeDocument 下无查询能力时跳过)。
     if (typeof document.querySelectorAll === 'function') {
       for (const row of Array.from(
         document.querySelectorAll<HTMLElement>('.wwc-sidebar-recent-item'),
@@ -917,8 +892,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     send.setAttribute('aria-label', presentation.sendLabel)
     cancel.hidden = !presentation.cancelVisible
     cancel.disabled = readOnly || state.interaction.status === 'cancelling'
-    // Design page 03a keeps the empty canvas clean; setup guidance only
-    // appears when no ready model route exists to start from.
     empty.hidden = state.status === 'loading' || state.status === 'refreshing'
       || state.messages.length > 0
     emptyMessage.textContent = state.session === null && readyModelRoutes(state).length > 0
@@ -1055,8 +1028,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
 
     messageCollection.update(state.messages)
 
-    // Design page 03b: a created Delivery surfaces as an in-flow receipt line
-    // pointing at the task detail for review.
     const deliveryCreated = options.deliveryCreator?.state.status === 'created'
     receipt.hidden = !deliveryCreated || state.session === null
     receiptText.textContent = deliveryCreated && state.session !== null
@@ -1099,8 +1070,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     conversion.hidden = !conversionOpen
     newDelegation.root.setAttribute('aria-expanded', String(conversionOpen))
     if (conversionOpen && !wasOpen) {
-      // UI-604: a keyboard user activating the trigger has to land inside the
-      // dialog, and the trigger has to be remembered so closing restores them.
       conversionFocusReturn = focusableElement(document.activeElement)
       conversionTitle.focus()
     } else if (!conversionOpen && wasOpen) {
@@ -1175,7 +1144,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     const attached = [...attachments.items]
     const draft = composer.value.trim() || (attached.length > 0 ? '请查看附件。' : '')
     if (draft.length === 0) return
-    // 设计稿 03a:新对话空状态下,首条消息创建会话(标题取首行)后发送。
     if (options.model.state.messages.length === 0 && options.listDeviceRepositories !== undefined && !repositorySelect.value) {
       repositoryStatus.textContent = '请选择设备上的项目。'
       repositorySelect.focus()

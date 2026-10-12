@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! MCP discovery uses the same client and configuration parser as embedded Core.
-
 use crate::DeviceProviderError;
 use codex_config::types::{
     AuthKeyringBackendKind, McpServerConfig, McpServerTransportConfig, OAuthCredentialsStoreMode,
@@ -42,8 +40,6 @@ pub(crate) fn validate(configuration: &str) -> Result<McpServerConfig, DevicePro
             http_headers_helper,
             ..
         } => {
-            // Header helper commands need their own lifecycle; explicit headers and env references
-            // use Core's existing credential boundary.
             if !(url.starts_with("https://")
                 || url.starts_with("http://127.0.0.1:")
                 || url.starts_with("http://localhost:"))
@@ -150,7 +146,6 @@ pub(crate) async fn discover(
                 .map_err(|_| DeviceProviderError::StateInvalid)?;
             for tool in page.tools {
                 let name = tool.name.to_string();
-                // ponytail: keep model names identical to protocol names; a native identity map is needed for renamed/hashed tools.
                 if !valid_tool(&name)
                     || id.len() + name.len() + 7 > 128
                     || names.len() >= 128

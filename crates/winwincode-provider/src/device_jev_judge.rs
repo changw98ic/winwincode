@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-owned immutable semantic Judge requests and inference receipts.
-
 use crate::{
     DeviceProviderError, DeviceProviderStore, JevExecutionOptions, JevHypothesis, JevRun,
     JevRuntime, JevScores,
@@ -9,7 +7,6 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-/// Scores are entailment, contradiction and neutral; none remain unknown.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredJevJudge {
     Completed {
@@ -114,15 +111,10 @@ impl DeviceProviderStore {
         Ok(())
     }
 
-    /// Reads Judge receipts only for the exact retained model exchange.
-    ///
-    /// # Errors
-    /// Rejects conflicting exchanges and malformed stored receipts.
     pub fn model_jev_judge_receipts(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
     ) -> Result<Vec<crate::DeviceJevReceipt<[f32; 3]>>, DeviceProviderError> {
-        // Reuse the existing byte-exact exchange identity check.
         self.model_jev_receipts(open)?;
         let prefix = format!("judge:{}:", open.model_exchange_id.0);
         let mut statement = self.connection.prepare(
@@ -155,10 +147,6 @@ impl DeviceProviderStore {
         .collect()
     }
 
-    /// Resolves the sealed Judge route from this Device's private credential store.
-    ///
-    /// # Errors
-    /// Rejects changed snapshots, missing routes and invalid transport settings.
     pub async fn evaluate_configured_judge_once(
         &self,
         operation_id: &str,
@@ -216,11 +204,6 @@ impl DeviceProviderStore {
         .await
     }
 
-    /// Claims exact input before inference. Pending calls never authorize a retry.
-    /// Credentials and provider configuration remain outside the receipt.
-    ///
-    /// # Errors
-    /// Rejects malformed identities, changed input and corrupt stored results.
     pub async fn evaluate_judge_once(
         &self,
         operation_id: &str,
@@ -543,7 +526,6 @@ mod tests {
                     .is_err()
             );
             assert_eq!(provider.calls(), 1);
-            // Legal renewal permits the original, never-started next operation once.
             store
                 .evaluate_judge_once_authorized(
                     "judge:next",

@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! CLIENT-300.3 coverage: the daemon's occupancy downlink lane —
-//! `client.occupancy.offer` persisting the mirror before the
-//! `client.occupancy.ack`, release intents for all three modes,
-//! `client.occupancy.force_fence` overwrites with full old-token
-//! invalidation, restart recovery of the mirror, and the fencing entry
-//! points the worker epic consumes. Harness mirrors `tests/connect_code.rs`.
-
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,7 +49,6 @@ fn seed() -> DeviceIdentitySeed {
     }
 }
 
-/// Canonical fixture identities (`ocl_` lease, `ocq_` claim, `usr_` holder).
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
 const ISSUED_SECRET: [u8; 32] = [0x3c; 32];
@@ -80,8 +72,6 @@ fn issued_credential_digest() -> String {
     format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
 }
 
-/// Opens a store whose identity already adopted the server-issued
-/// enrollment, so daemon sessions start in the enrolled phase.
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
     ensure_device_identity(&mut store, &seed(), STAMP).expect("device identity should load");
@@ -109,7 +99,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// One client-to-server frame the fake server received.
 #[derive(Clone, Debug)]
 struct SimFrame {
     kind: String,
@@ -122,15 +111,10 @@ struct ServerState {
     sequences: BTreeSet<u64>,
 }
 
-/// In-memory fake of the exchange endpoint: it records every frame,
-/// acknowledges the contiguous prefix, and delivers one queued downlink
-/// batch per exchange.
 struct ServerSim {
     state: Mutex<ServerState>,
     downlink: Mutex<VecDeque<Vec<Value>>>,
     next_sequence: AtomicU64,
-    /// The client-to-server watermark the server already holds for this
-    /// node (a resumed server keeps crediting the durable stream).
     client_stream_base: u64,
 }
 
@@ -139,9 +123,6 @@ impl ServerSim {
         Self::resumed(1, 0)
     }
 
-    /// A resumed exchange pair: the daemon restarted with a durable inbox
-    /// cursor (`first_downlink_sequence`) and a durable uplink watermark
-    /// (`client_stream_base`) the server still credits.
     fn resumed(first_downlink_sequence: u64, client_stream_base: u64) -> Self {
         Self {
             state: Mutex::new(ServerState::default()),
@@ -151,7 +132,6 @@ impl ServerSim {
         }
     }
 
-    /// Queues one server-to-client frame on this sim's downlink sequence.
     fn queue_downlink(&self, message: ServerToClientMessage) {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let envelope = ServerToClientEnvelope {
@@ -264,15 +244,12 @@ fn started_daemon(name: &str, root: &Path, sim: &Arc<ServerSim>) -> DeviceDaemon
         .expect("daemon should start enrolled")
 }
 
-/// Starts a daemon over an already-enrolled store (restart scenario).
 fn resumed_daemon(name: &str, root: &Path, sim: &Arc<ServerSim>) -> DeviceDaemon {
     let (store, identity) = open_resumed(root);
     DeviceDaemon::start(daemon_config(name), store, sim.clone(), &identity)
         .expect("restarted daemon should start enrolled")
 }
 
-/// Opens a store that already carries an adopted enrollment (the restart
-/// scenario: the identity is durable, never re-adopted).
 fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     let store = DeviceStore::open(root).expect("restarted device store should open");
     let record = load_device_identity(&store)
@@ -281,7 +258,6 @@ fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// Drives ticks until `condition` holds or the budget runs out.
 fn drive_until(daemon: &mut DeviceDaemon, condition: impl Fn(&DeviceDaemon) -> bool) {
     for _ in 0..600 {
         if condition(daemon) {
@@ -345,10 +321,6 @@ fn force_fence(expected_revision: u64, lease: &str, token: u64) -> ServerToClien
     })
 }
 
-// ---------------------------------------------------------------------------
-// offer → durable mirror → ack.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn offer_persists_the_mirror_then_acks_with_the_mirror_revision() {
     let root = temporary_directory("offer-ack");
@@ -361,9 +333,6 @@ fn offer_persists_the_mirror_then_acks_with_the_mirror_revision() {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
     });
 
-    // The ack frame echoes the offered lease/token and carries the new
-    // mirror revision as its expectedRevision (the contract's
-    // `mirrorRevision` ack fact).
     let acks = sim.frames_with_kind("client.occupancy.ack");
     assert_eq!(acks.len(), 1, "{acks:?}");
     let payload = &acks[0].frame["payload"];
@@ -378,8 +347,6 @@ fn offer_persists_the_mirror_then_acks_with_the_mirror_revision() {
         format!("occupancy-ack-{LEASE_ONE}-7")
     );
 
-    // The mirror is durable before the ack was ever sent, with the offer's
-    // holder and claim facts.
     let mirror = daemon.occupancy_mirror().expect("in-memory mirror").clone();
     assert_eq!(mirror.occupancy_lease_id, LEASE_ONE);
     assert_eq!(mirror.fencing_token, 7);
@@ -395,7 +362,6 @@ fn offer_persists_the_mirror_then_acks_with_the_mirror_revision() {
     assert_eq!(daemon.status().occupancy_offers_acked, 1);
     assert_eq!(daemon.status().occupancy_offers_rejected, 0);
 
-    // Every later heartbeat mirrors the lease id.
     drive_until(&mut daemon, |_daemon| {
         sim.frames_with_kind("client.heartbeat")
             .iter()
@@ -412,8 +378,6 @@ fn a_replayed_offer_re_acks_without_advancing_the_revision() {
     let sim = Arc::new(ServerSim::new());
     let mut daemon = started_daemon("offer-replay", &root, &sim);
 
-    // The server replays unanswered commands: the same offer arrives twice
-    // (the replay keeps its original expectedRevision 0).
     sim.queue_downlink(offer(0, LEASE_ONE, 7));
     drive_until(&mut daemon, |_daemon| {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
@@ -487,8 +451,6 @@ fn an_offer_based_on_a_divergent_revision_is_refused_and_the_next_one_lands() {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
     });
 
-    // The server's view regressed: this new-lease offer claims it was
-    // computed against revision 0 while the device mirror sits at 1.
     sim.queue_downlink(offer(0, LEASE_TWO, 9));
     drive_until(&mut daemon, |_daemon| {
         !sim.frames_with_kind("client.occupancy.rejected").is_empty()
@@ -503,8 +465,6 @@ fn an_offer_based_on_a_divergent_revision_is_refused_and_the_next_one_lands() {
     let mirror = daemon.occupancy_mirror().expect("mirror");
     assert_eq!(mirror.occupancy_lease_id, LEASE_ONE, "nothing landed");
 
-    // The recomputed offer (correct revision, higher token) advances the
-    // mirror to revision 2 under the new lease.
     sim.queue_downlink(offer(1, LEASE_TWO, 9));
     drive_until(&mut daemon, |_daemon| {
         sim.frames_with_kind("client.occupancy.ack").len() >= 2
@@ -521,10 +481,6 @@ fn an_offer_based_on_a_divergent_revision_is_refused_and_the_next_one_lands() {
     cleanup(&root);
 }
 
-// ---------------------------------------------------------------------------
-// force_fence: higher-token overwrites and total old-token invalidation.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn force_fence_overwrites_the_mirror_and_rejects_every_old_token() {
     let root = temporary_directory("force-fence");
@@ -536,8 +492,6 @@ fn force_fence_overwrites_the_mirror_and_rejects_every_old_token() {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
     });
 
-    // Before the fence, the old stamp authorizes the worker-epic entry
-    // points.
     let guard = daemon.fencing_guard();
     assert_eq!(
         guard.authorize_command(FencedCommandKind::WorkerLaunch, LEASE_ONE, 7),
@@ -573,7 +527,6 @@ fn force_fence_overwrites_the_mirror_and_rejects_every_old_token() {
         "a lease-matched fence keeps the holder facts"
     );
 
-    // The old token is now dead everywhere: the guard refuses it ...
     assert_eq!(
         daemon
             .fencing_guard()
@@ -600,7 +553,6 @@ fn force_fence_overwrites_the_mirror_and_rejects_every_old_token() {
         ),
         FencingVerdict::Rejected(FencingRejection::StaleFencingToken)
     );
-    // ... and the new stamp authorizes again.
     assert!(matches!(
         daemon
             .fencing_guard()
@@ -608,8 +560,6 @@ fn force_fence_overwrites_the_mirror_and_rejects_every_old_token() {
         FencingVerdict::Authorized(_)
     ));
 
-    // A queued release still stamped with the old token is refused with the
-    // stale-fencing verdict and never records an intent.
     sim.queue_downlink(release(
         2,
         "rel-stale",
@@ -654,7 +604,6 @@ fn a_force_fence_invalidates_tickets_authorized_before_it() {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
     });
 
-    // The worker epic's check-then-execute window: authorize now ...
     let ticket = match daemon.fencing_guard().authorize_command(
         FencedCommandKind::WorkerLaunch,
         LEASE_ONE,
@@ -665,7 +614,6 @@ fn a_force_fence_invalidates_tickets_authorized_before_it() {
     };
     assert!(daemon.verify_fencing_ticket(&ticket).is_ok());
 
-    // ... and a force-fence handled before the execution strands it.
     sim.queue_downlink(force_fence(1, LEASE_ONE, 9));
     drive_until(&mut daemon, |daemon| {
         daemon.status().occupancy_force_fences_applied >= 1
@@ -693,8 +641,6 @@ fn a_non_advancing_force_fence_is_refused_without_a_rollback() {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
     });
 
-    // A replayed fence at or below the current token can never roll the
-    // mirror back.
     sim.queue_downlink(force_fence(1, LEASE_ONE, 8));
     drive_until(&mut daemon, |_daemon| {
         !sim.frames_with_kind("client.command_ack").is_empty()
@@ -712,10 +658,6 @@ fn a_non_advancing_force_fence_is_refused_without_a_rollback() {
     daemon.into_store().close().expect("store close");
     cleanup(&root);
 }
-
-// ---------------------------------------------------------------------------
-// release: modes, durable intents, replay dedupe.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn release_records_all_three_modes_and_replays_deduplicate() {
@@ -777,8 +719,6 @@ fn release_records_all_three_modes_and_replays_deduplicate() {
         );
     }
 
-    // A replayed release (same idempotency key, new message id and
-    // sequence) answers `duplicate` and never records a second intent.
     let mut replayed = release(
         1,
         "rel-immediate",
@@ -876,10 +816,6 @@ fn release_without_a_mirror_fails_closed() {
     cleanup(&root);
 }
 
-// ---------------------------------------------------------------------------
-// Restart recovery (plan 18.3): the mirror is rebuilt, never cleared.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_mirror_survives_a_restart_and_keeps_authorizing() {
     let root = temporary_directory("restart-mirror");
@@ -893,9 +829,6 @@ fn the_mirror_survives_a_restart_and_keeps_authorizing() {
     let uplink_watermark = daemon.status().acked_through;
     daemon.into_store().close().expect("store close");
 
-    // A fresh process on the same store rebuilds the mirror from the
-    // durable row and keeps fencing against it; the server resumes both
-    // streams at the durable positions.
     let sim_two = Arc::new(ServerSim::resumed(2, uplink_watermark));
     let mut restarted = resumed_daemon("restart-mirror", &root, &sim_two);
     let mirror = restarted.occupancy_mirror().expect("rebuilt mirror");
@@ -909,7 +842,6 @@ fn the_mirror_survives_a_restart_and_keeps_authorizing() {
         FencingVerdict::Authorized(_)
     ));
 
-    // The rebuilt mirror rides the heartbeat again after the restart.
     drive_until(&mut restarted, |_daemon| {
         sim_two
             .frames_with_kind("client.heartbeat")
@@ -917,8 +849,6 @@ fn the_mirror_survives_a_restart_and_keeps_authorizing() {
             .any(|frame| frame.frame["payload"]["occupancyLeaseId"] == LEASE_ONE)
     });
 
-    // The recovery flow continues at the same revision: a stale-replay
-    // offer is refused exactly like before the restart ...
     sim_two.queue_downlink(offer(0, LEASE_TWO, 9));
     drive_until(&mut restarted, |_daemon| {
         !sim_two
@@ -930,7 +860,6 @@ fn the_mirror_survives_a_restart_and_keeps_authorizing() {
         "local_state_conflict"
     );
 
-    // ... and the correctly stamped one advances to revision 2.
     sim_two.queue_downlink(offer(1, LEASE_TWO, 9));
     drive_until(&mut restarted, |_daemon| {
         !sim_two.frames_with_kind("client.occupancy.ack").is_empty()
@@ -978,9 +907,6 @@ fn a_fresh_process_still_mints_revision_one_for_the_first_offer() {
 
 #[test]
 fn wire_payloads_of_the_lane_commands_keep_the_schema_vocabulary() {
-    // ClientToServerMessage serialization is the wire truth the daemon
-    // enqueues: the ack/rejected payloads must round-trip the exact
-    // kind/payload shape with the decimal-string token.
     let message = ClientToServerMessage::CommandAck(
         winwincode_client_port::messages::ClientCommandAckPayload {
             command_kind:
@@ -1007,9 +933,6 @@ fn wire_payloads_of_the_lane_commands_keep_the_schema_vocabulary() {
     assert_eq!(frame["payload"]["occupancyFencingToken"], "7");
     assert_eq!(frame["payload"]["mode"], "immediate");
 }
-
-// --- WORKER-100.2: live capacity reporting and the cancel-and-release
-// --- worker-stop hook (plan 14.5 / 12.4).
 
 struct StaticCapacity {
     running: u32,
@@ -1057,8 +980,6 @@ fn hello_and_heartbeat_report_the_live_worker_capacity() {
         reserved: 1,
     }));
 
-    // The hello announcement already carries the live facts, keeping the
-    // configured max/draining skeleton around them.
     drive_until(&mut daemon, |_| {
         !sim.frames_with_kind("client.hello").is_empty()
     });
@@ -1069,8 +990,6 @@ fn hello_and_heartbeat_report_the_live_worker_capacity() {
     assert_eq!(capacity["reservedWorkerSessions"], 1);
     assert_eq!(capacity["drainingWorkerSessions"], 0);
 
-    // Every heartbeat refreshes the facts from the source (the daemon
-    // config skeleton says running=0, so a 3 can only come from the wire).
     sim.queue_downlink(offer(0, LEASE_ONE, 7));
     drive_until(&mut daemon, |_| {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
@@ -1105,7 +1024,6 @@ fn cancel_and_release_stops_the_lease_workers_through_the_controller() {
     });
     daemon.set_lease_worker_controller(controller.clone());
 
-    // Claim the lease, then release it with cancel_tasks_and_release.
     sim.queue_downlink(offer(0, LEASE_ONE, 7));
     drive_until(&mut daemon, |_| {
         !sim.frames_with_kind("client.occupancy.ack").is_empty()
@@ -1127,7 +1045,6 @@ fn cancel_and_release_stops_the_lease_workers_through_the_controller() {
     );
     assert_eq!(*controller.leases.lock().expect("leases lock"), [LEASE_ONE]);
 
-    // A replayed release (duplicate) and other modes never re-stop.
     let acks = sim.frames_with_kind("client.command_ack").len();
     sim.queue_downlink(release(
         1,

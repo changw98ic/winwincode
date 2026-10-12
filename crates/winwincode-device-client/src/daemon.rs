@@ -1,76 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device Client daemon exchange loop (plan sections 9.2 and 18.3).
-//!
-//! One [`DeviceDaemon`] owns one [`DeviceStore`] and periodically drives the
-//! `POST /internal/v1/client/exchange` semantics over an injected
-//! [`ExchangeTransport`]:
-//!
-//! 1. **Persist before send.** Every `client.enroll` / `client.hello` /
-//!    `client.heartbeat` frame is encoded with the bounded [`FrameCodec`]
-//!    and appended to the durable outbox (the store's
-//!    [`FrameOutbox`](winwincode_client_port::exchange::FrameOutbox)
-//!    adapter) before any transport call, so a crash can only ever lose an
-//!    attempt, never a frame.
-//! 2. **Bounded delivery.** Each exchange takes at most
-//!    [`DaemonConfig::max_frames_per_exchange`] deliverable frames from the
-//!    durable delivery cursor; remainders page through later exchanges.
-//!    Empty batches are never sent: the endpoint rejects them, so an idle
-//!    daemon waits for the heartbeat cadence instead of polling.
-//! 3. **Acknowledgement.** The response's `ackSequence` is persisted through
-//!    the outbox state machine and the confirmed prefix is compacted.
-//! 4. **Gap replay.** A response carrying `replayFromSequence` moves the
-//!    delivery cursor back to `replayFromSequence - 1`, so the next exchange
-//!    re-delivers from there.
-//! 5. **Enrollment adoption.** The enrollment exchange response carries the
-//!    server-issued identity (`cnd_` `clientNodeId`, `publicClientId`, the
-//!    one-time Device Credential material, and the requested heartbeat
-//!    interval). The daemon backfills the persisted identity
-//!    ([`adopt_enrollment`](crate::identity::adopt_enrollment)), re-keys the
-//!    durable outbox stream onto the assigned node at the sequence the
-//!    server credited, and presents the issued material as the bearer
-//!    credential of every later exchange.
-//! 6. **Occupancy mirroring.** `client.occupancy.offer` persists the
-//!    occupancy mirror (strictly token-monotonic, revision-bumped) and only
-//!    then answers `client.occupancy.ack`; `client.occupancy.release`
-//!    records a durable release intent after the fencing stamp passes; and
-//!    `client.occupancy.force_fence` overwrites the mirror with the higher
-//!    token, immediately invalidating every intent authorized under the
-//!    previous revision (plan 12.2/12.4/12.6). The mirror survives
-//!    disconnects and restarts; recovery semantics stay server-owned.
-//! 7. **Worker launch.** `client.worker.launch` is fenced against the
-//!    mirror (plan 12.6 `WorkerLaunch`), its grant's instance binding is
-//!    checked against the current launch, the one-time worker credential is
-//!    taken from the wired [`WorkerLaunchMaterialSource`] when the local
-//!    bridge already holds it; otherwise launch waits for the exact credential
-//!    delivered by [`DeviceDaemon::receive_worker_credential`]. The wired
-//!    [`SessionSupervisor`] then spawns the managed
-//!    worker process. Every verdict is answered with a durable
-//!    `client.worker.launch_ack` echoing the grant identities — accepted,
-//!    idempotent duplicate, or rejected with a reason.
-//! 8. **Network recovery.** The shared request policy and durable attempt
-//!    journal own transport retries. Valid protocol rescheduling uses the
-//!    daemon's separate backoff and does not spend the network attempt budget.
-//! 9. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
-//!    with interruptible sleeps until an [`AtomicBool`] shutdown flag is
-//!    observed. Shutdown never discards taken frames: frames leave the
-//!    durable outbox only when their acknowledgement is persisted.
-//!
-//! Restart semantics: the durable identity decides the phase. Before the
-//! enrollment is adopted the daemon sends `client.enroll` (once — the
-//! durable enroll frame is redelivered, never re-enqueued) under the local
-//! placeholder node id; after adoption the daemon is enrolled, announces
-//! `client.hello` for the new launch instance as the first new frame, and
-//! the server's instance guard keeps accepting the surviving frames of the
-//! previous instance until the hello takes the instance over mid-batch.
-//!
-//! The [`ExchangeRequest`] / [`ExchangeResponse`] bodies are the endpoint's
-//! canonical wire contract: the request carries `{schemaVersion, frames[],
-//! ackSequence}`, the response carries `{schemaVersion, ackSequence,
-//! replayFromSequence?, frames[], enrollment?}`. The HTTP implementation
-//! lives behind [`ExchangeTransport`] and is injectable; the crate ships a
-//! dependency-free std TCP implementation in [`crate::http`].
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,73 +45,29 @@ use crate::store::{
 };
 use crate::supervisor::{SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorError};
 
-/// Live worker-capacity facts for hello/heartbeat reports (plan 14.5).
-///
-/// The daemon's static [`DaemonConfig::capacity`] stays the report skeleton
-/// (`maxConcurrentWorkerSessions`, `draining`); the two live facts —
-/// `runningWorkerSessions` from the local process registry and
-/// `reservedWorkerSessions` under the simplified claim-time rule — come
-/// from the wired [`WorkerCapacitySource`] when one is present.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerCapacitySnapshot {
-    /// Worker sessions whose registry row currently says `running`.
     pub running_worker_sessions: u32,
-    /// Reserved-but-not-yet-running worker slots. Simplified v1 semantics:
-    /// one slot while the device holds an occupancy claim whose lease has no
-    /// running worker yet. The durable reservation math stays server-owned
-    /// (the Control Plane/FLOW epic) — this is the device's local hint only.
     pub reserved_worker_sessions: u32,
 }
 
-/// The live capacity source the daemon consults on every hello/heartbeat
-/// (WORKER-100.2). Implemented by the local worker supervisor; tests inject
-/// fakes. Best effort: a source failure reports the last stored facts
-/// instead of blocking the exchange loop.
 pub trait WorkerCapacitySource: Send + Sync {
-    /// The live worker capacity facts to report.
     fn worker_capacity(&self) -> WorkerCapacitySnapshot;
 }
 
-/// The local worker-stop hook the daemon invokes when a
-/// `cancel_tasks_and_release` occupancy release lands (plan 12.4): every
-/// supervised worker bound to the lease must stop. Implemented by the local
-/// worker supervisor; tests inject fakes.
 pub trait LeaseWorkerController: Send + Sync {
-    /// Stops every supervised worker bound to the lease and answers how
-    /// many workers a stop was requested for.
     fn stop_lease_workers(&self, occupancy_lease_id: &str) -> usize;
 }
 
-/// The device-local directories hosting one worker session launch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerLaunchDirectories {
-    /// Local source root the worker executes against (config
-    /// `sourceDirectory`).
     pub source_directory: PathBuf,
-    /// Local data root carrying the worker's private files (config
-    /// `dataDirectory`).
     pub data_directory: PathBuf,
-    /// Local directory the worker process starts in.
     pub worker_root: PathBuf,
 }
 
-/// The device-local launch material one `client.worker.launch` command
-/// needs beyond the frame itself (plan 14.3): the one-time Worker Session
-/// Credential material — delivered once with the launch response to the
-/// local user-session bridge, never on the exchange — and the local
-/// directories hosting the worker session. The daemon matches the material
-/// against the launch grant's `credentialDigest`. The credential may
-/// legitimately be absent when the launch command lands (the bridge
-/// receives it only after the grant was consumed): the daemon then spawns
-/// with a placeholder private file and fills it through
-/// [`DeviceDaemon::receive_worker_credential`]. Implementations must keep
-/// the credential material in memory only; tests inject fakes.
 pub trait WorkerLaunchMaterialSource: Send + Sync {
-    /// The raw Worker Session Credential whose `sha256:` digest the launch
-    /// grant carries; `None` when the local bridge has not received it yet.
     fn worker_credential(&self, credential_digest: &str) -> Option<String>;
-    /// The local directories hosting the named worker session; `None` when
-    /// the device holds no usable local root for it.
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -190,16 +75,12 @@ pub trait WorkerLaunchMaterialSource: Send + Sync {
     ) -> Option<WorkerLaunchDirectories>;
 }
 
-/// Device-local repository resolver for managed application runs. Absolute
-/// paths stay on Device and are never part of the Server command.
 pub trait ManagedAppRepositorySource: Send + Sync {
     fn repository_root(&self, repository_binding_id: &str) -> Option<PathBuf>;
 }
 
-/// Longest slice the run loop sleeps without re-reading the shutdown flag.
 const WAKE_SLICE: Duration = Duration::from_millis(20);
 
-/// Failure of one exchange attempt at the transport boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeTransportError {
     message: String,
@@ -207,7 +88,6 @@ pub struct ExchangeTransportError {
 }
 
 impl ExchangeTransportError {
-    /// Builds one transport failure carrying a human-readable reason.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -233,7 +113,6 @@ impl ExchangeTransportError {
         self.failure
     }
 
-    /// The failure reason.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -248,31 +127,12 @@ impl fmt::Display for ExchangeTransportError {
 
 impl std::error::Error for ExchangeTransportError {}
 
-/// The network boundary of the exchange loop.
-///
-/// The daemon composes one implementation per session and hands it the
-/// encoded canonical request body together with the bearer credential to
-/// present (`None` before the enrollment issued one). Tests and embedders
-/// supply their own implementations; the crate ships the minimal std HTTP
-/// implementation [`crate::HttpExchangeTransport`].
 pub trait ExchangeTransport: Send + Sync {
-    /// Sends one encoded exchange request and returns the encoded response.
-    ///
-    /// # Errors
-    ///
-    /// Returns a transport failure when the request cannot be delivered or
-    /// no response can be received. The daemon answers every failure with
-    /// exponential backoff and re-delivers the same durable frames.
     fn exchange(
         &self,
         credential: Option<&str>,
         request_bytes: &[u8],
     ) -> Result<Vec<u8>, ExchangeTransportError>;
-    /// Executes one queue-owned attempt while checking live shutdown authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns cancellation or the transport failure for this attempt.
     fn exchange_authorized(
         &self,
         credential: Option<&str>,
@@ -292,51 +152,31 @@ pub trait ExchangeTransport: Send + Sync {
     }
 }
 
-/// Canonical exchange request body: a bounded batch of client-to-server
-/// frames (each value is one serialized `ClientToServerEnvelope`) plus this
-/// client's contiguous acknowledgement of the server-to-client stream. The
-/// routing identity rides inside each frame envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
-    /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
-    /// The bounded client-to-server frame batch.
     pub frames: Vec<serde_json::Value>,
-    /// Highest server-to-client sequence this client consecutively accepted.
     #[serde(rename = "ackSequence")]
     pub ack_sequence: u64,
 }
 
-/// The one-time enrollment issuance carried only by the enrollment exchange
-/// response. The raw credential material crosses the transport exactly once
-/// and never enters a frame payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollmentIssuance {
-    /// Server-assigned canonical `clientNodeId` (`cnd_` identity).
     #[serde(rename = "clientNodeId")]
     pub client_node_id: String,
-    /// Server-assigned public `publicClientId`.
     #[serde(rename = "publicClientId")]
     pub public_client_id: String,
-    /// Raw Device Credential material as lowercase hex of the 32 secret
-    /// bytes; the server persists only `deviceCredentialDigest`.
     #[serde(rename = "deviceCredential")]
     pub device_credential: String,
-    /// The persisted `sha256:` digest of the issued material.
     #[serde(rename = "deviceCredentialDigest")]
     pub device_credential_digest: String,
-    /// Heartbeat interval the server profile asks this device to use.
     #[serde(rename = "heartbeatIntervalMs")]
     pub heartbeat_interval_ms: u32,
-    /// Server timestamp the device should clock-drift against (RFC 3339).
     #[serde(rename = "serverTime")]
     pub server_time: String,
 }
 
-/// One Worker Session Credential delivered beside its matching durable
-/// `client.worker.launch` frame. The Server keeps this material only in
-/// memory and repeats it only while that frame is awaiting acknowledgement.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerCredentialIssuance {
     #[serde(rename = "workerLaunchGrantId")]
@@ -361,65 +201,36 @@ impl fmt::Debug for WorkerCredentialIssuance {
     }
 }
 
-/// Canonical exchange response body: the server's acknowledgement of the
-/// client batch (with the gap replay hint when present) plus a bounded
-/// server-to-client frame batch and — only on the exchange that accepted a
-/// fresh enrollment — the issued Device Credential material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeResponse {
-    /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
-    /// Highest client-to-server sequence the server consecutively accepted.
     #[serde(rename = "ackSequence")]
     pub ack_sequence: u64,
-    /// First missing client-to-server sequence; the receiving cursor stays
-    /// at `ackSequence` and the client must replay from here.
     #[serde(rename = "replayFromSequence", default)]
     pub replay_from_sequence: Option<u64>,
-    /// The bounded server-to-client frame batch.
     #[serde(default)]
     pub frames: Vec<serde_json::Value>,
-    /// The one-time enrollment issuance on the accepting exchange.
     #[serde(default)]
     pub enrollment: Option<EnrollmentIssuance>,
-    /// Ephemeral Worker credentials paired with launch frames in this exact
-    /// response. They are never part of the durable downlink frame.
     #[serde(rename = "workerCredentials", default)]
     pub worker_credentials: Vec<WorkerCredentialIssuance>,
 }
 
-/// Static configuration of one daemon session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
-    /// Server profile the daemon exchanges with; also the inbox-cursor key.
     pub server_profile_id: String,
-    /// Exchange endpoint base URL.
     pub base_url: String,
-    /// Human-readable server profile name persisted on enrollment.
     pub server_display_name: String,
-    /// Requested device display name for `client.enroll`.
     pub device_display_name: String,
-    /// Supported release target of this device.
     pub platform: ClientPlatformTarget,
-    /// CPU architecture of this device.
     pub architecture: ClientArchitecture,
-    /// Device client software version.
     pub client_version: String,
-    /// Idle cadence for `client.heartbeat`; the enrollment response may
-    /// override it with the server-requested interval.
     pub heartbeat_interval: Duration,
-    /// Cadence for the enrollment wait while no deliverable enroll frame
-    /// exists (the endpoint rejects empty batches, so the wait never sends).
     pub enroll_poll_interval: Duration,
-    /// Maximum client-to-server frames per exchange batch.
     pub max_frames_per_exchange: usize,
-    /// First backoff step for a valid protocol reschedule.
     pub initial_backoff: Duration,
-    /// Backoff ceiling for a valid protocol reschedule.
     pub max_backoff: Duration,
-    /// Worker session capacity report skeleton; real capacity is owned by
-    /// the later occupancy and worker lanes.
     pub capacity: ClientCapacityReport,
 }
 
@@ -450,21 +261,12 @@ impl Default for DaemonConfig {
     }
 }
 
-/// Fatal daemon failure; retriable exchange failures are reported through
-/// [`DaemonStatus`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonError {
-    /// The daemon configuration is invalid.
     Config(String),
-    /// A permanent request failure or an exhausted ordinary request budget.
     Network(winwincode_network::NetworkFailure),
-    /// The local store failed.
     Store(DeviceStoreError),
-    /// The durable outbox violates its invariants; recovery is refused
-    /// (`缺失即按损坏状态拒绝恢复`).
     CorruptOutbox(OutboxStateError),
-    /// A durable-state invariant the daemon itself violated, or an
-    /// enrollment issuance that contradicts the durable identity.
     Protocol(String),
 }
 
@@ -492,95 +294,49 @@ impl From<DeviceStoreError> for DaemonError {
     }
 }
 
-/// Observed counters and scheduling state of one daemon session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonStatus {
-    /// Whether the issued enrollment identity was persisted.
     pub enrolled: bool,
-    /// Exchanges attempted (a failed transport call counts).
     pub exchanges_started: u64,
-    /// Exchanges whose response was applied.
     pub exchanges_succeeded: u64,
-    /// Failed exchanges in a row right now.
     pub consecutive_failures: u64,
-    /// `client.heartbeat` frames enqueued.
     pub heartbeats_enqueued: u64,
-    /// `client.connect_code.published` frames enqueued by this session.
     pub connect_codes_published: u64,
-    /// `client.client_lock` commands applied and acknowledged.
     pub client_lock_commands_applied: u64,
-    /// `client.repository.rescan` commands that completed a fresh local scan.
     pub repository_rescans_applied: u64,
-    /// `client.repository.rescan` commands rejected because the binding is missing.
     pub repository_rescans_rejected: u64,
-    /// `client.occupancy.offer` frames accepted (mirror persisted, ack
-    /// enqueued).
     pub occupancy_offers_acked: u64,
-    /// `client.occupancy.offer` frames refused with
-    /// `client.occupancy.rejected` (locked node, revision divergence, or a
-    /// non-advancing fencing token).
     pub occupancy_offers_rejected: u64,
-    /// `client.occupancy.release` commands recorded as new durable release
-    /// intents (replayed duplicates are not counted again).
     pub occupancy_release_intents_recorded: u64,
-    /// `client.occupancy.force_fence` commands applied (mirror overwritten
-    /// with the higher token).
     pub occupancy_force_fences_applied: u64,
-    /// `client.worker.launch_ack` frames answered `accepted`/`duplicate`
-    /// (the supervisor spawned the managed worker, or the launch replayed an
-    /// already-running one) (WORKER-200.2).
     pub worker_launches_accepted: u64,
-    /// `client.worker.launch_ack` frames answered with a rejection — a
-    /// stale fencing stamp, missing launch material, or a failed spawn
-    /// (WORKER-200.2).
     pub worker_launches_rejected: u64,
-    /// Supervised workers a stop was requested for by a
-    /// `cancel_tasks_and_release` occupancy release (WORKER-100.2).
     pub workers_stopped_on_release: u64,
-    /// Client-to-server frames handed to the transport so far.
     pub frames_sent: u64,
-    /// Absolute server acknowledgement cursor after the last exchange.
     pub acked_through: u64,
-    /// Server-to-client frames consecutively accepted (absolute cursor).
     pub downlink_accepted_through: u64,
-    /// Server-to-client commands recorded but not yet handled by a lane.
     pub unhandled_downlink_commands: u64,
-    /// Gap replays performed.
     pub replays: u64,
-    /// Backoff applied to the next exchange attempt.
     pub current_backoff: Duration,
-    /// Reason of the most recent retriable failure.
     pub last_error: Option<String>,
 }
 
-/// One run-loop step's observable result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TickOutcome {
-    /// One exchange round-trip was applied.
     Exchanged {
-        /// Client-to-server frames in the request batch.
         frames_sent: usize,
-        /// Server acknowledgement recorded by this exchange.
         acked_through: u64,
-        /// Server-to-client frames in the response batch.
         downlink_frames: usize,
     },
-    /// Nothing was due; the loop should wait.
     Waiting {
-        /// Time until the next pending report or poll.
         ready_in: Duration,
     },
-    /// The exchange attempt failed and backed off.
     Retrying {
-        /// Backoff applied before the next attempt.
         after: Duration,
-        /// Failure reason.
         reason: String,
     },
 }
 
-/// The Device Client daemon: one persistent exchange loop over one durable
-/// outbox.
 pub struct DeviceDaemon {
     config: DaemonConfig,
     store: DeviceStore,
@@ -605,57 +361,20 @@ pub struct DeviceDaemon {
     next_heartbeat_at: Instant,
     next_attempt_at: Instant,
     consecutive_failures: u64,
-    /// In-memory mirror of the durable connection policy; every write goes
-    /// through the store first and refreshes this mirror.
     connection_policy: ConnectionPolicyRecord,
-    /// In-memory mirror of the durable occupancy mirror; every write goes
-    /// through the store first (persist-before-send) and refreshes this
-    /// field. Restored from the store at start and never cleared by a
-    /// disconnect.
     occupancy_mirror: Option<OccupancyMirrorRecord>,
-    /// Live worker-capacity source (WORKER-100.2); `None` keeps the static
-    /// [`DaemonConfig::capacity`] skeleton on every report.
     worker_capacity_source: Option<Arc<dyn WorkerCapacitySource>>,
-    /// Local worker-stop hook for `cancel_tasks_and_release` releases
-    /// (WORKER-100.2); `None` records the intent without stopping workers.
     lease_worker_controller: Option<Arc<dyn LeaseWorkerController>>,
-    /// The local worker supervisor (WORKER-200.2): the execution authority
-    /// `client.worker.launch` commands spawn through. `None` answers every
-    /// launch with a rejected acknowledgement.
     worker_supervisor: Option<SessionSupervisor>,
-    /// The device-local launch material source (WORKER-200.2): the one-time
-    /// worker credential and the local directories one launch needs.
     worker_launch_material: Option<Arc<dyn WorkerLaunchMaterialSource>>,
     managed_app_supervisor: Option<crate::managed_app::ManagedAppSupervisor>,
     managed_app_repository: Option<Arc<dyn ManagedAppRepositorySource>>,
-    /// Credential digest → worker session of every launch this daemon
-    /// handled, so the deferred launch-response material reaches the right
-    /// worker's private file (`receive_worker_credential`).
     launch_credential_sessions: std::collections::HashMap<String, String>,
-    /// Credential material received beside the current launch frame batch.
-    /// Entries live only until the matching launch is handled.
     pending_worker_credentials: std::collections::HashMap<String, String>,
     status: DaemonStatus,
 }
 
 impl DeviceDaemon {
-    /// Starts one daemon session over an open store and an injected
-    /// transport.
-    ///
-    /// Restores the phase from the durable identity: an adopted enrollment
-    /// (`clientNodeId` persisted) resumes enrolled with the issued bearer
-    /// credential, a fresh identity enrolls under the local placeholder node
-    /// id. The server-to-client acknowledgement cursor restores from the
-    /// durable inbox cursor. Pending frames keep their original stream
-    /// sequence, message id, and launch instance — the server accepts them
-    /// as the still-current instance and the announcement hello of this
-    /// launch takes the instance over mid-batch.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Config`] for an invalid configuration,
-    /// [`DaemonError::Store`] for store failures, and
-    /// [`DaemonError::Protocol`] when durable state is inconsistent.
     pub fn start(
         config: DaemonConfig,
         store: DeviceStore,
@@ -685,9 +404,6 @@ impl DeviceDaemon {
         let heartbeat_interval = config.heartbeat_interval;
         let connection_policy =
             connect_code::connection_policy(&store).map_err(DaemonError::Store)?;
-        // Plan 18.3: the restart scan rebuilds the occupancy mirror from the
-        // durable row — a restart never clears it; the server-side recovery
-        // flow reconciles against whatever the device still mirrors.
         let occupancy_mirror = store.occupancy_mirror().map_err(DaemonError::Store)?;
         let network_journal = winwincode_network::journal::RequestJournal::open(
             &store
@@ -735,8 +451,6 @@ impl DeviceDaemon {
             },
         };
         if !daemon.enrolled {
-            // The durable enroll frame is redelivered as-is; never enqueue a
-            // second one (`client.enroll` must stay the first stream frame).
             daemon.enroll_frame_pending = daemon
                 .store
                 .pending_outbox_envelopes()?
@@ -749,8 +463,6 @@ impl DeviceDaemon {
                 .server_profile(&daemon.config.server_profile_id)?
                 .is_none()
         {
-            // Crash window between the identity adoption and the profile
-            // write: heal the profile from the configuration.
             let stamp = now_rfc3339();
             daemon
                 .store
@@ -767,49 +479,36 @@ impl DeviceDaemon {
         Ok(daemon)
     }
 
-    /// The observed counters of this session.
     #[must_use]
     pub fn status(&self) -> &DaemonStatus {
         &self.status
     }
 
-    /// This device's stable local device id.
     #[must_use]
     pub fn device_id(&self) -> &str {
         &self.device_id
     }
 
-    /// The exchange routing node id: the server-assigned `clientNodeId`
-    /// after enrollment, the local placeholder before it.
     #[must_use]
     pub fn client_node_id(&self) -> &str {
         &self.node_id
     }
 
-    /// This launch's `clientInstanceId`.
     #[must_use]
     pub fn client_instance_id(&self) -> &str {
         &self.instance_id
     }
 
-    /// Whether the issued enrollment identity has been persisted.
     #[must_use]
     pub const fn is_enrolled(&self) -> bool {
         self.enrolled
     }
 
-    /// Mutable store access for callers composing additional local work.
     #[must_use]
     pub fn store_mut(&mut self) -> &mut DeviceStore {
         &mut self.store
     }
 
-    /// Returns the durable outbox snapshot (an empty stream is the zero
-    /// snapshot).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] when the store read fails.
     pub fn outbox_snapshot(&mut self) -> Result<OutboxSnapshot, DaemonError> {
         FrameOutbox::load(&mut self.store)
             .map_err(DaemonError::Store)
@@ -856,14 +555,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Persists one client-to-server message into the durable outbox
-    /// (persist-before-send) and returns its sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] or [`DaemonError::CorruptOutbox`] when
-    /// the durable append fails, and [`DaemonError::Protocol`] when the
-    /// message cannot be encoded.
     pub fn enqueue(&mut self, message: ClientToServerMessage) -> Result<u64, DaemonError> {
         let expected = self
             .session
@@ -889,36 +580,15 @@ impl DeviceDaemon {
         Ok(expected)
     }
 
-    /// Takes the store back (for close or handover to another owner).
     #[must_use]
     pub fn into_store(self) -> DeviceStore {
         self.store
     }
 
-    /// Generates a new dynamic connect code (or refreshes the current one:
-    /// the next publication replaces the prior Server-owned generation and
-    /// the new publication carries `generation + 1`), persists its digest
-    /// state, and enqueues the durable `client.connect_code.published`
-    /// frame. The plaintext rides the returned value only — never the store,
-    /// the outbox, or any log.
-    ///
-    /// Requires an adopted enrollment: a pending publication frame on the
-    /// placeholder stream could never be re-keyed onto the assigned node.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Protocol`] before the enrollment adoption and
-    /// [`DaemonError::Store`] for durable failures.
     pub fn publish_connect_code(&mut self) -> Result<PublishedConnectCode, DaemonError> {
         self.publish_connect_code_with_ttl(connect_code::CONNECT_CODE_TTL)
     }
 
-    /// [`DeviceDaemon::publish_connect_code`] with an explicit validity
-    /// window (tests and policy-driven callers).
-    ///
-    /// # Errors
-    ///
-    /// Same failure modes as [`DeviceDaemon::publish_connect_code`].
     pub fn publish_connect_code_with_ttl(
         &mut self,
         ttl: Duration,
@@ -944,33 +614,14 @@ impl DeviceDaemon {
         Ok(published)
     }
 
-    /// Locks the client locally: `acceptingConnections = false` and
-    /// `lockState = locked`, durably, mirrored into every later hello and
-    /// heartbeat. The Server uses the published policy when authorizing access.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
     pub fn lock_client(&mut self) -> Result<ConnectionPolicyRecord, DaemonError> {
         self.apply_policy(false, ClientLockState::Locked)
     }
 
-    /// Unlocks the client locally: `acceptingConnections = true` and
-    /// `lockState = unlocked`, durably.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
     pub fn unlock_client(&mut self) -> Result<ConnectionPolicyRecord, DaemonError> {
         self.apply_policy(true, ClientLockState::Unlocked)
     }
 
-    /// Disables (or re-enables) new connections without changing the lock
-    /// state (plan 11.1 `禁止新连接`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
     pub fn set_accepting_connections(
         &mut self,
         accepting: bool,
@@ -979,7 +630,6 @@ impl DeviceDaemon {
         self.apply_policy(accepting, lock_state)
     }
 
-    /// Persists and mirrors one connection policy update.
     fn apply_policy(
         &mut self,
         accepting_connections: bool,
@@ -996,85 +646,40 @@ impl DeviceDaemon {
         Ok(record)
     }
 
-    /// The durable connect-code state (digest-bearing; no plaintext).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
     pub fn connect_code_state(&self) -> Result<Option<ConnectCodeStateRecord>, DaemonError> {
         self.store.connect_code_state().map_err(DaemonError::Store)
     }
 
-    /// The current durable connection policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
     pub fn connection_policy(&self) -> Result<ConnectionPolicyRecord, DaemonError> {
         connect_code::connection_policy(&self.store).map_err(DaemonError::Store)
     }
 
-    /// The current occupancy mirror (`None` while the device holds no
-    /// occupancy). It survives disconnects and restarts and is only advanced
-    /// by `client.occupancy.offer` and `client.occupancy.force_fence`.
     #[must_use]
     pub const fn occupancy_mirror(&self) -> Option<&OccupancyMirrorRecord> {
         self.occupancy_mirror.as_ref()
     }
 
-    /// A fencing guard over the current mirror — the entry point the worker
-    /// epic calls before any fenced local action (worker launch/stop,
-    /// candidate apply, repository mutation): `daemon.fencing_guard()
-    /// .authorize_command(kind, lease, token)`.
     #[must_use]
     pub fn fencing_guard(&self) -> FencingGuard {
         FencingGuard::new(self.occupancy_mirror.clone())
     }
 
-    /// Re-validates a previously authorized fencing ticket against the
-    /// current mirror immediately before executing the command (the
-    /// invalidate semantics: an offer or force-fence handled in between
-    /// strands every outstanding ticket with `SupersededIntent`).
-    ///
-    /// # Errors
-    ///
-    /// Returns the fencing rejection when the ticket is no longer current.
     pub fn verify_fencing_ticket(&self, ticket: &FencingTicket) -> Result<(), FencingRejection> {
         self.fencing_guard().verify_ticket(ticket)
     }
 
-    /// Wires the live worker-capacity source (WORKER-100.2): every later
-    /// hello and heartbeat replaces the report's `runningWorkerSessions`
-    /// and `reservedWorkerSessions` with the source's live facts while
-    /// keeping the configured `maxConcurrentWorkerSessions`/`draining`.
     pub fn set_worker_capacity_source(&mut self, source: Arc<dyn WorkerCapacitySource>) {
         self.worker_capacity_source = Some(source);
     }
 
-    /// Wires the local worker-stop hook (WORKER-100.2): a
-    /// `cancel_tasks_and_release` occupancy release stops every supervised
-    /// worker bound to the lease after its durable intent is recorded.
     pub fn set_lease_worker_controller(&mut self, controller: Arc<dyn LeaseWorkerController>) {
         self.lease_worker_controller = Some(controller);
     }
 
-    /// Wires the local worker supervisor (WORKER-200.2): every later
-    /// `client.worker.launch` command spawns its managed worker process
-    /// through it. Without a supervisor every launch is answered with a
-    /// rejected acknowledgement.
     pub fn set_worker_supervisor(&mut self, supervisor: SessionSupervisor) {
         self.worker_supervisor = Some(supervisor);
     }
 
-    /// Replays authorized WorkerStop intents left without a terminal receipt
-    /// by a previous daemon process. This runs after the supervisor is wired,
-    /// before the next exchange, and routes through the normal receipt/outbox
-    /// path while preserving the original fencing decision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable store cannot be read or a recovered
-    /// stop cannot be verified by the local supervisor.
     pub fn recover_worker_stop_intents(&mut self) -> Result<u64, DaemonError> {
         let pending = self
             .store
@@ -1110,9 +715,6 @@ impl DeviceDaemon {
         Ok(recovered)
     }
 
-    /// Wires the device-local launch material source (WORKER-200.2): the
-    /// bridge that received the one-time worker credential with the launch
-    /// response and owns the local worker directories.
     pub fn set_worker_launch_material_source(
         &mut self,
         source: Arc<dyn WorkerLaunchMaterialSource>,
@@ -1120,8 +722,6 @@ impl DeviceDaemon {
         self.worker_launch_material = Some(source);
     }
 
-    /// Wires the independent managed-application supervisor and the local
-    /// repository resolver used by its Server→Device commands.
     pub fn set_managed_app_supervisor(
         &mut self,
         supervisor: crate::managed_app::ManagedAppSupervisor,
@@ -1131,8 +731,6 @@ impl DeviceDaemon {
         self.managed_app_repository = Some(repository);
     }
 
-    /// The capacity report for the current moment: the configured skeleton
-    /// with the live running/reserved facts overlaid when a source is wired.
     fn current_capacity(&self) -> ClientCapacityReport {
         let mut capacity = self.config.capacity;
         if let Some(source) = self.worker_capacity_source.as_ref() {
@@ -1143,16 +741,6 @@ impl DeviceDaemon {
         capacity
     }
 
-    /// Runs the loop until `shutdown` is observed.
-    ///
-    /// Shutdown is graceful: no exchange is abandoned mid-transport, and
-    /// frames leave the durable outbox only when their acknowledgement is
-    /// persisted, so an interrupted session resumes from the store.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first fatal [`DaemonError`] (store failure, corrupt
-    /// outbox, enrollment identity contradiction).
     pub fn run(&mut self, shutdown: &AtomicBool) -> Result<DaemonStatus, DaemonError> {
         while !shutdown.load(Ordering::Relaxed) {
             let outcome =
@@ -1169,15 +757,6 @@ impl DeviceDaemon {
         Ok(self.status.clone())
     }
 
-    /// Performs at most one exchange round-trip (or schedules one).
-    ///
-    /// Public so tests and embedders can drive the loop deterministically
-    /// without spawning a thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first fatal [`DaemonError`]; retriable failures are
-    /// reported as [`TickOutcome::Retrying`] instead.
     pub fn tick(&mut self, now: Instant) -> Result<TickOutcome, DaemonError> {
         self.tick_authorized(now, &|| true)
     }
@@ -1208,9 +787,6 @@ impl DeviceDaemon {
             }
         };
         if batch.frames.is_empty() {
-            // The endpoint rejects empty batches: an idle enrolled daemon
-            // waits for the heartbeat cadence, and an enrollment wait paces
-            // its next poll without sending.
             let ready_in = if self.enrolled {
                 self.idle_ready_in(now)
             } else {
@@ -1306,11 +882,12 @@ impl DeviceDaemon {
     ) -> Result<TickOutcome, DaemonError> {
         let reason = format!("exchange transport failed: {}", error.message());
         self.network_journal
-            .finish(
+            .finish_with_delay_cap(
                 operation.as_bytes(),
                 sequence,
                 Some(error.network_failure()),
                 network_now,
+                Some(self.config.max_backoff),
             )
             .map_err(DaemonError::Network)?;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
@@ -1382,8 +959,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Enqueues the enroll, hello, and heartbeat reports the current phase
-    /// requires (each is durable before any send).
     fn ensure_pending_reports(&mut self, now: Instant) -> Result<(), DaemonError> {
         if !self.enrolled {
             if !self.enroll_frame_pending {
@@ -1425,8 +1000,6 @@ impl DeviceDaemon {
                 accepting_connections: self.connection_policy.accepting_connections,
                 lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
-                // The mirrored lease rides every heartbeat, rebuilt from the
-                // durable mirror (plan 18.3: a restart keeps reporting it).
                 occupancy_lease_id: self
                     .occupancy_mirror
                     .as_ref()
@@ -1486,7 +1059,6 @@ impl DeviceDaemon {
     }
 
     fn publish_worker_exits(&mut self) -> Result<(), DaemonError> {
-        // The registry survives a restart; enqueue before marking a report sent.
         for worker in self.store.worker_report_candidates("exit", None)? {
             use winwincode_client_port::domain::ClientWorkerRunState;
             let state = match worker.state.as_str() {
@@ -1609,8 +1181,6 @@ impl DeviceDaemon {
         self.session
             .compact_confirmed(&mut self.store)
             .map_err(fatal_outbox)?;
-        // Everything at or below the contiguous acknowledgement is confirmed;
-        // anything above stays durable for redelivery.
         self.delivery_cursor = ack;
         self.status.frames_sent += u64::try_from(batch.frames.len()).unwrap_or(u64::MAX);
         self.status.acked_through = ack;
@@ -1624,9 +1194,6 @@ impl DeviceDaemon {
             match self.ingest_downlink(&response.frames, &response.worker_credentials) {
                 Ok(count) => count,
                 Err(DownlinkFailure::Retriable(reason)) => {
-                    // The client acknowledgement was already persisted; the
-                    // offending downlink batch is simply refused and the server
-                    // replays it after our next ackSequence report.
                     self.register_failure(now, reason);
                     return Ok(self.retry_outcome());
                 }
@@ -1660,8 +1227,6 @@ impl DeviceDaemon {
             self.register_failure(now, reason);
             return Ok(self.retry_outcome());
         }
-        // Re-deliver from the first missing frame; confirmed frames above the
-        // gap are replayed too and deduplicated by the receiver.
         self.delivery_cursor = replay_from - 1;
         self.status.replays += 1;
         self.status.exchanges_succeeded += 1;
@@ -1682,12 +1247,6 @@ impl DeviceDaemon {
         })
     }
 
-    /// Ingests the server-to-client batch: validates contiguous sequences,
-    /// persists the acknowledgement cursor, and handles
-    /// client-lock commands (persist the policy, acknowledge) and the
-    /// occupancy commands (mirror advance with persist-before-send acks,
-    /// release intents, force-fence overwrites). Commands owned by later
-    /// lanes are counted without acting.
     #[allow(clippy::too_many_lines)]
     fn ingest_downlink(
         &mut self,
@@ -1698,11 +1257,6 @@ impl DeviceDaemon {
         let started = Instant::now();
         let mut accepted = 0_usize;
         for (visited, value) in frames.iter().enumerate() {
-            // Each completed command keeps its existing durable effect and ACK
-            // ordering. Leave the unaccepted suffix in the Server outbox for
-            // the next exchange using only our persisted downlink cursor.
-            // Count raw frames, including duplicates; a single synchronous
-            // command may exceed this between-command elapsed budget.
             if visited > 0 && (visited >= 32 || started.elapsed() >= Duration::from_millis(25)) {
                 break;
             }
@@ -1839,9 +1393,6 @@ impl DeviceDaemon {
             }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
-                    // The sender may discard every acknowledged frame. Keep the
-                    // cursor behind the durable effect/intent and its reply so a
-                    // crash at any earlier point replays the command.
                     match &envelope.message {
                         ServerToClientMessage::CommandAck(payload) => {
                             self.store.record_command_result(payload).map_err(|error| {
@@ -1881,10 +1432,6 @@ impl DeviceDaemon {
                         ServerToClientMessage::WorkerStop(payload) => {
                             self.apply_worker_stop(payload, &envelope.message_id)
                                 .map_err(worker_stop_failure_to_downlink)?;
-                            // The stop intent, process-group action, terminal
-                            // registry state, and receipt are durable before
-                            // this cursor is advanced. A crash before this
-                            // point therefore replays the same command.
                         }
                         ServerToClientMessage::RepositoryRescan(payload) => {
                             self.apply_repository_rescan(payload, &envelope.message_id)
@@ -2050,9 +1597,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Adopts the server-issued enrollment: identity backfill, durable
-    /// stream re-key onto the assigned node, bearer credential, server
-    /// profile, and the server-requested heartbeat cadence.
     fn accept_enrollment(&mut self, issuance: &EnrollmentIssuance) -> Result<(), DaemonError> {
         let placeholder_node_id = self.node_id.clone();
         let stamp = now_rfc3339();
@@ -2099,12 +1643,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Applies one `client.client_lock` command: persists the new durable
-    /// policy (locked also disables new connections) and acknowledges the
-    /// command with `client.command_ack`, per the contract's explicit-ack
-    /// rule for server commands without a dedicated ack. The idempotency key
-    /// derives from the command's own key, so a server replay re-acks
-    /// idempotently.
     fn apply_client_lock(
         &mut self,
         payload: &ServerClientLockPayload,
@@ -2123,17 +1661,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Applies one `client.occupancy.offer` (plan 12.2): persists the
-    /// occupancy mirror and only then answers `client.occupancy.ack`
-    /// carrying the lease, the token, and the new mirror revision
-    /// (persist-before-send, so the lease enters `occupied` only after the
-    /// durable fact exists). A locked node, a revision divergence, or a
-    /// non-advancing token answers `client.occupancy.rejected` instead and
-    /// never touches the mirror — a stale offer can never roll it back.
-    ///
-    /// An offer repeating the exact stored lease/token pair is the
-    /// idempotent replay of an unanswered first ack: the ack is re-enqueued
-    /// unchanged and the revision does not move.
     fn apply_occupancy_offer(
         &mut self,
         payload: &ServerOccupancyOfferPayload,
@@ -2144,7 +1671,6 @@ impl DeviceDaemon {
             .as_ref()
             .map_or(0, |mirror| mirror.mirror_revision);
 
-        // Plan 12.1: a locked node refuses every occupancy application.
         if self.connection_policy.lock_state == ClientLockState::Locked {
             return self.reject_occupancy_offer(
                 &stamp,
@@ -2152,8 +1678,6 @@ impl DeviceDaemon {
                 current_revision,
             );
         }
-        // Idempotent replay: the mirror already holds this exact lease and
-        // token, so re-ack the persisted record without advancing it.
         if self
             .occupancy_mirror
             .as_ref()
@@ -2162,9 +1686,6 @@ impl DeviceDaemon {
             let record = self.occupancy_mirror.clone().expect("checked above");
             return self.ack_occupancy_mirror(&record);
         }
-        // The offer was computed against the mirror revision the server
-        // last saw acknowledged; any divergence means the server's view of
-        // this device moved (or replayed) and the offer must not land.
         if stamp.command.expected_revision != current_revision {
             return self.reject_occupancy_offer(
                 &stamp,
@@ -2195,9 +1716,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Persists the acked mirror state in memory and enqueues the durable
-    /// `client.occupancy.ack` (the mirror write already committed, so the
-    /// ack frame is the persist-before-send tail).
     fn ack_occupancy_mirror(&mut self, record: &OccupancyMirrorRecord) -> Result<(), DaemonError> {
         self.occupancy_mirror = Some(record.clone());
         self.enqueue(occupancy_ack_message(record))?;
@@ -2205,10 +1723,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Enqueues the durable `client.occupancy.rejected` frame for one
-    /// refused offer, echoing the offered stamp so the Control Plane can
-    /// settle the `reserving` lease back to `released`, and carrying the
-    /// current local mirror revision in `expectedRevision`.
     fn reject_occupancy_offer(
         &mut self,
         stamp: &OccupancyCommandContext,
@@ -2237,13 +1751,6 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// Applies one `client.occupancy.release` (plan 12.4): the command must
-    /// carry the current occupancy stamp; passing commands record a durable
-    /// release intent (mode plus affected worker-session count — actually
-    /// stopping workers belongs to the worker epic) and are answered with
-    /// `client.command_ack`. Stale or unknown stamps are refused with a
-    /// rejected ack and no local action. The mirror itself is never
-    /// mutated: only an offer or a force-fence advances it.
     fn apply_occupancy_release(
         &mut self,
         payload: &ServerOccupancyReleasePayload,
@@ -2314,9 +1821,6 @@ impl DeviceDaemon {
             .map_err(DaemonError::Store)?;
         let mut stopped = 0_u64;
         let status = match outcome {
-            // Persist-before-send: the intent is durable before the ack —
-            // and before any worker stop, so a crash mid-stop leaves the
-            // promise on disk for the restart scan to reconcile.
             OccupancyReleaseIntentOutcome::Recorded(_) => {
                 self.status.occupancy_release_intents_recorded += 1;
                 if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
@@ -2333,13 +1837,6 @@ impl DeviceDaemon {
         ack(self, status, None, mirror_revision)
     }
 
-    /// Applies one `client.occupancy.force_fence` (plan 12.6): overwrites
-    /// the mirror with the strictly higher token and answers
-    /// `client.command_ack`. Every intent authorized under the previous
-    /// revision is invalidated from this moment
-    /// ([`DeviceDaemon::verify_fencing_ticket`] refuses them), which is the
-    /// "镜像更新后旧 token 的未处理命令立即失效" rule. A non-advancing fence is
-    /// refused and never rolls the mirror back.
     fn apply_occupancy_force_fence(
         &mut self,
         payload: &ServerOccupancyForceFencePayload,
@@ -2360,8 +1857,6 @@ impl DeviceDaemon {
                 ))
                 .map(|_| ())
         };
-        // Idempotent replay of an unanswered ack: the mirror already holds
-        // the fenced stamp, so re-ack it without advancing.
         if self
             .occupancy_mirror
             .as_ref()
@@ -2388,8 +1883,6 @@ impl DeviceDaemon {
                 current_revision,
             );
         }
-        // Descriptive facts ride only a lease-matched fence: a fence that
-        // supersedes a foreign lease carries no holder/claim facts.
         let (holder, claim, idle) = match self.occupancy_mirror.as_ref() {
             Some(mirror) if mirror.occupancy_lease_id == stamp.occupancy_lease_id => (
                 mirror.holder_user_id.clone(),
@@ -2434,9 +1927,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Applies one managed application lifecycle command. The same occupancy
-    /// mirror and fencing ticket gate every operation before the independent
-    /// managed-app supervisor is touched.
     fn apply_managed_app_command(
         &mut self,
         payload: &winwincode_client_port::messages::ServerManagedAppCommandPayload,
@@ -2540,18 +2030,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Applies one `client.worker.launch` (plan 14.3 steps 6-9,
-    /// WORKER-200.2): the occupancy fencing stamp is judged first (plan
-    /// 12.6), the grant's instance binding is checked against the current
-    /// launch, the launch material is resolved from the wired local source
-    /// (the one-time worker credential the launch response delivered to the
-    /// local user-session bridge plus the local worker directories), and
-    /// the supervisor spawns the one managed worker process. A passing
-    /// spawn — or its idempotent already-running replay — is answered with
-    /// a durable `client.worker.launch_ack` echoing the grant identities
-    /// and the current mirror revision, the settlement fact the Server
-    /// consumes the grant against. Every refusal answers a rejected
-    /// acknowledgement and touches nothing.
     #[allow(clippy::too_many_lines)]
     fn apply_worker_launch(
         &mut self,
@@ -2593,8 +2071,6 @@ impl DeviceDaemon {
             .as_ref()
             .map_or(0, |mirror| mirror.mirror_revision);
 
-        // Plan 12.6: the launch must carry the current mirror stamp; a
-        // rejected stamp spawns nothing and stops nothing.
         let guard = self.fencing_guard();
         let ticket = match guard.authorize_command(
             FencedCommandKind::WorkerLaunch,
@@ -2616,9 +2092,6 @@ impl DeviceDaemon {
         };
         drop(guard);
 
-        // The grant binds the worker to the device instance that received
-        // it; a stale launch frame from a previous device boot can never
-        // spawn (the supervisor config would bake the wrong instance).
         if grant.client_node_id != self.node_id || grant.client_instance_id != self.instance_id {
             return self.enqueue_launch_ack(
                 stamp,
@@ -2719,11 +2192,6 @@ impl DeviceDaemon {
                 false,
             );
         };
-        // The authenticated private credential must arrive before spawning.
-        // Missing material leaves this launch pending for exact replay; the
-        // launch deadline closes a command whose material never arrives.
-        // The worker transport re-reads its private credential on every
-        // exchange.
         let credential = self
             .pending_worker_credentials
             .get(&grant.credential_digest)
@@ -2750,16 +2218,11 @@ impl DeviceDaemon {
         let outcome = supervisor.spawn(spawn_request);
         match outcome {
             Ok(spawn_outcome) => {
-                // Remember which worker session the grant's credential binds
-                // to, so the deferred launch-response material can be
-                // written into the right private file when it lands.
                 self.launch_credential_sessions.insert(
                     grant.credential_digest.clone(),
                     grant.worker_session_id.clone(),
                 );
                 let (status, worker_id, worker_instance_id) = match spawn_outcome {
-                    // One-session-one-worker idempotence: the live process
-                    // of a previous identical launch answers `duplicate`.
                     SpawnOutcome::Started(handle) => (
                         WorkerLaunchAckStatus::Accepted,
                         handle.worker_id,
@@ -2787,11 +2250,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Applies one `client.worker.stop` command. The command is acknowledged
-    /// through the existing universal `client.command_ack` contract because
-    /// the wire has no worker-specific stop acknowledgement. The fencing
-    /// stamp is checked before looking up the session, so an old lease cannot
-    /// stop (or claim an idempotent replay of) a terminal worker row.
     #[allow(clippy::too_many_lines)]
     fn apply_worker_stop(
         &mut self,
@@ -2871,10 +2329,6 @@ impl DeviceDaemon {
             WorkerStopIntentOutcome::Recorded(record)
             | WorkerStopIntentOutcome::Duplicate(record) => record,
         };
-        // The durable row owns the command identity. A redelivered frame may
-        // carry another envelope id while retaining the same idempotency key;
-        // complete and replay the original row so that branch cannot leave an
-        // action applied with an uncommitted receipt.
         let durable_command_message_id = stored.command_message_id.clone();
         if let Some(receipt_payload) = stored.receipt_payload {
             let receipt: ClientToServerMessage =
@@ -3015,18 +2469,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Delivers one deferred Worker Session Credential: the launch response
-    /// handed the raw material to the local user-session bridge after the
-    /// grant was consumed, and the bridge hands it over here. The material
-    /// is written into the supervised worker's mode-0600 credential file
-    /// (the worker transport re-reads it on every exchange) and never
-    /// persisted anywhere else. Answers whether the digest named a launch
-    /// this daemon handled.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Protocol`] when the credential file write
-    /// fails.
     pub fn receive_worker_credential(
         &mut self,
         credential_digest: &str,
@@ -3046,12 +2488,6 @@ impl DeviceDaemon {
         Ok(true)
     }
 
-    /// Builds and enqueues the durable `client.worker.launch_ack` for one
-    /// handled launch. The idempotency key is deterministic per grant, so a
-    /// redelivered command re-acks with the same key, and the occupancy
-    /// stamp echoes the command's lease and token with the device's current
-    /// mirror revision (the revision fact the Server's grant settlement
-    /// observes).
     #[allow(clippy::too_many_arguments)]
     fn process_closure_for_record(
         &self,
@@ -3180,8 +2616,6 @@ impl DeviceDaemon {
         }
     }
 
-    /// Time until the next steady-state heartbeat; only consulted once
-    /// enrolled (the enrollment waiting period polls exchanges instead).
     fn idle_ready_in(&self, now: Instant) -> Duration {
         self.next_heartbeat_at.saturating_duration_since(now)
     }
@@ -3198,17 +2632,11 @@ impl DeviceDaemon {
     }
 }
 
-/// Why one downlink batch could not be fully ingested.
 enum DownlinkFailure {
-    /// The server misbehaved; the exchange is retried with backoff.
     Retriable(String),
-    /// The local durable state failed; the daemon must stop.
     Fatal(DaemonError),
 }
 
-/// Applies one WorkerStop while preserving the distinction between a local
-/// condition that can be retried after the supervisor is ready and durable
-/// state that must stop the daemon.
 enum WorkerStopFailure {
     Retryable(String),
     Fatal(DaemonError),
@@ -3240,7 +2668,6 @@ fn worker_stop_supervisor_failure(
     }
 }
 
-/// Maps a connect-code failure onto the daemon error set.
 fn map_connect_code_error(error: connect_code::ConnectCodeError) -> DaemonError {
     match error {
         connect_code::ConnectCodeError::Store(store) => DaemonError::Store(store),
@@ -3249,7 +2676,6 @@ fn map_connect_code_error(error: connect_code::ConnectCodeError) -> DaemonError 
     }
 }
 
-/// Decodes one server-to-client frame value under the codec bound.
 fn decode_downlink_frame(
     codec: &FrameCodec,
     value: &serde_json::Value,
@@ -3269,8 +2695,6 @@ fn decode_downlink_frame(
     Ok(envelope)
 }
 
-/// Maps an outbox acknowledgement failure to a retriable reason or a fatal
-/// daemon error.
 fn retriable_ack_error(error: OutboxError<DeviceStoreError>) -> Result<String, DaemonError> {
     match error {
         OutboxError::AckAhead { requested, highest } => Ok(format!(
@@ -3286,7 +2710,6 @@ fn retriable_ack_error(error: OutboxError<DeviceStoreError>) -> Result<String, D
     }
 }
 
-/// Maps every outbox failure the daemon cannot recover from by retrying.
 fn fatal_outbox(error: OutboxError<DeviceStoreError>) -> DaemonError {
     match error {
         OutboxError::CorruptState(state) => DaemonError::CorruptOutbox(state),
@@ -3297,8 +2720,6 @@ fn fatal_outbox(error: OutboxError<DeviceStoreError>) -> DaemonError {
     }
 }
 
-/// Exponential backoff for the n-th consecutive failure, capped at
-/// `max_backoff`.
 fn backoff_for(failures: u64, initial_backoff: Duration, max_backoff: Duration) -> Duration {
     winwincode_network::exponential_delay(
         u32::try_from(failures).unwrap_or(u32::MAX),
@@ -3346,24 +2767,15 @@ fn validate_config(config: &DaemonConfig) -> Result<(), DaemonError> {
     Ok(())
 }
 
-/// RFC 3339 UTC stamp of the current wall clock (server-side style).
 fn now_rfc3339() -> String {
     crate::canonical_rfc3339(OffsetDateTime::now_utc())
 }
 
-/// Whether the mirror holds exactly the offered/fenced lease and token —
-/// the identity test behind idempotent replays of the mirror-advancing
-/// commands.
 fn mirror_is_exact(mirror: &OccupancyMirrorRecord, stamp: &OccupancyCommandContext) -> bool {
     mirror.occupancy_lease_id == stamp.occupancy_lease_id
         && mirror.fencing_token == stamp.occupancy_fencing_token
 }
 
-/// Builds the durable `client.occupancy.ack` for one persisted mirror: the
-/// ack's `expectedRevision` is the persisted mirror revision (the
-/// contract's `mirrorRevision` ack fact), and the idempotency key is
-/// deterministic per lease/token so a replayed offer re-acks with the same
-/// key and payload.
 fn occupancy_ack_message(record: &OccupancyMirrorRecord) -> ClientToServerMessage {
     ClientToServerMessage::OccupancyAck(ClientOccupancyAckPayload {
         occupancy: OccupancyCommandContext {
@@ -3380,7 +2792,6 @@ fn occupancy_ack_message(record: &OccupancyMirrorRecord) -> ClientToServerMessag
     })
 }
 
-/// Stable idempotency suffix for one reject reason.
 const fn reject_reason_slug(reason: OccupancyRejectReason) -> &'static str {
     match reason {
         OccupancyRejectReason::UnknownLease => "unknown-lease",
@@ -3391,7 +2802,6 @@ const fn reject_reason_slug(reason: OccupancyRejectReason) -> &'static str {
     }
 }
 
-/// The command-ack status for one fenced command rejection.
 const fn fencing_rejection_status(rejection: FencingRejection) -> CommandAckStatus {
     match rejection {
         FencingRejection::MirrorNotSet => CommandAckStatus::RejectedLeaseMismatch,
@@ -3401,8 +2811,6 @@ const fn fencing_rejection_status(rejection: FencingRejection) -> CommandAckStat
     }
 }
 
-/// Reads only a retained private receipt. Early receipts used numeric closure
-/// tokens; keep their stored bytes immutable while projecting canonical wire text.
 fn decode_worker_launch_receipt_ack(
     stored: &serde_json::Value,
 ) -> Result<ClientToServerMessage, DaemonError> {
@@ -3424,7 +2832,6 @@ fn decode_worker_launch_receipt_ack(
     Ok(ack)
 }
 
-/// Builds a non-fencing worker-stop error without exposing local process data.
 fn stop_error(code: ClientControlErrorCode, message: &str, retryable: bool) -> ClientControlError {
     ClientControlError {
         code,
@@ -3433,7 +2840,6 @@ fn stop_error(code: ClientControlErrorCode, message: &str, retryable: bool) -> C
     }
 }
 
-/// Builds the machine-readable error fact for one fencing rejection.
 fn control_error(code: ClientControlErrorCode, rejection: FencingRejection) -> ClientControlError {
     let (message, retryable) = match rejection {
         FencingRejection::MirrorNotSet => {
@@ -3455,7 +2861,6 @@ fn control_error(code: ClientControlErrorCode, rejection: FencingRejection) -> C
     }
 }
 
-/// Builds one durable `client.command_ack` frame.
 fn command_ack_message(
     command_kind: ClientControlMessageKind,
     command_message_id: &str,
@@ -3484,9 +2889,6 @@ const fn managed_app_error_status(error: &crate::managed_app::ManagedAppError) -
     }
 }
 
-/// The `client.worker.launch_ack` status for one fencing rejection: an
-/// unknown mirror reads as a lease mismatch, a stale or superseded stamp as
-/// a stale fencing token (the same distinction the release ack draws).
 const fn fencing_launch_status(rejection: FencingRejection) -> WorkerLaunchAckStatus {
     match rejection {
         FencingRejection::MirrorNotSet => WorkerLaunchAckStatus::RejectedLeaseMismatch,
@@ -3496,10 +2898,6 @@ const fn fencing_launch_status(rejection: FencingRejection) -> WorkerLaunchAckSt
     }
 }
 
-/// Maps one supervisor spawn failure onto the launch-ack rejection verdict:
-/// a fencing refusal keeps its precise wire status, an exhausted local
-/// capacity bound its own status, and every other spawn failure is a wrong
-/// device state with an internal error fact.
 fn launch_spawn_rejection(
     error: &SupervisorError,
 ) -> (WorkerLaunchAckStatus, ClientControlErrorCode, bool) {
@@ -3522,8 +2920,6 @@ fn launch_spawn_rejection(
     }
 }
 
-/// `Some(value)` when the grant's optional scope field is a non-empty
-/// string, `None` otherwise (the wire encodes absent scopes as empty).
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
@@ -3550,7 +2946,6 @@ struct PendingConfigurationApply {
         thread::JoinHandle<Result<ConfigurationReceipt, winwincode_provider::DeviceProviderError>>,
 }
 
-/// Derives a terminal closure from the supervisor's original private config.
 pub(crate) fn worker_process_closure(
     record: &crate::store::WorkerProcessRecord,
     reporting_instance: &str,

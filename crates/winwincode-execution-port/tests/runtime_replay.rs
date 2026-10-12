@@ -124,9 +124,6 @@ struct FileSnapshot {
     events: Vec<FileFrame>,
 }
 
-/// Re-openable test-only durable store. The production Worker injects its own
-/// durable adapter at this seam; this fixture makes restart a real file close
-/// and reopen rather than moving an in-memory map.
 #[derive(Debug, Clone)]
 struct FileStore {
     path: PathBuf,

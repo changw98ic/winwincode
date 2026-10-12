@@ -1,36 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Quick Chat native Codex continuous execution path (FLOW-100.4).
-//!
-//! After a `chat.submit` command passes the FLOW-100.3 permission gate and
-//! commits its turn, the execution position of that turn follows the
-//! session's durable launch anchor: a session whose newest
-//! `WorkerLaunchGrant` anchors it to a Client executes on the Device
-//! `WorkerSession` that the grant launched, and a session without an anchor
-//! keeps the supervised local execution path unchanged.
-//!
-//! The dispatch is a durable identity join, not a transport action:
-//!
-//! 1. the anchor grant's `WorkerSession` is bound once in the
-//!    `DeviceExecutionBinding` ledger — the launch-response material
-//!    (`workerSessionId`/`workerId`/`workerInstanceId` beside the occupancy
-//!    and repository facts) becomes the queryable `ExecutionPort` identity of
-//!    the device session;
-//! 2. the turn's queued `ExecutionJob` is reserved under the anchor holder's
-//!    admission identity and receives its device facts through the same
-//!    ledger (`attach_facts`): one row naming the exact device worker
-//!    identities, occupancy lease, and repository binding the job must
-//!    execute against. Queue selection and the local runtime scheduler treat
-//!    a job with device facts as device-owned and never claim it locally, so
-//!    the device worker — the process the Client launched against its
-//!    session credential — is the only possible executor of the turn.
-//!
-//! Every step is idempotent: repeated turns, command replays, and a crashed
-//! dispatch between two steps all find their durable receipts and change
-//! nothing. The anchor stays a permission fact only: a revoked or expired
-//! grant refuses new dispatches instead of routing work to a dead worker
-//! session (replacement and drain semantics belong to FLOW-100.6).
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -52,35 +21,19 @@ use crate::client_launch_grant::{
 use crate::device_execution_binding::DeviceExecutionBindingService;
 use crate::product_session_service::chat_turn_execution_job_id;
 
-/// Worker pool boundary of device-dispatched execution. Distinct from the
-/// supervised local pool so a device reservation never consumes local
-/// admission capacity and the local driver can never mistake device work
-/// for its own.
 pub const QUICK_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000D3";
 
-/// Stable Quick device dispatch failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuickDeviceDispatchErrorKind {
-    /// A command input violated the canonical identity bounds.
     InvalidInput,
-    /// The session's anchor launch grant is revoked or expired: the device
-    /// worker session it launched can no longer execute work.
     AnchorNotLive,
-    /// The anchor's worker session already released its execution binding.
     WorkerSessionEnded,
-    /// The turn is already dispatched to a different launch, or its
-    /// admission state contradicts the dispatch.
     DispatchConflict,
-    /// Execution admission rejected the reservation for an ordinary,
-    /// temporary capacity reason; a retry may succeed.
     AdmissionUnavailable,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free Quick device dispatch failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuickDeviceDispatchError {
     kind: QuickDeviceDispatchErrorKind,
@@ -124,28 +77,12 @@ impl fmt::Display for QuickDeviceDispatchError {
 
 impl std::error::Error for QuickDeviceDispatchError {}
 
-/// The durable dispatch decision of one device-anchored Chat turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickDeviceDispatch {
-    /// The `WorkerSession` binding the launch material produced.
     pub binding: DeviceExecutionBindingRecord,
-    /// The job's device facts: the identity match that routes the turn to
-    /// the launched device worker and excludes it from local claims.
     pub facts: DeviceExecutionReservationFacts,
 }
 
-/// Routes one committed Chat turn to its session's Device `WorkerSession`
-/// when the session carries a durable launch anchor.
-///
-/// Returns `Ok(None)` when the session has no anchor: the turn keeps the
-/// supervised local execution path and nothing durable changes. Any error
-/// leaves the queued turn untouched (its device dispatch simply did not
-/// happen yet), so an exact command replay can complete it later.
-///
-/// # Errors
-///
-/// Returns the stable dispatch failure categories; nothing is decided on a
-/// storage failure.
 pub fn dispatch_turn_to_device_worker(
     storage: &mut SqliteStorage,
     product_session_id: &ProductSessionId,
@@ -172,17 +109,11 @@ pub fn dispatch_turn_to_device_worker(
             .map_err(|_| QuickDeviceDispatchError::storage())?
     };
     let Some(anchor) = anchor else {
-        // No device anchor: the session is not a device session and keeps
-        // the supervised local execution path unchanged.
         return Ok(None);
     };
     dispatch_chat_job_to_device_worker(storage, &execution_job_id, &anchor, now).map(Some)
 }
 
-/// Resumes the original Chat job through its sealed Device launch lineage.
-/// No new turn, job or admission reservation is created for an existing route.
-/// # Errors
-/// Rejects cross-session, role, cancellation and unsealed replacement authority.
 pub fn dispatch_chat_job_to_device_worker(
     storage: &mut SqliteStorage,
     execution_job_id: &ExecutionJobId,
@@ -211,8 +142,6 @@ pub fn dispatch_chat_job_to_device_worker(
     }
     validate_active_dispatch(&record, anchor)?;
 
-    // The launch material becomes the device session's durable ExecutionPort
-    // identity: bound exactly once per launch grant, replay-safe.
     let binding = {
         let mut bindings = DeviceExecutionBindingService::new(storage);
         if let Some(existing) = bindings
@@ -234,9 +163,6 @@ pub fn dispatch_chat_job_to_device_worker(
                 .binding
         }
     };
-    // An already attached job is either this exact dispatch (idempotent
-    // repeat) or a routing conflict this lane refuses instead of silently
-    // re-anchoring committed work.
     {
         let mut bindings = DeviceExecutionBindingService::new(storage);
         if let Some(existing) = bindings
@@ -271,9 +197,6 @@ pub fn dispatch_chat_job_to_device_worker(
         }
     }
 
-    // The dispatch reservation runs under the anchor holder's admission
-    // identity, so the durable device facts join the reservation user to the
-    // grant holder exactly.
     ensure_device_admission_reservation(storage, execution_job_id, anchor)?;
 
     let facts = {
@@ -366,9 +289,6 @@ fn replay_terminal_dispatch(
     Ok(QuickDeviceDispatch { binding, facts })
 }
 
-/// Echoes every anchor grant field into the validated bind command with
-/// stable derived identities, so a repeated dispatch replays the original
-/// receipt instead of conflicting.
 fn bind_command(
     anchor: &WorkerLaunchGrantRecord,
 ) -> Result<DeviceExecutionBindingIssuance, QuickDeviceDispatchError> {
@@ -395,8 +315,6 @@ fn bind_command(
     .map_err(|error| QuickDeviceDispatchError::invalid_input(error.to_string()))
 }
 
-/// Reserves the turn's execution admission under the device worker pool and
-/// the anchor holder's identity when no reservation exists yet.
 fn ensure_device_admission_reservation(
     storage: &mut SqliteStorage,
     execution_job_id: &ExecutionJobId,
@@ -466,8 +384,6 @@ fn load_queued_job(
     Ok(record)
 }
 
-/// Ordinary admission backpressure defers the dispatch instead of failing
-/// the boundary: the turn stays queued and an exact retry re-runs the glue.
 fn admission_error(
     error: &winwincode_storage::ExecutionAdmissionError,
 ) -> QuickDeviceDispatchError {
@@ -484,10 +400,6 @@ fn admission_error(
     }
 }
 
-/// One canonical `prefix` + 26 character Crockford identity derived from
-/// stable dispatch material, so every replay of the same dispatch reuses the
-/// exact same command identities. Shared with the `StrongFlow` device routing,
-/// which derives its identities from distinct namespaces.
 pub(crate) fn derived_id(prefix: &str, namespace: &[u8], identity: &str) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut hasher = Sha256::new();

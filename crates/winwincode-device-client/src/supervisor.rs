@@ -1,65 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local one-session-one-worker process supervision (WORKER-100.2, plan
-//! sections 14.1, 14.5, 8.2, 18.3).
-//!
-//! The [`SessionSupervisor`] is the Device Client's local execution
-//! authority for managed Worker processes. "一 Session 一 Worker" is
-//! enforced locally: one `WorkerSessionId` maps to at most one live Worker
-//! process — a spawn naming a session that already has a verified-live
-//! process is the idempotent replay of the same launch and returns the
-//! existing record, and a spawn naming a session whose registry row claims
-//! `running` but whose process cannot be verified fails closed.
-//!
-//! Lifecycle:
-//!
-//! 1. **Fencing first** (plan 12.6): every launch and stop is judged by
-//!    [`FencingGuard::authorize_command`] against the durable occupancy
-//!    mirror *before* any local action; a rejected stamp spawns nothing and
-//!    stops nothing.
-//! 2. **Registry before acknowledgement**: the spawn writes the plan-8.2
-//!    `worker_process_registry` row binding `pid` **and**
-//!    `process_start_identity` — a PID alone is never sufficient because
-//!    PIDs are reused — with the launch grant's `workerInstanceId` and state
-//!    `running`. The server-minted stable `workerId` is reused across
-//!    replacement boots of the same session; every launch grant carries a
-//!    fresh instance id.
-//! 3. **Locality**: the supervisor writes the two private (mode-0600)
-//!    files the managed Worker entry reads — the Worker Session Credential
-//!    and the `managed-session.json` config — field-for-field aligned with
-//!    `winwincode-worker --managed-session` (the reader is fail-closed and
-//!    rejects unknown fields), then spawns the Worker binary with the
-//!    config path. The Worker binary path is configurable; the default
-//!    locates the `winwincode-worker` binary shipped next to the current
-//!    executable.
-//! 4. **Supervision**: [`SessionSupervisor::reap`] polls the tracked
-//!    children (`waitpid`-style) and moves rows to their terminal states
-//!    (`exited` with the exit code, or `crashed` for a nonzero/signal
-//!    death); [`SessionSupervisor::stop`] sends the graceful signal first
-//!    (SIGTERM via `/bin/kill` — this crate denies `unsafe`, so there is no
-//!    direct `libc` call) and escalates to a hard kill after
-//!    [`SupervisorConfig::stop_grace_period`].
-//! 5. **Recovery**: after a Device Client restart the children map is
-//!    empty, so [`SessionSupervisor::reconcile`] probes every registry row
-//!    by `pid` + start identity and answers the plan-18.3 vocabulary —
-//!    `still_running`, `terminal`, `missing`, `unknown` — the durable data
-//!    source for the later `client.worker.reconcile` uplink frames.
-//!
-//! Capacity (plan 14.5): the live `runningWorkerSessions` figure is the
-//! count of `running` registry rows, wired into the daemon's hello/heartbeat
-//! through the [`crate::daemon::WorkerCapacitySource`] trait. The
-//! `reservedWorkerSessions` slot is simplified: one reserved slot while the
-//! device holds an occupancy claim whose lease has no running worker yet;
-//! the durable reservation math stays server-owned (the FLOW epic). The
-//! spawn path additionally re-checks the local
-//! [`SupervisorConfig::max_concurrent_worker_sessions`] bound ("Device
-//! Client 负责二次校验").
-//!
-//! Known crash window: the registry row is written immediately *after* the
-//! process is spawned (the pid exists only then), so a crash in between
-//! leaves an unregistered orphan; the plan-18.3 launch-intent scan owned by
-//! the launch-grant lane closes that window.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -84,60 +24,27 @@ use crate::worker_logs::{
     WorkerLogConfig, WorkerLogContentKind, WorkerLogRecorder, WorkerLogStream,
 };
 
-/// Technical capacity bound of the existing ClientControl contract. Provider
-/// request limits are independent of the number of supervised Worker processes.
 pub(crate) const PROTOCOL_WORKER_SESSION_CAPACITY: u32 = 1024;
 
-/// Registry lifecycle state of a supervised, believed-live worker process.
 pub const WORKER_STATE_RUNNING: &str = "running";
-/// Registry lifecycle state of a worker that exited with status zero.
 pub const WORKER_STATE_EXITED: &str = "exited";
-/// Registry lifecycle state of a worker that died abnormally (nonzero exit
-/// or a fatal signal).
 pub const WORKER_STATE_CRASHED: &str = "crashed";
-/// Registry lifecycle state of a row whose process is gone without a
-/// locally observed exit (post-restart probe or unrecoverable wait).
 pub const WORKER_STATE_MISSING: &str = "missing";
 
-/// File name of the managed-session config written under the worker data
-/// directory (mode 0600, the exact file `--managed-session` reads).
 const MANAGED_SESSION_CONFIG_FILE: &str = "managed-session.json";
-/// File name of the Worker Session Credential written under the worker
-/// data directory (mode 0600; the config names it at `workerCredentialPath`).
 const WORKER_CREDENTIAL_FILE: &str = "worker-credential";
-/// The managed entry's argument: `winwincode-worker --managed-session <file>`.
 const MANAGED_SESSION_ARG: &str = "--managed-session";
-/// Default Worker binary name looked up next to the current executable.
 const WORKER_BINARY_NAME: &str = "winwincode-worker";
-/// Poll slice while waiting for a graceful stop to land.
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Static configuration of one [`SessionSupervisor`]: the device-level
-/// identity facts written into every managed-session config plus the local
-/// supervision policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SupervisorConfig {
-    /// `ClientNode` the launching Device Client runs on (config
-    /// `clientNodeId`).
     pub client_node_id: String,
-    /// One Device Client process boot (config `clientInstanceId`); the
-    /// grant binding requires the current instance.
     pub client_instance_id: String,
-    /// `https://HOST:PORT` origin of the `ExecutionPort` exchange endpoint
-    /// (config `serverOrigin`).
     pub server_origin: String,
-    /// Optional model gateway route; the canonical embedded route is used
-    /// when absent (config `modelRoute`).
     pub model_route: Option<ModelRoute>,
-    /// Configured Worker binary; `None` locates `winwincode-worker` next to
-    /// the current executable (same directory, the shipped sibling binary).
     pub worker_binary_path: Option<PathBuf>,
-    /// Local second-check bound for concurrent worker sessions (plan 14.5).
-    /// `0` disables the local cap (the Control Plane still owns durable
-    /// capacity; V1 不允许超卖).
     pub max_concurrent_worker_sessions: u32,
-    /// How long a graceful stop waits for the worker to exit before
-    /// escalating to a hard kill. Zero escalates immediately.
     pub stop_grace_period: Duration,
 }
 
@@ -155,136 +62,69 @@ impl Default for SupervisorConfig {
     }
 }
 
-/// Optional model gateway route written into the managed-session config,
-/// mirroring the Worker entry's `modelRoute` shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRoute {
     pub capability: String,
     pub route: String,
 }
 
-/// One launch request: the identity facts of the Worker Session to start.
-///
-/// The identity facts arrive server-minted from the launch grant the
-/// `client.worker.launch` frame carried: the stable `workerId` (reused
-/// across replacement boots of the same session) and the fresh
-/// `workerInstanceId` of this exact boot. The registry records them
-/// verbatim, so a `client.worker.launch_ack` echoing the registry facts
-/// settles against the grant.
-///
-/// `worker_credential_token` is the Worker Session Credential material —
-/// the fourth, strictly separated credential class. It is written exactly
-/// once to the mode-0600 credential file the config names and is never
-/// stored, logged, or uploaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnRequest<'a> {
-    /// The one `WorkerSession` this process authenticates.
     pub worker_session_id: &'a str,
-    /// Stable server-minted worker identity (launch grant `workerId`,
-    /// config `workerId`).
     pub worker_id: &'a str,
-    /// Fresh server-minted identity of this process boot (launch grant
-    /// `workerInstanceId`, config `workerInstanceId`).
     pub worker_instance_id: &'a str,
-    /// Occupancy lease the session consumes (config `occupancyLeaseId`).
     pub occupancy_lease_id: &'a str,
-    /// Fencing token of the lease; judged against the durable mirror before
-    /// any local action (plan 12.6 `WorkerLaunch`).
     pub occupancy_fencing_token: u64,
-    /// Worker Session Credential material (written to the 0600 credential
-    /// file; never persisted anywhere else).
     pub worker_credential_token: &'a str,
-    /// Repository binding the session executes against.
     pub repository_binding_id: &'a str,
-    /// Server-issued launch grant the launch is settled against (registry
-    /// `launch_grant_id`).
     pub launch_grant_id: &'a str,
-    /// Product session scope from the grant (optional config
-    /// `productSessionId`).
     pub product_session_id: Option<&'a str>,
-    /// Work run scope from the grant (optional config `workRunId`).
     pub work_run_id: Option<&'a str>,
-    /// Local source root — the only Worker-visible filesystem path the
-    /// Device Client writes into the config (`sourceDirectory`).
     pub source_directory: &'a Path,
-    /// Local Worker data root; the config and credential files are written
-    /// under it (`dataDirectory`).
     pub data_directory: &'a Path,
-    /// Local launch state root the worker process starts in (the child's
-    /// working directory).
     pub worker_root: &'a Path,
 }
 
-/// The process handle of one started worker boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerHandle {
     pub worker_session_id: String,
-    /// Stable worker identity (reused across replacement boots).
     pub worker_id: String,
-    /// Fresh `cix_` identity of this exact process boot.
     pub worker_instance_id: String,
     pub pid: u32,
-    /// Platform process-boot identity binding the pid (plan 8.2).
     pub process_start_identity: String,
 }
 
-/// Outcome of one [`SessionSupervisor::spawn`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnOutcome {
-    /// A new worker process was started and registered.
     Started(WorkerHandle),
-    /// One-session-one-worker: the session already has a verified-live
-    /// process, so the spawn was an idempotent replay of the same launch
-    /// and no second process was created.
     AlreadyRunning(WorkerProcessRecord),
 }
 
-/// One worker exit observed by [`SessionSupervisor::reap`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReapedWorker {
     pub worker_session_id: String,
     pub worker_instance_id: String,
-    /// Terminal registry state: [`WORKER_STATE_EXITED`] or
-    /// [`WORKER_STATE_CRASHED`].
     pub state: &'static str,
-    /// Exit status when the platform supplied one (`None` for signal
-    /// deaths).
     pub exit_code: Option<i64>,
 }
 
-/// One worker stop requested through [`SessionSupervisor::stop_lease_workers`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerStopOutcome {
     pub worker_session_id: String,
-    /// Whether a stop was requested for a believed-live worker (`false`
-    /// means the row was already terminal or the stop was refused; see
-    /// `error`).
     pub stopped: bool,
-    /// Terminal registry state after the stop, when reached.
     pub state: Option<String>,
     pub exit_code: Option<i64>,
-    /// Refusal reason when the stop could not be requested or finished.
     pub error: Option<String>,
 }
 
-/// The plan-18.3 reconcile vocabulary for one registry row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerReconcileVerdict {
-    /// The process is alive with the bound boot identity.
     StillRunning,
-    /// The row already carries a locally observed terminal state.
     Terminal,
-    /// The process is gone (unobserved exit, or the pid now names a
-    /// different boot — PID reuse).
     Missing,
-    /// The platform could not determine the process state; the row is left
-    /// untouched and the server should treat the session as unconfirmed.
     Unknown,
 }
 
-/// One row's reconcile report — the durable data source for the later
-/// `client.worker.reconcile` uplink frames (frame construction belongs to
-/// the launch-grant lane).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerReconcileReport {
     pub worker_session_id: String,
@@ -292,36 +132,20 @@ pub struct WorkerReconcileReport {
     pub pid: u32,
     pub process_start_identity: String,
     pub verdict: WorkerReconcileVerdict,
-    /// Registry state represented by this observation for exact report acknowledgement.
     pub record: WorkerProcessRecord,
 }
 
-/// Failure of one supervision operation. Every variant is secret-free: the
-/// Worker Session Credential never appears in any message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SupervisorError {
-    /// The durable store failed.
     Store(DeviceStoreError),
-    /// The fencing guard refused the command before any local action.
     Fencing(FencingRejection),
-    /// No registry row exists for the worker session.
     NotFound { worker_session_id: String },
-    /// A registry row claims `running` but its process boot cannot be
-    /// verified; spawning over it could violate one-session-one-worker, so
-    /// the operation fails closed.
     UnverifiableExisting { worker_session_id: String, pid: u32 },
-    /// The local concurrent-worker bound rejected the spawn (plan 14.5).
     CapacityExhausted { max_concurrent_worker_sessions: u32 },
-    /// A request or configuration field is invalid.
     InvalidInput(String),
-    /// The Worker binary could not be located.
     WorkerBinary { path: PathBuf, reason: String },
-    /// The worker process could not be spawned.
     Spawn { reason: String },
-    /// The local worker log recorder could not be opened.
     WorkerLogs(String),
-    /// The platform could not supply the process-boot identity the registry
-    /// binding requires (plan 8.2: a bare pid is never sufficient).
     ProcessIdentityUnavailable { pid: u32 },
 }
 
@@ -388,44 +212,29 @@ impl From<crate::worker_logs::WorkerLogError> for SupervisorError {
     }
 }
 
-/// Platform observation of one pid's process boot.
-///
-/// The observation distinguishes the boot identity (readable until the
-/// process is reaped, zombies included — the capture right after spawn
-/// must tolerate a worker that already exited) from liveness (a zombie
-/// holds its pid but stopped working, so it probes as gone).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProcessObservation {
-    /// The pid names a process boot with this identity; `working` is false
-    /// for a zombie (still holding the pid, already dead).
-    Boot { identity: String, working: bool },
-    /// The pid names no process at all.
+    Boot {
+        identity: String,
+        working: bool,
+    },
     Absent,
-    /// The platform cannot tell. (Constructed on Linux and the stubbed
-    /// platforms; the macOS `ps` snapshot is always conclusive.)
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Unknown,
 }
 
-/// Liveness verdict for a registry row's `pid` + expected boot identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessProbe {
-    /// The pid is live *and* its boot identity matches the row.
     Alive,
-    /// The pid is gone, or names a different boot (PID reuse).
     Gone,
-    /// The platform cannot tell.
     Unknown,
 }
 
-/// The tracked child of one supervised session. The registry row owns the
-/// identity facts; the bookkeeping only needs the process itself.
 struct TrackedChild {
     child: Child,
     log_readers: Vec<thread::JoinHandle<()>>,
 }
 
-/// Shared state of one supervisor handle.
 struct SupervisorInner {
     config: SupervisorConfig,
     store: Mutex<DeviceStore>,
@@ -433,11 +242,6 @@ struct SupervisorInner {
     worker_logs: WorkerLogRecorder,
 }
 
-/// The Device Client's local worker supervisor.
-///
-/// Cheap to clone; every method is `&self` — the store connection and the
-/// child bookkeeping live behind internal mutexes, so one handle can be
-/// shared as the daemon's capacity source and release controller.
 #[derive(Clone)]
 pub struct SessionSupervisor {
     inner: Arc<SupervisorInner>,
@@ -453,20 +257,6 @@ impl fmt::Debug for SessionSupervisor {
 }
 
 impl SessionSupervisor {
-    /// Builds one supervisor over an open device store and a configuration.
-    ///
-    /// The store is owned by the supervisor; pass a dedicated
-    /// [`DeviceStore::open`] connection or hand the daemon's store over via
-    /// [`crate::daemon::DeviceDaemon::into_store`]. The store may name the
-    /// same database file other device-client components use: `SQLite` WAL
-    /// mode multiplexes the connections.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty device identity or a malformed
-    /// [`SupervisorConfig::server_origin`] (the same `https://HOST:PORT`
-    /// rule the Worker entry enforces, so a config this supervisor writes
-    /// can never be refused by its reader).
     pub fn new(config: SupervisorConfig, store: DeviceStore) -> Result<Self, SupervisorError> {
         validate_config(&config)?;
         let logs_root = store
@@ -485,7 +275,6 @@ impl SessionSupervisor {
         })
     }
 
-    /// The static supervision configuration.
     #[must_use]
     pub fn config(&self) -> &SupervisorConfig {
         &self.inner.config
@@ -551,11 +340,6 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    /// Loads one worker-process registry row.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when the read fails.
     pub fn worker_process(
         &self,
         worker_session_id: &str,
@@ -563,16 +347,6 @@ impl SessionSupervisor {
         Ok(self.lock_store().worker_process(worker_session_id)?)
     }
 
-    /// Writes (or overwrites) the mode-0600 Worker Session Credential file
-    /// of one supervised worker session — the deferred-material delivery the
-    /// daemon invokes when the launch response's one-time credential lands
-    /// after the spawn. The worker transport re-reads the private file on
-    /// every exchange, so the next retry picks the material up.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SupervisorError::NotFound`] for an unknown session and the
-    /// write failure otherwise.
     pub fn write_worker_credential(
         &self,
         worker_session_id: &str,
@@ -588,30 +362,14 @@ impl SessionSupervisor {
         write_private_file(&path, material.as_bytes())
     }
 
-    /// Loads every worker-process registry row.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when the read fails.
     pub fn worker_processes(&self) -> Result<Vec<WorkerProcessRecord>, SupervisorError> {
         Ok(self.lock_store().worker_processes()?)
     }
 
-    /// Counts the registry rows in one lifecycle state.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when the read fails.
     pub fn count_worker_processes_in_state(&self, state: &str) -> Result<u64, SupervisorError> {
         Ok(self.lock_store().count_worker_processes_in_state(state)?)
     }
 
-    /// The live `runningWorkerSessions` capacity fact: reaps observed exits
-    /// first, then counts the `running` registry rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when the read fails.
     pub fn running_worker_sessions(&self) -> Result<u32, SupervisorError> {
         self.reap()?;
         let rows = self
@@ -622,29 +380,11 @@ impl SessionSupervisor {
         Ok(u32::try_from(running).unwrap_or(u32::MAX))
     }
 
-    /// Starts the one Worker process of one Worker Session (plan 14.3
-    /// steps 6-9).
-    ///
-    /// Order of operations: fencing authorization, the one-session-one-worker
-    /// idempotence check, the local capacity second-check, then credential +
-    /// config files (mode 0600), the process spawn, and the registry row
-    /// binding `pid` + `process_start_identity` with the launch grant's
-    /// `workerInstanceId` (the grant owns both worker identities).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SupervisorError::Fencing`] for a rejected launch stamp (no
-    /// local action happens), [`SupervisorError::CapacityExhausted`] when
-    /// the local bound is full, [`SupervisorError::UnverifiableExisting`]
-    /// when a `running` row cannot be verified (fail closed), and the
-    /// remaining variants for spawn-time failures.
     #[allow(clippy::too_many_lines)]
     pub fn spawn(&self, request: SpawnRequest<'_>) -> Result<SpawnOutcome, SupervisorError> {
         let stamp = now_rfc3339();
         let mut store = self.lock_store();
 
-        // Plan 12.6: the launch must carry the current mirror stamp; a
-        // rejected stamp never touches the filesystem or the registry.
         let guard = FencingGuard::from_store(&store)?;
         if let FencingVerdict::Rejected(rejection) = guard.authorize_command(
             FencedCommandKind::WorkerLaunch,
@@ -656,9 +396,6 @@ impl SessionSupervisor {
         drop(guard);
         validate_request(request)?;
 
-        // One session one worker: a verified-live process makes the spawn an
-        // idempotent replay; an unverifiable `running` row fails closed; a
-        // gone one is demoted to `missing` before the replacement boot.
         if let Some(existing) = store.worker_process(request.worker_session_id)?
             && existing.state == WORKER_STATE_RUNNING
             && let Some(outcome) = self.already_running_outcome(&mut store, &existing, &stamp)?
@@ -666,7 +403,6 @@ impl SessionSupervisor {
             return Ok(outcome);
         }
 
-        // Plan 14.5: the Device Client's local second check on capacity.
         let max = self.inner.config.max_concurrent_worker_sessions;
         if max > 0 {
             let running = store.count_worker_processes_in_state(WORKER_STATE_RUNNING)?;
@@ -677,15 +413,9 @@ impl SessionSupervisor {
             }
         }
 
-        // The launch grant owns the identity facts: the stable workerId and
-        // the fresh workerInstanceId of this boot arrive server-minted, and
-        // the registry records them verbatim so the launch acknowledgement
-        // echoes exactly what the grant carries.
         let worker_id = request.worker_id;
         let worker_instance_id = request.worker_instance_id;
 
-        // Locality: the two private files the managed entry reads, written
-        // under the worker data directory with exactly mode 0600.
         create_directory(request.data_directory, "worker data directory")?;
         create_directory(request.worker_root, "worker root")?;
         let credential_path = request.data_directory.join(WORKER_CREDENTIAL_FILE);
@@ -741,8 +471,6 @@ impl SessionSupervisor {
                 return Err(error);
             }
         };
-        // A managed Worker cannot enter execution until its exact boot is durable.
-        // Parent death before this write closes the pipe and makes the child exit.
         let release = child
             .stdin
             .take()
@@ -771,10 +499,6 @@ impl SessionSupervisor {
         }))
     }
 
-    /// The one-session-one-worker verdict for a `running` row: `Some(_)`
-    /// ends the spawn (the idempotent replay of a verified-live process);
-    /// an unverifiable row fails closed; a gone row is demoted to
-    /// `missing` and the spawn proceeds to the replacement boot.
     fn already_running_outcome(
         &self,
         store: &mut DeviceStore,
@@ -809,7 +533,6 @@ impl SessionSupervisor {
         Ok(None)
     }
 
-    /// Spawns the Worker process with the managed-session entry arguments.
     fn launch_process(
         &self,
         config_path: &Path,
@@ -825,9 +548,6 @@ impl SessionSupervisor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Every managed Worker owns a fresh process group. A stop can then
-        // terminate the complete Worker tree without touching an unrelated
-        // process that happens to be outside this session.
         #[cfg(unix)]
         command.process_group(0);
         command.spawn().map_err(|error| SupervisorError::Spawn {
@@ -879,9 +599,6 @@ impl SessionSupervisor {
         })
     }
 
-    /// Captures the boot identity of the fresh child and writes the plan-8.2
-    /// registry row. A child whose identity is unavailable is killed and the
-    /// launch refused (a bare pid can never be probed safely).
     fn register_child(
         &self,
         store: &mut DeviceStore,
@@ -893,11 +610,7 @@ impl SessionSupervisor {
     ) -> Result<WorkerProcessRecord, SupervisorError> {
         let pid = child.id();
         let process_start_identity = match observe_process(pid) {
-            ProcessObservation::Boot { identity, .. } => {
-                // Zombie-tolerant: an instantly-exiting worker still names
-                // the boot it ran under.
-                identity
-            }
+            ProcessObservation::Boot { identity, .. } => identity,
             ProcessObservation::Absent | ProcessObservation::Unknown => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -937,26 +650,6 @@ impl SessionSupervisor {
         Ok(record)
     }
 
-    /// Stops the Worker process of one Worker Session (plan 12.6
-    /// `WorkerStop`).
-    ///
-    /// `graceful` sends the terminate signal first and waits up to
-    /// [`SupervisorConfig::stop_grace_period`] before the hard kill;
-    /// `!graceful` kills immediately. The registry row moves to its terminal
-    /// state (`exited`/`crashed` with the exit code when observed, or
-    /// `missing` when the process was already gone). Stopping an already
-    /// terminal row is the idempotent no-op returning the stored row.
-    ///
-    /// Works across supervisor restarts: a row without a tracked child is
-    /// stopped by its registered `pid` after a boot-identity probe
-    /// re-confirms it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SupervisorError::Fencing`] for a rejected stop stamp (no
-    /// signal is sent), [`SupervisorError::NotFound`] for an unknown
-    /// session, and [`SupervisorError::UnverifiableExisting`] when the
-    /// process state cannot be determined (fail closed).
     pub fn stop(
         &self,
         worker_session_id: &str,
@@ -965,16 +658,6 @@ impl SessionSupervisor {
         self.stop_with_fencing(worker_session_id, graceful, true)
     }
 
-    /// Completes a stop intent that was authorized and durably recorded
-    /// before a Device Client restart. The intent's session and lease binding
-    /// are checked, while the live occupancy mirror is deliberately bypassed:
-    /// a newer fencing update cannot undo an already accepted local stop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable worker identity or occupancy lease
-    /// does not match the registered worker, or when stopping the process
-    /// cannot be verified.
     pub fn stop_recovered(
         &self,
         worker_session_id: &str,
@@ -1014,15 +697,10 @@ impl SessionSupervisor {
                 .ok_or_else(|| SupervisorError::NotFound {
                     worker_session_id: worker_session_id.to_owned(),
                 })?;
-        // A terminal row is a local read-only no-op: no PID can be signalled,
-        // and the daemon has already fenced any remote WorkerStop command.
         if record.state != WORKER_STATE_RUNNING {
             return Ok(record);
         }
 
-        // Plan 12.6: stopping a live process requires the current mirror stamp
-        // of the worker's own lease. A force-fenced or released lease can no
-        // longer signal its workers.
         if enforce_fencing {
             let mirror = store.occupancy_mirror()?;
             let token = mirror.as_ref().map_or(0, |record| record.fencing_token);
@@ -1064,14 +742,6 @@ impl SessionSupervisor {
         Ok(store.worker_process(worker_session_id)?.unwrap_or(record))
     }
 
-    /// Polls every tracked child (`waitpid`-style) and records observed
-    /// exits: status zero moves the row to `exited` with its exit code, an
-    /// abnormal death to `crashed`. Answers the workers whose exits this
-    /// call observed (crash detection); live workers are not listed.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when a state write fails.
     pub fn reap(&self) -> Result<Vec<ReapedWorker>, SupervisorError> {
         let stamp = now_rfc3339();
         let mut finished: Vec<(String, &'static str, Option<i64>)> = Vec::new();
@@ -1110,23 +780,10 @@ impl SessionSupervisor {
         Ok(reaped)
     }
 
-    /// The plan-18.3 restart scan: probes every registry row by `pid` +
-    /// process-start identity and answers the reconcile vocabulary
-    /// (`still_running` / `terminal` / `missing` / `unknown`), updating the
-    /// rows it could classify. The result is the durable data source for
-    /// the `client.worker.reconcile` uplink the launch-grant lane sends.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when a read or write fails.
     pub fn reconcile(&self) -> Result<Vec<WorkerReconcileReport>, SupervisorError> {
         self.reconcile_rows(self.worker_processes()?)
     }
 
-    /// Reconciles active processes and durable unreported changes for one lease.
-    ///
-    /// # Errors
-    /// Propagates process registry read/write failures.
     pub fn reconcile_pending(
         &self,
         lease: &str,
@@ -1222,14 +879,6 @@ impl SessionSupervisor {
         Ok(reports)
     }
 
-    /// Stops every supervised worker bound to one occupancy lease (the
-    /// `cancel_tasks_and_release` execution path) and answers one outcome
-    /// per registry row of the lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store failure when the lease scan fails; per-worker
-    /// stop refusals are reported in the outcomes instead.
     pub fn stop_lease_workers(
         &self,
         occupancy_lease_id: &str,
@@ -1290,9 +939,6 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    /// Whether the session's tracked child is still live, removing an
-    /// already-exited child from the bookkeeping (`try_wait` collects the
-    /// exit status, so no zombie remains).
     fn tracked_child_verdict(&self, worker_session_id: &str) -> Option<ProcessProbe> {
         let mut children = self.lock_children();
         let mut tracked = children.remove(worker_session_id)?;
@@ -1323,9 +969,6 @@ impl SessionSupervisor {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The Worker binary to spawn: the configured path when set (verified
-    /// present), else the `winwincode-worker` sibling of the current
-    /// executable.
     fn resolve_worker_binary(&self) -> Result<PathBuf, SupervisorError> {
         if let Some(configured) = &self.inner.config.worker_binary_path {
             if configured.is_file() {
@@ -1353,12 +996,8 @@ impl SessionSupervisor {
     }
 }
 
-/// Live capacity facts for the daemon's hello/heartbeat reports (plan 14.5).
 impl WorkerCapacitySource for SessionSupervisor {
     fn worker_capacity(&self) -> WorkerCapacitySnapshot {
-        // Best effort: a supervision hiccup must not block the exchange
-        // loop. Failed observation must not imply that workers have drained,
-        // including when no additional local process cap is configured.
         let configured_capacity = self.config().max_concurrent_worker_sessions;
         let unobserved_capacity = if configured_capacity == 0 {
             PROTOCOL_WORKER_SESSION_CAPACITY
@@ -1377,9 +1016,6 @@ impl WorkerCapacitySource for SessionSupervisor {
 }
 
 impl SessionSupervisor {
-    /// The simplified reserved-slot hint: one slot while the device holds
-    /// an occupancy claim whose lease has no running worker yet. The
-    /// durable reservation math stays with the Control Plane (FLOW epic).
     fn reserved_worker_slots(&self) -> Result<u32, SupervisorError> {
         let store = self.lock_store();
         let Some(mirror) = store.occupancy_mirror()? else {
@@ -1390,8 +1026,6 @@ impl SessionSupervisor {
     }
 }
 
-/// The daemon's `cancel_tasks_and_release` hook: stop every supervised
-/// worker bound to the lease.
 impl LeaseWorkerController for SessionSupervisor {
     fn stop_lease_workers(&self, occupancy_lease_id: &str) -> usize {
         self.stop_lease_workers(occupancy_lease_id)
@@ -1401,7 +1035,6 @@ impl LeaseWorkerController for SessionSupervisor {
     }
 }
 
-/// Validates the static supervisor configuration.
 fn validate_config(config: &SupervisorConfig) -> Result<(), SupervisorError> {
     for (value, label) in [
         (&config.client_node_id, "client node id"),
@@ -1424,8 +1057,6 @@ fn validate_config(config: &SupervisorConfig) -> Result<(), SupervisorError> {
     Ok(())
 }
 
-/// The Worker entry's `https://HOST:PORT` origin rule: a config this
-/// supervisor writes must never be refused by its reader.
 fn validate_server_origin(origin: &str) -> Result<(), SupervisorError> {
     let authority = origin
         .strip_prefix("https://")
@@ -1452,15 +1083,6 @@ fn validate_server_origin(origin: &str) -> Result<(), SupervisorError> {
     Ok(())
 }
 
-/// Validates one spawn request's identity facts and local paths.
-///
-/// The worker credential material may be empty: the launch acknowledgement
-/// must not wait for the one-time material (the launch response delivers it
-/// to the local user-session bridge after the grant is consumed), so the
-/// supervisor writes the private credential file as a placeholder and the
-/// daemon fills it via [`SessionSupervisor::write_worker_credential`] when
-/// the material lands. The worker transport re-reads the file on every
-/// exchange.
 fn validate_request(request: SpawnRequest<'_>) -> Result<(), SupervisorError> {
     for (value, label) in [
         (request.worker_session_id, "worker session id"),
@@ -1513,9 +1135,6 @@ fn create_directory(path: &Path, label: &str) -> Result<(), SupervisorError> {
         .map_err(|error| SupervisorError::invalid(format!("{label} {}: {error}", path.display())))
 }
 
-/// Writes one file with exactly mode 0600 (the managed entry's private-file
-/// rule: the config is refused on anything else, the credential on any
-/// group/other bit).
 #[cfg(unix)]
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorError> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1530,8 +1149,6 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorErro
         .map_err(|error| SupervisorError::invalid(format!("{}: {error}", path.display())))?;
     file.write_all(contents)
         .map_err(|error| SupervisorError::invalid(format!("{}: {error}", path.display())))?;
-    // The mode option only applies at creation; pin the exact mode even when
-    // overwriting a pre-existing file.
     let mut permissions = file
         .metadata()
         .map_err(|error| SupervisorError::invalid(format!("{}: {error}", path.display())))?
@@ -1548,11 +1165,6 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorErro
         .map_err(|error| SupervisorError::invalid(format!("{}: {error}", path.display())))
 }
 
-/// Builds the managed-session config: field-for-field the camelCase shape
-/// `winwincode-worker --managed-session` reads (unknown fields are refused
-/// by the reader, so this writes exactly the known fields, carrying the
-/// optional `productSessionId`/`workRunId` scopes when the launch grant
-/// provides them).
 fn managed_session_config_json(
     config: &SupervisorConfig,
     request: SpawnRequest<'_>,
@@ -1597,15 +1209,10 @@ fn managed_session_config_json(
         .map_err(|error| SupervisorError::invalid(format!("config encoding failed: {error}")))
 }
 
-/// RFC 3339 UTC stamp of the current wall clock (server-side style).
 fn now_rfc3339() -> String {
     crate::canonical_rfc3339(OffsetDateTime::now_utc())
 }
 
-/// The platform process-boot observation behind a pid (plan 8.2: 不能只存
-/// PID). This crate denies `unsafe`, so the observations go through the
-/// kernel's text interfaces (`/proc` on Linux, `ps` on macOS) instead of
-/// raw syscalls.
 fn observe_process(pid: u32) -> ProcessObservation {
     #[cfg(target_os = "linux")]
     {
@@ -1622,9 +1229,6 @@ fn observe_process(pid: u32) -> ProcessObservation {
     }
 }
 
-/// Linux: `/proc/<pid>/stat` carries the state (field 3) and the start time
-/// in clock ticks since boot (field 22); the comm field is bracketed, so
-/// parsing starts after its closing parenthesis.
 #[cfg(target_os = "linux")]
 fn linux_process_observation(pid: u32) -> ProcessObservation {
     let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -1635,8 +1239,6 @@ fn linux_process_observation(pid: u32) -> ProcessObservation {
     };
     let mut fields = rest.split_ascii_whitespace();
     let state = fields.next().unwrap_or_default();
-    // After the state (field 3), the start time (field 22) is the 19th
-    // further field.
     let start_time = fields.nth(18).unwrap_or_default();
     if state.is_empty() || start_time.is_empty() {
         return ProcessObservation::Unknown;
@@ -1647,9 +1249,6 @@ fn linux_process_observation(pid: u32) -> ProcessObservation {
     }
 }
 
-/// macOS: `ps -o lstart=,stat=` answers the process start timestamp plus
-/// the state flag column; `ps` fails for an absent pid and reports `Z*`
-/// for zombies. The locale is pinned so the identity string is stable.
 #[cfg(target_os = "macos")]
 fn macos_process_observation(pid: u32) -> ProcessObservation {
     let Some((start_time, state)) = macos_process_snapshot(pid) else {
@@ -1661,7 +1260,6 @@ fn macos_process_observation(pid: u32) -> ProcessObservation {
     }
 }
 
-/// `(lstart, stat)` of one pid, or `None` when `ps` says it is absent.
 #[cfg(target_os = "macos")]
 fn macos_process_snapshot(pid: u32) -> Option<(String, String)> {
     let output = Command::new("/bin/ps")
@@ -1685,13 +1283,10 @@ fn macos_process_snapshot(pid: u32) -> Option<(String, String)> {
     Some((start_time, state))
 }
 
-/// Probes a registry row's pid against its recorded boot identity. A
-/// zombie probes as gone: it holds the pid but stopped working.
 fn probe_process(pid: u32, expected_start_identity: &str) -> ProcessProbe {
     match observe_process(pid) {
         ProcessObservation::Boot { identity, working } => {
             if identity != expected_start_identity {
-                // The pid now names a different boot: PID reuse (plan 8.2).
                 ProcessProbe::Gone
             } else if working {
                 ProcessProbe::Alive
@@ -1704,17 +1299,11 @@ fn probe_process(pid: u32, expected_start_identity: &str) -> ProcessProbe {
     }
 }
 
-/// Terminal registry state for one observed (or unobservable) exit during
-/// a passive reap: status zero is `exited` with its exit code, an abnormal
-/// self-death is `crashed`, a death whose status could not be collected
-/// stays `missing` (unobserved exit).
 fn terminal_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
     match status {
         Some(status) => match status.code() {
             Some(0) => (WORKER_STATE_EXITED, Some(0)),
             Some(code) => (WORKER_STATE_CRASHED, Some(i64::from(code))),
-            // A signal death under passive reap is a crash this lane did
-            // not cause (a supervisor never signals outside `stop`).
             None => (WORKER_STATE_CRASHED, None),
         },
         None => (WORKER_STATE_MISSING, None),
@@ -1727,11 +1316,6 @@ fn join_log_readers(readers: Vec<thread::JoinHandle<()>>) {
     }
 }
 
-/// Terminal registry state for one exit observed while *stopping*: this
-/// supervisor is the deliberate terminator, so a signal death — including
-/// one landing on a worker that had not finished installing its handlers —
-/// records `exited` without a code, and only a nonzero self-exit is a
-/// `crashed`.
 fn stop_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
     match status {
         Some(status) => match status.code() {
@@ -1743,29 +1327,18 @@ fn stop_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
     }
 }
 
-/// Outcome of stopping a process by its registered pid.
 #[derive(PartialEq, Eq)]
 enum StopOutcome {
-    /// The stop landed and the process is gone.
     Stopped,
-    /// The process was already gone before any signal was sent.
     AlreadyGone,
-    /// The platform could not confirm the process state (fail closed).
     Unverifiable,
 }
 
-/// Stops a worker this supervisor process does not own (post-restart row).
-/// The boot identity and the live process group are checked against the root
-/// before a group signal is sent. Rows whose root is not its own group fail
-/// closed rather than risking a broad negative-pid signal.
 fn stop_registered_process(
     record: &WorkerProcessRecord,
     graceful: bool,
     grace: Duration,
 ) -> StopOutcome {
-    // ponytail: /bin/ps identity checks and /bin/kill cannot be atomic; a
-    // pidfd-style platform handle is the upgrade path for closing the tiny
-    // PID-reuse window without adding a larger process-control abstraction.
     if probe_process(record.pid, &record.process_start_identity) != ProcessProbe::Alive {
         return StopOutcome::AlreadyGone;
     }
@@ -1780,8 +1353,6 @@ fn stop_registered_process(
     loop {
         match probe_process(record.pid, &record.process_start_identity) {
             ProcessProbe::Gone => {
-                // The root may have honored TERM while a descendant ignored
-                // it. Clear the process group before reporting the tree gone.
                 if !signal_process(target, "KILL") {
                     return if process_group_is_empty(target) == Some(true) {
                         StopOutcome::Stopped
@@ -1815,9 +1386,6 @@ fn stop_registered_process(
             ProcessProbe::Alive => {}
         }
         if Instant::now() >= deadline + grace {
-            // A process surviving SIGKILL is the platform misbehaving, not
-            // a supervision decision this lane can make; report it as
-            // unverifiable so the caller fails closed.
             return StopOutcome::Unverifiable;
         }
         thread::sleep(STOP_POLL_INTERVAL);
@@ -1829,16 +1397,10 @@ enum ProcessSignalTarget {
     Group(u32),
 }
 
-/// Resolves a worker's process group only after proving it is a fresh group
-/// led by the worker root. Legacy rows whose process is not its own group
-/// fail closed rather than falling back to a potentially broad signal.
 fn validated_process_group_target(pid: u32) -> Option<ProcessSignalTarget> {
     (observe_process_group_id(pid) == Some(pid)).then_some(ProcessSignalTarget::Group(pid))
 }
 
-/// Confirms that a validated worker group has no remaining members. A
-/// successful `kill` only means the signal was delivered; it is not proof
-/// that descendants have exited.
 fn wait_for_group_empty(target: ProcessSignalTarget, deadline: Instant) -> StopOutcome {
     loop {
         match process_group_is_empty(target) {
@@ -1851,9 +1413,6 @@ fn wait_for_group_empty(target: ProcessSignalTarget, deadline: Instant) -> StopO
     }
 }
 
-/// Reads the root's current process group through the platform text tool.
-/// This keeps the crate's `unsafe` prohibition while making a negative-PID
-/// signal conditional on an observed live group match.
 #[cfg(unix)]
 fn observe_process_group_id(pid: u32) -> Option<u32> {
     let output = Command::new("/bin/ps")
@@ -1906,7 +1465,6 @@ fn process_group_is_empty(_target: ProcessSignalTarget) -> Option<bool> {
     None
 }
 
-/// Sends one signal to a validated root or process group.
 #[cfg(unix)]
 fn signal_process(target: ProcessSignalTarget, signal: &str) -> bool {
     let ProcessSignalTarget::Group(group) = target;
@@ -1924,10 +1482,6 @@ fn signal_process(_target: ProcessSignalTarget, _signal: &str) -> bool {
     false
 }
 
-/// Stops a child this supervisor process owns: terminate signal, bounded
-/// wait, then the hard kill (`Child::kill`) — always collecting the exit
-/// status so no zombie remains. `None` when the status could not be
-/// collected.
 fn stop_tracked_child(
     child: &mut Child,
     graceful: bool,
@@ -1958,8 +1512,6 @@ fn stop_tracked_child(
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    // The root may have honored TERM while a descendant
-                    // ignored it; clear the process group before returning.
                     if !signal_process(target, "KILL")
                         && process_group_is_empty(target) != Some(true)
                     {
@@ -2008,34 +1560,22 @@ mod tests {
     const CLIENT_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
     const ORIGIN: &str = "https://127.0.0.1:8443";
     const CREDENTIAL_TOKEN: &str = "wsc-supervisor-test-token";
-    /// Server-minted identities a launch grant would carry.
     const WORKER_ID: &str = "wrk_TESTWORKER00000000000001";
     const WORKER_INSTANCE: &str = "wki_TESTINSTANCE000000000001";
     const WORKER_INSTANCE_2: &str = "wki_TESTINSTANCE000000000002";
 
-    /// A long-lived worker test double: installs the terminate trap first,
-    /// then signals readiness next to the config file (`$2`), then idles.
-    /// The marker lets tests wait for the worker to actually reach its
-    /// handler loop — on a loaded machine a whole `/bin/sh` boot can take
-    /// seconds, and a terminate landing before the trap is installed is the
-    /// platform's default-disposition death.
     const LONG_RUNNING_BODY: &str = "trap 'exit 0' TERM\n\
          echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
          while :; do sleep 0.1; done";
-    /// A worker tree test double: the shell starts a child that outlives the
-    /// shell unless the supervisor signals the worker's process group.
     const TREE_RUNNING_BODY: &str = "(trap '' TERM; while :; do sleep 1; done) &\n\
          echo $! > \"$(dirname \"$2\")/child-pid\"\n\
          trap 'exit 0' TERM\n\
          echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
          while :; do sleep 0.1; done";
-    /// A crashing worker test double: dies immediately with status 3.
     const CRASH_BODY: &str = "exit 3";
     const LOGGING_CRASH_BODY: &str =
         "printf 'worker stdout\n'; printf 'worker stderr\n' >&2; printf '%*s\\n' 1500 x; exit 3";
 
-    /// Waits until the worker test double signals readiness (its handler
-    /// loop is running) — bounded, so a failure cannot hang the suite.
     fn wait_for_ready_marker(data_directory: &Path, worker_session_id: &str) {
         let marker = data_directory.join("worker-ready");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -2081,7 +1621,6 @@ mod tests {
             thread::sleep(STOP_POLL_INTERVAL);
         };
         let foreign_alive = foreign.try_wait().expect("foreign status").is_none();
-        // Both children are direct handles; clean up before any assertion.
         let _ = owned.kill();
         let _ = owned.wait();
         let _ = foreign.kill();
@@ -2103,8 +1642,6 @@ mod tests {
     }
 
     fn write_executable_script(path: &Path, body: &str) {
-        // Real managed Workers wait for the registry commit before executing.
-        // In particular, a crash fixture must not exit before the start gate.
         fs::write(
             path,
             format!(
@@ -2145,8 +1682,6 @@ mod tests {
         }
     }
 
-    /// Opens a supervisor whose store already mirrors `lease`/`token`, so
-    /// spawn/stop fencing authorizations pass.
     fn supervisor_with_mirror(
         name: &str,
         worker_binary: &Path,
@@ -2187,8 +1722,6 @@ mod tests {
         }
     }
 
-    /// Kills every listed session through the supervisor on drop, so a
-    /// failing assertion cannot leak worker processes.
     struct StopOnDrop {
         supervisor: SessionSupervisor,
         sessions: Vec<String>,
@@ -2228,10 +1761,6 @@ mod tests {
         );
     }
 
-    /// The exact camelCase field set `winwincode-worker --managed-session`
-    /// accepts (fail-closed `deny_unknown_fields` reader). If the Worker
-    /// entry's contract moves, this pin fails and the config writer must
-    /// move with it.
     const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 17] = [
         "clientNodeId",
         "clientInstanceId",
@@ -2278,8 +1807,6 @@ mod tests {
     }
 
     #[test]
-    // The end-to-end spawn lifecycle asserts registry, config contract, file
-    // modes, liveness, and the stop observation in one realistic flow.
     #[allow(clippy::too_many_lines)]
     fn spawn_registers_starts_and_stops_a_real_worker_process() {
         let bin_root = temp_root("spawn-bin");
@@ -2304,7 +1831,6 @@ mod tests {
         };
         let _guard = StopOnDrop::watch(&supervisor, "wss_ONE");
 
-        // Handle and registry agree; the platform boot identity is bound.
         assert!(handle.pid > 0);
         assert_eq!(
             handle.worker_id, WORKER_ID,
@@ -2333,8 +1859,6 @@ mod tests {
         assert_eq!(record.launch_grant_id, "wlg_TESTGRANT");
         assert_eq!(record.exit_code, None);
 
-        // The config and credential files exist with exactly mode 0600 and
-        // the config matches the Worker entry's field contract exactly.
         assert_mode_0600(&data.join("managed-session.json"));
         assert_mode_0600(&data.join("worker-credential"));
         let config_text =
@@ -2388,7 +1912,6 @@ mod tests {
             CREDENTIAL_TOKEN
         );
 
-        // The process is really running and reaped as exited on stop.
         assert_eq!(
             supervisor
                 .count_worker_processes_in_state(WORKER_STATE_RUNNING)
@@ -2397,8 +1920,6 @@ mod tests {
         );
         assert!(supervisor.reap().expect("reap").is_empty(), "still alive");
 
-        // Wait for the double's handler loop before judging the graceful
-        // stop's exit status.
         wait_for_ready_marker(&data, "wss_ONE");
 
         let stopped = supervisor.stop("wss_ONE", true).expect("graceful stop");
@@ -2421,8 +1942,6 @@ mod tests {
             .lock_store()
             .advance_occupancy_mirror(&mirror_update("ocl_BBBBBBBBBBBBBBBBBBBBBBBBBB", 8))
             .expect("a later occupancy advances the mirror");
-        // Idempotent local cleanup: a terminal row returns unchanged even
-        // after its lease is no longer current because no signal can be sent.
         let again = supervisor.stop("wss_ONE", true).expect("second stop");
         assert_eq!(again.state, WORKER_STATE_EXITED);
     }
@@ -2618,7 +2137,6 @@ mod tests {
         write_executable_script(&binary, LONG_RUNNING_BODY);
         let root = temp_root("fence");
         let mut store = DeviceStore::open(&root).expect("store opens");
-        // No mirror at all: fail closed.
         let supervisor =
             SessionSupervisor::new(test_config(&binary), store).expect("supervisor builds");
         let source = root.join("repo");
@@ -2652,7 +2170,6 @@ mod tests {
             .stop("wss_FENCED", false)
             .expect_err("nothing to stop");
 
-        // A stale token on the same lease refuses the same way.
         store = DeviceStore::open(&root).expect("store reopens");
         store
             .advance_occupancy_mirror(&mirror_update(LEASE, 7))
@@ -2782,7 +2299,6 @@ mod tests {
         let binary = bin_root.join("winwincode-worker");
         write_executable_script(&binary, LONG_RUNNING_BODY);
         let (supervisor, root) = supervisor_with_mirror("cap", &binary, LEASE, 7);
-        // Tighten the local bound for this test.
         let mut bounded = supervisor.config().clone();
         bounded.max_concurrent_worker_sessions = 1;
         let supervisor =
@@ -2863,7 +2379,6 @@ mod tests {
             2
         );
 
-        // The daemon's cancel_and_release hook: every lease worker stops.
         let stopped = supervisor.stop_lease_workers(LEASE).expect("lease stop");
         assert_eq!(stopped.len(), 2);
         assert!(stopped.iter().all(|outcome| outcome.stopped));
@@ -2879,7 +2394,6 @@ mod tests {
                 .expect("count"),
             0
         );
-        // A second pass is the idempotent no-op over terminal rows.
         let again = supervisor.stop_lease_workers(LEASE).expect("lease stop");
         assert!(again.iter().all(|outcome| !outcome.stopped));
         assert!(
@@ -2888,7 +2402,6 @@ mod tests {
                 .all(|outcome| outcome.error.is_none() && outcome.state.is_some())
         );
 
-        // The LeaseWorkerController face answers the requested-stop count.
         assert_eq!(
             LeaseWorkerController::stop_lease_workers(&supervisor, LEASE),
             0,
@@ -2906,7 +2419,6 @@ mod tests {
         let data = root.join("data");
         let worker_root = root.join("worker-root");
 
-        // Claim without a running worker: the simplified +1 reserved slot.
         let capacity = WorkerCapacitySource::worker_capacity(&supervisor);
         assert_eq!(capacity.running_worker_sessions, 0);
         assert_eq!(capacity.reserved_worker_sessions, 1);
@@ -2977,15 +2489,12 @@ mod tests {
     }
 
     #[test]
-    // The restart scenario spans two supervisor processes, foreign rows,
-    // and a cross-process stop; splitting it would hide the timeline.
     #[allow(clippy::too_many_lines)]
     fn restart_reconcile_classifies_live_dead_and_terminal_rows() {
         let bin_root = temp_root("reconcile-bin");
         let binary = bin_root.join("winwincode-worker");
         write_executable_script(&binary, LONG_RUNNING_BODY);
 
-        // "Previous" Device Client process: spawns workers and crashes.
         let (previous, root) = supervisor_with_mirror("reconcile", &binary, LEASE, 7);
         let source = root.join("repo");
         let data = root.join("data");
@@ -3005,8 +2514,6 @@ mod tests {
         let _guard = StopOnDrop::watch(&previous, "wss_LIVE");
         wait_for_ready_marker(&data, "wss_LIVE");
 
-        // The crashing boot runs through its own binary (the worker binary
-        // is a supervisor-level configuration) over the same registry.
         let crash_binary = bin_root.join("crashing-worker");
         write_executable_script(&crash_binary, CRASH_BODY);
         let mut crash_config = test_config(&crash_binary);
@@ -3032,7 +2539,6 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        // A restart's supervisor sees the same registry without any child.
         let restarted = SessionSupervisor::new(
             test_config(&binary),
             DeviceStore::open(&root).expect("store reopens"),
@@ -3053,8 +2559,6 @@ mod tests {
             .expect("crashed report");
         assert_eq!(crashed_report.verdict, WorkerReconcileVerdict::Terminal);
 
-        // Rows the previous process never wrote: a live foreign boot and a
-        // dead pid. The restart classifies them by pid + boot identity.
         let mut foreign_store = DeviceStore::open(&root).expect("third connection");
         let test_pid = std::process::id();
         foreign_store
@@ -3063,7 +2567,6 @@ mod tests {
                 worker_id: "wrk_FOREIGN".to_owned(),
                 worker_instance_id: "cix_FOREIGNINSTANCE00000000".to_owned(),
                 pid: test_pid,
-                // A wrong identity: this pid names a different boot.
                 process_start_identity: "bogus-identity".to_owned(),
                 repository_binding_id: "rbn_TESTREPO".to_owned(),
                 occupancy_lease_id: LEASE.to_owned(),
@@ -3074,8 +2577,6 @@ mod tests {
                 last_observed_at: STAMP.to_owned(),
             })
             .expect("foreign row writes");
-        // A pid that is certainly absent: an already-reaped exit of this
-        // test process (walk aside if the OS recycled it instantly).
         let mut dead_child = Command::new("/bin/sh")
             .arg("-c")
             .arg("exit 0")
@@ -3127,8 +2628,6 @@ mod tests {
             .expect("dead row");
         assert_eq!(dead_row.state, WORKER_STATE_MISSING);
 
-        // The restarted supervisor can still stop the live worker through
-        // the registered pid; the owning supervisor observes the exit.
         let stopped = restarted.stop("wss_LIVE", true).expect("registry stop");
         assert_eq!(stopped.state, WORKER_STATE_EXITED);
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -3158,23 +2657,17 @@ mod tests {
             .advance_occupancy_mirror(&mirror_update(LEASE, 7))
             .expect("mirror advances");
 
-        // Malformed origin refuses the supervisor construction.
         let mut bad_config = test_config(&binary);
         bad_config.server_origin = "http://127.0.0.1:8443".to_owned();
         let error = SessionSupervisor::new(bad_config, DeviceStore::open(&root).expect("open"))
             .expect_err("http origin must refuse");
         assert!(error.to_string().contains("https"), "{error}");
 
-        // The remaining field-validation refusals happen before any
-        // supervisor construction would matter; the store is consumed here
-        // to keep one store per scenario.
         drop(SessionSupervisor::new(test_config(&binary), store).expect("builds"));
         let source = root.join("repo");
         let data = root.join("data");
         let worker_root = root.join("worker-root");
 
-        // Field validation is directly testable; the spawn path judges the
-        // fencing stamp first (a zero token can never match a mirror).
         let mut request = spawn_request(
             "wss_VALIDATE",
             WORKER_INSTANCE,
@@ -3193,15 +2686,12 @@ mod tests {
             &data,
             &worker_root,
         );
-        // An empty credential material is the deferred-delivery placeholder:
-        // accepted at spawn, filled later via write_worker_credential.
         request.worker_credential_token = "";
         assert!(
             validate_request(request).is_ok(),
             "deferred material is valid"
         );
 
-        // A configured worker binary that is missing refuses the spawn.
         let mut config = test_config(&binary);
         config.worker_binary_path = Some(root.join("absent-worker"));
         let mut reopened = DeviceStore::open(&root).expect("reopen");

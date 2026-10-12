@@ -61,7 +61,6 @@ function assertProviderAttempts(call) {
   }
 }
 
-/** Check the observed identity and effort of every actual product model exchange. */
 export function assertBenchmarkExecutionReceipts(receipts) {
   assert.ok(receipts && Array.isArray(receipts.calls) && receipts.calls.length > 0)
   const exchanges = new Set()

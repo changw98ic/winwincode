@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A complete bounded HTTP exchange, including the response body, is one attempt.
 use crate::{
     Acceptance, ErrorKind, NetworkFailure, Phase, Replay, RequestRetry, RetryFailure,
     transport::{ExchangeCancellation, ExchangeConnector, ExchangeIo},
@@ -36,13 +35,6 @@ impl RetryFailure for HttpAttemptError {
     }
 }
 
-/// Executes one prepared logical request. The callback must retain the same
-/// method, headers, body and request identity on every invocation.
-/// Non-success HTTP responses remain available to the protocol decoder after
-/// the network policy stops. Unknown non-idempotent writes require reconciliation.
-///
-/// # Errors
-/// Returns only bounded network facts. The authority callback must remain live.
 pub fn execute_http(
     agent: &ureq::Agent,
     send_once: impl FnMut(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
@@ -62,9 +54,6 @@ pub fn execute_http(
     )
 }
 
-/// One complete attempt for durable queue owners. It never starts a retry loop.
-/// # Errors
-/// Returns bounded transport facts or the unchanged final HTTP response.
 pub fn execute_http_once(
     agent: &ureq::Agent,
     send_once: impl FnMut(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,

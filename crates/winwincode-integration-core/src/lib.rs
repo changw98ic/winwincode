@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Storage- and product-neutral integration authority, receipts, and ports.
-
 mod error;
 mod framework;
 #[doc(hidden)]

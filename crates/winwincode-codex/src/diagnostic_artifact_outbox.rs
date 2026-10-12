@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable command/test output Artifact uploads.
-//!
-//! This is deliberately a small companion to the candidate upload ledger. It
-//! retains the exact bounded, redacted bytes and the generated
-//! `artifact.open`/`artifact.chunk` frames before transport. Runtime evidence
-//! may only publish the reference returned after the final Artifact ACK.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -27,7 +20,6 @@ use crate::{
     store::{AdapterStore, AdapterStoreError},
 };
 
-/// A bounded, already-redacted command/test output stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticArtifactUpload {
     pub snapshot_id: Option<winwincode_domain::SnapshotId>,
@@ -56,8 +48,6 @@ pub struct DiagnosticArtifactAuthority {
 }
 
 impl DiagnosticArtifactAuthority {
-    /// Compares retained evidence with the independently installed current run.
-    /// The original upload and ACK identity remain exact; only expiry may advance.
     pub(crate) fn matches_current(&self, current: &Self) -> bool {
         self.snapshot_id == current.snapshot_id
             && self.job == current.job
@@ -101,18 +91,9 @@ pub enum DiagnosticArtifactAckOutcome {
 const DIAGNOSTIC_CHUNK_BYTES: usize = 64 * 1024;
 const PENDING: &str = "pending";
 
-/// Maximum bytes retained for one command/test output Artifact.
 pub const MAX_DIAGNOSTIC_OUTPUT_BYTES: usize = 256 * 1024;
-/// Keep individual model/body lines bounded even when the whole output is small.
 pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 1_024;
 
-/// Bounds and redacts Core command output before it becomes durable.
-///
-/// This keeps the output useful for diagnosis while applying the same safety
-/// boundary as the Device log recorder: control bytes are removed, common
-/// credential-bearing lines are replaced, and local absolute paths are
-/// masked. The raw Core `formatted_output` is intentionally excluded because
-/// it is model-facing content rather than process output.
 pub fn sanitize_command_output(stdout: &str, stderr: &str) -> Vec<u8> {
     let mut result = Vec::new();
     append_sanitized(&mut result, "[stdout]\n", stdout);
@@ -120,10 +101,6 @@ pub fn sanitize_command_output(stdout: &str, stderr: &str) -> Vec<u8> {
     result
 }
 
-/// Stable opaque source identity for a Core command invocation.
-///
-/// Call IDs are transport correlation data and must not become externally
-/// visible artifact names or source identifiers.
 pub fn canonical_command_source_id(turn_id: &str, call_id: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"winwincode.diagnostic-command-source.v1");
@@ -147,8 +124,6 @@ fn append_sanitized(output: &mut Vec<u8>, label: &str, source: &str) {
             .chars()
             .filter(|ch| !ch.is_control() || *ch == '\t')
             .collect();
-        // Device worker_logs drops an overlong line as a whole. Doing the
-        // same here avoids a byte truncation that could split UTF-8.
         if cleaned.len() > MAX_DIAGNOSTIC_LINE_BYTES {
             continue;
         }
@@ -667,8 +642,6 @@ fn validate_legacy_diagnostic_columns(tx: &Transaction<'_>) -> Result<(), Adapte
     Ok(())
 }
 
-/// Builds a stable Job route once. Later opens verify only its schema contract.
-/// All retained bytes and the migration marker commit in one immediate transaction.
 fn prepare_diagnostic_job_route(store: &AdapterStore) -> Result<(), AdapterStoreError> {
     let mut connection = store.lock()?;
     let tx = connection
@@ -881,7 +854,6 @@ impl StoredDiagnosticArtifact {
         Ok(record)
     }
 
-    /// ACK progress is mutable; the complete original upload remains immutable.
     fn same_upload(&self, other: &Self) -> bool {
         self.authority_key == other.authority_key
             && self.run_key == other.run_key

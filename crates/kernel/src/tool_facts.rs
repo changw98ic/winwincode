@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::{Kernel, KernelFailure, KernelResult};
 
-/// One original Core metadata event. Its cursor survives Kernel subscriptions
-/// and Worker restarts; the JSON contains no tool input or result bodies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KernelToolRuntimeEvent {
     pub source_sequence: i64,
@@ -10,12 +8,6 @@ pub struct KernelToolRuntimeEvent {
 }
 
 impl Kernel {
-    /// Reads one bounded page from the Core-owned execution fact stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a Core storage/encoding failure. Closed threads remain readable
-    /// from this Kernel's private Core database so final receipts can drain.
     pub async fn tool_runtime_events(
         &self,
         session_id: &str,

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A complete Device response is validated once before its immutable replay index is sealed.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -145,7 +143,6 @@ pub(crate) fn validate_model_response(
     })
 }
 
-/// The caller owns the transaction which also writes the original private response.
 pub(crate) fn insert_model_response_index(
     connection: &Connection,
     exchange_id: &str,
@@ -184,8 +181,6 @@ pub(crate) fn create_model_response_index(
             SELECT RAISE(ABORT,'prepared model payload is immutable');
          END;",
     )?;
-    // A raw source mutation invalidates the seal. Only the validated writer can
-    // publish a replacement index, in the same transaction as the source bytes.
     connection.execute_batch(
         "CREATE TRIGGER model_response_update AFTER UPDATE OF exchange_id,digest,request_open,chunks ON exchanges
          WHEN NEW.chunks IS NOT OLD.chunks OR NEW.request_open IS NOT OLD.request_open OR NEW.digest IS NOT OLD.digest OR NEW.exchange_id IS NOT OLD.exchange_id BEGIN

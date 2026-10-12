@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A paired wall/monotonic anchor. A retained anchor is never the current time.
-
 use winwincode_domain::Instant;
 
 pub(super) struct DriverClock {
@@ -22,7 +20,6 @@ impl DriverClock {
         else {
             return;
         };
-        // A delayed sample or clock rollback must not discard elapsed time.
         if current >= estimated {
             self.wall_anchor = wall;
             self.monotonic_anchor = observed_at;
@@ -63,8 +60,6 @@ impl DriverClock {
         if now < parse(issued)? || now >= expires {
             return None;
         }
-        // Keep the original paired origin; rounding a projected wall timestamp
-        // and attaching a fresh origin could extend the expiry again.
         self.monotonic_anchor
             .checked_add(std::time::Duration::try_from(expires - parse(&self.wall_anchor)?).ok()?)
     }

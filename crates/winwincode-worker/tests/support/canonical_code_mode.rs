@@ -2,8 +2,6 @@
 
 use serde_json::Value;
 
-// Convert synthetic canonical model frames through the current public exec tool.
-// This only scripts a model response; Core still discovers and executes the real tool.
 pub(super) fn canonical_frames(frames: &[Value]) -> Vec<Value> {
     frames.iter().map(|frame| {
         let mut frame = frame.clone();

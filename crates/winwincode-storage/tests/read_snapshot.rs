@@ -83,7 +83,6 @@ fn snapshot_pins_state_and_runtime_cursor_before_first_caller_read_and_rejects_w
     let mut writer = SqliteStorage::open(&root).unwrap();
     writer.commit(&commit(1)).unwrap();
     let mut snapshot = SqliteStorage::open_read_snapshot(writer.database_path()).unwrap();
-    // A writer remains free to commit while the read transaction is retained.
     writer.commit(&commit(2)).unwrap();
     assert_eq!(
         snapshot
@@ -154,8 +153,6 @@ fn snapshot_rejects_git_retention_before_recovery_and_preserves_refs_and_owner()
     let refs = git(&["show-ref"]);
     let mut writer = SqliteStorage::open(root.join("data")).unwrap();
     writer.commit(&commit(1)).unwrap();
-    // The original owner can open this exact root, so rejection below cannot
-    // be explained by an invalid repository fixture or absent authority.
     drop(writer.git_candidate_retention(&repository).unwrap());
     let mut snapshot = SqliteStorage::open_read_snapshot(writer.database_path()).unwrap();
     assert!(snapshot.git_candidate_retention(&repository).is_err());
@@ -380,9 +377,7 @@ fn normal_close_returns_while_snapshot_and_writer_remain_held() {
         assert!(closed_tx.send(Box::new(storage).close()).is_ok());
     });
 
-    // Capture the deadline result while both conflicting fixtures remain held.
     let closed = closed_rx.recv_timeout(std::time::Duration::from_secs(1));
-    // Release and join before asserting, including on the expected old-code timeout.
     lock.execute_batch("ROLLBACK").unwrap();
     drop(lock);
     Box::new(snapshot).close().unwrap();

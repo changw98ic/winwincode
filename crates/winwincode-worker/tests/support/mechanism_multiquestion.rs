@@ -1051,7 +1051,6 @@ fn multiquestion_case(mode: &str, count: usize, exact: &str, other: bool) {
                 .expect("actual Core handler emitted the legal question event"),
         )
         .unwrap();
-        // Keep the complete typed event and terminal in the receipt before semantic assertions.
         let outcomes = port
             .messages()
             .into_iter()

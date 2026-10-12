@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-owned semantic review input. Only new Core tool evidence enables review.
-
 use serde_json::{Value, json};
 use winwincode_fusion::{
     FusionPanelResult, claims::extract_claims_from_answer, judge::build_blind_judge_request,
@@ -18,8 +16,6 @@ pub(crate) fn requests(
     let Some(input) = payload.pointer("/request/input").and_then(Value::as_array) else {
         return Ok(vec![]);
     };
-    // R1 opinions alone never authorize a Judge call. Ordinary continuation without
-    // an additional tool result does not rescore the same evidence.
     if !input.last().is_some_and(is_tool_output) {
         return Ok(vec![]);
     }
@@ -52,8 +48,6 @@ pub(crate) fn requests(
             }
         }
     }
-    // Single-model runs retain their latest stated hypothesis verbatim. It is
-    // model prose, never a verified fact; evidence is supplied separately below.
     if claims.is_empty()
         && let Some(item) = input.iter().rev().find(|item| {
             item.get("role").and_then(Value::as_str) == Some("assistant")

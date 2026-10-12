@@ -13,7 +13,6 @@ const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.
 const patches = sourceLock.patches.filter(({ file, planned }) => (
   file.startsWith('upstream/patches/codex/') && !planned
 ))
-// Baseline files from the pinned Codex tree, before the Code Mode definition patch.
 const originalHashes = {
   "codex-rs/code-mode-protocol/src/description.rs": "a85090f7b639db03dc336937490b3230e37203da5d780d5c20b0bf378276ee24",
   "codex-rs/code-mode-runtime/src/cell_actor/conversions.rs": "6030fa4322e4c198c296f8f1b9190f02185411d7dfdb056cde2cd9da9b4c2237",

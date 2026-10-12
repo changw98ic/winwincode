@@ -7,8 +7,6 @@
   min-width: 0;
 }
 
-/* Design page 04: the big title shares one row with the Scope select and the
-   new-task entry on the right. */
 .wwc-home-topbar {
   display: flex;
   flex-wrap: wrap;
@@ -66,7 +64,6 @@
   border-color: var(--wwc-color-text);
 }
 
-/* 设计评审 P0-1:仅看待处理筛选开关,与项目范围/新建任务同排。 */
 .wwc-home-attention-only {
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   background: var(--wwc-color-surface);
@@ -93,8 +90,6 @@
   color: var(--wwc-color-on-accent);
 }
 
-/* Design page 04: the polite status line stays for announcements but renders
-   nowhere — the board canvas carries no status banner. */
 .wwc-home-status {
   position: absolute;
   width: 1px;
@@ -125,7 +120,6 @@
   font-size: var(--wwc-font-size-sm);
 }
 
-/* Two live columns: Running left, Needs-you right. */
 .wwc-home-sections {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -170,7 +164,6 @@
   align-items: baseline;
 }
 
-/* Collapsed history rows: bold heading + gray count on one hairline row. */
 .wwc-home-sections [data-section='backlog'],
 .wwc-home-sections [data-section='ready'],
 .wwc-home-sections [data-section='waiting'],
@@ -214,7 +207,6 @@
   font-weight: var(--wwc-font-weight-strong);
 }
 
-/* Collapsed history rows read 「已完成 · 18」 with the muted middle dot. */
 .wwc-home-sections [data-section='backlog'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='ready'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='waiting'] .wwc-home-section-count::before,
@@ -266,7 +258,6 @@
   list-style: none;
 }
 
-/* Design page 04: name + status line on the left, one action on the right. */
 .wwc-home-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -307,7 +298,6 @@
   color: var(--wwc-color-danger-text);
 }
 
-/* Card metadata shares one quiet line under the status text. */
 .wwc-home-card-context {
   display: flex;
   flex-wrap: wrap;
@@ -334,12 +324,10 @@
   color: var(--wwc-color-text-muted);
 }
 
-/* 设计稿 04:卡面只有标题+状态行+动作钮,会话入口不占卡面。 */
 .wwc-home-card-chat {
   display: none;
 }
 
-/* Reading a task is a secondary action; decisions are confirmed in its detail. */
 .wwc-home-card-action {
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   color: var(--wwc-color-text);
@@ -394,9 +382,6 @@
   font-weight: var(--wwc-font-weight-medium);
 }
 }
-
-/* UI-100.2: the §16.6 new-task form and the §16.7 run page mount in the Home
-   surface slot, so their styles live beside the task-board styles. */
 
 .wwc-task-entry,
 .wwc-task-run {
@@ -474,7 +459,6 @@
   font-size: var(--wwc-font-size-sm);
 }
 
-/* Design page 05: back link left, 流程与记录 | ⋯ 更多 display slot right. */
 .wwc-task-run-topbar {
   display: flex;
   flex-wrap: wrap;
@@ -529,7 +513,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Design page 05: the identity table collapses behind one hairline row. */
 .wwc-task-run-identity {
   gap: var(--wwc-space-0);
 }
@@ -645,8 +628,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Design page 05: one accent primary action beside the quiet secondary one.
-   Both stay disabled here: approval and change requests run in StrongFlow. */
 .wwc-task-run-actions {
   display: flex;
   flex-wrap: wrap;
@@ -654,7 +635,6 @@
   gap: var(--wwc-space-4);
 }
 
-/* Primary delivery action. */
 .wwc-task-run-actions .wwc-task-run-approve {
   border: var(--wwc-border-width-control) solid var(--wwc-color-text);
   background: var(--wwc-color-accent);

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production Publication policy authority and provider registry.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -38,8 +36,6 @@ use crate::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Trusted input assembled after the current Delivery, candidate, verdict,
-/// approval, and review-package Artifact have been resolved.
 pub struct PublicationAuthorityRequest<'request> {
     command: &'request PublicationPublishCommand,
     authorization: &'request PublicationAuthorization,
@@ -75,7 +71,6 @@ impl<'request> PublicationAuthorityRequest<'request> {
     }
 }
 
-/// Opaque policy facts consumed by the Publication coordinator.
 pub struct PublicationAuthorityFacts {
     authorization: PublicationAuthorization,
     policy: RepositoryPublicationPolicy,
@@ -105,14 +100,12 @@ impl PublicationAuthorityFacts {
     }
 }
 
-/// Stable failure before a Publication intent can be written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationAuthorityErrorKind {
     InvalidConfiguration,
     TrustedFactsUnavailable,
 }
 
-/// Secret-safe authority failure.
 #[derive(Debug)]
 pub struct PublicationAuthorityError {
     kind: PublicationAuthorityErrorKind,
@@ -148,21 +141,13 @@ impl fmt::Display for PublicationAuthorityError {
 
 impl std::error::Error for PublicationAuthorityError {}
 
-/// Only application-owned prepared facts can cross this policy seam.
 pub trait PublicationAuthorityPort: Send {
-    /// Resolves one exact generated command into sealed policy facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, target, Delivery, candidate, approval time, or
-    /// malformed startup policy.
     fn resolve(
         &mut self,
         request: PublicationAuthorityRequest<'_>,
     ) -> Result<PublicationAuthorityFacts, PublicationAuthorityError>;
 }
 
-/// Startup-only policy configuration for one local repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalPublicationAuthorityConfig {
     policy_scope: RepositoryPolicyScope,
@@ -174,13 +159,6 @@ pub struct LocalPublicationAuthorityConfig {
 }
 
 impl LocalPublicationAuthorityConfig {
-    /// Builds one closed allow policy from process configuration rather than
-    /// request fields.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty principal set, malformed repository, invalid lifetime,
-    /// or non-portable audit origin.
     pub fn try_new(
         policy_scope: RepositoryPolicyScope,
         repository: impl Into<String>,
@@ -217,18 +195,12 @@ impl LocalPublicationAuthorityConfig {
     }
 }
 
-/// Local policy authority over already-sealed Delivery and Artifact facts.
 pub struct LocalPublicationAuthority {
     policy: RepositoryPublicationPolicy,
     origin: PublicationPolicyOrigin,
 }
 
 impl LocalPublicationAuthority {
-    /// Freezes the startup configuration into one immutable policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable configuration failure if any policy field is invalid.
     pub fn open(
         config: LocalPublicationAuthorityConfig,
     ) -> Result<Self, PublicationAuthorityError> {
@@ -294,7 +266,6 @@ impl PublicationAuthorityPort for LocalPublicationAuthority {
     }
 }
 
-/// Stable provider-registry failure before a Publication intent is written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationProviderRegistryErrorKind {
     NotConfigured,
@@ -302,7 +273,6 @@ pub enum PublicationProviderRegistryErrorKind {
     Unavailable,
 }
 
-/// Secret-safe provider-registry failure.
 #[derive(Debug)]
 pub struct PublicationProviderRegistryError {
     kind: PublicationProviderRegistryErrorKind,
@@ -349,23 +319,13 @@ impl fmt::Display for PublicationProviderRegistryError {
 
 impl std::error::Error for PublicationProviderRegistryError {}
 
-/// Chooses one preconfigured provider and validates its current Credential
-/// reference before any Publication state is created.
 pub trait PublicationProviderRegistry: Send {
-    /// Resolves one exact target into a short-lived provider session.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported/foreign targets, missing or revoked Credential
-    /// references, and unavailable secret storage.
     fn resolve(
         &mut self,
         target: &ApiPublicationTarget,
     ) -> Result<PublicationProviderSession, PublicationProviderRegistryError>;
 }
 
-/// A short-lived provider port bound to the single Credential secret snapshot
-/// resolved by the registry.
 pub struct PublicationProviderSession {
     port: Box<dyn PublicationPort>,
 }
@@ -375,8 +335,6 @@ impl PublicationProviderSession {
         Self { port }
     }
 
-    /// Returns the provider port that owns this session's frozen Credential
-    /// snapshot.
     #[must_use]
     pub fn port(&mut self) -> &mut dyn PublicationPort {
         self.port.as_mut()
@@ -407,7 +365,6 @@ impl Drop for SessionGitHubCredentialResolver {
     }
 }
 
-/// Production registry configuration for one GitHub repository.
 #[derive(Clone, Debug)]
 pub struct LocalGitHubProviderConfig {
     credential_reference_id: CredentialReferenceId,
@@ -417,7 +374,6 @@ pub struct LocalGitHubProviderConfig {
 }
 
 impl LocalGitHubProviderConfig {
-    /// Creates one registry entry from startup configuration.
     #[must_use]
     pub fn new(
         credential_reference_id: CredentialReferenceId,
@@ -434,7 +390,6 @@ impl LocalGitHubProviderConfig {
     }
 }
 
-/// Single-entry production GitHub provider registry.
 pub struct LocalPublicationProviderRegistry {
     credential_reference_id: CredentialReferenceId,
     repository: String,
@@ -468,8 +423,6 @@ impl PublicationCredentialSource for LocalPublicationCredentialSource {
     }
 }
 
-/// Complete startup configuration for local Publication policy and provider
-/// ownership.
 #[derive(Clone, Debug)]
 pub struct LocalPublicationAdapterConfig {
     authority: LocalPublicationAuthorityConfig,
@@ -478,15 +431,6 @@ pub struct LocalPublicationAdapterConfig {
 }
 
 impl LocalPublicationAdapterConfig {
-    /// Builds the one production Publication adapter set from process-owned
-    /// configuration.
-    ///
-    /// Requester strings must use canonical `usr_`, `svc_`, or `sys_` IDs.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed tenant, policy, target, identity, or secret-store
-    /// configuration before any adapter is installed.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         scope: RepositoryScope,
@@ -539,7 +483,6 @@ impl LocalPublicationAdapterConfig {
     }
 }
 
-/// Startup failure for the production Publication adapters.
 #[derive(Debug)]
 pub struct LocalPublicationAdapterError {
     message: String,
@@ -562,12 +505,6 @@ impl fmt::Display for LocalPublicationAdapterError {
 impl std::error::Error for LocalPublicationAdapterError {}
 
 impl LocalPublicationProviderRegistry {
-    /// Opens current Credential-reference metadata and the protected local
-    /// secret store used by the GitHub adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid GitHub configuration or unavailable local stores.
     pub fn open(
         config: LocalGitHubProviderConfig,
         data_directory: impl AsRef<Path>,
@@ -617,12 +554,6 @@ impl PublicationProviderRegistry for LocalPublicationProviderRegistry {
 }
 
 impl ControlPlane {
-    /// Installs one immutable Publication authority and provider registry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-local storage, invalid configuration, unavailable durable
-    /// stores, or replacement of either live adapter.
     pub fn install_local_publication_adapters(
         &mut self,
         config: LocalPublicationAdapterConfig,
@@ -654,12 +585,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Starts all local production adapters before returning a runnable host.
-    ///
-    /// # Errors
-    ///
-    /// Shuts the partially opened host down and returns one startup error when
-    /// Delivery or Publication composition fails.
     pub fn start_local_with_production_adapters(
         config: crate::ControlPlaneConfig,
         publisher: Box<dyn EventPublisher>,
@@ -682,17 +607,6 @@ impl ControlPlane {
         Ok(control_plane)
     }
 
-    /// Publishes from one generated command after resolving all current
-    /// Delivery, policy, approval, evidence, and provider facts internally.
-    ///
-    /// Exact receipt replay returns before consulting any authority, Artifact,
-    /// Credential, or provider adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed request identity, stale/foreign current facts, denied
-    /// policy, missing/revoked Credential references, unavailable providers,
-    /// and durable storage failures.
     pub fn publication_publish(
         &mut self,
         command: &PublicationPublishCommand,

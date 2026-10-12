@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The bounded, canonical contract for ephemeral `DebugProbe` experiments.
-//!
-//! The wire types in [`generated`] describe the durable experiment record.  This
-//! module owns the parts that cannot be expressed by JSON Schema: the small DSL,
-//! its digest, and the lifecycle transition table.  In particular, an
-//! experiment is never a candidate and its workspace must be cleaned before it
-//! can be reused.
-
 use std::{fmt, path::Path};
 
 use sha2::{Digest as _, Sha256};
@@ -23,19 +15,14 @@ const MAX_EXPRESSION_BYTES: usize = 2_048;
 const MAX_ARG_BYTES: usize = 4_096;
 const MAX_REPETITIONS: u32 = 100;
 
-/// One deliberately small instrumentation operation.  Operations are data,
-/// not shell snippets; the Worker turns them into an admitted Action Gateway
-/// request after the workspace barrier has been acquired.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstrumentationOperation {
-    /// Add a bounded source-level log probe at a known symbol.
     InsertLogProbe {
         path: String,
         symbol: String,
         expression: String,
     },
-    /// Run one declared test command a bounded number of times.
     RepeatTest {
         path: String,
         command: Vec<String>,
@@ -43,14 +30,12 @@ pub enum InstrumentationOperation {
     },
 }
 
-/// User-supplied experiment program before semantic validation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstrumentationDsl {
     pub operations: Vec<InstrumentationOperation>,
 }
 
-/// A DSL that passed all host bounds and has a content-derived identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedInstrumentationDsl {
     dsl: InstrumentationDsl,
@@ -58,26 +43,22 @@ pub struct ValidatedInstrumentationDsl {
 }
 
 impl ValidatedInstrumentationDsl {
-    /// Returns the exact validated operations.
     #[must_use]
     pub const fn dsl(&self) -> &InstrumentationDsl {
         &self.dsl
     }
 
-    /// Returns the digest bound into the durable experiment record.
     #[must_use]
     pub const fn digest(&self) -> &Sha256Digest {
         &self.digest
     }
 
-    /// Returns the validated operation sequence.
     #[must_use]
     pub fn operations(&self) -> &[InstrumentationOperation] {
         &self.dsl.operations
     }
 }
 
-/// Stable semantic failure; input values are intentionally not echoed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DebugExperimentErrorCode {
     InvalidDsl,
@@ -87,7 +68,6 @@ pub enum DebugExperimentErrorCode {
     CleanupRequired,
 }
 
-/// Error returned by contract validation and lifecycle helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DebugExperimentError {
     code: DebugExperimentErrorCode,
@@ -99,7 +79,6 @@ impl DebugExperimentError {
         Self { code, message }
     }
 
-    /// Machine-readable failure category.
     #[must_use]
     pub const fn code(self) -> DebugExperimentErrorCode {
         self.code
@@ -114,12 +93,6 @@ impl fmt::Display for DebugExperimentError {
 
 impl std::error::Error for DebugExperimentError {}
 
-/// Validates and seals an experiment DSL.
-///
-/// # Errors
-///
-/// Returns [`DebugExperimentErrorCode::InvalidDsl`] when an operation, path,
-/// expression, command, or repetition exceeds the bounded contract.
 pub fn validate_instrumentation_dsl(
     dsl: InstrumentationDsl,
 ) -> Result<ValidatedInstrumentationDsl, DebugExperimentError> {
@@ -175,14 +148,6 @@ pub fn validate_instrumentation_dsl(
     })
 }
 
-/// Validates the TTL relation without interpreting wall-clock strings.  The
-/// canonical Instant format is UTC RFC3339, whose fixed-width representation
-/// sorts chronologically when both values are normalized by the producer.
-///
-/// # Errors
-///
-/// Returns [`DebugExperimentErrorCode::InvalidTtl`] when expiry is not later
-/// than creation.
 pub fn validate_ttl(created_at: &str, expires_at: &str) -> Result<(), DebugExperimentError> {
     if created_at.is_empty() || expires_at.is_empty() || expires_at <= created_at {
         return Err(DebugExperimentError::new(
@@ -193,12 +158,6 @@ pub fn validate_ttl(created_at: &str, expires_at: &str) -> Result<(), DebugExper
     Ok(())
 }
 
-/// Returns the only legal next state for one lifecycle event.
-///
-/// # Errors
-///
-/// Returns [`DebugExperimentErrorCode::InvalidTransition`] for any transition
-/// outside the canonical lifecycle table.
 pub fn transition_experiment(
     current: &DebugExperimentStatus,
     next: DebugExperimentStatus,
@@ -228,7 +187,6 @@ pub fn transition_experiment(
     }
 }
 
-/// Checks that a terminal cleanup receipt is sufficient to reuse the slot.
 pub fn cleanup_allows_reuse(status: &DebugExperimentStatus, residual_resources: u32) -> bool {
     matches!(status, DebugExperimentStatus::CleanedUp) && residual_resources == 0
 }

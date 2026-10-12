@@ -1,26 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Server-owned browser authorization for access to registered Clients.
-//!
-//! `POST /api/v1/clients/connections` validates the signed-in user, rate
-//! limits, stored access policy and connect-code digest. It atomically consumes
-//! the code and creates the grant without contacting Device or requiring it
-//! to be online. Retried requests return the existing grant.
-//!
-//! `GET /api/v1/clients` projects the signed-in user's directory of granted
-//! Clients as `DeviceSummary` cards; occupancy is uniformly `available` until
-//! the occupancy epic lands, and presence and lock facts map from the
-//! `ClientNode` registry.
-//!
-//! `POST /api/v1/clients/grants/revoke` revokes the Owner's grant immediately;
-//! revocation takes effect without waiting for the Device Client.
-//!
-//! Authorization decisions (grant creation and revocation) are recorded in
-//! the durable `client_connect_audit` table. The connect flow carries no
-//! organization/workspace scope, so the scoped `winwincode-audit`
-//! event schema does not apply; the dedicated storage-level audit trail is
-//! the canonical record for this domain.
-
 use std::fmt;
 use std::path::PathBuf;
 
@@ -51,16 +30,11 @@ use winwincode_storage::RepositoryGrantPermissions;
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::connect_attempt_window_anchor;
 
-/// Schema version of the public browser-facing connect surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// Server-side throttling policy of the connect flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConnectionsConfig {
-    /// Length of the fixed connect-attempt window in seconds (plan 11.3).
     pub rate_window_seconds: u64,
-    /// Failed connect attempts per window and dimension that block further
-    /// attempts (plan 11.3).
     pub rate_max_attempts: u64,
 }
 
@@ -73,33 +47,20 @@ impl Default for ClientConnectionsConfig {
     }
 }
 
-/// Stable failure categories of the connect flow boundary. Each domain
-/// category maps to exactly one wire error code of the §16.3 taxonomy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientConnectionsErrorKind {
-    /// The request body violated the connect contract.
     InvalidRequest,
-    /// The public Client ID does not name a connectable Client.
     ClientNotFound,
-    /// The requested operation needs a reachable Client.
     ClientOffline,
-    /// The presented code digest matches no code.
     ConnectCodeInvalid,
-    /// The code is expired, exhausted, revoked, or already consumed.
     ConnectCodeExpired,
-    /// The Client no longer accepts new connections.
     ClientConnectionsForbidden,
-    /// The Client is locked by a local operator.
     ClientLocked,
-    /// One of the three attempt dimensions is throttled.
     RateLimited,
-    /// No active grant matches the revoke request.
     ResourceNotFound,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Secret-free connect flow failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientConnectionsError {
     kind: ClientConnectionsErrorKind,
@@ -142,8 +103,6 @@ impl fmt::Display for ClientConnectionsError {
 
 impl std::error::Error for ClientConnectionsError {}
 
-/// The signed-in user's authorization surface over the Server's product-state
-/// database. Device transport is independent of browser authorization.
 #[derive(Debug, Clone)]
 pub struct ClientConnectionsApplication {
     data_directory: PathBuf,
@@ -151,11 +110,6 @@ pub struct ClientConnectionsApplication {
 }
 
 impl ClientConnectionsApplication {
-    /// Composes the connect application over one product-state directory.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the configuration violates its bounds.
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientConnectionsConfig,
@@ -172,10 +126,6 @@ impl ClientConnectionsApplication {
         })
     }
 
-    /// Authorizes a browser request from Server-owned state, without a Device round trip.
-    ///
-    /// # Errors
-    /// Rejects invalid, expired or already-consumed codes and unavailable storage.
     pub fn connect(
         &self,
         user_id: &str,
@@ -185,21 +135,11 @@ impl ClientConnectionsApplication {
         self.prepare(user_id, client_ip, request)
     }
 
-    /// Projects the signed-in user's granted Clients as a device list body.
-    ///
-    /// # Errors
-    ///
-    /// Fails when durable state or storage is unavailable.
     pub fn list_clients(&self, user_id: &str) -> Result<Value, ClientConnectionsError> {
         let mut storage = self.open_storage()?;
         directory_json(&mut storage, user_id)
     }
 
-    /// Revokes the signed-in Owner's active grant immediately (contract 3).
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid body, an unknown grant, or storage failure.
     pub fn revoke(
         &self,
         owner_user_id: &str,
@@ -262,7 +202,6 @@ impl ClientConnectionsApplication {
         }))
     }
 
-    /// Validates the request and consumes the Server-owned code atomically.
     #[allow(clippy::too_many_lines)]
     fn prepare(
         &self,
@@ -289,8 +228,6 @@ impl ClientConnectionsApplication {
                 .map_err(|_| ClientConnectionsError::unavailable())?
         };
         let node = match node {
-            // Pending-enrollment and revoked identities are not Clients yet
-            // (or any more); the boundary cannot connect them.
             None
             | Some(ClientNodeRecord {
                 presence_state:
@@ -299,7 +236,6 @@ impl ClientConnectionsApplication {
             }) => {
                 return Err(client_not_found());
             }
-            // A locally locked device is not connectable either.
             Some(node) if node.presence_state == ClientPresenceState::Locked => {
                 return Err(client_locked());
             }
@@ -315,8 +251,6 @@ impl ClientConnectionsApplication {
             return Err(client_locked());
         }
 
-        // Three-dimensional throttling (plan 11.3): user, source address, and
-        // target Client, each against the same fixed window anchor.
         let anchor = connect_attempt_window_anchor(&now, self.config.rate_window_seconds)
             .map_err(|_| ClientConnectionsError::unavailable())?;
         {
@@ -343,8 +277,6 @@ impl ClientConnectionsApplication {
             }
         }
 
-        // Idempotent retry of an already-successful connect: the retry sees
-        // the existing active grant and returns the same 201 device list.
         {
             let mut grants = AccessGrantService::new(&mut storage);
             if grants
@@ -357,8 +289,6 @@ impl ClientConnectionsApplication {
             }
         }
 
-        // Code verification against the stored digest only (plan 11.3): a
-        // wrong code is indistinguishable from an unknown one.
         let mut connect = ConnectCodeService::new(&mut storage);
         let code = connect
             .code_snapshot_by_digest(&code_digest)
@@ -369,7 +299,6 @@ impl ClientConnectionsApplication {
                 return Err(connect_code_invalid());
             }
             Some(code) if code.client_node_id != node.client_node_id => {
-                // The code belongs to another Client: still one invalid code.
                 self.record_failures(user_id, client_ip, &public_client_id)?;
                 return Err(connect_code_invalid());
             }
@@ -385,8 +314,6 @@ impl ClientConnectionsApplication {
                     None
                 }
             }
-            // Consumed (used up) and revoked (refreshed or voided) read as
-            // the expiry category of the §16.3 taxonomy.
             ConnectCodeState::Expired | ConnectCodeState::Consumed | ConnectCodeState::Revoked => {
                 Some("the connect code is no longer usable")
             }
@@ -403,7 +330,6 @@ impl ClientConnectionsApplication {
         self.consume(user_id, client_ip, &node, &code)
     }
 
-    /// Consumes the validated code atomically and builds the `201` body.
     fn consume(
         &self,
         user_id: &str,
@@ -455,9 +381,6 @@ impl ClientConnectionsApplication {
                     ))
                 }
                 ClientConnectServiceErrorKind::ClientLocked => Err(client_locked()),
-                // A concurrent retry of the same request won the consume: its
-                // grant is ours to return (idempotent, one active grant per
-                // user and client by the partial unique index).
                 ClientConnectServiceErrorKind::AccessGrantConflict
                 | ClientConnectServiceErrorKind::CodeNotActive => {
                     let mut grants = AccessGrantService::new(&mut storage);
@@ -498,9 +421,6 @@ impl ClientConnectionsApplication {
         SqliteStorage::open(&self.data_directory).map_err(|_| ClientConnectionsError::unavailable())
     }
 
-    /// Records one failed attempt in all three throttle dimensions (plan
-    /// 11.3). The client dimension uses the durable node id when the Client
-    /// is known and the presented public id otherwise.
     fn record_failures(
         &self,
         user_id: &str,
@@ -588,7 +508,6 @@ fn connect_code_invalid() -> ClientConnectionsError {
     )
 }
 
-/// Reads one required all-digit field of an exact length range.
 fn required_digits(
     value: Option<&Value>,
     min_digits: usize,
@@ -606,15 +525,10 @@ fn required_digits(
     Ok(text.to_owned())
 }
 
-/// SHA-256 digest of one presented 8-digit code (plan 11.3: only the digest
-/// is ever persisted or compared).
 fn connect_code_digest(code: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(code.as_bytes()))
 }
 
-/// Builds the device list body for one user: every active grant joined with
-/// its registry projection, occupancy uniformly `available` until the
-/// occupancy epic lands (§12.1, §16.4).
 fn directory_json(
     storage: &mut SqliteStorage,
     user_id: &str,
@@ -646,7 +560,6 @@ fn directory_json(
     }))
 }
 
-/// One `DeviceSummary` card (the contract the browser facade validates).
 fn device_summary(record: &ClientNodeRecord) -> Value {
     json!({
         "clientId": record.public_client_id,
@@ -664,22 +577,16 @@ fn device_summary(record: &ClientNodeRecord) -> Value {
     })
 }
 
-/// Maps the registry presence onto the three-value display presence (§12.1).
 const fn presence_text(state: ClientPresenceState) -> &'static str {
     match state {
         ClientPresenceState::Online | ClientPresenceState::Degraded => "online",
         ClientPresenceState::Locked => "locked",
-        // `pending_enrollment` and `revoked` never reach the directory
-        // projection; offline is the safest display for them anyway.
         ClientPresenceState::Offline
         | ClientPresenceState::PendingEnrollment
         | ClientPresenceState::Revoked => "offline",
     }
 }
 
-/// Appends one connect-domain authorization audit entry. An audit failure
-/// never undoes the durable grant decision, but it fails the request so the
-/// gap is visible instead of silently swallowing the authorization record.
 fn record_audit(
     storage: &mut SqliteStorage,
     action: ConnectAuditAction,
@@ -706,16 +613,13 @@ fn record_audit(
         .map_err(|_| ClientConnectionsError::unavailable())
 }
 
-/// The canonical application instant the boundary shares across one flow.
 fn now_instant() -> Instant {
     use crate::application::StandaloneApplicationClock as _;
     crate::application::SystemStandaloneApplicationClock.now_instant()
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, ClientConnectionsError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| ClientConnectionsError::unavailable())?;

@@ -1,14 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//!
-//! `WinWinCode` heartbeat: liveness and phase progress for long product chains.
-//!
-//! Different from per-request HTTP deadline:
-//! - HTTP timeout = one model call must return by T
-//! - Heartbeat = the job is alive and advancing through phases
-//!
-//! A silent process with an open socket still beats; a wedged process stops
-//! beating and is detected as Stalled.
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,7 +47,6 @@ struct WriterState {
     background: Option<JoinHandle<()>>,
 }
 
-/// Duration -> whole milliseconds, saturating instead of truncating u128.
 fn duration_ms(value: Duration) -> u64 {
     u64::try_from(value.as_millis()).unwrap_or(u64::MAX)
 }
@@ -69,13 +58,11 @@ fn now_unix_ms() -> u64 {
 }
 
 impl HeartbeatHandle {
-    /// Starts a heartbeat file under dir (usually the task workdir).
     #[must_use]
     pub fn start(dir: &Path, job_id: impl Into<String>, stall_after_ms: u64) -> Arc<Self> {
         Self::start_with_generation(dir, job_id, 1, stall_after_ms)
     }
 
-    /// Starts one run attempt and binds every record to its generation.
     #[must_use]
     pub fn start_with_generation(
         dir: &Path,
@@ -107,14 +94,6 @@ impl HeartbeatHandle {
         handle
     }
 
-    /// Publishes one alive record for the current attempt generation.
-    ///
-    /// Returns `false` when the writer is terminal or the persistent monotonic
-    /// guard rejects a stale record.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the heartbeat cannot be serialized or persisted.
     pub fn beat(&self, phase: &str, detail: &str) -> io::Result<bool> {
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         if !writer.running {
@@ -124,7 +103,6 @@ impl HeartbeatHandle {
         write_heartbeat(&self.path, &record)
     }
 
-    /// True when no beat exists or none arrived within the stall window.
     #[must_use]
     pub fn is_stalled(&self) -> bool {
         read_heartbeat(&self.path).is_none_or(|heartbeat| {
@@ -132,12 +110,6 @@ impl HeartbeatHandle {
         })
     }
 
-    /// Publishes one absorbing terminal state and drains the background writer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when terminal publication loses to a newer/terminal
-    /// record or the heartbeat cannot be persisted.
     pub fn finish(&self, ok: bool, detail: &str) -> io::Result<()> {
         let background = {
             let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
@@ -220,10 +192,6 @@ fn spawn_background(handle: Weak<HeartbeatHandle>) -> JoinHandle<()> {
     })
 }
 
-/// Atomically replaces one complete record while rejecting stale writers.
-///
-/// The caller owns the in-process publication boundary. Persistent checks make
-/// late staging renames and old-attempt records fail closed as well.
 fn write_heartbeat(path: &Path, record: &Heartbeat) -> io::Result<bool> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -250,14 +218,12 @@ fn write_heartbeat(path: &Path, record: &Heartbeat) -> io::Result<bool> {
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Reads the last heartbeat; None if missing or corrupt.
 #[must_use]
 pub fn read_heartbeat(path: &Path) -> Option<Heartbeat> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-/// Classifies a heartbeat file as alive or stalled; terminal states absorb.
 #[must_use]
 pub fn classify_heartbeat(path: &Path, stall_after_ms: u64) -> HeartbeatStatus {
     match read_heartbeat(path) {

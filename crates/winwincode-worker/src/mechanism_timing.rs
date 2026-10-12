@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Test-support instrumentation for actual owned Worker process timings.
-//! Enabled only by an explicit isolated-fixture output path.
 use std::io::Write as _;
 use std::sync::OnceLock;
 static DESTINATION: OnceLock<std::path::PathBuf> = OnceLock::new();
-/// Selects the owned fixture destination before the actual main loop starts.
 pub fn configure(path: std::path::PathBuf) {
     let _ = DESTINATION.set(path);
 }
 static ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
-/// Appends secret-free timing evidence to the isolated fixture's output.
 pub fn record(stage: &str, details: &serde_json::Value) {
     let path = DESTINATION
         .get()

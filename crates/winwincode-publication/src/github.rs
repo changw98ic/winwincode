@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! GitHub REST adapter for the durable publication provider port.
-
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -23,21 +21,12 @@ const MAX_RESPONSE_BYTES: u64 = 2 * 1_024 * 1_024;
 const PAGE_SIZE: usize = 100;
 const USER_AGENT: &str = "WinWinCode-GitHub-Publication";
 
-/// Secret material resolved for one provider request.
-///
-/// The value is intentionally neither serializable nor cloneable. Its `Debug` output is redacted,
-/// and the owned bytes are overwritten when the value is dropped.
 pub struct GitHubCredential {
     provider_id: String,
     secret: Vec<u8>,
 }
 
 impl GitHubCredential {
-    /// Creates one short-lived in-memory credential supplied by the Control Plane credential owner.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-portable provider identifier or a token that cannot be used in an HTTP header.
     pub fn try_new(
         provider_id: impl Into<String>,
         secret: impl AsRef<[u8]>,
@@ -58,7 +47,6 @@ impl GitHubCredential {
     }
 
     fn token(&self) -> &str {
-        // `try_new` only accepts visible ASCII.
         std::str::from_utf8(&self.secret).expect("validated visible ASCII credential")
     }
 }
@@ -79,7 +67,6 @@ impl Drop for GitHubCredential {
     }
 }
 
-/// Stable, secret-safe failure returned by the Control Plane credential interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialResolutionError {
     kind: CredentialResolutionErrorKind,
@@ -132,20 +119,13 @@ impl fmt::Display for CredentialResolutionError {
 
 impl std::error::Error for CredentialResolutionError {}
 
-/// Control Plane-owned seam that resolves a credential reference for each individual request.
 pub trait GitHubCredentialResolver {
-    /// Resolves one credential reference into short-lived memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe error when the reference is missing or temporarily unavailable.
     fn resolve(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<GitHubCredential, CredentialResolutionError>;
 }
 
-/// Safe GitHub adapter configuration. It contains a reference, never credential material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubAdapterConfig {
     credential_reference_id: CredentialReferenceId,
@@ -156,13 +136,6 @@ pub struct GitHubAdapterConfig {
 }
 
 impl GitHubAdapterConfig {
-    /// Creates the canonical adapter configuration with production-safe defaults.
-    ///
-    /// Plain HTTP is accepted only for loopback test servers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid credential reference or a credential-bearing/non-HTTPS remote URL.
     pub fn try_new(
         credential_reference_id: CredentialReferenceId,
         api_base_url: impl Into<String>,
@@ -187,7 +160,6 @@ struct GitHubResponse {
     body: Option<Value>,
 }
 
-/// Blocking Rust GitHub REST implementation of the canonical publication port.
 pub struct GitHubPublicationAdapter<Resolver> {
     config: GitHubAdapterConfig,
     credentials: Resolver,
@@ -661,8 +633,6 @@ impl<Resolver: GitHubCredentialResolver> GitHubPublicationAdapter<Resolver> {
                 return Ok(if current {
                     PublicationPortObservation::found(operation, operation.request_sha256(), None)
                 } else {
-                    // GitHub statuses are append-only; a different status under the same context
-                    // does not own the current request and a new exact status may be created.
                     PublicationPortObservation::absent(operation)
                 });
             }

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Synthetic loopback Provider used only by the explicit mechanism audit.
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:https'
 
-/** An owned TLS Provider with an explicit, observable response release gate. */
 export async function startOwnedSseProvider({ key, cert, protocol = 'anthropic_messages',
   deltaCount = 2523, deltaBytes = 120, finalText = null,
   requestLimitBytes = 16 * 1024 * 1024, responseFactory = null } = {}) {

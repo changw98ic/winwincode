@@ -214,9 +214,6 @@ fn running_non_final_executor(seed: u64) -> Delivery {
     let (delivery, _candidate) = running_final_verifier(seed);
     let mut snapshot = delivery.into_snapshot();
     snapshot.status = DeliveryStatus::Ready;
-    // A first writer has no previous candidate or independent checking sessions.
-    // Keep only the running job; do not turn a completed verification scenario
-    // into a writer while retaining its candidate-ready producer.
     snapshot
         .work_run_aggregate
         .runs
@@ -2925,10 +2922,6 @@ fn assert_persisted_candidate_rejection(
 }
 
 fn seed_historical_candidate_success(seed: u64) -> HistoricalCandidateFixture {
-    // A historical Worker can already have reported success before the CP
-    // discovers that its candidate cannot satisfy the durable rework contract.
-    // Persist through the real terminal transaction, rather than constructing
-    // the post-terminal snapshot or replacing the Worker report with Failed.
     let root = temporary_directory("candidate-rejected-after-success");
     let repository = root.join("repository");
     let (base_commit, candidate_commit) = initialize_git_repository(&repository);

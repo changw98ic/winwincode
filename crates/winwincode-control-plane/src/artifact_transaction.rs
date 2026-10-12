@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generated `ExecutionPort` Artifact messages mapped to the durable Artifact store.
-
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,7 +27,6 @@ use crate::session_binding_transaction::{instant_millis, require_id};
 
 const MAX_ENCODED_PAYLOAD_BYTES: usize = 16_777_216;
 
-/// Failure before an Artifact message can be acknowledged.
 #[derive(Debug)]
 pub enum ArtifactMessageError {
     Storage(StorageError),
@@ -765,10 +762,6 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
         ));
     }
     let content_type = message.payload.content_type.as_bytes();
-    // Open accepts any bounded mediaType string; chunk contentType must accept
-    // the same production diagnostic media types, including RFC 6838
-    // parameters such as `text/plain; charset=utf-8`. Rejecting parameters
-    // after open accepts them leaves the Worker durable outbox pending forever.
     if content_type.is_empty()
         || content_type.len() > 200
         || !content_type[0].is_ascii_alphanumeric()

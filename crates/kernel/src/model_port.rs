@@ -1,5 +1,3 @@
-//! Provider-neutral model stream boundary owned by the `WinWinCode` host.
-
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,12 +18,9 @@ use tokio::sync::mpsc;
 
 const MODEL_STREAM_CHANNEL_CAPACITY: usize = 256;
 
-/// One secret-free request crossing from the Rust kernel to the host model runtime.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModelPortRequest {
-    /// Stable identity shared by cancellation, diagnostics, and every stream message.
     pub request_id: String,
-    /// Serialized [`ModelStreamRequest`] using the public host wire contract.
     pub payload_json: String,
 }
 
@@ -39,27 +34,19 @@ impl fmt::Debug for ModelPortRequest {
     }
 }
 
-/// Serializable failure facts retained across the host/native boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPortFailure {
-    /// Stable Kernel model-port failure category.
     pub code: String,
-    /// Human-readable diagnostic that must not contain provider credentials.
     pub message: String,
-    /// Provider HTTP status, when supplied by the model runtime.
     pub status: Option<u16>,
-    /// Explicit host retry classification. Absent on legacy canonical errors.
     pub retryable: Option<bool>,
-    /// Provider-requested retry delay, when supplied by the model runtime.
     pub provider_retry_after_millis: Option<u64>,
-    /// Provider-issued request identity, when supplied by the model runtime.
     pub provider_request_id: Option<String>,
     /// Original bounded attempt facts; absent on older streams.
     pub facts: Option<Box<winwincode_execution_port::generated::ModelFailureFacts>>,
 }
 
 impl ModelPortFailure {
-    /// Build an owned bridge failure without provider-specific facts.
     #[must_use]
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -86,16 +73,10 @@ impl fmt::Display for ModelPortFailure {
 
 impl std::error::Error for ModelPortFailure {}
 
-/// One ordered stream of JSON messages returned by the host model runtime.
 pub type ModelPortStream =
     Pin<Box<dyn Stream<Item = Result<String, ModelPortFailure>> + Send + 'static>>;
 
-/// The kernel's only model-execution dependency.
 pub trait ModelPort: fmt::Debug + Send + Sync {
-    /// Measures host-added task context without calling a model provider.
-    ///
-    /// # Errors
-    /// Returns a failure when the current task binding cannot be recovered.
     fn compaction_context_overhead_bytes(
         &self,
         _thread_id: &str,
@@ -103,7 +84,6 @@ pub trait ModelPort: fmt::Debug + Send + Sync {
         Ok(0)
     }
 
-    /// Start one model request. Dropping the returned stream cancels host work.
     fn stream(
         &self,
         request: ModelPortRequest,
@@ -213,9 +193,7 @@ enum ModelPortMessage {
     },
 }
 
-// The Kernel consumes inclusive counters for context management. Cache details
-// may be unavailable; billing retains the original nullable wire fact in Host.
-#[allow(clippy::struct_field_names)] // Canonical token field names belong to the wire contract.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Deserialize)]
 struct ModelTokenUsageWire {
     input_tokens: i64,

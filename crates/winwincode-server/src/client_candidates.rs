@@ -1,47 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! User-facing candidate local operations for one Client device (GIT-100.7,
-//! plan §15, contract `client-control-state-machines.md` 6 and 8): the
-//! dual-authorized candidate list and the three bounded flows
-//! `POST /api/v1/clients/candidates/branch`, `.../apply`, and `.../discard`.
-//!
-//! The shapes follow the browser facade (`apps/client`
-//! `ControlPlaneClientCandidates`) field for field: the list projects
-//! `{schemaVersion, clientId, candidates}` cards that carry the device
-//! retention receipt plus the two ledger facts the card renders
-//! (`branchName` and the immutable apply `history`); branch and apply
-//! resolve to `201` bodies built from the settled ledger rows.
-//!
-//! Every mutation runs under the same authority chain (plan 13.4, §15): the
-//! caller must hold the Client's one active device-confirmed occupancy lease
-//! (`occupied` or `draining`) and the repository binding must be visible to
-//! them (an active `use` Client grant AND an active repository grant — the
-//! exact `RepositoryBindingService::visible_bindings` check the repository
-//! directory uses). The `client.candidate.apply` command goes downlink
-//! stamped `C + L` from that lease and the mirror revision the device last
-//! confirmed; it is appended to the durable outbox before the flow waits, so
-//! a Server that answers at all has already made the command durable.
-//!
-//! The bounded wait polls the receipt ledger for the device's
-//! `client.candidate.apply_result` settlement (the client exchange settles
-//! that frame into the ledger). Branch is idempotent without a device round
-//! trip: a candidate that already carries a `branch_created` receipt returns
-//! the original branch. Apply on an already `applied` candidate returns the
-//! original receipt when the request repeats the same command
-//! (strategy/target/head) and refuses a different one — the append-only
-//! ledger is the audit authority, history is never rewritten. Discard is
-//! terminal and settled by the Control Plane: the frozen wire vocabulary
-//! (`client-control.schema.json`, 27 kinds) has no discard downlink kind, so
-//! the discard decision is appended to the ledger directly (result
-//! `discarded`; receipt strategy `create_branch`, the only strategy that
-//! performs no target-branch delivery) and the device-side ref cleanup stays
-//! the retention lane's job.
-//!
-//! The list projection filters every retained receipt of the node through
-//! the caller's visible bindings, so a candidate of an unshared binding is
-//! invisible exactly like its binding is in the repository directory. No
-//! absolute path ever crosses the boundary.
-
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
@@ -79,22 +37,15 @@ use winwincode_storage::SqliteStorage;
 
 use crate::client_occupancy::client_mirror_revision_view;
 
-/// Schema version of the public browser-facing candidate surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// The canonical `refs/winwincode/candidates/` namespace of a candidate ref.
 const CANDIDATE_REF_PREFIX: &str = "refs/winwincode/candidates/";
 
-/// The branch namespace the branch flow requests inside the device engine.
 const BRANCH_NAMESPACE: &str = "winwincode/";
 
-/// Bounded-wait policy of the candidate flows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCandidatesConfig {
-    /// How long one branch or apply flow waits for the Device Client's
-    /// `client.candidate.apply_result` settlement before failing.
     pub apply_wait: std::time::Duration,
-    /// How often the receipt ledger is polled while waiting.
     pub poll_interval: std::time::Duration,
 }
 
@@ -107,38 +58,21 @@ impl Default for ClientCandidatesConfig {
     }
 }
 
-/// Stable failure categories of the candidate flow boundary. Each category
-/// maps to exactly one wire error code of the §16.3 taxonomy the browser
-/// facade translates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientCandidatesErrorKind {
-    /// The request body violated the candidate contract.
     InvalidRequest,
-    /// The public Client ID does not name a candidate-capable Client.
     ClientNotFound,
-    /// The Client is not reachable (offline or degraded).
     ClientOffline,
-    /// The Client is locked by a local operator.
     ClientLocked,
-    /// The Client has no usable occupancy (none, unconfirmed, or pending
-    /// recovery).
     OccupancyRequired,
-    /// The occupancy lease belongs to another user.
     NotHolder,
-    /// The binding is not visible to the caller (a missing `use` grant or a
-    /// missing repository grant).
     AccessDenied,
-    /// No retained candidate matches the requested reference.
     CandidateNotFound,
-    /// The candidate lifecycle state refuses the requested change.
     WrongState,
-    /// The device did not settle the apply command within the bounded wait.
     ApplyResultTimeout,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Secret-free candidate flow failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientCandidatesError {
     kind: ClientCandidatesErrorKind,
@@ -181,30 +115,20 @@ impl fmt::Display for ClientCandidatesError {
 
 impl std::error::Error for ClientCandidatesError {}
 
-/// What one validated request prepared before the flow's durable step.
 struct PreparedCommand {
     node: ClientNodeRecord,
     lease: OccupancyLeaseRecord,
     candidate: LocalCandidateReceiptRecord,
-    /// Apply only: the requested target branch.
     target_branch: Option<String>,
-    /// Apply only: the requested expected target HEAD.
     expected_head: Option<String>,
 }
 
-/// Which of the two downlink flows is running.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommandKind {
-    /// Create the candidate's local branch (`strategy: create_branch`).
     Branch,
-    /// Apply the complete candidate history onto a target branch (`strategy: merge`).
     Apply,
 }
 
-/// The signed-in user's candidate surface over the Server's one product-state
-/// database directory. Like the connect and occupancy flows, every operation
-/// opens and closes its own storage connection so concurrent flows never
-/// share state in memory and the bounded wait holds no database lock.
 #[derive(Debug, Clone)]
 pub struct ClientCandidatesApplication {
     data_directory: PathBuf,
@@ -212,11 +136,6 @@ pub struct ClientCandidatesApplication {
 }
 
 impl ClientCandidatesApplication {
-    /// Composes the candidate application over one product-state directory.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the configuration violates its bounds.
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientCandidatesConfig,
@@ -233,13 +152,6 @@ impl ClientCandidatesApplication {
         })
     }
 
-    /// Lists the candidate cards the user may see on one Client device.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidRequest` for a malformed Client id, `ClientNotFound`
-    /// for an unknown or unenrolled Client, and `Unavailable` for storage
-    /// failure.
     pub fn list(
         &self,
         user_id: &str,
@@ -276,14 +188,6 @@ impl ClientCandidatesApplication {
         }))
     }
 
-    /// Runs the branch creation flow: the durable `create_branch` command
-    /// downlink, then the bounded wait for the device's `branch_created`
-    /// settlement. An already-branched candidate answers the original branch
-    /// without a device round trip.
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable candidate failure categories.
     pub async fn create_branch(
         &self,
         user_id: &str,
@@ -293,14 +197,6 @@ impl ClientCandidatesApplication {
             .await
     }
 
-    /// Runs the target-branch apply flow: the durable `merge` command
-    /// downlink with the expected head passed through, then the bounded wait
-    /// for the device's apply receipt (`applied`, `base_stale`, or another
-    /// frozen result code — the receipt carries the outcome).
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable candidate failure categories.
     pub async fn apply_candidate(
         &self,
         user_id: &str,
@@ -310,11 +206,6 @@ impl ClientCandidatesApplication {
             .await
     }
 
-    /// Settles the discard decision into the ledger (terminal, idempotent).
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable candidate failure categories.
     pub fn discard_candidate(
         &self,
         user_id: &str,
@@ -358,9 +249,6 @@ impl ClientCandidatesApplication {
         }))
     }
 
-    /// The shared branch/apply flow: validate, short-circuit the idempotent
-    /// replays, enqueue the durable downlink command, and wait the bounded
-    /// interval for the device's ledger settlement.
     #[allow(clippy::too_many_lines)]
     async fn branch_command(
         &self,
@@ -407,8 +295,6 @@ impl ClientCandidatesApplication {
             ));
         }
 
-        // The known history is the dedup baseline: the device settles the
-        // command by appending a new receipt, never by rewriting one.
         let known: HashSet<String> = history
             .iter()
             .map(|receipt| receipt.local_apply_receipt_id.clone())
@@ -443,8 +329,6 @@ impl ClientCandidatesApplication {
         }
     }
 
-    /// Reads the ledger once and decides whether the flow settled. A receipt
-    /// the baseline did not know is the device's fresh answer.
     fn poll_settlement(
         &self,
         prepared: &PreparedCommand,
@@ -487,7 +371,6 @@ impl ClientCandidatesApplication {
         Ok(Some(outcome))
     }
 
-    /// Runs the shared authority chain and returns everything the flows need.
     fn prepare(
         &self,
         user_id: &str,
@@ -526,9 +409,6 @@ impl ClientCandidatesApplication {
     }
 }
 
-/// Decides the idempotent replay answer of a branch/apply request, if any:
-/// a branched candidate re-answers its original branch, and a repeated apply
-/// onto an `applied` candidate re-answers the original receipt.
 fn idempotent_replay(
     prepared: &PreparedCommand,
     history: &[LocalApplyReceiptRecord],
@@ -562,7 +442,6 @@ fn idempotent_replay(
     }
 }
 
-/// The field vocabulary of one request shape.
 #[derive(Debug)]
 struct ParsedRequest {
     client_id: String,
@@ -572,19 +451,14 @@ struct ParsedRequest {
     expected_head: Option<String>,
 }
 
-/// Request shape strategy: branch and discard share four fields, apply six.
 trait RequestShape {
     fn parse(&self, request: &Value) -> Result<ParsedRequest, ClientCandidatesError>;
 }
 
-/// `POST .../branch`: `{schemaVersion, clientId, candidateRef,
-/// repositoryBindingId}`.
 struct BranchFields;
 
-/// `POST .../discard`: the branch shape (no branch-specific fields).
 struct DiscardFields;
 
-/// `POST .../apply`: adds `targetBranch` and `expectedHead`.
 struct ApplyFields;
 
 impl RequestShape for BranchFields {
@@ -619,8 +493,6 @@ impl RequestShape for ApplyFields {
     }
 }
 
-/// Reads the request object and enforces the exact field count, so an
-/// under-specified or over-specified body is a request failure.
 fn object_fields(
     request: &Value,
     expected_fields: usize,
@@ -634,7 +506,6 @@ fn object_fields(
     Ok(fields)
 }
 
-/// Reads one required public Client ID: 9-12 ASCII digits.
 fn required_client_id(value: Option<&Value>) -> Result<String, ClientCandidatesError> {
     let text = value
         .and_then(Value::as_str)
@@ -646,7 +517,6 @@ fn required_client_id(value: Option<&Value>) -> Result<String, ClientCandidatesE
     }
 }
 
-/// Reads one required candidate reference inside the canonical namespace.
 fn required_candidate_ref(value: Option<&Value>) -> Result<String, ClientCandidatesError> {
     let text = value
         .and_then(Value::as_str)
@@ -667,7 +537,6 @@ fn required_candidate_ref(value: Option<&Value>) -> Result<String, ClientCandida
     }
 }
 
-/// Reads one required repository binding identity.
 fn required_binding_id(value: Option<&Value>) -> Result<String, ClientCandidatesError> {
     let text = value
         .and_then(Value::as_str)
@@ -680,11 +549,6 @@ fn required_binding_id(value: Option<&Value>) -> Result<String, ClientCandidates
     }
 }
 
-/// Reads one required target branch inside the Git ref vocabulary the
-/// ledger and the device engine both validate (`git check-ref-format`
-/// shaped, never option-like, never a multi-level jump). The `.lock` suffix
-/// is refused case-sensitively on purpose: only the canonical lowercase
-/// spelling is a Git dot-lock collision.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn required_target_branch(value: Option<&Value>) -> Result<String, ClientCandidatesError> {
     let text = value
@@ -706,8 +570,6 @@ fn required_target_branch(value: Option<&Value>) -> Result<String, ClientCandida
     }
 }
 
-/// Reads one required expected target HEAD: the full lowercase commit name
-/// the device compare-and-swap and the ledger both validate.
 fn required_expected_head(value: Option<&Value>) -> Result<String, ClientCandidatesError> {
     let text = value
         .and_then(Value::as_str)
@@ -723,12 +585,10 @@ fn required_expected_head(value: Option<&Value>) -> Result<String, ClientCandida
     }
 }
 
-/// Whether `value` carries the 9-12 digit public Client ID shape.
 fn is_public_client_id(value: &str) -> bool {
     (9..=12).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Resolves the public Client id to an enrolled node.
 fn lookup_node(
     storage: &mut SqliteStorage,
     public_client_id: &str,
@@ -750,7 +610,6 @@ fn lookup_node(
     }
 }
 
-/// The reachability check of the mutation flows (the list stays available).
 fn require_online(node: &ClientNodeRecord) -> Result<(), ClientCandidatesError> {
     if matches!(
         node.presence_state,
@@ -770,8 +629,6 @@ fn require_online(node: &ClientNodeRecord) -> Result<(), ClientCandidatesError> 
     Ok(())
 }
 
-/// The caller must hold the node's one active device-confirmed lease; its
-/// identity and token stamp the downlink command.
 fn require_holder_lease(
     storage: &mut SqliteStorage,
     node: &ClientNodeRecord,
@@ -807,9 +664,6 @@ fn require_holder_lease(
     Ok(lease)
 }
 
-/// The dual authorization of plan 13.4: the binding must be visible to the
-/// caller (an active `use` Client grant AND an active repository grant) —
-/// the exact check the repository directory applies.
 fn require_binding_visible(
     storage: &mut SqliteStorage,
     user_id: &str,
@@ -826,7 +680,6 @@ fn require_binding_visible(
     Ok(())
 }
 
-/// The binding ids of one node the user may see (plan 13.4 dual grants).
 fn visible_binding_ids(
     storage: &mut SqliteStorage,
     user_id: &str,
@@ -841,7 +694,6 @@ fn visible_binding_ids(
         .collect())
 }
 
-/// Loads one candidate receipt fresh from the ledger.
 fn load_candidate(
     storage: &mut SqliteStorage,
     candidate: &LocalCandidateReceiptRecord,
@@ -853,7 +705,6 @@ fn load_candidate(
         .ok_or_else(ClientCandidatesError::unavailable)
 }
 
-/// Loads the immutable apply history of one candidate, oldest first.
 fn load_history(
     storage: &mut SqliteStorage,
     candidate: &LocalCandidateReceiptRecord,
@@ -864,7 +715,6 @@ fn load_history(
         .map_err(|_| ClientCandidatesError::unavailable())
 }
 
-/// The branch name a `branch_created` receipt recorded, if any.
 fn branch_of(history: &[LocalApplyReceiptRecord]) -> Option<String> {
     history
         .iter()
@@ -872,18 +722,11 @@ fn branch_of(history: &[LocalApplyReceiptRecord]) -> Option<String> {
         .map(|receipt| receipt.target_branch.clone())
 }
 
-/// The branch name the branch flow requests: a deterministic
-/// `winwincode/candidate-<short commit>` name inside the device engine's
-/// namespace, derived from the frozen candidate commit.
 fn requested_branch_name(candidate: &LocalCandidateReceiptRecord) -> String {
     let short = candidate.candidate_commit.get(..7).unwrap_or_default();
     format!("{BRANCH_NAMESPACE}candidate-{short}")
 }
 
-/// Enqueues one `client.candidate.apply` command into the durable outbox at
-/// the next free stream position, stamped `C + L` from the caller's lease
-/// and the mirror revision the device last confirmed. The append is the
-/// durability point: the flow only waits after it.
 #[allow(clippy::too_many_arguments)]
 fn enqueue_apply_command(
     storage: &mut SqliteStorage,
@@ -966,8 +809,6 @@ fn enqueue_apply_command(
     Ok(())
 }
 
-/// Builds the occupancy fencing stamp every candidate downlink command
-/// carries (contract `client-control-port-v1.md`, `C + L`).
 fn occupancy_stamp(lease: &OccupancyLeaseRecord, mirror_revision: u64) -> OccupancyCommandContext {
     OccupancyCommandContext {
         command: CommandContext {
@@ -982,8 +823,6 @@ fn occupancy_stamp(lease: &OccupancyLeaseRecord, mirror_revision: u64) -> Occupa
     }
 }
 
-/// Projects one candidate receipt plus its immutable history onto the
-/// facade's card shape.
 fn candidate_summary(
     record: &LocalCandidateReceiptRecord,
     history: &[LocalApplyReceiptRecord],
@@ -1002,7 +841,6 @@ fn candidate_summary(
     })
 }
 
-/// Projects one immutable apply receipt onto the facade's receipt shape.
 fn apply_receipt_json(receipt: &LocalApplyReceiptRecord) -> Value {
     json!({
         "localApplyReceiptId": receipt.local_apply_receipt_id,
@@ -1019,10 +857,6 @@ fn apply_receipt_json(receipt: &LocalApplyReceiptRecord) -> Value {
     })
 }
 
-/// Enumerates the candidate receipt identities of one node from the receipt
-/// ledger's table, oldest first. The read-only projection tolerates a ledger
-/// that was never opened (no table, no database) as an empty list; any other
-/// read failure is unavailable.
 fn node_candidate_rows(
     data_directory: &Path,
     client_node_id: &str,
@@ -1058,22 +892,18 @@ fn node_candidate_rows(
     }
 }
 
-/// Whether one `SQLite` failure is the "relation does not exist yet" answer.
 fn is_no_such_table(sql: &rusqlite::Error) -> bool {
     matches!(sql, rusqlite::Error::SqliteFailure(_, Some(message))
         if message.contains("no such table"))
 }
 
-/// The canonical application instant the boundary shares across one flow.
 fn now_instant() -> Instant {
     use crate::application::StandaloneApplicationClock as _;
     crate::application::SystemStandaloneApplicationClock.now_instant()
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, ClientCandidatesError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| ClientCandidatesError::unavailable())?;
@@ -1095,7 +925,6 @@ mod tests {
         format!("cnd_{suffix_digit}{}", "A".repeat(25))
     }
 
-    /// One canonical `prefix` + 26 character Crockford ledger identity.
     fn canonical_id(prefix: &str) -> String {
         format!("{prefix}{}1", "A".repeat(25))
     }
@@ -1157,7 +986,6 @@ mod tests {
         assert_eq!(parsed.candidate_ref, "refs/winwincode/candidates/0f9e8d7");
         assert!(parsed.target_branch.is_none());
 
-        // An extra or missing field is a request failure.
         let mut extra = branch.clone();
         extra["extra"] = json!(1);
         assert_eq!(
@@ -1172,7 +1000,6 @@ mod tests {
             ClientCandidatesErrorKind::InvalidRequest
         );
 
-        // A candidate ref outside the namespace is a request failure.
         let foreign = json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "clientId": "927351842",
@@ -1266,7 +1093,6 @@ mod tests {
                 .is_empty()
         );
 
-        // A database without the candidate table projects empty as well.
         let connection =
             rusqlite::Connection::open(directory.join("control-plane.sqlite3")).expect("database");
         connection
@@ -1295,7 +1121,6 @@ mod tests {
 
     #[test]
     fn retained_commands_validate_before_any_ledger_write() {
-        // The exchange settlement builds these; the shapes must hold.
         let command = LocalCandidateRetained::try_new(
             canonical_id("lcr_"),
             canonical_node('A'),

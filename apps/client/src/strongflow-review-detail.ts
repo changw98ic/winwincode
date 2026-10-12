@@ -28,10 +28,6 @@ export interface StrongFlowReviewDetailOptions {
   readonly model: StrongFlowReviewViewModel
   readonly annotations: StrongFlowReviewAnnotations
   readonly candidateActions?: Omit<CandidateApplicationOptions, 'root' | 'model'>
-  /**
-   * Text previews download as plain text through this seam. Production wires a
-   * Blob download; tests capture the payload instead of touching the network.
-   */
   readonly onDownload?: (fileName: string, bytes: Uint8Array, mediaType: string) => void
 }
 
@@ -111,11 +107,6 @@ function fileNameFor(path: string): string {
   return `${base}.diff.txt`
 }
 
-/**
- * VER-12 bounded delivery export. Only schema-owned identities, enums and
- * counts leave the page; free-form descriptions, findings, source refs, logs
- * and paths deliberately remain in the authorized interactive view.
- */
 export function deliveryReportText(state: StrongFlowReviewState): string | null {
   const detail = state.detail
   if (detail === null) return null
@@ -158,11 +149,6 @@ export function deliveryReportText(state: StrongFlowReviewState): string | null 
   ].join('\n')
 }
 
-/**
- * RUN-07 safe preview rendering. Text chunks are the only bytes ever placed in
- * the DOM, always through `textContent`; degraded classes render their reason
- * instead of content, so HTML/SVG and binary never enter the page.
- */
 function renderPreview(
   document: Document,
   file: StrongFlowReviewState['files'][number],
@@ -453,7 +439,6 @@ function renderEvidenceArtifact(
   return box
 }
 
-/** RUN-07/VER-07 review surface: real Control Plane projections, safe degradation. */
 export function mountStrongFlowReviewDetail(
   options: StrongFlowReviewDetailOptions,
 ): StrongFlowReviewDetailPage {
@@ -786,7 +771,6 @@ export function mountStrongFlowReviewDetail(
     resultHeading.textContent = '完成情况'
     const results = new Map((detail.verdict?.criteria ?? []).map(result => [result.criterionId, result.verdict]))
     const outcome = element(document, 'ul', 'wwc-review-outcomes')
-    // Show unresolved criteria first; the acceptance tab always retains the full list.
     const criteria = [...requirements.acceptanceCriteria].sort((a, b) =>
       Number(results.get(a.id) === 'pass') - Number(results.get(b.id) === 'pass'))
     for (const criterion of criteria.slice(0, 3)) {

@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Browser-facing redaction boundary. The credential patterns mirror the
- * StrongFlow credential-boundary package; this extra pass is required because
- * runtime artifacts are not proven to have been redacted by their producer.
- */
 const PRIVATE_KEY = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gu
 const JWT = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu
 const BEARER = /\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/=-]+/giu
@@ -19,7 +14,6 @@ const INTERNAL_ID = /\b(?:agt|art|att|binding|call|cfg|crd|crt|dlv|evd|evt|hum|j
 const SOURCE_REF = /\b(?:sourceRef|source_ref)\s*[:=]\s*[^\s,;]+/giu
 const RUNTIME_SOURCE = /\bruntime(?::\/\/|:)[^\s,;]+/gu
 
-/** Redacts credentials, local paths, and internal runtime identities in text. */
 export function redactPublicText(value: string): string {
   return value
     .replace(PRIVATE_KEY, '[REDACTED PRIVATE KEY]')
@@ -42,7 +36,6 @@ export function redactPublicText(value: string): string {
     .replace(INTERNAL_ID, '[INTERNAL ID]')
 }
 
-/** Converts transport and server errors to fixed browser-facing copy. */
 export function publicErrorText(error: unknown, phase: string): string {
   const code = error !== null && typeof error === 'object'
     && typeof (error as { readonly code?: unknown }).code === 'string'

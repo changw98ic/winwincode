@@ -1,37 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server-side `WorkerSessionCredential` ledger and its audit trail.
-//!
-//! Short-lived Worker session credentials replace the shared static Worker
-//! bearer (plan 17.2): exactly one credential backs one `WorkerSession` and
-//! one `WorkerInstance`, and it authorizes exactly the one
-//! `WorkerLaunchGrant` it was issued beside. A credential is created
-//! `active`, and the frozen `active | rotated | revoked | expired` state
-//! machine is the whole lifetime:
-//!
-//! - `rotate` retires the session's `active` credential and inserts its
-//!   replacement inside one immediate transaction, so a worker session never
-//!   holds two live credentials and there is no acceptance window where the
-//!   old material still authenticates;
-//! - `revoke_for_session` terminates the `active` credential immediately —
-//!   a running worker loses its proof on its very next exchange;
-//! - `expire` is the sweep that retires every `active` credential whose
-//!   deadline passed; verification itself already refuses an expired
-//!   credential, so the sweep is durable hygiene over the same rule.
-//!
-//! Uniqueness: at most one `active` credential may exist per
-//! `worker_session_id` — the partial unique index is the durable backstop.
-//!
-//! Credentials: only the `sha256:` digest of the 32-byte material is stored.
-//! The raw material never enters this ledger; it crosses the launch response
-//! and the device chain once and is dropped (plan 17.2).
-//!
-//! Audit: every issuance, rotation, revocation, and expiry is appended to
-//! `worker_session_credentials_audit` inside the same transaction as the
-//! state change. Audit identities derive deterministically from the
-//! credential suffix and the action, so each of the at-most-once transitions
-//! records exactly one row without the storage layer drawing entropy.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -93,16 +61,11 @@ CREATE TABLE IF NOT EXISTS worker_session_credential_renewals (
 );
 ";
 
-/// Lifecycle state of one `WorkerSessionCredential` (plan 17.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSessionCredentialState {
-    /// The material authenticates the bound worker session and instance.
     Active,
-    /// Terminal: a rotation replaced this credential; its material is dead.
     Rotated,
-    /// Terminal: revoked; the material is dead immediately.
     Revoked,
-    /// Terminal: the expiry deadline passed.
     Expired,
 }
 
@@ -137,18 +100,12 @@ impl fmt::Display for WorkerSessionCredentialState {
     }
 }
 
-/// Credential decision recorded in the credential audit trail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialAuditAction {
-    /// The credential was issued (initial issuance or rotation replacement).
     Issued,
-    /// A rotation retired this credential in favor of its replacement.
     Rotated,
-    /// The credential was revoked.
     Revoked,
-    /// The expiry sweep terminated the credential.
     Expired,
-    /// A fresh accepted heartbeat extended the active credential's idle TTL.
     Renewed,
 }
 
@@ -164,8 +121,6 @@ impl CredentialAuditAction {
         }
     }
 
-    /// Two-character audit identity discriminator. Crockford Base32 digits
-    /// only, so the derived audit id stays canonical.
     const fn code(self) -> &'static str {
         match self {
             Self::Issued => "01",
@@ -177,10 +132,6 @@ impl CredentialAuditAction {
     }
 }
 
-/// Validated atomic issue command (plan 17.2).
-///
-/// The `_id` postfix on every field is the plan's own domain vocabulary, so
-/// the lint against repeated field suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialIssuance {
@@ -194,12 +145,6 @@ pub struct CredentialIssuance {
 }
 
 impl CredentialIssuance {
-    /// Builds one validated issue command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-`sha256:` credential digest,
-    /// or a non-canonical expiry before any durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         worker_session_credential_id: impl Into<String>,
@@ -240,11 +185,6 @@ impl CredentialIssuance {
     }
 }
 
-/// Validated rotation command (plan 17.2): the session's `active` credential
-/// is retired and replaced by the named replacement inside one transaction.
-/// The worker identities and the bound launch grant are inherited from the
-/// retired credential, so a rotation can never re-bind a credential to
-/// another worker session, worker instance, or launch grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialRotation {
     worker_session_id: String,
@@ -255,12 +195,6 @@ pub struct CredentialRotation {
 }
 
 impl CredentialRotation {
-    /// Builds one validated rotation command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-`sha256:` replacement digest,
-    /// a non-canonical expiry, or an out-of-bounds reason.
     pub fn try_new(
         worker_session_id: impl Into<String>,
         replacement_credential_id: impl Into<String>,
@@ -291,63 +225,38 @@ impl CredentialRotation {
     }
 }
 
-/// Outcome of one rotation: the retired credential and its replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialRotationOutcome {
-    /// The previously `active` credential, now terminal `rotated`.
     pub retired: WorkerSessionCredentialRecord,
-    /// The replacement, `active` from the rotation instant on.
     pub issued: WorkerSessionCredentialRecord,
 }
 
-/// Durable `WorkerSessionCredential` row (plan 17.2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSessionCredentialRecord {
-    /// Stable credential identifier.
     pub worker_session_credential_id: String,
-    /// Worker session the credential authorizes.
     pub worker_session_id: String,
-    /// Worker identity the credential authorizes.
     pub worker_id: String,
-    /// Worker instance the credential authorizes.
     pub worker_instance_id: String,
-    /// The one launch grant this credential authorizes.
     pub worker_launch_grant_id: String,
-    /// `sha256:` digest of the credential material; never the material.
     pub credential_digest: String,
-    /// Lifecycle state.
     pub state: WorkerSessionCredentialState,
-    /// Deadline after which the credential no longer authenticates.
     pub expires_at: Instant,
-    /// Instant the credential was issued.
     pub issued_at: Instant,
-    /// Terminal instant; set on `rotated`, `revoked`, and `expired`.
     pub ended_at: Option<Instant>,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Stable credential ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSessionCredentialStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// No credential matches the requested identity.
     UnknownCredential,
-    /// The worker session already carries an `active` credential.
     CredentialConflict,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race that should be impossible inside
-    /// one immediate transaction.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free credential ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSessionCredentialStoreError {
     kind: WorkerSessionCredentialStoreErrorKind,
@@ -369,19 +278,11 @@ impl fmt::Display for WorkerSessionCredentialStoreError {
 
 impl std::error::Error for WorkerSessionCredentialStoreError {}
 
-/// Worker session credential ledger borrowing the sole product-state `SQLite`
-/// authority.
 pub struct WorkerSessionCredentialLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable worker session credential ledger on this same
-    /// product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn worker_session_credential_ledger(
         &mut self,
     ) -> Result<WorkerSessionCredentialLedger<'_>, WorkerSessionCredentialStoreError> {
@@ -403,13 +304,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Extends only the exact active credential under a fresh accepted Core
-    /// heartbeat and a still-current launch, binding, occupancy and Job lease.
-    /// The authority checks, credential CAS and renewal audit commit together.
-    ///
-    /// # Errors
-    /// Rejects malformed input or unavailable durable authority. A lost CAS or
-    /// inactive authority returns `None` and never revives the credential.
     pub fn renew_after_accepted_heartbeat(
         &mut self,
         expected: &WorkerSessionCredentialRecord,
@@ -509,14 +403,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(Some(record))
     }
 
-    /// Atomically issues one worker session credential (plan 17.2). The
-    /// `active` row and its `issued` audit entry commit together. The worker
-    /// session must not already carry an `active` credential.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an `active` credential already present for the session, a
-    /// reused credential id, or storage failure.
     pub fn issue(
         &mut self,
         issuance: &CredentialIssuance,
@@ -528,16 +414,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(stored)
     }
 
-    /// Atomically rotates one worker session's credential (plan 17.2): the
-    /// `active` credential becomes terminal `rotated` and its replacement
-    /// becomes `active` inside one immediate transaction, so the old
-    /// material stops authenticating at the same instant the new material
-    /// starts. The replacement inherits the retired credential's worker
-    /// identities and launch grant.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a session without an `active` credential or storage failure.
     pub fn rotate(
         &mut self,
         rotation: &CredentialRotation,
@@ -621,14 +497,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         })
     }
 
-    /// Revokes the session's `active` credential immediately (plan 17.2): the
-    /// material stops authenticating at once, whether the worker session is
-    /// still launching or already running.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a session without an `active` credential, an over-long
-    /// reason, or storage failure.
     pub fn revoke_for_session(
         &mut self,
         worker_session_id: &str,
@@ -675,15 +543,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(revoked)
     }
 
-    /// Expires every `active` credential whose expiry deadline is at or
-    /// before `cutoff` (plan 17.2). Returns the expired credential ids.
-    ///
-    /// Verification already refuses an expired credential, so this sweep is
-    /// the durable state transition over the same rule.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire(
         &mut self,
         cutoff: &Instant,
@@ -732,12 +591,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(expired)
     }
 
-    /// Returns one durable credential projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical credential identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot(
         &self,
         worker_session_credential_id: &str,
@@ -746,14 +599,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         load_credential(self.connection()?, worker_session_credential_id)
     }
 
-    /// Returns the one `active` credential of a worker session, if any.
-    ///
-    /// More than one `active` row is a corrupt database and fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity, a corrupt active
-    /// set, or storage failure.
     pub fn active_for_session(
         &self,
         worker_session_id: &str,
@@ -782,17 +627,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         }
     }
 
-    /// Looks one credential up by its stored `sha256:` digest — the durable
-    /// half of digest verification. State and expiry are judged by the
-    /// caller so every authentication failure stays one uniform category.
-    ///
-    /// More than one row for one digest is a corrupt database and fails
-    /// closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-`sha256:` digest shape, a corrupt digest match, or
-    /// storage failure.
     pub fn find_by_digest(
         &self,
         credential_digest: &str,
@@ -821,12 +655,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         }
     }
 
-    /// Returns every durable credential audit entry of one credential,
-    /// oldest first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical credential identity or storage failure.
     pub fn audit_trail(
         &self,
         worker_session_credential_id: &str,
@@ -882,22 +710,14 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
     }
 }
 
-/// One credential audit row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialAuditEntry {
-    /// Stable audit identity.
     pub audit_id: String,
-    /// Recorded action.
     pub action: CredentialAuditAction,
-    /// Credential the entry refers to.
     pub worker_session_credential_id: String,
-    /// Worker session the credential authorizes.
     pub worker_session_id: String,
-    /// User that drove the transition; self-audits carry the session id.
     pub actor_user_id: String,
-    /// Machine-readable reason, when one exists.
     pub reason: Option<String>,
-    /// Instant the entry was recorded.
     pub occurred_at: Instant,
 }
 
@@ -948,8 +768,6 @@ impl CredentialAuditEntry {
     }
 }
 
-/// Loads the session's one `active` credential or fails with the unknown
-/// category; the partial unique index keeps the active set a singleton.
 fn require_active_credential(
     connection: &rusqlite::Connection,
     worker_session_id: &str,
@@ -979,9 +797,6 @@ fn require_active_credential(
     }
 }
 
-/// Appends one credential audit row inside the caller's transaction. Audit
-/// identities derive from the credential suffix and the action code, so each
-/// of the at-most-once transitions records exactly one row.
 #[allow(clippy::too_many_arguments)]
 fn insert_audit(
     transaction: &Transaction<'_>,
@@ -1019,9 +834,6 @@ fn insert_audit(
     Ok(())
 }
 
-/// Deterministic audit identity: the action discriminator followed by the
-/// first 24 characters of the credential suffix. Every action happens at
-/// most once per credential, so identities never collide.
 fn audit_identity(
     action: CredentialAuditAction,
     worker_session_credential_id: &str,
@@ -1238,7 +1050,6 @@ fn validate_user_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError
     validate_crockford_id(value, "usr_", "user id")
 }
 
-/// Validates the canonical `sha256:` + 64 lowercase hex digest shape.
 fn validate_credential_digest(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(error(
@@ -1260,7 +1071,6 @@ fn validate_credential_digest(value: &str) -> Result<(), WorkerSessionCredential
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), WorkerSessionCredentialStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1302,9 +1112,6 @@ fn map_credential_insert_sql(sql: &rusqlite::Error) -> WorkerSessionCredentialSt
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the one-active-per-session
-            // partial index; a credential id reuse shares the extended code
-            // family and fails closed as a conflict too.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 WorkerSessionCredentialStoreErrorKind::CredentialConflict,
                 "the worker session already carries an active credential",

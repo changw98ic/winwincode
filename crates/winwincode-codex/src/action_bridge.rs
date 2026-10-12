@@ -403,9 +403,6 @@ impl ExecutionPortActionGate {
             .binding_for_alias(session_id)
             .map_err(authority_error)?;
         let stale = current_binding.as_ref().is_none_or(|binding| {
-            // This request is retained in the pending map and its signature
-            // remains bound to the original stamp. Only the current deadline
-            // may have advanced while the exact request was in flight.
             !winwincode_execution_port::execution_identity::retained_lease_matches_current(
                 &action.authority.lease,
                 &binding.authority.lease,
@@ -449,10 +446,6 @@ impl ExecutionPortActionGate {
         pending_generation: u64,
         received_at: &Instant,
     ) -> Result<(PendingAction, u64), ActionBridgeError> {
-        // Keep the generation lock while taking the pending request.  The
-        // cancellation path acquires these same locks in this order, so a
-        // cancel racing with a receipt cannot observe the old generation and
-        // then lose the race after the permit has been accepted.
         let mut generations = self
             .state
             .session_generations
@@ -1023,8 +1016,6 @@ fn is_core_control_tool(request: &KernelActionRequest) -> bool {
     matches!(request.payload, KernelActionPayload::CoreControl { .. })
 }
 
-// The registered process manager certifies this output-only interaction after
-// resolving and locking the exact process owned by the current Core session.
 fn is_process_output_poll(request: &KernelActionRequest) -> bool {
     matches!(&request.payload, KernelActionPayload::ProcessInteraction {
         process_id, origin_call_id, input,
@@ -1370,8 +1361,6 @@ fn canonical_tool_requests(
     request: &KernelActionRequest,
 ) -> Result<Vec<ToolRequest>, ActionBridgeError> {
     const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
-    // Core controls authorize orchestration. Each nested operation still goes
-    // through its own action request, including in delegated read-only runs.
     if is_core_control_tool(request) || is_process_output_poll(request) {
         return Ok(Vec::new());
     }

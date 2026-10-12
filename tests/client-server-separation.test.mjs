@@ -19,10 +19,7 @@ test('static Client permits only secure remote Control Plane connections', () =>
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self'",
-    // `blob:` covers only the Evidence screenshots this client mints from the
-    // exact Artifact bytes it already read, and the URL is revoked on close.
     "img-src 'self' data: blob:",
-    // Community local HTTP (loopback only) is allowed in addition to TLS.
     'connect-src https: wss: http://127.0.0.1:* http://localhost:*',
     "object-src 'none'",
     "base-uri 'none'",

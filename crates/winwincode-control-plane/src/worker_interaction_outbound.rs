@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Control Plane-to-Worker interaction and lease-renewal delivery.
-//!
-//! The adapter maps canonical interaction and lease-renewal messages to the
-//! durable Worker outbound queue. Raw input values and
-//! approval reasons remain inside the restricted queue and the explicit
-//! Worker connection boundary.
-
 use std::{fmt, path::Path};
 
 use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest, WorkerId, WorkerInstanceId};
@@ -30,7 +23,6 @@ use crate::{
     WorkerInteractionOutboundPort,
 };
 
-/// Stable Worker connection failure categories. None contains interaction data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerInteractionConnectionErrorKind {
     InvalidInput,
@@ -40,7 +32,6 @@ pub enum WorkerInteractionConnectionErrorKind {
     Unavailable,
 }
 
-/// Bounded connection-side queue failure with no input value or decision reason.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerInteractionConnectionError {
     kind: WorkerInteractionConnectionErrorKind,
@@ -80,11 +71,9 @@ impl fmt::Display for WorkerInteractionConnectionError {
 
 impl std::error::Error for WorkerInteractionConnectionError {}
 
-/// Opaque stable cursor bound by storage to one exact Worker authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerInteractionPageCursor(WorkerOutboundPageCursor);
 
-/// One validated canonical frame for either an in-process or remote Worker.
 #[derive(Clone, PartialEq)]
 pub struct WorkerInteractionClaim {
     message_id: ExecutionMessageId,
@@ -106,13 +95,11 @@ impl WorkerInteractionClaim {
         &self.payload_digest
     }
 
-    /// Returns the canonical frame used by an in-process Worker adapter.
     #[must_use]
     pub const fn typed_frame(&self) -> &TypedFrame {
         &self.typed_frame
     }
 
-    /// Returns the exact same canonical frame encoded for a remote Worker.
     #[must_use]
     pub fn encoded_frame(&self) -> &[u8] {
         &self.encoded_frame
@@ -128,12 +115,6 @@ impl WorkerInteractionClaim {
         self.replayed
     }
 
-    /// Delivers this already-validated frame to an in-process Worker through
-    /// the canonical local adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter or Worker core error without logging the frame.
     pub fn deliver_local<Core: ExecutionPortCore + ?Sized>(
         &self,
         core: &mut Core,
@@ -156,26 +137,18 @@ impl fmt::Debug for WorkerInteractionClaim {
     }
 }
 
-/// One stable delivery page. Newly enqueued frames do not enter its page cut.
 #[derive(Debug, PartialEq)]
 pub struct WorkerInteractionClaimPage {
     pub claims: Vec<WorkerInteractionClaim>,
     pub next_cursor: Option<WorkerInteractionPageCursor>,
 }
 
-/// Production durable interaction delivery and atomic lease-renewal adapter.
 pub struct DurableWorkerInteractionOutbound {
     storage: SqliteStorage,
     config: WorkerOutboundQueueConfig,
 }
 
 impl DurableWorkerInteractionOutbound {
-    /// Creates an adapter around its own `SQLite` connection and prepares the
-    /// restricted queue before the adapter can be injected.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded error for invalid limits, permissions, or schema setup.
     pub fn new(
         mut storage: SqliteStorage,
         config: WorkerOutboundQueueConfig,
@@ -186,18 +159,11 @@ impl DurableWorkerInteractionOutbound {
         Ok(Self { storage, config })
     }
 
-    /// Returns the canonical database path so the composition root can prove
-    /// this adapter and the Control Plane state storage use the same database.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         self.storage.database_path()
     }
 
-    /// Checkpoints the shared database and closes both adapter connections.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded unavailable error if checkpointing or close fails.
     pub fn close(self) -> Result<(), WorkerInteractionConnectionError> {
         Box::new(self.storage).close().map_err(|_| {
             WorkerInteractionConnectionError::new(
@@ -207,13 +173,6 @@ impl DurableWorkerInteractionOutbound {
         })
     }
 
-    /// Atomically renews an exact running Worker slot and retains the canonical
-    /// renewal frame. Returns its extended authority for the connection cache.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid protocol frames, foreign/stale slots, conflicting renewal
-    /// replays, and queue/storage failures. Failed enqueue rolls back renewal.
     pub fn renew_lease(
         &mut self,
         slot: &WorkerSlotAuthority,
@@ -266,12 +225,6 @@ impl DurableWorkerInteractionOutbound {
         Ok(route.authority)
     }
 
-    /// Claims and validates a stable page for one healthy reconnected Worker.
-    /// Both previously claimed and pending frames are returned until ack.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority/cursors and fails closed on any invalid frame.
     pub fn claim_page(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -301,14 +254,6 @@ impl DurableWorkerInteractionOutbound {
         })
     }
 
-    /// Claims the current queue cut and orders renewals before interactions,
-    /// including renewals that occur on later pages. Renewal order is preserved.
-    /// The queue's configured retained-byte limit bounds this batch in memory.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid authority, corrupt frames, and storage failures before
-    /// returning any message for delivery.
     pub fn claim_pending(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -338,11 +283,6 @@ impl DurableWorkerInteractionOutbound {
         Ok(claims)
     }
 
-    /// Reliably accepts an authenticated remote receipt before raw-frame cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign or unclaimed interaction receipts and storage failures.
     pub fn confirm_remote(
         &mut self,
         worker: &WorkerId,
@@ -357,11 +297,6 @@ impl DurableWorkerInteractionOutbound {
             .map_err(|error| map_connection_error(&error))
     }
 
-    /// Retries proven cleanup independently of repeated transport ACKs.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed durable proofs or failure to load the cleanup batch.
     pub fn retry_confirmed(
         &mut self,
         worker: &WorkerId,
@@ -374,11 +309,6 @@ impl DurableWorkerInteractionOutbound {
             .map_err(|error| map_connection_error(&error))
     }
 
-    /// Acknowledges a claimed message and securely removes its raw frame.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/foreign authority and unclaimed or conflicting messages.
     pub fn acknowledge(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -392,11 +322,6 @@ impl DurableWorkerInteractionOutbound {
             .map_err(|error| map_connection_error(&error))
     }
 
-    /// Clears all raw interaction frames after the exact slot is terminal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-terminal or foreign authority and storage failures.
     pub fn settle_terminal(
         &mut self,
         authority: &WorkerOutboundAuthority,

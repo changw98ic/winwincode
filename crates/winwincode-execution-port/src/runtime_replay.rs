@@ -1,11 +1,3 @@
-//! Worker-side handling for the generated `runtime.replay_request` message.
-//!
-//! The Control Plane sends this request to a Worker after reconnect.  This
-//! module owns only the Worker-side response seam: the caller injects the
-//! Worker-owned [`ReplayStore`] and the active-lease [`ReplayAuthority`].
-//! Product state, Delivery state, and the public Control Plane event cursor do
-//! not participate in the lookup.
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -28,22 +20,15 @@ use crate::transport::ExecutionPortCore;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_REPLAY_EVENTS: i64 = 10_000;
 
-/// Complete identity supplied to the Worker lease authority for replay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeReplayIdentity {
-    /// Current lease, attempt, Worker instance, and fencing token.
     pub lease: ExecutionLeaseStamp,
-    /// Worker process session identity.
     pub worker_session_id: WorkerSessionId,
-    /// Product session, optional stage run, Worker session, and Codex thread.
     pub session_identity: SessionIdentity,
-    /// Top-level runtime-event Codex thread identity.
     pub codex_thread_id: CodexThreadId,
 }
 
 impl RuntimeReplayIdentity {
-    /// Returns the canonical Worker-owned runtime stream for this exact lease
-    /// and source identity.
     #[must_use]
     pub fn stream_key(&self) -> ReplayStreamKey {
         runtime_stream_key(
@@ -82,12 +67,6 @@ impl RuntimeReplayIdentity {
     }
 }
 
-/// Stable Worker-owned stream identity for one runtime lease/session.
-///
-/// The key contains the complete execution identity and is length-prefixed so
-/// arbitrary field boundaries cannot collide.  It deliberately excludes the
-/// request id, message id, and cursor: retries and pages address the same
-/// Worker stream rather than creating a second cursor.
 #[must_use]
 pub fn runtime_replay_stream_key(request: &RuntimeReplayRequestMessage) -> ReplayStreamKey {
     runtime_stream_key(
@@ -98,12 +77,6 @@ pub fn runtime_replay_stream_key(request: &RuntimeReplayRequestMessage) -> Repla
     )
 }
 
-/// Returns the stream key used when a Worker retains one original runtime
-/// event frame.
-///
-/// A valid runtime event and its corresponding replay request produce the same
-/// key.  The top-level event `codexThreadId` is included separately so a
-/// malformed event cannot alias a valid session stream.
 #[must_use]
 pub fn runtime_event_stream_key(message: &RuntimeEventMessage) -> ReplayStreamKey {
     runtime_stream_key(
@@ -114,7 +87,6 @@ pub fn runtime_event_stream_key(message: &RuntimeEventMessage) -> ReplayStreamKe
     )
 }
 
-/// Returns the stream key addressed by a Control Plane runtime acknowledgement.
 #[must_use]
 pub fn runtime_ack_stream_key(message: &RuntimeAckMessage) -> ReplayStreamKey {
     runtime_stream_key(
@@ -157,61 +129,38 @@ fn runtime_stream_key(
     ReplayStreamKey::new(value)
 }
 
-/// A validated batch of original Worker runtime frames.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeReplayBatch {
-    /// Highest sequence the Control Plane has confirmed as accepted.
     pub ack_sequence: ExecutionAckSequence,
-    /// Highest contiguous sequence retained by the Worker.
     pub highest_sequence: ExecutionAckSequence,
-    /// Original typed runtime messages after the requested sequence.
     pub events: Vec<RuntimeEventMessage>,
 }
 
-/// Result of processing one Control Plane `runtime.ack` message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeReplayAckReceipt {
-    /// Status carried by the Control Plane acknowledgement.
     pub status: LeaseWriteStatus,
-    /// Durable Control Plane acknowledgement after processing.
     pub ack_sequence: ExecutionAckSequence,
-    /// Highest contiguous frame retained by the Worker.
     pub highest_sequence: ExecutionAckSequence,
-    /// Replay start carried by a gap acknowledgement.
     pub replay_from_sequence: Option<ExecutionSequence>,
-    /// Original frames returned for a gap acknowledgement.
     pub replay: Option<RuntimeReplayBatch>,
 }
 
-/// Output of the Worker-side runtime replay core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeReplayOutput {
-    /// Original runtime frames requested after a cursor.
     Replay(RuntimeReplayBatch),
-    /// Acknowledgement watermark processing result.
     Ack(RuntimeReplayAckReceipt),
 }
 
-/// Request-shape failures detected before the Worker store is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeReplayRequestError {
-    /// The generated discriminator is not `runtime.replay_request`.
     WrongKind,
-    /// The generated schema version is not supported by this Worker core.
     UnsupportedSchema,
-    /// A required identity string is empty.
     EmptyIdentity,
-    /// The lease attempt is not positive.
     InvalidAttempt,
-    /// The lease fencing token is not canonical decimal text.
     InvalidFencingToken,
-    /// The requested acknowledgement is negative.
     NegativeAfterSequence,
-    /// The requested acknowledgement exceeds the public safe integer range.
     SequenceOutOfRange,
-    /// The requested page size is outside the wire contract.
     InvalidMaxEvents,
-    /// The duplicated `WorkerSession` fields do not agree.
     WorkerSessionMismatch,
 }
 
@@ -235,30 +184,18 @@ impl fmt::Display for RuntimeReplayRequestError {
 
 impl std::error::Error for RuntimeReplayRequestError {}
 
-/// Event-shape failures detected before retention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeReplayEventError {
-    /// The generated discriminator is not `runtime.event`.
     WrongKind,
-    /// The generated schema version is unsupported.
     UnsupportedSchema,
-    /// A required identity string is empty.
     EmptyIdentity,
-    /// The event sequence is negative or zero.
     InvalidSequence,
-    /// The event sequence exceeds the public safe integer range.
     SequenceOutOfRange,
-    /// The lease attempt is not positive.
     InvalidAttempt,
-    /// The lease fencing token is not canonical decimal text.
     InvalidFencingToken,
-    /// The duplicated `WorkerSession` fields do not agree.
     WorkerSessionMismatch,
-    /// The duplicated Codex thread fields do not agree.
     CodexThreadMismatch,
-    /// The event has no stable event identifier.
     EmptyEventId,
-    /// The generated event could not be encoded canonically.
     Serialization,
 }
 
@@ -282,34 +219,22 @@ impl fmt::Display for RuntimeReplayEventError {
 
 impl std::error::Error for RuntimeReplayEventError {}
 
-/// Acknowledgement-shape failures detected before the Worker store changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeReplayAckError {
-    /// The generated discriminator is not `runtime.ack`.
     WrongKind,
-    /// The generated schema version is unsupported.
     UnsupportedSchema,
-    /// A required identity string is empty.
     EmptyIdentity,
-    /// The lease attempt is not positive.
     InvalidAttempt,
     /// The acknowledgement message identifier is not canonical.
     InvalidMessageId,
     /// The acknowledgement time is malformed or predates its original frame.
     InvalidTime,
-    /// The lease fencing token is not canonical decimal text.
     InvalidFencingToken,
-    /// The acknowledgement sequence is negative.
     NegativeSequence,
-    /// A sequence exceeds the public safe integer range.
     SequenceOutOfRange,
-    /// The duplicated `WorkerSession` fields do not agree.
     WorkerSessionMismatch,
-    /// A gap acknowledgement omitted its replay start.
     GapReplayMissing,
-    /// A gap acknowledgement did not point to the next missing sequence.
     GapReplayMismatch,
-    /// A non-gap acknowledgement supplied a replay start.
     UnexpectedReplayStart,
 }
 
@@ -343,24 +268,15 @@ impl fmt::Display for RuntimeReplayAckError {
 
 impl std::error::Error for RuntimeReplayAckError {}
 
-/// Corruption found in one retained Worker frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeReplayFrameError {
-    /// The durable frame has no bytes.
     Empty,
-    /// The durable frame is not a generated runtime event.
     Malformed,
-    /// The frame bytes differ from canonical generated JSON.
     NonCanonical,
-    /// The frame digest differs from canonical generated JSON.
     DigestMismatch,
-    /// The frame discriminator is not `runtime.event`.
     WrongKind,
-    /// The frame schema version is unsupported.
     UnsupportedSchema,
-    /// The frame identity differs from the stored row or request.
     IdentityMismatch,
-    /// The frame sequence differs from the stored row.
     SequenceMismatch,
 }
 
@@ -381,27 +297,17 @@ impl fmt::Display for RuntimeReplayFrameError {
 
 impl std::error::Error for RuntimeReplayFrameError {}
 
-/// Failure from request validation, Worker authority, durable state, or a
-/// retained frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RuntimeReplayError<AuthorityError, StoreError> {
-    /// The request shape was rejected before any store read.
     Request(RuntimeReplayRequestError),
-    /// The event shape was rejected before retention.
     Event(RuntimeReplayEventError),
-    /// The acknowledgement shape was rejected before state mutation.
     Acknowledgement(RuntimeReplayAckError),
-    /// The active Worker lease/fence authority rejected the request.
     Replay(ReplayError<AuthorityError, StoreError>),
-    /// A retained frame could not be returned as the requested generated type.
     Frame {
         sequence: ReplaySequence,
         error: RuntimeReplayFrameError,
     },
-    /// The durable acknowledgement cannot be represented by the generated
-    /// `ExecutionAckSequence` field.
     AckOutOfRange,
-    /// A caller sent a different message union member to this Worker core.
     UnsupportedMessage,
 }
 
@@ -432,14 +338,12 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Stateless Worker-side responder over an injected durable replay store.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuntimeReplayResponder {
     machine: ReplayStateMachine,
 }
 
 impl RuntimeReplayResponder {
-    /// Creates a responder with no in-memory authority or cursor state.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -447,17 +351,6 @@ impl RuntimeReplayResponder {
         }
     }
 
-    /// Retains one generated runtime event before the Worker sends it.
-    ///
-    /// The canonical generated JSON is retained as the original frame, while
-    /// the nested event record supplies the semantic SHA-256 duplicate digest.
-    /// The replay state machine owns lease, ordering, duplicate, and conflict
-    /// handling.
-    ///
-    /// # Errors
-    ///
-    /// Returns before a store write for malformed event fields, then forwards
-    /// authority, durable state, and append failures.
     pub fn retain_runtime_event<S, A>(
         &self,
         store: &mut S,
@@ -494,13 +387,6 @@ impl RuntimeReplayResponder {
             .map_err(RuntimeReplayError::Replay)
     }
 
-    /// Reads and decodes original frames after the request's acknowledged
-    /// sequence.  The injected store remains the only source of durable state.
-    ///
-    /// # Errors
-    ///
-    /// Returns before a store read for malformed request fields, then forwards
-    /// active-lease, store, corruption, cursor, and frame failures.
     pub fn resume<S, A>(
         &self,
         store: &mut S,
@@ -549,9 +435,6 @@ impl RuntimeReplayResponder {
     /// execution authority. This only proves transport cleanup; it cannot
     /// advance a watermark or authorize execution. The caller must use the
     /// normal acknowledgement path when no exact retained proof exists.
-    ///
-    /// # Errors
-    ///
     /// Returns malformed acknowledgement, corrupt original frame or storage
     /// failures before any mutation.
     pub fn retained_acknowledgement<S, A>(
@@ -624,16 +507,6 @@ impl RuntimeReplayResponder {
         }))
     }
 
-    /// Processes one Control Plane `runtime.ack` message.
-    ///
-    /// Accepted and duplicate statuses advance the durable acknowledgement
-    /// watermark monotonically. A gap status leaves that watermark unchanged
-    /// and returns original retained frames from `replayFromSequence`.
-    ///
-    /// # Errors
-    ///
-    /// Returns malformed acknowledgement fields before a store write, then
-    /// forwards authority, durable state, cursor, and frame failures.
     pub fn acknowledge<S, A>(
         &self,
         store: &mut S,
@@ -654,10 +527,6 @@ impl RuntimeReplayResponder {
 
         let (ack_sequence, replay) = match message.status {
             LeaseWriteStatus::Duplicate if validated.ack_sequence <= before.ack_sequence => {
-                // The Control Plane can deliver an older duplicate response
-                // after a later contiguous acknowledgement was already
-                // applied. Its authority and shape were validated above; the
-                // durable high-water mark remains the canonical receipt.
                 (before.ack_sequence, None)
             }
             LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate => {
@@ -712,8 +581,6 @@ impl RuntimeReplayResponder {
     }
 }
 
-/// Worker-side `ExecutionPortCore` for CP→Worker replay requests and
-/// acknowledgements. Local and remote adapters call this same responder.
 pub struct RuntimeReplayCore<S, A> {
     responder: RuntimeReplayResponder,
     store: S,
@@ -721,8 +588,6 @@ pub struct RuntimeReplayCore<S, A> {
 }
 
 impl<S, A> RuntimeReplayCore<S, A> {
-    /// Creates a Worker replay core over caller-owned durable state and lease
-    /// authority.
     #[must_use]
     pub const fn new(store: S, authority: A) -> Self {
         Self {
@@ -732,11 +597,6 @@ impl<S, A> RuntimeReplayCore<S, A> {
         }
     }
 
-    /// Retains one runtime event in the injected Worker store before sending.
-    ///
-    /// # Errors
-    ///
-    /// Forwards retention validation, authority, and durable-state errors.
     pub fn retain_runtime_event(
         &mut self,
         message: &RuntimeEventMessage,
@@ -749,8 +609,6 @@ impl<S, A> RuntimeReplayCore<S, A> {
             .retain_runtime_event(&mut self.store, &self.authority, message)
     }
 
-    /// Returns the injected store so a caller can close or replace the Worker
-    /// process while preserving durable state in the adapter.
     #[must_use]
     pub fn into_store(self) -> S {
         self.store

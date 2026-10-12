@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Responses transport to the embedded Core's `ModelPort` event format.
-//! Preserve response item IDs, message phase and encrypted reasoning for later turns.
-
 use crate::{
     CanonicalModelStreamFrame, CredentialOutputBoundary, HttpsSseProviderCompletion,
     HttpsSseProviderError, HttpsSseProviderErrorKind, ModelAttemptFailureFact,
@@ -143,7 +140,6 @@ fn prepare(
     request.insert("stream".into(), json!(true));
     request.insert("store".into(), json!(false));
     request.entry("instructions").or_insert_with(|| json!(""));
-    // The subscription endpoint rejects API-only sampling/output-limit parameters.
     if codex_backend {
         for key in ["max_output_tokens", "temperature", "top_p"] {
             request.remove(key);
@@ -505,7 +501,6 @@ impl<'a> Responses<'a> {
                 });
                 None
             }
-            // These events carry bookkeeping already present in completed response items.
             "response.in_progress"
             | "response.content_part.added"
             | "response.content_part.done"

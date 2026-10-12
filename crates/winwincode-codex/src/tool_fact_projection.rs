@@ -23,8 +23,6 @@ use winwincode_kernel::KernelToolRuntimeEvent;
 const CONTENT_TYPE: &str = "application/vnd.winwincode.core-tool-fact+json";
 
 impl ProductionCodexAdapter {
-    /// Request the final Core close and forward recorded receipts while it
-    /// finishes. Seal the final cursor only after that same owner has closed.
     pub(super) async fn poll_final_tool_facts(
         &mut self,
         run_key: &str,
@@ -47,10 +45,6 @@ impl ProductionCodexAdapter {
         let thread_id = run.binding.canonical_thread_id.clone();
         let kernel_close_pending = run.kernel_close_pending;
         self.fence_thread(&thread_id, now)?;
-        // Core can persist closed-cell facts before a shutdown hook or MCP client
-        // finishes. Forward that evidence between close attempts; withholding it
-        // can strand a caller that needs the fact to release its external wait.
-        // Start shutdown first so a running producer cannot prolong this drain.
         if kernel_close_pending
             && let Some(fact) = self.poll_tool_facts(run_key, &session, now).await?
         {
@@ -64,8 +58,6 @@ impl ProductionCodexAdapter {
         {
             match self.kernel.close_session(&session).await {
                 Ok(()) => {}
-                // The original terminal remains authoritative while the same
-                // Core session finishes closing. A later poll can wait again.
                 Err(error) if error.code() == "SESSION_SHUTDOWN_TIMEOUT" => {
                     self.runs
                         .get_mut(run_key)
@@ -92,8 +84,6 @@ impl ProductionCodexAdapter {
         Ok(None)
     }
 
-    /// Drain original Core receipts before consuming a terminal Codex event.
-    /// The single pending frame bridges crashes between replay, outbox and cursor commits.
     pub(super) async fn poll_tool_facts(
         &mut self,
         run_key: &str,
@@ -180,8 +170,6 @@ impl ProductionCodexAdapter {
                 }
             }
         } else {
-            // Before first retention, a lease extension may refresh the transport
-            // stamp. Once retained, the original frame remains immutable.
             if message.lease != identity.lease {
                 message.lease = identity.lease.clone();
                 self.runs
@@ -206,8 +194,6 @@ impl ProductionCodexAdapter {
         let acked = snapshot.ack_sequence
             >= u64::try_from(message.event.sequence.0).map_err(|_| unavailable())?;
         if !acked {
-            // Idempotent insertion also repairs a crash after replay retention but
-            // before the first outbox insertion. ACKed frames remain compacted.
             self.outbox
                 .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
                 .map_err(map_store_error)?;

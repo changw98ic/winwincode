@@ -50,7 +50,6 @@ pub(crate) fn ledger_state(bytes: usize) {
 }
 
 mod fixture {
-    // Reuse the canonical local lease/dispatch/WorkRun/SessionBinding fixture.
     include!("../tests/durable_execution_port_ingress.rs");
     include!("storage_runtime_regression.rs");
     include!("storage_runtime_indexed_faults.rs");

@@ -1,44 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bidirectional sequence allocation and acknowledgement cursors.
-//!
-//! Both directions of one exchange number frames from 1 with no gaps
-//! (`两个流各自从 1 开始连续递增`). The sender side allocates sequences through
-//! [`SequenceAllocator`] immediately before the durable outbox append; the
-//! receiver side tracks the contiguous acknowledgement through [`AckCursor`].
-//!
-//! `ackSequence` means the highest consecutively accepted sequence, never the
-//! highest sequence seen (`ackSequence 表示接收方已连续接受的最大 sequence，
-//! 而不是“见过的最大值”`). A sequence beyond the cursor is a gap: the
-//! acknowledgement stays where it is and the receiver returns
-//! `replayFromSequence` pointing at the first missing frame.
-
-/// Sequence numbers of one exchange stream.
 pub type Sequence = u64;
 
-/// Sender-side sequence allocation for one stream.
-///
-/// The allocator is the in-memory cursor; the durable outbox append is the
-/// crash-safe boundary (`先持久化再发送`), so a sender restores the allocator
-/// from the outbox cursor after a restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceAllocator {
     next: Sequence,
 }
 
 impl SequenceAllocator {
-    /// Creates an allocator whose first sequence is 1.
     #[must_use]
     pub const fn new() -> Self {
         Self { next: 1 }
     }
 
-    /// Restores an allocator from the durable outbox cursor. `next` is the
-    /// sequence the next appended frame must carry.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `next` is zero; sequences start at 1.
     pub const fn from_next(next: Sequence) -> Result<Self, SequenceError> {
         if next == 0 {
             return Err(SequenceError::ZeroSequence);
@@ -46,17 +20,11 @@ impl SequenceAllocator {
         Ok(Self { next })
     }
 
-    /// Returns the sequence the next allocation will hand out.
     #[must_use]
     pub const fn peek_next(&self) -> Sequence {
         self.next
     }
 
-    /// Allocates the next sequence of the stream.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the sequence space is exhausted at [`u64::MAX`].
     pub const fn allocate(&mut self) -> Result<Sequence, SequenceError> {
         let allocated = self.next;
         match self.next.checked_add(1) {
@@ -75,81 +43,55 @@ impl Default for SequenceAllocator {
     }
 }
 
-/// Sequence allocation failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceError {
-    /// Sequence zero does not exist; sequences start at 1.
     ZeroSequence,
-    /// The sequence space is exhausted at [`u64::MAX`].
     Overflow,
 }
 
-/// Receiver-side contiguous acknowledgement cursor for one stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AckCursor {
     ack_sequence: Sequence,
 }
 
-/// Result of observing one inbound sequence against an [`AckCursor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceVerdict {
-    /// The sequence is exactly the cursor's next expected frame.
     Accept,
-    /// The sequence is at or below the contiguous acknowledgement; it was
-    /// already accepted.
     Duplicate,
-    /// The sequence is beyond the next expected frame; the receiver keeps its
-    /// acknowledgement and asks for a replay from the first missing sequence.
-    Gap {
-        /// The first sequence the sender must replay (`replayFromSequence`).
-        replay_from_sequence: Sequence,
-    },
-    /// Sequence zero does not exist; sequences start at 1.
+    Gap { replay_from_sequence: Sequence },
     Zero,
 }
 
-/// Contiguous acknowledgement advancement failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckAdvanceError {
-    /// The cursor is saturated at [`u64::MAX`] and cannot advance further.
     Overflow,
-    /// Only the consecutive next sequence may advance the cursor
-    /// (`ack 推进只认连续`).
     NotContiguous {
-        /// The current acknowledgement.
         ack_sequence: Sequence,
-        /// The rejected sequence.
         sequence: Sequence,
     },
 }
 
 impl AckCursor {
-    /// Creates a cursor that has accepted nothing yet.
     #[must_use]
     pub const fn new() -> Self {
         Self { ack_sequence: 0 }
     }
 
-    /// Restores a cursor from a persisted acknowledgement.
     #[must_use]
     pub const fn from_ack(ack_sequence: Sequence) -> Self {
         Self { ack_sequence }
     }
 
-    /// Returns the highest consecutively accepted sequence.
     #[must_use]
     pub const fn ack_sequence(&self) -> Sequence {
         self.ack_sequence
     }
 
-    /// Returns the sequence the next accepted frame must carry, or `None`
-    /// once the cursor saturated at [`u64::MAX`].
     #[must_use]
     pub const fn next_expected(&self) -> Option<Sequence> {
         self.ack_sequence.checked_add(1)
     }
 
-    /// Classifies one inbound sequence without mutating the cursor.
     #[must_use]
     pub fn observe(&self, sequence: Sequence) -> SequenceVerdict {
         if sequence == 0 {
@@ -160,17 +102,10 @@ impl AckCursor {
             Some(expected) if sequence > expected => SequenceVerdict::Gap {
                 replay_from_sequence: expected,
             },
-            // Below the cursor, or the cursor saturated at u64::MAX.
             None | Some(_) => SequenceVerdict::Duplicate,
         }
     }
 
-    /// Advances the contiguous acknowledgement by exactly one frame.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `sequence` is not the consecutive next sequence or the
-    /// cursor saturated at [`u64::MAX`].
     pub const fn advance(&mut self, sequence: Sequence) -> Result<(), AckAdvanceError> {
         match self.next_expected() {
             None => Err(AckAdvanceError::Overflow),

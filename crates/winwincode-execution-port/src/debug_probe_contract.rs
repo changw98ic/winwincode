@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical semantic validation for one bounded `DebugProbe` round.
-//!
-//! The generated module owns wire shape. This module owns relationships that
-//! JSON Schema cannot express: content-derived digests, exact authority and
-//! intent bindings, aggregate budgets, receipt consistency, and ordered event
-//! transitions. Host command admission and resource recomputation remain
-//! Worker responsibilities and must happen after this seal and before spawn.
-
 use std::{collections::HashSet, fmt};
 
 use sha2::{Digest as _, Sha256};
@@ -30,7 +22,6 @@ const BUDGET_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-probe.budget.v1\0";
 const PLAN_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-probe.plan.v1\0";
 const EXECUTION_ID_DOMAIN: &[u8] = b"winwincode.debug-probe.execution-id.v1\0";
 
-/// Secret-safe semantic validation failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DebugProbeContractError {
     code: DebugProbeErrorCode,
@@ -38,13 +29,11 @@ pub struct DebugProbeContractError {
 }
 
 impl DebugProbeContractError {
-    /// Returns the canonical wire error category.
     #[must_use]
     pub const fn code(&self) -> &DebugProbeErrorCode {
         &self.code
     }
 
-    /// Returns a bounded message that never echoes command or resource input.
     #[must_use]
     pub const fn message(&self) -> &'static str {
         self.message
@@ -59,8 +48,6 @@ impl fmt::Display for DebugProbeContractError {
 
 impl std::error::Error for DebugProbeContractError {}
 
-/// One probe whose wire shape, content digest, budget, and execution identity
-/// were sealed against its parent plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedProbe {
     ordinal: usize,
@@ -70,32 +57,27 @@ pub struct ValidatedProbe {
 }
 
 impl ValidatedProbe {
-    /// Stable zero-based position in the canonical plan.
     #[must_use]
     pub const fn ordinal(&self) -> usize {
         self.ordinal
     }
 
-    /// Exact generated specification retained by the plan.
     #[must_use]
     pub const fn spec(&self) -> &ProbeSpec {
         &self.spec
     }
 
-    /// Host-derived identity for this exact plan authority and definition.
     #[must_use]
     pub const fn execution_id(&self) -> &ProbeExecutionId {
         &self.execution_id
     }
 
-    /// Canonical encoded argv byte count verified during sealing.
     #[must_use]
     pub const fn command_arg_bytes(&self) -> i64 {
         self.command_arg_bytes
     }
 }
 
-/// An owned plan that passed every contract-level semantic check.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedDebugProbePlan {
     plan: DebugProbePlan,
@@ -103,19 +85,16 @@ pub struct ValidatedDebugProbePlan {
 }
 
 impl ValidatedDebugProbePlan {
-    /// Exact generated plan retained by the seal.
     #[must_use]
     pub const fn plan(&self) -> &DebugProbePlan {
         &self.plan
     }
 
-    /// Canonically ordered sealed probes.
     #[must_use]
     pub fn probes(&self) -> &[ValidatedProbe] {
         &self.probes
     }
 
-    /// Finds one sealed probe by its plan-local identity.
     #[must_use]
     pub fn probe_by_id(&self, probe_id: &ProbeId) -> Option<&ValidatedProbe> {
         self.probes
@@ -123,21 +102,18 @@ impl ValidatedDebugProbePlan {
             .find(|probe| probe.spec.probe_id == *probe_id)
     }
 
-    /// Builds the canonical identity for one probe in this sealed plan.
     #[must_use]
     pub fn probe_identity(&self, probe_id: &ProbeId) -> Option<DebugProbeIdentity> {
         self.probe_by_id(probe_id)
             .map(|probe| probe_identity(&self.plan.authority, probe))
     }
 
-    /// Consumes the seal and returns the original generated plan.
     #[must_use]
     pub fn into_plan(self) -> DebugProbePlan {
         self.plan
     }
 }
 
-/// An owned intent bound to one sealed probe and plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedProbeExecutionIntent {
     intent: ProbeExecutionIntent,
@@ -145,34 +121,22 @@ pub struct ValidatedProbeExecutionIntent {
 }
 
 impl ValidatedProbeExecutionIntent {
-    /// Exact generated intent retained by the seal.
     #[must_use]
     pub const fn intent(&self) -> &ProbeExecutionIntent {
         &self.intent
     }
 
-    /// Sealed probe addressed by this intent.
     #[must_use]
     pub const fn probe(&self) -> &ValidatedProbe {
         &self.probe
     }
 
-    /// Consumes the seal and returns the original generated intent.
     #[must_use]
     pub fn into_intent(self) -> ProbeExecutionIntent {
         self.intent
     }
 }
 
-/// Returns the byte length of the canonical argv encoding.
-///
-/// The encoding is an unsigned 64-bit big-endian argument count followed by
-/// each UTF-8 argument framed with its unsigned 64-bit big-endian byte length.
-/// This is independent of shell quoting and platform argument rendering.
-///
-/// # Errors
-///
-/// Rejects an empty, oversized, NUL-containing, or aggregate-oversized argv.
 pub fn derive_probe_command_arg_bytes(argv: &[String]) -> Result<i64, DebugProbeContractError> {
     if argv.is_empty() || argv.len() > 64 {
         return Err(invalid_probe("probe argv count is invalid"));
@@ -195,12 +159,6 @@ pub fn derive_probe_command_arg_bytes(argv: &[String]) -> Result<i64, DebugProbe
     i64::try_from(bytes).map_err(|_| invalid_probe("probe argv byte count overflowed"))
 }
 
-/// Derives the canonical digest of a probe definition, excluding the digest
-/// field itself.
-///
-/// # Errors
-///
-/// Rejects a structurally or semantically invalid specification.
 pub fn derive_probe_definition_digest(
     spec: &ProbeSpec,
 ) -> Result<Sha256Digest, DebugProbeContractError> {
@@ -232,12 +190,6 @@ pub fn derive_probe_definition_digest(
     Ok(digest.finish())
 }
 
-/// Derives the canonical digest of a round budget, excluding the digest field
-/// itself.
-///
-/// # Errors
-///
-/// Rejects values outside the generated hard bounds.
 pub fn derive_probe_budget_digest(
     budget: &ProbeRoundBudget,
 ) -> Result<Sha256Digest, DebugProbeContractError> {
@@ -253,15 +205,6 @@ pub fn derive_probe_budget_digest(
     Ok(digest.finish())
 }
 
-/// Derives the canonical digest of one plan, excluding all supplied digest
-/// fields and using freshly derived probe and budget digests.
-///
-/// Probe order is significant. Set-valued fields inside a probe are sorted by
-/// their canonical text or numeric representation before hashing.
-///
-/// # Errors
-///
-/// Rejects invalid authority, plan, probe, budget, or completion-rule input.
 pub fn derive_debug_probe_plan_digest(
     plan: &DebugProbePlan,
 ) -> Result<Sha256Digest, DebugProbeContractError> {
@@ -279,11 +222,6 @@ pub fn derive_debug_probe_plan_digest(
     Ok(digest.finish())
 }
 
-/// Derives the identity for one exact scheduled probe execution.
-///
-/// # Errors
-///
-/// Rejects malformed authority, plan digest, or probe input.
 pub fn derive_probe_execution_id(
     authority: &DebugProbeRoundAuthority,
     plan_digest: &Sha256Digest,
@@ -300,12 +238,6 @@ pub fn derive_probe_execution_id(
     Ok(ProbeExecutionId(digest.finish().0))
 }
 
-/// Confirms that presented round authority exactly matches the current host
-/// authority.
-///
-/// # Errors
-///
-/// Rejects malformed current authority or any stale/foreign presented field.
 pub fn validate_debug_probe_round_authority(
     actual: &DebugProbeRoundAuthority,
     expected: &DebugProbeRoundAuthority,
@@ -319,12 +251,6 @@ pub fn validate_debug_probe_round_authority(
     Ok(())
 }
 
-/// Seals one generated plan against current host authority.
-///
-/// # Errors
-///
-/// Rejects stale authority, changed derivations, duplicate probe IDs, aggregate
-/// budget overflow, and unsupported `first_conclusive` completion.
 pub fn seal_debug_probe_plan(
     plan: DebugProbePlan,
     expected_authority: &DebugProbeRoundAuthority,
@@ -422,12 +348,6 @@ pub fn seal_debug_probe_plan(
     Ok(ValidatedDebugProbePlan { plan, probes })
 }
 
-/// Seals one durable intent against a validated plan.
-///
-/// # Errors
-///
-/// Rejects changed schema, plan, probe definition, authority, execution ID, or
-/// creation order.
 pub fn seal_probe_execution_intent(
     intent: ProbeExecutionIntent,
     plan: &ValidatedDebugProbePlan,
@@ -456,11 +376,6 @@ pub fn seal_probe_execution_intent(
     })
 }
 
-/// Validates one terminal execution receipt against its exact durable intent.
-///
-/// # Errors
-///
-/// Rejects identity, plan, time, output, artifact, or status/error drift.
 pub fn validate_probe_execution_receipt(
     receipt: &ProbeExecutionReceipt,
     intent: &ValidatedProbeExecutionIntent,
@@ -611,12 +526,6 @@ fn validate_reducer_supplement(
     Ok(())
 }
 
-/// Validates the complete strictly ordered event history for one probe.
-///
-/// # Errors
-///
-/// Rejects gaps, changed identity, illegal transitions, post-terminal events,
-/// invalid times, or artifacts before the terminal event.
 pub fn validate_probe_execution_events(
     events: &[ProbeExecutionEvent],
     intent: &ValidatedProbeExecutionIntent,
@@ -670,12 +579,6 @@ pub fn validate_probe_execution_events(
     Ok(())
 }
 
-/// Validates a terminal probe event history against its terminal receipt.
-///
-/// # Errors
-///
-/// Returns the event or receipt error, or rejects a missing/changed terminal
-/// status, finish time, or Artifact projection.
 pub fn validate_probe_execution_history(
     events: &[ProbeExecutionEvent],
     receipt: &ProbeExecutionReceipt,
@@ -698,12 +601,6 @@ pub fn validate_probe_execution_history(
     Ok(())
 }
 
-/// Validates the complete strictly ordered event history for one probe round.
-///
-/// # Errors
-///
-/// Rejects gaps, changed authority, illegal transitions, post-terminal events,
-/// or invalid time/summary values.
 pub fn validate_probe_round_events(
     events: &[ProbeRoundEvent],
     plan: &ValidatedDebugProbePlan,
@@ -747,12 +644,6 @@ pub fn validate_probe_round_events(
     Ok(())
 }
 
-/// Validates a terminal round event history against its terminal receipt.
-///
-/// # Errors
-///
-/// Returns the event or receipt error, or rejects a missing/changed terminal
-/// status or finish time.
 pub fn validate_probe_round_history(
     events: &[ProbeRoundEvent],
     receipt: &ProbeRoundReceipt,
@@ -774,12 +665,6 @@ pub fn validate_probe_round_history(
     Ok(())
 }
 
-/// Validates one terminal round receipt and every nested probe receipt.
-///
-/// # Errors
-///
-/// Rejects authority, plan, coverage, order, status, completion, time, or
-/// audited-budget drift.
 pub fn validate_probe_round_receipt(
     receipt: &ProbeRoundReceipt,
     plan: &ValidatedDebugProbePlan,

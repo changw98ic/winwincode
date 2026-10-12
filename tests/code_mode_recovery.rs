@@ -1,4 +1,3 @@
-//! Rebuild the product Kernel at an observed model boundary, then resume its rollout.
 use super::*;
 use sha2::{Digest, Sha256};
 use winwincode_kernel::{
@@ -136,7 +135,6 @@ async fn rebuild_diagnostic_boundary(queued: bool) {
         .unwrap();
     let database = state_database(&fixture);
     if queued {
-        // Stop delivery before staging, after real tool calls have queued the question.
         database.execute_batch("CREATE TRIGGER pause_diagnostic_staging BEFORE INSERT ON tool_diagnostic_feedback BEGIN SELECT RAISE(FAIL, 'diagnostic staging interrupted'); END;").unwrap();
     }
     kernel
@@ -331,7 +329,6 @@ fn assert_explanation_response(
     delivered: Vec<Value>,
 ) {
     let expected_explanation = model.explanation.lock().unwrap().clone().unwrap();
-    // Use the actual persisted assistant item, including its transport-assigned identity.
     let explanation = std::fs::read_to_string(rollout_path)
         .unwrap()
         .lines()
@@ -347,8 +344,6 @@ fn assert_explanation_response(
     let explanation: codex_protocol::models::ResponseItem =
         serde_json::from_value(explanation).unwrap();
     let mut explanation = serde_json::to_value(explanation).unwrap();
-    // History adds the turn metadata after observing the response. The response
-    // fact separately stores that turn identity and hashes the incoming item.
     explanation
         .as_object_mut()
         .unwrap()

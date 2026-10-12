@@ -59,15 +59,8 @@ pub(crate) struct SharedAuthoritySource {
     /// Cancellation closes the complete run. Durable lineage remains readable
     /// for original receipts, but cannot reinstall a live root or child alias.
     fenced_runs: Arc<RwLock<HashSet<String>>>,
-    /// Exact authority for every Core thread in a run, including spawned
-    /// descendants.  The job-key map above remains the trusted root lease;
-    /// this map prevents a child from inheriting authority merely because it
-    /// carries the same job id.
     lineage: Arc<RwLock<HashMap<String, ModelLeaseAuthority>>>,
-    /// Worker-owned durable backing for exact root/child lineage.  Tests that
-    /// exercise only the protocol source can use the default in-memory mode.
     store: Option<AdapterStore>,
-    /// Authority time keeps advancing when the owner has no new clock sample.
     authority_clock: AuthorityClock,
 }
 
@@ -276,9 +269,6 @@ impl SharedAuthoritySource {
                     existing_run_key == run_key
                         && same_binding_with_extended_lease(&existing, &authority)
                 });
-        // A durable source is authoritative for run identity.  The
-        // process-local job map stores only the lease authority, so it cannot
-        // make a root with a different run key look idempotent.
         let same_root = if self.store.is_some() {
             persisted_root_same
         } else {
@@ -289,9 +279,6 @@ impl SharedAuthoritySource {
         self.write_authorities()?
             .insert(job_id.clone(), authority.clone());
         let mut lineage = self.write_lineage()?;
-        // A replacement lease invalidates all old descendants before a new
-        // root is made available.  Never leave an old child bound to a new
-        // attempt/fencing token.
         if same_root {
             lineage.retain(|_, candidate| {
                 if candidate.lease.job_id.0 != job_id {
@@ -700,10 +687,6 @@ impl KernelStreamSink {
     ) -> Result<mpsc::UnboundedReceiver<KernelStreamItem>, BridgeError> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut streams = self.lock()?;
-        // A reopened Core model stream for the same durable exchange replaces
-        // the previous sender. Closing the old sender wakes any abandoned
-        // reader so Core can attach to the fresh channel instead of hanging
-        // on a stream whose Provider frames were never fully delivered.
         streams.insert(exchange.0.clone(), sender);
         Ok(receiver)
     }
@@ -980,12 +963,6 @@ impl ExecutionPortModelBridge {
         self.fence_action_sessions(stale)
     }
 
-    /// Detaches the live model binding while retaining the exact replay
-    /// authority for durable terminal deliveries. A Worker may close the
-    /// embedded Core session before the Control Plane acknowledges the final
-    /// `RuntimeEvent` or `JobOutcome`; those acknowledgements still need the
-    /// original lease/session lineage for validation. A later attempt replaces
-    /// this authority through `install_binding`, invalidating the predecessor.
     pub(crate) fn detach_binding(&self, binding: &ModelRunBinding) -> Result<(), BridgeError> {
         let aliases = self.authority.detach_run(&binding.run_key)?;
         self.fence_action_sessions(aliases)
@@ -1017,8 +994,6 @@ impl ExecutionPortModelBridge {
         Ok(())
     }
 
-    /// Closes the provider-side lifecycle in the durable ledger. A local
-    /// cancellation has a terminal cursor without a complete response seal.
     fn mark_provider_final(
         &self,
         owner: &ModelExchangeOwner,
@@ -1037,9 +1012,6 @@ impl ExecutionPortModelBridge {
             })
     }
 
-    /// Retains a contiguous Provider frame and forwards any payload text to a
-    /// still-live Core sink so a verifier final response is not lost after
-    /// Device has already produced it.
     fn retain_and_forward_frame(
         &self,
         chunk: &ModelChunkMessage,
@@ -1065,12 +1037,6 @@ impl ExecutionPortModelBridge {
         Ok(())
     }
 
-    /// Reserves the frame in the durable ledger before Core sees it, then hands
-    /// the frame to Core and maps a Core rejection onto the canonical
-    /// dispositions. Returns the disposition and whether the ledger already
-    /// held this frame. A gap or changed duplicate is left to
-    /// `WorkerModelPortClient` so it can emit the canonical Gap/Conflict
-    /// acknowledgement instead of poisoning the durable response sequence.
     async fn reserve_and_accept(
         &self,
         client: &mut ModelClient,
@@ -1083,9 +1049,6 @@ impl ExecutionPortModelBridge {
         let pre_retained = if exact_duplicate {
             true
         } else if contiguous_new {
-            // Note: this path does not log a retention failure (unlike
-            // `retain_and_forward_frame`) — the caller surfaces it as a hard
-            // error on the control path instead.
             validate_chunk_for_retention(chunk)?;
             self.ordinal_store
                 .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
@@ -1100,16 +1063,11 @@ impl ExecutionPortModelBridge {
                 confirmed_sequence: u64::try_from(chunk.sequence.0)
                     .map_err(|_| BridgeError::InvalidPayload)?,
             },
-            Err(_) if pre_retained => {
-                // The durable ledger already has this exact Provider frame.
-                // Core can reopen and replay it; failing the Worker poll here
-                // only blocks later contiguous frames behind this chunk.
-                ModelChunkDisposition::Delivered {
-                    confirmed_sequence: u64::try_from(chunk.sequence.0)
-                        .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk_termination(chunk),
-                }
-            }
+            Err(_) if pre_retained => ModelChunkDisposition::Delivered {
+                confirmed_sequence: u64::try_from(chunk.sequence.0)
+                    .map_err(|_| BridgeError::InvalidPayload)?,
+                termination: chunk_termination(chunk),
+            },
             Err(_) => return Err(BridgeError::Protocol),
         };
         Ok((disposition, pre_retained))
@@ -1219,15 +1177,8 @@ impl ExecutionPortModelBridge {
         };
         self.validate_chunk_authority(chunk, &binding, received_at)
             .inspect_err(|error| log_model_intake_failure(chunk, "authority", *error))?;
-        // The sink can wake Core synchronously while `accept_chunk` is
         // awaiting. The shared authority clock advances before Core receives
         // the frame, so model and action gates observe the same trusted time.
-        // Keep the exact response frame before handing it to Core.  This
-        // closes the crash window where Core has consumed a final chunk but
-        // the private replay ledger has not yet been written.  A gap or a
-        // changed duplicate is left to WorkerModelPortClient so it can emit
-        // the canonical Gap/Conflict acknowledgement instead of poisoning
-        // the durable response sequence.
         let mut client = self.client.lock().await;
         let (mut exact_duplicate, contiguous_new, provider_final) = self
             .ordinal_store
@@ -1245,10 +1196,6 @@ impl ExecutionPortModelBridge {
             exact_duplicate = true;
         }
         if !process_exchange {
-            // A Provider may retry a terminal frame after the Worker process
-            // has released its live Core stream.  The durable frame ledger is
-            // authoritative in that interval: acknowledge only an exact
-            // retained frame and never create a new Provider/Core exchange.
             if exact_duplicate && chunk.is_final {
                 let disposition = client
                     .accept_terminal_duplicate(
@@ -1273,20 +1220,12 @@ impl ExecutionPortModelBridge {
                     disposition
                 });
             }
-            // An exact durable duplicate must unblock the Device model queue
-            // even when Core is not attached; otherwise one stale accept error
-            // can starve every later Provider frame for the same exchange.
             if exact_duplicate {
                 return Ok(ModelChunkDisposition::Duplicate {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
                 });
             }
-            // Contiguous Provider frames can outlive the process-local exchange
-            // map (for example after a Core stream was abandoned mid-response).
-            // Keep the durable frame ledger exact and deliver to any still-live
-            // Core sink so a verifier final response is not lost after Device
-            // has already produced it.
             if contiguous_new {
                 self.retain_and_forward_frame(chunk, &owner)?;
                 if chunk.is_final {
@@ -1412,8 +1351,6 @@ impl ExecutionPortModelBridge {
         chunk: &ModelChunkMessage,
         received_at: &Instant,
     ) -> bool {
-        // The durable frame and ProviderFinal ledger own completion. These
-        // projections can be unavailable without revoking a delivered result.
         let jev_complete = self
             .retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at)
             .is_ok();
@@ -1533,11 +1470,6 @@ impl ExecutionPortModelBridge {
         binding: &ModelRunBinding,
         received_at: &Instant,
     ) -> Result<(), BridgeError> {
-        // Validate the complete envelope before the crash-safe frame write.
-        // The client repeats these checks when it delivers to Core, but doing
-        // them here is required because this method intentionally retains the
-        // frame first: a stale or cross-scoped chunk must not become durable
-        // merely because it arrived with the next sequence number.
         if !canonical_instant(received_at)
             || received_at.0 < binding.authority.lease.issued_at.0
             || chunk.worker_session_id != binding.authority.worker_session_id
@@ -1619,9 +1551,6 @@ impl ExecutionPortModelBridge {
         Ok(Some(ModelRunBinding {
             run_key,
             canonical_thread_id: thread_id.clone(),
-            // A late Provider frame does not need to reopen a Core session;
-            // the session alias is retained only to complete the binding
-            // shape for authority checks.
             kernel_session_id: thread_id.0.clone(),
             opened_at: authority.lease.issued_at.clone(),
             authority,
@@ -1746,17 +1675,12 @@ impl ExecutionPortModelBridge {
                 .or_else(|| bindings.get(&envelope.session_id))
                 .cloned()
         };
-        if let Some(binding) = binding {
-            // Core's public thread id can be the registered Kernel session
-            // UUID, while the Worker also keeps its own canonical lineage id.
-            // Both must point at this binding; a valid session alias cannot
-            // be paired with an unrelated thread id.
-            if envelope.session_id == binding.kernel_session_id
-                && (envelope.thread_id == binding.kernel_session_id
-                    || envelope.thread_id == binding.canonical_thread_id.0)
-            {
-                return Ok(binding);
-            }
+        if let Some(binding) = binding
+            && envelope.session_id == binding.kernel_session_id
+            && (envelope.thread_id == binding.kernel_session_id
+                || envelope.thread_id == binding.canonical_thread_id.0)
+        {
+            return Ok(binding);
         }
         if let Some((run_key, authority)) =
             self.authority.load_lineage_binding(&envelope.thread_id)?
@@ -1784,11 +1708,6 @@ impl ExecutionPortModelBridge {
     ) -> Result<ModelRunBinding, BridgeError> {
         let parent_thread_id =
             parent_thread_id(&envelope.request).ok_or(BridgeError::StaleAuthority)?;
-        // A nested child can be the first model call observed after a Worker
-        // restart.  Its parent alias may not have been rebuilt in the
-        // process-local map yet, while the exact parent authority is already
-        // durable.  Loading that authority preserves the same root lease and
-        // lets `install_child_binding` re-establish the edge atomically.
         let parent = if let Some(parent) = self
             .authority
             .bindings
@@ -1807,10 +1726,6 @@ impl ExecutionPortModelBridge {
             ModelRunBinding {
                 run_key,
                 canonical_thread_id: authority.session_identity.codex_thread_id.clone(),
-                // The parent session id is not persisted in lineage; only its
-                // authority is needed to derive this child. Keep a distinct
-                // placeholder so the child binding remains keyed by the
-                // request's exact session.
                 kernel_session_id: parent_thread_id.clone(),
                 opened_at: authority.lease.issued_at.clone(),
                 authority,
@@ -1824,9 +1739,6 @@ impl ExecutionPortModelBridge {
         let binding = ModelRunBinding {
             run_key: parent.run_key,
             canonical_thread_id: CodexThreadId(envelope.thread_id.clone()),
-            // Child requests have their own Core session identity. Keep that
-            // exact value as the action-gate/session alias; the canonical
-            // thread id remains the durable lineage key.
             kernel_session_id: envelope.session_id.clone(),
             authority: ModelLeaseAuthority {
                 lease: parent.authority.lease,
@@ -2007,8 +1919,6 @@ impl ExecutionPortModelBridge {
             return Err(model_failure(BridgeError::InvalidPayload));
         }
         let binding = self.binding_for(&envelope).map_err(model_failure)?;
-        // A session can select a different configured provider from the Worker
-        // default. Root and child requests use the same sealed run settings.
         let stored = self
             .ordinal_store
             .load_run_header::<serde_json::Value>(&binding.run_key)
@@ -2018,7 +1928,6 @@ impl ExecutionPortModelBridge {
         } else {
             validate_model_selection(&envelope, stored.as_ref(), &self.expected_provider)?;
         }
-        // Child bindings can be restored from the durable lineage table while
         // the Kernel is already processing the replayed model response. The
         // shared source makes this exact binding available to the action gate
         // before Core can authorize a tool.
@@ -2063,8 +1972,6 @@ impl ExecutionPortModelBridge {
             Some(ModelCallPhase::ProviderFinal | ModelCallPhase::CoreCommitted)
         ) || frames.last().is_some_and(|frame| frame.is_final)
         {
-            // A retained final frame also recovers a crash before the phase
-            // update, without opening another Provider call.
             if phase == Some(ModelCallPhase::InFlight) {
                 self.ordinal_store
                     .mark_model_call_provider_final(&binding.run_key, &model_call_id)
@@ -2077,8 +1984,6 @@ impl ExecutionPortModelBridge {
                 &self.authority,
             )?));
         }
-        // Retained ModelOpen identity includes the first frozen host context.
-        // The admission ledger above remains bound to the raw Core semantics.
         let prepared_payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
             .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
         let prepared_request_digest =
@@ -2263,8 +2168,6 @@ pub(crate) fn sealed_context_payload(
     }
     let mut payload: serde_json::Value = serde_json::from_str(&request.payload_json)
         .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
-    // Core cannot supply this field: KernelRequestEnvelope rejects unknown fields.
-    // The outer payload digest binds this host-owned snapshot to the original request.
     payload["winwincodeJevContext"] = config.clone();
     payload["winwincodeJevTask"] = serde_json::json!({"job": job, "jobDigest": digest});
     serde_json::to_vec(&payload).map_err(|_| model_failure(BridgeError::InvalidPayload))
@@ -2282,8 +2185,6 @@ struct KernelRequestEnvelope {
     request: serde_json::Value,
 }
 
-// Only the host-created member port can select a route from this frozen list.
-// Ordinary Core requests continue through validate_model_selection.
 fn validate_fusion_model_selection(
     envelope: &KernelRequestEnvelope,
     stored: Option<&serde_json::Value>,
@@ -2325,7 +2226,6 @@ fn validate_fusion_model_selection(
     Ok(())
 }
 
-/// Every Core descendant inherits the same frozen run model selection.
 fn validate_model_selection(
     envelope: &KernelRequestEnvelope,
     stored: Option<&serde_json::Value>,
@@ -2393,7 +2293,6 @@ fn model_open_request_digest(
     model_call_digest(request)
 }
 
-/// A same-root extension preserves child aliases and pending operations.
 pub(crate) fn extend_binding_lineage(
     bindings: &mut HashMap<String, ModelRunBinding>,
     binding: &ModelRunBinding,
@@ -2427,7 +2326,6 @@ fn same_binding(left: &ModelRunBinding, right: &ModelRunBinding) -> bool {
         && left.authority == right.authority
 }
 
-/// Only the deadline may advance; identities, attempt and fencing stay exact.
 pub(crate) fn same_binding_with_extended_lease(
     previous: &ModelLeaseAuthority,
     current: &ModelLeaseAuthority,
@@ -2448,10 +2346,6 @@ pub(crate) fn common_authority(left: &ModelLeaseAuthority, right: &ModelLeaseAut
         && left.session_identity.worker_session_id == right.session_identity.worker_session_id
 }
 
-/// Returns the parent Core thread carried by the canonical Responses
-/// metadata.  A child request is accepted only when this edge resolves to an
-/// already-bound parent; an arbitrary job id or matching lease is not enough
-/// to mint a child authority.
 fn parent_thread_id(request: &serde_json::Value) -> Option<String> {
     let metadata = request.get("client_metadata")?.as_object()?;
     let direct = metadata
@@ -2806,14 +2700,8 @@ fn model_store_failure(error: crate::store::AdapterStoreError) -> ModelPortFailu
     model_failure(model_frame_store_error(error))
 }
 
-/// Durable non-secret intake diagnostics for Device→Worker model frames.
-/// Worker stderr redacts credentials; this path records only public envelope
-/// identities and `BridgeError` codes so verification-exchange resolve/authority
-/// failures remain inspectable after a run.
 static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Publishes the Worker-owned durable intake log path for model-bridge
-/// diagnostics. Idempotent; the first path wins.
 pub fn set_model_intake_log_path(path: impl Into<std::path::PathBuf>) {
     let path = path.into();
     let _ = MODEL_INTAKE_LOG_PATH.set(path);
@@ -2886,10 +2774,6 @@ pub(crate) fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<
     if let Some(error) = &chunk.error {
         decode_provider_failure(error, chunk.payload.as_ref())?;
     }
-    // The private ledger is replayed through the same typed protocol mapper
-    // as Core.  Validate that mapping before writing a new frame so malformed
-    // generated identities or stream metadata cannot survive a crash and be
-    // surfaced later as a durable response.
     frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
         .map_err(|_| BridgeError::InvalidPayload)?;
     Ok(())
@@ -3094,9 +2978,6 @@ mod tests {
                 retryable,
             });
             if index == 1 {
-                // A restored owner can still have an attached Core sink. Its
-                // forwarding path must deliver the error, never the metadata
-                // JSON as a synthetic model response.
                 bridge
                     .exchanges
                     .lock()
@@ -3763,7 +3644,6 @@ mod tests {
         }
     }
 
-    /// Builds one Provider frame from already-resolved lease/session identity.
     fn test_chunk(
         authority: &ModelLeaseAuthority,
         exchange: &ModelExchangeId,
@@ -3798,7 +3678,6 @@ mod tests {
         }
     }
 
-    /// Loopback-route bridge over one shared authority source.
     fn loopback_bridge(
         store: &AdapterStore,
         source: SharedAuthoritySource,
@@ -3817,7 +3696,6 @@ mod tests {
         )
     }
 
-    /// Loopback-route bridge with one run binding already installed.
     fn installed_loopback_bridge(
         store: &AdapterStore,
         source: SharedAuthoritySource,
@@ -4262,7 +4140,6 @@ mod tests {
             ModelChunkDisposition::Duplicate { .. }
         ));
         drop(restored);
-        // A distinct valid job still consumes its own response after failure cleanup.
         let mut next = authority(&id("cdx", 'B'));
         next.lease.job_id.0 = id("job", 'B');
         next.lease.expires_at.0 = "2030-01-01T02:00:00.000Z".into();
@@ -4381,7 +4258,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Claims one model call on the durable store.
     fn claim_test_call(
         store: &AdapterStore,
         run_key: &str,
@@ -4399,7 +4275,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("claim {call_id}: {error:?}"));
     }
 
-    /// One `ModelOpen` over a claimed call on the loopback route.
     fn test_open(
         authority: &ModelLeaseAuthority,
         call_id: &str,
@@ -5323,8 +5198,6 @@ mod tests {
         }
     }
 
-    /// Automatic second model call after `tool_result` must retain the full
-    /// multi-frame Provider response even when the live Core sink is gone.
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn post_tool_second_call_multi_frame_path_is_durably_provider_final() {
@@ -5406,8 +5279,6 @@ mod tests {
             Some(ModelCallPhase::ProviderFinal)
         );
 
-        // Frame 1 of the automatic second call is accepted. Frames 2+ must
-        // still be retained and mark provider_final without a live Core sink.
         for sequence in 1..=6 {
             let is_final = sequence == 6;
             let disposition = bridge
@@ -5611,8 +5482,6 @@ mod tests {
         for message in bridge.take_messages().unwrap() {
             bridge.outbox.retain(&message).unwrap();
         }
-        // Exact replay compares the same envelope digest, while the durable
-        // call identity separately binds the sealed member and provider.
         assert!(bridge.open_command(&exchange).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -6027,8 +5896,6 @@ mod tests {
             .performance_report("child-run", 60_000)
             .expect("child performance report after restart replay");
         assert_eq!(report.primary_model_call_count, 2);
-        // These terminal frames carry no usage. Transport completion must not
-        // turn either accounting row into a measured zero, even after replay.
         assert_eq!(report.primary_model_wait_ms, expected_wait_ms);
         assert_eq!(
             report.primary_model_wait_ms,

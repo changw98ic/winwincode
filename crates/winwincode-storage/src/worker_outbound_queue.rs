@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Restricted durable queue for Control Plane-to-Worker interaction frames.
-//!
-//! Raw interaction frames live only in this internal table and are deleted
-//! atomically after acknowledgement or terminal settlement. Public state,
-//! outbox events, audit records, errors, and `Debug` output contain only
-//! authority, identifiers, digests, states, and counts.
-
 use std::{collections::BTreeMap, fmt, fs};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -165,7 +158,6 @@ BEGIN
 END;
 ";
 
-/// Bounded queue settings owned by the host composition root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundQueueConfig {
     pub max_frame_bytes: usize,
@@ -185,7 +177,6 @@ impl Default for WorkerOutboundQueueConfig {
     }
 }
 
-/// Exact current Worker slot and complete lease time authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerOutboundAuthority {
@@ -194,7 +185,6 @@ pub struct WorkerOutboundAuthority {
     pub lease_expires_at: Instant,
 }
 
-/// Durable outbound lifecycle while raw bytes remain retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerOutboundMessageState {
     Pending,
@@ -211,7 +201,6 @@ impl WorkerOutboundMessageState {
     }
 }
 
-/// Secret-free terminal disposition retained after raw frame cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerOutboundSettlement {
     Acknowledged,
@@ -235,7 +224,6 @@ impl WorkerOutboundSettlement {
     }
 }
 
-/// New internal frame. `Debug` deliberately omits the raw bytes.
 pub struct WorkerOutboundEnqueueRequest {
     authority: WorkerOutboundAuthority,
     message_id: ExecutionMessageId,
@@ -245,11 +233,6 @@ pub struct WorkerOutboundEnqueueRequest {
 }
 
 impl WorkerOutboundEnqueueRequest {
-    /// Seals one raw canonical typed frame to its digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty frame or malformed authority, identity, or time.
     pub fn new(
         authority: WorkerOutboundAuthority,
         message_id: ExecutionMessageId,
@@ -301,7 +284,6 @@ impl fmt::Debug for WorkerOutboundEnqueueRequest {
     }
 }
 
-/// Secret-free durable enqueue result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundEnqueueReceipt {
     pub message_id: ExecutionMessageId,
@@ -311,7 +293,6 @@ pub struct WorkerOutboundEnqueueReceipt {
     pub replayed: bool,
 }
 
-/// One claimed frame. `Debug` deliberately omits the raw bytes.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WorkerOutboundClaim {
     authority: WorkerOutboundAuthority,
@@ -323,7 +304,6 @@ pub struct WorkerOutboundClaim {
 }
 
 impl WorkerOutboundClaim {
-    /// The exact accepted lease authority under which this frame was retained.
     #[must_use]
     pub const fn authority(&self) -> &WorkerOutboundAuthority {
         &self.authority
@@ -369,7 +349,6 @@ impl fmt::Debug for WorkerOutboundClaim {
     }
 }
 
-/// Opaque stable page cursor bound to one exact authority and page size.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundPageCursor {
     authority_digest: String,
@@ -378,14 +357,12 @@ pub struct WorkerOutboundPageCursor {
     page_size: usize,
 }
 
-/// One stable claim page. Newly enqueued frames never enter an existing page cut.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundClaimPage {
     pub claims: Vec<WorkerOutboundClaim>,
     pub next_cursor: Option<WorkerOutboundPageCursor>,
 }
 
-/// Secret-free acknowledgement or cleanup result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundAcknowledgement {
     pub message_id: ExecutionMessageId,
@@ -393,14 +370,12 @@ pub struct WorkerOutboundAcknowledgement {
     pub replayed: bool,
 }
 
-/// Completed cleanups plus a retained, independently retryable cleanup failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundConfirmationProgress {
     pub acknowledgements: Vec<WorkerOutboundAcknowledgement>,
     pub retry_error: Option<WorkerOutboundQueueErrorCode>,
 }
 
-/// Stable queue failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerOutboundQueueErrorCode {
     InvalidInput,
@@ -412,7 +387,6 @@ pub enum WorkerOutboundQueueErrorCode {
     Storage,
 }
 
-/// Bounded queue failure with no raw frame or interaction content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerOutboundQueueError {
     code: WorkerOutboundQueueErrorCode,
@@ -507,18 +481,12 @@ impl From<WorkerSlotError> for WorkerOutboundQueueError {
     }
 }
 
-/// Borrowed durable internal outbound queue.
 pub struct WorkerOutboundQueue<'storage> {
     storage: &'storage mut SqliteStorage,
     config: WorkerOutboundQueueConfig,
 }
 
 impl SqliteStorage {
-    /// Opens the restricted outbound queue over this exact database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid bounds or a schema/permission preparation failure.
     pub fn worker_outbound_queue(
         &mut self,
         config: WorkerOutboundQueueConfig,
@@ -528,11 +496,6 @@ impl SqliteStorage {
 }
 
 impl<'storage> WorkerOutboundQueue<'storage> {
-    /// Prepares the restricted internal tables and directory permissions.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid bounds or a schema/permission preparation failure.
     pub fn new(
         storage: &'storage mut SqliteStorage,
         config: WorkerOutboundQueueConfig,
@@ -550,14 +513,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(Self { storage, config })
     }
 
-    /// Durably accepts a frame after current slot and lease validation.
-    /// Worker liveness is intentionally not required, so disconnected Workers
-    /// retain messages for reconnect delivery.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, capacity exhaustion, changed-body duplicates,
-    /// oversized frames, and storage failures.
     pub fn enqueue(
         &mut self,
         request: &WorkerOutboundEnqueueRequest,
@@ -575,15 +530,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Atomically extends a lease and retains its exact outbound control frame.
-    /// The caller encodes the protocol frame; its envelope must match the renewal.
-    /// A rejected renewal retains no frame. Any queue failure rolls back the lease
-    /// and its replay receipt, so retry cannot lose the control message.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched envelopes, invalid queue authority, capacity exhaustion,
-    /// changed-body replay, and storage failures.
     pub fn renew_lease_and_enqueue(
         &mut self,
         renewal: &ExecutionLeaseRenewal,
@@ -623,13 +569,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Claims a stable authority-bound page for one reconnected Worker.
-    /// Claimed-but-unacknowledged rows are returned again with the same bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched authority, an invalid cursor/page size, corrupt
-    /// retained bytes, and storage failures.
     pub fn claim_page(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -724,13 +663,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         })
     }
 
-    /// Persists an authenticated remote confirmation before attempting cleanup.
-    /// Non-interaction transport IDs return `false`; known foreign or unclaimed
-    /// interaction IDs are rejected. No raw interaction content is copied.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identity, authority or a failure to persist the proof.
     pub fn confirm_remote(
         &mut self,
         worker_id: &WorkerId,
@@ -799,13 +731,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(true)
     }
 
-    /// Retries only proven remote confirmations, including after restart.
-    /// Stops at the first cleanup failure; the proof remains until deletion and
-    /// secure WAL checkpoint both complete. This performs no new execution.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt proof records or failure to load the bounded batch.
     pub fn retry_confirmed(
         &mut self,
         worker_id: &WorkerId,
@@ -840,8 +765,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
                 let mut proof = load_confirmation(connection, &ExecutionMessageId(id))?
                     .ok_or_else(WorkerOutboundQueueError::storage)?;
                 validate_confirmation(connection, &proof, worker_id, worker_instance_id)?;
-                // A later accepted renewal may extend the cleanup authority.
-                // Preserve the original confirmation clock and immutable slot.
                 if let Some(lease) =
                     load_lease_in_transaction(connection, &proof.authority.slot.job_id)
                         .map_err(|_| WorkerOutboundQueueError::storage())?
@@ -909,12 +832,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(progress)
     }
 
-    /// Acknowledges one claimed frame and atomically deletes its raw bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign/stale authority, an unclaimed/missing message, or a
-    /// storage failure. Exact acknowledgement replay remains successful.
     pub fn acknowledge(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -983,11 +900,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         })
     }
 
-    /// Clears every raw frame after the exact slot becomes terminal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign or non-terminal slot and storage failures.
     pub fn settle_terminal(
         &mut self,
         authority: &WorkerOutboundAuthority,
@@ -1641,8 +1553,6 @@ fn load_enqueue_capacity(
     let authority_pending = if let Some(authority_pending) = authority_pending {
         usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?
     } else {
-        // A missing counter is valid only for a new slot. Retained raw rows
-        // must never let a lost counter reset that slot's capacity to zero.
         let mut retained_slot = connection
             .prepare(
                 "SELECT 1 FROM internal_worker_outbound_messages
@@ -1692,8 +1602,6 @@ fn prepare_capacity_counters(storage: &mut SqliteStorage) -> Result<(), WorkerOu
     let slots_layout =
         capacity_table_layout(&transaction, "internal_worker_outbound_capacity_slots")?;
     if head_layout.is_some() && slots_layout.is_none() {
-        // A completed head must never cause a lost slot table to be replaced by
-        // empty counters. The original retained rows remain authoritative.
         return Err(WorkerOutboundQueueError::storage());
     }
     for (stored, definition) in [
@@ -1793,7 +1701,6 @@ fn authority_history(
 ) -> Result<BTreeMap<String, WorkerOutboundAuthority>, WorkerOutboundQueueError> {
     let slot = &authority.slot;
     let mut history = BTreeMap::new();
-    // ponytail: scan one job's receipts; index by lease if long-lived jobs make this material.
     for lease in accepted_lease_history(connection, &slot.job_id)
         .map_err(|_| WorkerOutboundQueueError::storage())?
     {

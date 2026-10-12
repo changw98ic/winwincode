@@ -35,8 +35,6 @@ async fn mechanism_actual_model_intake_and_complete_cursor_restore() {
                 _ => None,
             })
             .unwrap();
-        // Synthetic payloads contain no formal model content. Match the observed
-        // per-frame envelope scale as closely as the canonical test envelope allows.
         let profile: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/mechanism/model-frame-size-profile.json"
         ))

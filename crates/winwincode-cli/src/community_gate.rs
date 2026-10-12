@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Community local-only evidence closure.
-//!
-//! This module joins already authoritative leaf results. It does not run a
-//! `Worker`, invent Delivery facts, or infer evidence from chat. The resulting
-//! package is accepted only when one local Git candidate, a passing independent
-//! Verdict, the current test-asset contract, and every exported digest agree.
-
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -34,14 +27,12 @@ use crate::Attachment;
 
 pub const COMMUNITY_LOCAL_GATE_SCHEMA_VERSION: u8 = 1;
 
-/// Local Community dependencies that must remain absent throughout the gate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CommunityLocalEnvironment {
     pub commercial_account_configured: bool,
     pub vendor_telemetry_enabled: bool,
 }
 
-/// Complete explicit input for one local evidence closure.
 #[derive(Debug)]
 pub struct CommunityLocalGateRequest<'facts> {
     pub repository_root: &'facts Path,
@@ -61,7 +52,6 @@ pub struct CommunityLocalGateRequest<'facts> {
     pub environment: CommunityLocalEnvironment,
 }
 
-/// Stable contract and source identities retained beside the exported files.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommunityLocalSourceTrace {
@@ -87,7 +77,6 @@ pub struct CommunityLocalSourceTrace {
     pub evidence_manifest_sha256: String,
 }
 
-/// Successful offline-verifiable Community closure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityLocalGateReceipt {
     pub export: ExportReport,
@@ -95,8 +84,6 @@ pub struct CommunityLocalGateReceipt {
     pub source_trace: CommunityLocalSourceTrace,
 }
 
-/// Product-facing failure ownership. These classes never depend on whether a
-/// Git remote exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommunityGateFailureCategory {
     Implementation,
@@ -104,7 +91,6 @@ pub enum CommunityGateFailureCategory {
     Environment,
 }
 
-/// Stable failure code for remediation and deterministic tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommunityGateFailureCode {
     ExternalDependencyPresent,
@@ -119,7 +105,6 @@ pub enum CommunityGateFailureCode {
     EvidenceExportFailed,
 }
 
-/// Categorized gate failure with bounded detail.
 #[derive(Debug)]
 pub struct CommunityLocalGateError {
     category: CommunityGateFailureCategory,
@@ -169,14 +154,6 @@ struct ValidatedLocalSources {
     verdict_id: String,
 }
 
-/// Runs the local-only Community gate and immediately verifies the published
-/// evidence directory offline.
-///
-/// # Errors
-///
-/// Returns a stable implementation, acceptance, or environment failure. A
-/// missing remote never changes a Verdict: only an existing canonical passing
-/// Verdict with independent test Evidence can pass.
 #[allow(clippy::too_many_lines)]
 pub fn run_community_local_gate(
     request: &CommunityLocalGateRequest<'_>,

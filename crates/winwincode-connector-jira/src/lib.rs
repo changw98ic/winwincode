@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Jira Cloud protocol adapter over the durable Integration Framework.
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -21,23 +19,16 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical Integration Framework protocol identifier for Jira Cloud.
 pub const JIRA_CONNECTOR_PROTOCOL: &str = "jira.cloud.v1";
 const USER_AGENT: &str = "WinWinCode-Jira-Connector";
 const MAX_RESPONSE_BYTES: u64 = 2 * 1_024 * 1_024;
 const MAX_LOOKUP_RESULTS: usize = 100;
 const OPERATION_PROPERTY: &str = "winwincode.operation";
 
-/// Canonical Jira Cloud site identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JiraSiteId(String);
 
 impl JiraSiteId {
-    /// Builds a bounded portable Jira Cloud site identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, overlong, or non-portable identities.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         if !valid_identifier(&value, 128) {
@@ -52,16 +43,10 @@ impl JiraSiteId {
     }
 }
 
-/// Canonical uppercase Jira project key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JiraProjectKey(String);
 
 impl JiraProjectKey {
-    /// Builds a Jira project key.
-    ///
-    /// # Errors
-    ///
-    /// Rejects keys outside Jira's portable uppercase form.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         let valid = matches!(value.len(), 2..=20)
@@ -84,14 +69,12 @@ impl JiraProjectKey {
     }
 }
 
-/// Explicit TLS root configuration for Jira Cloud or a loopback fixture.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JiraTlsRoots {
     WebPki,
     Specific(Vec<Vec<u8>>),
 }
 
-/// Credential-free Jira site/project connector configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JiraConnectorConfig {
     integration_id: IntegrationId,
@@ -105,11 +88,6 @@ pub struct JiraConnectorConfig {
 }
 
 impl JiraConnectorConfig {
-    /// Builds one exact Jira site/project boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid authority, URL, TLS roots, or project facts.
     pub fn try_new(
         integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
@@ -155,7 +133,6 @@ impl JiraConnectorConfig {
     }
 }
 
-/// Jira OAuth/webhook credential resolution category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JiraCredentialErrorKind {
     Revoked,
@@ -163,7 +140,6 @@ pub enum JiraCredentialErrorKind {
     Unavailable,
 }
 
-/// Secret-safe Jira credential resolution error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JiraCredentialError {
     kind: JiraCredentialErrorKind,
@@ -189,15 +165,9 @@ impl fmt::Display for JiraCredentialError {
 
 impl std::error::Error for JiraCredentialError {}
 
-/// Short-lived Jira webhook secret; never serializable or clonable.
 pub struct JiraWebhookSecret(Vec<u8>);
 
 impl JiraWebhookSecret {
-    /// Builds opaque webhook secret material.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized values.
     pub fn try_new(value: impl AsRef<[u8]>) -> Result<Self, IntegrationError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > 4_096 {
@@ -223,7 +193,6 @@ impl Drop for JiraWebhookSecret {
     }
 }
 
-/// Closed Jira OAuth permission required by the connector.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum JiraOAuthScope {
     ReadIssue,
@@ -232,7 +201,6 @@ pub enum JiraOAuthScope {
     WriteComment,
 }
 
-/// Short-lived OAuth token sealed to one Jira site and bounded project set.
 pub struct JiraOAuthAccessToken {
     token: Vec<u8>,
     site_id: JiraSiteId,
@@ -242,11 +210,6 @@ pub struct JiraOAuthAccessToken {
 }
 
 impl JiraOAuthAccessToken {
-    /// Builds an opaque site/project-scoped access token.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid token bytes, empty project/scopes, or invalid expiry.
     pub fn try_new(
         token: impl AsRef<[u8]>,
         site_id: JiraSiteId,
@@ -303,23 +266,12 @@ impl Drop for JiraOAuthAccessToken {
     }
 }
 
-/// Credential-owner port for Jira webhook and OAuth material.
 pub trait JiraCredentialPort {
-    /// Resolves the webhook secret only for raw-body authentication.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_webhook_secret(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<JiraWebhookSecret, JiraCredentialError>;
 
-    /// Resolves one short-lived OAuth token for the configured site.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_oauth_token(
         &mut self,
         reference: &CredentialReferenceId,
@@ -327,12 +279,10 @@ pub trait JiraCredentialPort {
     ) -> Result<JiraOAuthAccessToken, JiraCredentialError>;
 }
 
-/// Time authority used only for OAuth expiry checks.
 pub trait JiraClock {
     fn now_millis(&self) -> u64;
 }
 
-/// Exact Jira webhook headers before raw-body authentication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JiraWebhookHeaders {
     event_id: String,
@@ -340,11 +290,6 @@ pub struct JiraWebhookHeaders {
 }
 
 impl JiraWebhookHeaders {
-    /// Builds a bounded Jira delivery identity and HMAC signature.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, oversized, or malformed values.
     pub fn try_new(
         event_id: impl Into<String>,
         signature: impl AsRef<[u8]>,
@@ -364,7 +309,6 @@ impl JiraWebhookHeaders {
     }
 }
 
-/// Builds Integration Framework requests from Jira webhook headers/body.
 #[derive(Clone, Debug)]
 pub struct JiraWebhookRequestFactory {
     config: JiraConnectorConfig,
@@ -376,11 +320,6 @@ impl JiraWebhookRequestFactory {
         Self { config }
     }
 
-    /// Builds one authenticated-request candidate with resource-local ordering.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown event types or mismatched site/project facts.
     pub fn build(
         &self,
         scope: IntegrationScope,
@@ -415,7 +354,6 @@ impl JiraWebhookRequestFactory {
     }
 }
 
-/// HMAC-SHA256 verifier using only the connector credential reference.
 pub struct JiraWebhookVerifier<Credentials> {
     config: JiraConnectorConfig,
     credentials: Credentials,
@@ -457,14 +395,12 @@ impl<Credentials: JiraCredentialPort> WebhookSignatureVerifier
     }
 }
 
-/// Closed Jira webhook resource kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JiraResourceKind {
     Issue,
     Comment,
 }
 
-/// Validated Jira webhook event supplied to a formal-command mapper.
 pub struct JiraInboundEvent<'a> {
     event_type: &'a str,
     resource_kind: JiraResourceKind,
@@ -512,13 +448,7 @@ impl JiraInboundEvent<'_> {
     }
 }
 
-/// Control Plane seam mapping one closed Jira event to a formal command.
 pub trait JiraEventMapperPort {
-    /// Maps a validated Jira event without copying Jira workflow state.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable secret-safe mapping failure.
     fn map_event(
         &mut self,
         authority: &ConnectorAuthority,
@@ -526,7 +456,6 @@ pub trait JiraEventMapperPort {
     ) -> Result<NormalizedInboundEvent, ConnectorCallError>;
 }
 
-/// Jira protocol mapper and retry-stable outbound REST adapter.
 pub struct JiraConnector<Credentials, Mapper, Clock> {
     config: JiraConnectorConfig,
     credentials: Credentials,
@@ -536,11 +465,6 @@ pub struct JiraConnector<Credentials, Mapper, Clock> {
 }
 
 impl<Credentials, Mapper, Clock> JiraConnector<Credentials, Mapper, Clock> {
-    /// Builds a no-proxy, no-redirect, rustls-verified Jira connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots.
     pub fn try_new(
         config: JiraConnectorConfig,
         credentials: Credentials,
@@ -1167,11 +1091,6 @@ fn validate_webhook_scope(
     config: &JiraConnectorConfig,
     value: &Value,
 ) -> Result<(), IntegrationError> {
-    // Jira's documented webhook body does not contain a Cloud site identity.
-    // The selected connector authority, callback route, and per-connector
-    // credential reference bind that boundary before this adapter sees the
-    // body. Some ingress deployments add a trusted `siteId` envelope field;
-    // when present it must still agree with the configured Cloud site.
     let site_matches = match value.get("siteId") {
         None => true,
         Some(Value::String(site)) => site == config.site_id.as_str(),

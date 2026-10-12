@@ -75,7 +75,7 @@ jobs:
   rust:
     name: rust-${{ matrix.lane }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -124,9 +124,15 @@ jobs:
           cargo -V
 
       - name: Install persistent Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
         with:
           version: "v0.17.0"
+
+      - name: Cache pinned V8 source build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/debug/gn_out
+          key: v8-gn-${{ runner.os }}-${{ runner.arch }}-debug-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
 
       - name: Lint Rust workspace
         if: ${{ matrix.lane == 'lint' }}

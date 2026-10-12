@@ -500,8 +500,6 @@ fn concurrent_crash_quarantine_finishers_count_exactly_one_removal() {
             let original = lease.path().to_path_buf();
             let lease_bytes =
                 fs::read(original.join(TEMPORARY_ROOT_LEASE_FILE)).expect("read lease");
-            // A real, populated root keeps recursive deletion overlapping after
-            // multiple independent recovery scans validate the same crash claim.
             for item in 0..128 {
                 fs::write(
                     original.join(format!("payload-{item}")),
@@ -681,8 +679,6 @@ fn lifecycle_lock_rejects_writable_parents_and_linked_or_readable_files() {
     );
 }
 
-// Independent OS processes exercise the same manager and persistent proof.
-// The ignored probe is executed only by its parent test with a private path.
 #[test]
 #[ignore = "subprocess probe for independent lifecycle tests"]
 fn temporary_root_process_probe() {

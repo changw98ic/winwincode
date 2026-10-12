@@ -1,8 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* Design page 07: 项目 — display title with the accent 添加仓库 entry on the
-   row's right end, then one hairline row per repository. */
-
 .wwc-projects {
   display: grid;
   gap: var(--wwc-space-4);
@@ -84,7 +81,6 @@
   font-weight: var(--wwc-font-weight-display);
 }
 
-/* The accent primary action of the page, top-right beside the title. */
 .wwc-projects-add {
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   color: var(--wwc-color-text);
@@ -252,7 +248,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Keep the project action visually separate from its name and context. */
 .wwc-projects-row-chat {
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   color: var(--wwc-color-text);

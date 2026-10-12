@@ -567,7 +567,6 @@ fn ra_c01_pending_approval_answer_before_restored_waiter_is_retained() {
             )
             .unwrap();
         assert_eq!(state, "resolved");
-        // Remove the first process's request witness so only the replacement Core request qualifies.
         fs::remove_file(root.0.join("mechanism-barrier/approval.request.event.json")).unwrap();
         let open = wait_open_at(&mut worker, &port, 0, at("00:02:00")).await;
         request_escalated_shell_at(

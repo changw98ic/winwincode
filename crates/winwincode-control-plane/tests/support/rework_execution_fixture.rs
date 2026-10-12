@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Real scheduler and Git seams for post-terminal rework rejection regressions.
-//! The caller starts each role through public commands. This helper consumes
-//! that exact queued job and keeps verification Snapshot and rework boundaries.
-
 #[path = "dispatch_fixture.rs"]
 #[allow(dead_code)]
 mod dispatch_fixture;
@@ -63,8 +59,6 @@ impl EventPublisher for RecordingPublisher {
     }
 }
 
-/// `clock` is a minute counter in the existing January 2027 dispatch fixture.
-/// Choose a fresh identity seed for each stage, even though its attempt is one.
 #[derive(Clone, Copy)]
 pub struct ReworkAttemptConfig<'fixture> {
     pub root: &'fixture Path,
@@ -84,15 +78,11 @@ pub struct RunningReworkAttempt {
     pub clock: u64,
 }
 
-/// Claim, admit, dispatch and bind the public command's sealed remediator job.
 pub fn claim_running_rework(config: ReworkAttemptConfig<'_>) -> RunningReworkAttempt {
     assert_eq!(config.job.execution_profile, "remediator");
     claim_profile(config, None)
 }
 
-/// Verification roles use the production freeze request and Snapshot commit.
-/// Their freeze receipt is an offline Worker fact fixture over the real source;
-/// it does not claim that a Worker process materialized the Snapshot.
 pub fn claim_running_profile(
     config: ReworkAttemptConfig<'_>,
     repository: &Path,
@@ -317,9 +307,6 @@ fn claim_profile(
     }
 }
 
-/// Reuses the initial writer's immutable policies. Each new role has a new
-/// `ProductSession` boundary, whose fixture limit follows that same organization
-/// policy. The production reserve/start calls still enforce every boundary.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_role_admission(
     storage: &mut SqliteStorage,
@@ -614,7 +601,6 @@ fn binding_for_dispatch(
     (authority, message)
 }
 
-/// This is an offline Worker fact fixture, not a claimed model receipt.
 pub fn successful_rework_terminal(
     running: &RunningReworkAttempt,
     artifact: ArtifactReference,
@@ -624,7 +610,6 @@ pub fn successful_rework_terminal(
     successful_profile_terminal(running, vec![artifact], seed)
 }
 
-/// Produces an offline successful terminal over the already bound exact role.
 pub fn successful_profile_terminal(
     running: &RunningReworkAttempt,
     artifacts: Vec<ArtifactReference>,
@@ -744,7 +729,6 @@ fn source_lines(value: u32, unrelated: u32) -> String {
     })
 }
 
-/// The first candidate changes line two. Line eighteen is outside its Git hunk.
 pub fn initialize_rework_repository(repository: &Path) -> (String, String) {
     fs::create_dir_all(repository.join("src")).expect("rework repository root");
     git(repository, &["init", "-q"]);
@@ -763,7 +747,6 @@ pub fn initialize_rework_repository(repository: &Path) -> (String, String) {
     (base, git(repository, &["rev-parse", "HEAD"]))
 }
 
-/// Extend the exact sealed source commit with the authorized edit and one escape.
 pub fn commit_rework_escape(
     repository: &Path,
     source_commit: &str,

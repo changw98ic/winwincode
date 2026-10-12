@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Execution-time protection for verification inputs and private scratch.
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -26,7 +24,6 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
-/// Version of the protected input and writable scratch contract.
 pub const PROTECTED_INPUT_SCOPE_VERSION: u8 = 1;
 
 const PROTECTED_INPUT_CATEGORIES: &[&str] = &[
@@ -37,7 +34,6 @@ const PROTECTED_INPUT_CATEGORIES: &[&str] = &[
     "controlled-config",
 ];
 
-/// Stable error returned by verification isolation setup or execution.
 #[derive(Debug)]
 pub struct IsolationError {
     message: String,
@@ -59,7 +55,6 @@ impl std::fmt::Display for IsolationError {
 
 impl std::error::Error for IsolationError {}
 
-/// Versioned protected source contract. Enforcement covers the whole checkout.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectedInputScope {
     version: u8,
@@ -77,11 +72,6 @@ struct ProtectedInputScopeDigest<'a> {
 }
 
 impl ProtectedInputScope {
-    /// Declares the immutable input root and additional contract paths.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical roots and declared paths that escape the root.
     pub fn new(root: impl AsRef<Path>, declared_paths: &[String]) -> Result<Self, IsolationError> {
         let root = canonical_directory(root.as_ref(), "protected input root")?;
         let mut normalized = declared_paths.to_vec();
@@ -134,7 +124,6 @@ impl ProtectedInputScope {
     }
 }
 
-/// Private writable directories allocated to one verification profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationScratch {
     id: String,
@@ -147,11 +136,6 @@ pub struct VerificationScratch {
 }
 
 impl VerificationScratch {
-    /// Allocates a collision-free scratch tree below a job-private workspace.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid run identifiers or filesystem failures.
     pub fn create(
         workspace_root: impl AsRef<Path>,
         run_identity: &str,
@@ -203,11 +187,6 @@ impl VerificationScratch {
         Ok(scratch)
     }
 
-    /// Allocates an independent sibling scratch from the same workspace pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scratch roots or run identities and filesystem failures.
     pub fn sibling(&self, run_id: &str, ordinal: usize) -> Result<Self, IsolationError> {
         let base = self
             .root
@@ -246,7 +225,6 @@ impl VerificationScratch {
     }
 }
 
-/// Host-enforced protection capability discovered by a real mutation probe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtectionCapability {
     Available { backend: String },
@@ -259,7 +237,6 @@ impl ProtectionCapability {
     }
 }
 
-/// One verification profile bound to immutable input and isolated scratch.
 #[derive(Clone, Debug)]
 pub struct VerificationIsolation {
     scope: ProtectedInputScope,
@@ -269,8 +246,6 @@ pub struct VerificationIsolation {
     cancellation: VerificationCancellation,
 }
 
-/// Owned cancellation signal. Command completion waits for process-group kill
-/// and direct-child reap before the verification task returns.
 #[derive(Clone, Debug)]
 pub struct VerificationCancellation {
     requested: tokio::sync::watch::Sender<bool>,
@@ -322,7 +297,6 @@ impl VerificationCancellation {
     }
 }
 
-/// Complete output from an isolated test-only or capability command.
 #[derive(Debug)]
 pub struct IsolatedOutput {
     pub status: std::process::ExitStatus,
@@ -339,12 +313,6 @@ impl IsolatedOutput {
 }
 
 impl VerificationIsolation {
-    /// Builds the host policy and proves the enforcement with live mutation attempts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope or scratch. An unsupported host is retained as a
-    /// fail-closed capability instead of permitting verification execution.
     pub async fn open(
         scope: ProtectedInputScope,
         scratch: VerificationScratch,
@@ -426,11 +394,6 @@ impl VerificationIsolation {
         capability.allows_strong_pass()
     }
 
-    /// Runs one no-shell command with all descendants under the host policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable protection, path escapes, or process launch failure.
     pub async fn run(
         &self,
         argv: &[String],
@@ -449,11 +412,6 @@ impl VerificationIsolation {
         .await
     }
 
-    /// Builds the exact production command wrapper used by validation execution.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable protection, empty argv, path escapes, or policy errors.
     pub fn command(
         &self,
         argv: &[String],
@@ -528,8 +486,6 @@ impl VerificationIsolation {
                 "host cannot enforce protected verification input",
             ));
         }
-        // The helper discovers the platform sandbox launcher through PATH,
-        // including during the capability probe before a command environment exists.
         environment.entry("PATH".to_owned()).or_insert_with(|| {
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned())
         });
@@ -596,8 +552,6 @@ impl VerificationIsolation {
         let policy = FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry::new(root, FileSystemAccessMode::Read),
             FileSystemSandboxEntry::new(scratch, FileSystemAccessMode::Write),
-            // Linux bubblewrap mounts its own writable /dev. Treating a device
-            // file as a writable root also invents directory exclusions below it.
             #[cfg(not(target_os = "linux"))]
             FileSystemSandboxEntry::new(
                 FileSystemPath::from(absolute_path(Path::new("/dev/null"))?),
@@ -611,8 +565,6 @@ impl VerificationIsolation {
     }
 
     async fn probe(&mut self) -> Result<(), IsolationError> {
-        // Bubblewrap versions without --argv0 re-exec the helper by its first
-        // argument. Keep that absolute alias outside the writable scratch.
         #[cfg(target_os = "linux")]
         if let Some(helper) = &mut self.helper_executable {
             let source = fs::canonicalize(&*helper)
@@ -625,9 +577,6 @@ impl VerificationIsolation {
                 .map_err(|error| IsolationError::new(format!("sandbox launcher alias: {error}")))?;
             *helper = alias;
         }
-        // Probe the same read-only policy outside both the sealed input and
-        // writable scratch. Never create/delete probe files in a Snapshot:
-        // it may already contain those names or serve concurrent verifiers.
         let probe_root = self.scratch.root.with_extension("probe");
         fs::create_dir(&probe_root)
             .map_err(|error| IsolationError::new(format!("probe directory: {error}")))?;
@@ -710,8 +659,6 @@ async fn run_isolated_command(
     if cancellation.is_cancelled() {
         return Err(IsolationError::new("verification cancelled"));
     }
-    // EOF can precede exit. Both waits share one deadline, including time
-    // already spent spawning and draining the process's output.
     let deadline = tokio::time::Instant::now() + timeout;
     command.kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {

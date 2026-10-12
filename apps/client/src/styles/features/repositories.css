@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* REPO-100.3: the signed-in repository list for the selected Client. It only
-   reads tokens, like every other shell region. */
 .wwc-repositories {
   max-width: 36rem;
   margin: var(--wwc-space-4) auto;

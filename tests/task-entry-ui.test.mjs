@@ -26,8 +26,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/task-entry-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -65,7 +63,6 @@ const { mountTaskRunPage } = taskRunPageModule
 
 const FIXED_NOW = () => '2026-09-04T00:02:00.000Z'
 
-/** Settle one async model read (repository list, task create, identity read). */
 function flush() {
   return new Promise(resolvePromise => setTimeout(resolvePromise, 0))
 }
@@ -125,7 +122,6 @@ function repositoriesFake(byDevice) {
   }
 }
 
-/** One deterministic task port: every create records and can fail once. */
 function taskPortFake() {
   const calls = []
   let sequence = 0
@@ -414,7 +410,6 @@ class FakeElement {
 
   set value(next) {
     if (this.tagName === 'SELECT') {
-      // A select keeps only values one of its options names, like the DOM.
       const match = this.children.some(option => option.getAttribute('value') === next)
       this.attributes.set('value', match ? next : '')
       return
@@ -1267,7 +1262,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   })
   await fixture.model.start()
 
-  // Design page 05: back link left, 流程与记录 display slot right.
   const back = byClass(rootElement, 'wwc-task-run-back')
   assert.equal(back.textContent, '返回看板')
   assert.equal(
@@ -1289,7 +1283,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   )
   assert.match(visibleText(byClass(rootElement, 'wwc-task-run-description')), /Ship the occupancy gate/u)
 
-  // The StrongFlow-owned actions stay visible but disabled: no fake success.
   const approve = byClass(rootElement, 'wwc-task-run-approve')
   assert.equal(approve.textContent, '批准方案并执行')
   assert.equal(approve.disabled, true)
@@ -1298,7 +1291,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   assert.equal(requestChange.textContent, '提出修改')
   assert.equal(requestChange.disabled, true)
 
-  // The identity table stays collapsed behind the design-05 row.
   const identityToggle = byClass(rootElement, 'wwc-task-run-identity-toggle')
   assert.equal(identityToggle.textContent, '展开运行详情 · 12 项')
   const rowsContainer = byClass(rootElement, 'wwc-task-run-rows')

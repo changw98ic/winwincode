@@ -86,7 +86,16 @@ impl HttpsFixture {
         Self::start_with_declared_length(body, None)
     }
 
-    fn start_truncated(body: String) -> Self {
+    fn start_truncated(body: &str) -> Self {
+        let declared_length = body.len().saturating_add(64);
+        let terminal_start = body
+            .trim_end_matches('\n')
+            .rfind("\n\n")
+            .map_or(0, |index| index + 2);
+        Self::start_with_declared_length(body[..terminal_start].to_owned(), Some(declared_length))
+    }
+
+    fn start_complete_with_truncated_http_tail(body: String) -> Self {
         let declared_length = body.len().saturating_add(64);
         Self::start_with_declared_length(body, Some(declared_length))
     }
@@ -1563,12 +1572,7 @@ fn disconnected_anthropic_messages_stream_settles_failure_without_durable_privat
         SECRET_FIXTURE.to_vec(),
         ANTHROPIC_INPUT_FIXTURE,
     );
-    let mut body = anthropic_sse("incomplete");
-    body.truncate(
-        body.rfind("event: message_stop\n")
-            .expect("Anthropic terminal"),
-    );
-    let tls = HttpsFixture::start_truncated(body);
+    let tls = HttpsFixture::start_truncated(&anthropic_sse("incomplete"));
     let provider =
         tls.anthropic_provider_config(ANTHROPIC_PROVIDER, 64, ProviderTokenPricing::default());
     let mut application = application_with_providers(&root, vec![provider.clone()]);
@@ -1673,12 +1677,7 @@ fn truncated_external_stream_settles_failure_and_cleans_durable_resources() {
         EXTERNAL_MODEL,
         "verified-https-sse",
     );
-    let mut body = external_sse("truncated response");
-    body.truncate(
-        body.rfind("data: {\"type\":\"response.finished\"")
-            .expect("canonical terminal"),
-    );
-    let tls = HttpsFixture::start_truncated(body);
+    let tls = HttpsFixture::start_truncated(&external_sse("truncated response"));
     let provider = tls.provider_config(EXTERNAL_PROVIDER);
     let mut application = application_with_providers(&root, vec![provider.clone()]);
     let error = application
@@ -1720,7 +1719,7 @@ fn complete_protocol_terminal_settles_success_before_the_declared_http_tail() {
                 INPUT_FIXTURE
             },
         );
-        let tls = HttpsFixture::start_truncated(if anthropic {
+        let tls = HttpsFixture::start_complete_with_truncated_http_tail(if anthropic {
             anthropic_sse("complete response")
         } else {
             external_sse("complete response")

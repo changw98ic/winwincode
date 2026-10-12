@@ -1,21 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Worker-owned state for one delegated `ChangeBatch`.
-//!
-//! This store is the Worker's own evidence root for the delegated loop. Every
-//! observation intent, Provider exchange frame, validation decision, progress
-//! fact, and receipt is committed here before it becomes observable, and every
-//! write is idempotent so an exact replay after a process loss can never mint a
-//! second effect. Two invariants are structural:
-//!
-//! * An Observer chunk is retained only contiguously (`Inserted`), and an exact
-//!   replay of a retained frame is a `Duplicate` while a missing predecessor is
-//!   a `Gap` that never advances the confirmed cursor.
-//! * The workspace accepted revision only advances through
-//!   [`ChangeBatchStore::accept_observed_checkpoint`], which releases the active
-//!   batch exactly once and rejects stale or foreign facts with
-//!   [`ObservationGateResult::Stale`] instead of an error.
-
 use std::{
     collections::HashSet,
     fmt, fs,
@@ -40,7 +24,6 @@ use winwincode_execution_port::observation_contract::{
 };
 use winwincode_execution_port::typed_replay::stream_key_from_message;
 
-/// Durable contiguous Observer model stream retention result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationChunkRetention {
     Inserted { confirmed_sequence: i64 },
@@ -48,11 +31,6 @@ pub enum ObservationChunkRetention {
     Gap { confirmed_sequence: i64 },
 }
 
-/// One bounded Provider frame submitted for contiguous retention.
-///
-/// Only the strict response text, terminal usage, and stable terminal kind are
-/// retained. Provider reasoning, tool data, and raw envelopes never enter the
-/// store.
 pub struct ObservationModelFrame<'frame> {
     pub model_exchange_id: ModelExchangeId,
     pub sequence: i64,
@@ -62,22 +40,16 @@ pub struct ObservationModelFrame<'frame> {
     pub terminal_status: Option<&'frame str>,
 }
 
-/// Result of a revision-gated observation transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationGateResult {
     Accepted,
     Stale,
 }
 
-/// A monotonic cutoff derived from the exact current Server lease. Checkpoint
-/// acceptance checks it after acquiring the writer lock and before commit.
 #[derive(Clone, Copy, Debug)]
 pub struct CheckpointAcceptanceDeadline(std::time::Instant);
 
 impl CheckpointAcceptanceDeadline {
-    /// Binds a trusted Worker clock observation to the current lease deadline.
-    ///
-    /// Returns `None` for invalid time, an unissued lease, or an expired lease.
     #[must_use]
     pub fn from_lease_observation(
         lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
@@ -104,14 +76,12 @@ impl CheckpointAcceptanceDeadline {
     }
 }
 
-/// Whether one durable write inserted new state or replayed existing state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreRetention {
     Inserted,
     Replay,
 }
 
-/// Revalidated durable one-shot Provider exchange state for one observation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationModelRecord {
     pub request: ObservationRequest,
@@ -123,7 +93,6 @@ pub struct ObservationModelRecord {
     pub receipt: Option<ObservationReceipt>,
 }
 
-/// Durable deterministic decision over one exact base/result diagnostic pair.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ValidationDiagnosticEvaluation {
@@ -137,7 +106,6 @@ pub struct ValidationDiagnosticEvaluation {
     pub reason_code: Option<String>,
 }
 
-/// Revalidated durable one-proposal state: intent, receipt, and base revision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChangeBatchRecord {
     pub event: ChangeBatchProposalEvent,
@@ -146,21 +114,15 @@ pub struct ChangeBatchRecord {
     pub receipt: Option<ChangeBatchReceipt>,
 }
 
-/// Exact durable process-cleanup barrier for one owned validation.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ValidationCleanupRecord {
-    /// Workspace whose owner must remain retained.
     pub workspace_id: String,
-    /// Frozen identity of the validation whose cleanup is pending or failed.
     pub identity: ChangeBatchIdentity,
-    /// Stable secret-safe cleanup diagnostic.
     pub cause_code: String,
-    /// Pending or first failure time from the paired Worker clock.
     pub occurred_at: Instant,
 }
 
-/// Durable accepted-revision anchor and active batch for one workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceBatchBinding {
     pub workspace_id: String,
@@ -171,11 +133,6 @@ pub struct WorkspaceBatchBinding {
     pub checkpoint_delta_digest: Option<Sha256Digest>,
 }
 
-/// Bounded durable Worker state for the workspace that owns one proposal.
-///
-/// The PR1 Worker never writes files itself: it retains evidence, routes one
-/// bounded observation, and gates the accepted revision. Mutations beyond this
-/// state machine belong to a later delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BatchState {
     Idle,
@@ -214,7 +171,6 @@ impl BatchState {
     }
 }
 
-/// Secret-free durable store failure. Source bytes never appear in a message.
 #[derive(Debug)]
 pub struct ChangeBatchStoreError {
     message: &'static str,
@@ -225,7 +181,6 @@ impl ChangeBatchStoreError {
         Self { message }
     }
 
-    /// Returns the stable secret-safe failure description.
     #[must_use]
     pub const fn message(&self) -> &'static str {
         self.message
@@ -263,8 +218,6 @@ fn unavailable() -> ChangeBatchStoreError {
     ChangeBatchStoreError::new("ChangeBatch durable state is unavailable")
 }
 
-/// Canonical wire bytes: a serialize/deserialize round trip rejects any shape
-/// that cannot be read back exactly, so stored evidence is always replayable.
 fn canonical_bytes<T: serde::Serialize + serde::de::DeserializeOwned>(
     value: &T,
 ) -> Result<Vec<u8>, ChangeBatchStoreError> {
@@ -280,10 +233,6 @@ fn valid_digest(digest: &Sha256Digest) -> bool {
     encoded.len() == 64 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// A batch id is itself the canonical `sha256:` digest of the framed proposal
-/// content, so it must be accepted only in that exact form. It is never
-/// re-hashed here: re-deriving it is the separate
-/// `validate_change_batch_identity_derivation` check.
 fn valid_batch_id(batch_id: &ChangeBatchId) -> bool {
     digest_str_is_canonical(&batch_id.0)
 }
@@ -319,7 +268,6 @@ fn valid_progress_event(event: &ChangeBatchProgressEvent) -> bool {
         && !event.summary.is_empty()
 }
 
-/// Worker-owned `SQLite` store for delegated `ChangeBatch` evidence.
 pub struct ChangeBatchStore {
     connection: Connection,
     database: PathBuf,
@@ -334,11 +282,6 @@ impl fmt::Debug for ChangeBatchStore {
 }
 
 impl ChangeBatchStore {
-    /// Opens the private store with FULL synchronous WAL durability.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable state paths and unusable database state.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ChangeBatchStoreError> {
         let root = root.as_ref();
         let directory = root.join(DATABASE_DIRECTORY);
@@ -374,16 +317,11 @@ impl ChangeBatchStore {
         })
     }
 
-    /// Returns the durable database path for restart diagnostics.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database
     }
 
-    /// Commits the exact cleanup barrier before any validation process starts.
-    ///
-    /// # Errors
-    /// Rejects unresolved cleanup, foreign identity, or unavailable state.
     pub fn retain_validation_cleanup_pending(
         &mut self,
         workspace_id: &str,
@@ -414,10 +352,6 @@ impl ChangeBatchStore {
         transaction.commit().map_err(|_| unavailable())
     }
 
-    /// Clears one exact pending barrier only after its owner confirms cleanup.
-    ///
-    /// # Errors
-    /// Rejects foreign identity, failed cleanup, or unavailable state.
     pub fn clear_validation_cleanup_pending(
         &mut self,
         workspace_id: &str,
@@ -446,10 +380,6 @@ impl ChangeBatchStore {
         transaction.commit().map_err(|_| unavailable())
     }
 
-    /// Retains the first cleanup failure under its exact workspace and batch.
-    ///
-    /// # Errors
-    /// Rejects foreign identity, changed replay bytes, or unavailable state.
     pub fn retain_validation_cleanup_failure(
         &mut self,
         workspace_id: &str,
@@ -490,10 +420,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Loads the exact cleanup barrier, including after process restart.
-    ///
-    /// # Errors
-    /// Rejects corrupt or foreign stored identity and unavailable state.
     pub fn validation_cleanup_record(
         &self,
         job_id: &ExecutionJobId,
@@ -553,11 +479,6 @@ impl ChangeBatchStore {
         Ok(observations)
     }
 
-    /// Creates or replays the workspace durable accepted-revision anchor.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid revision or a changed initial revision.
     pub fn retain_workspace_binding(
         &mut self,
         workspace_id: &str,
@@ -588,11 +509,6 @@ impl ChangeBatchStore {
         }
     }
 
-    /// Loads one workspace binding.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state.
     pub fn workspace_binding(
         &self,
         workspace_id: &str,
@@ -639,11 +555,6 @@ impl ChangeBatchStore {
         }))
     }
 
-    /// Resolves the workspace that owns one batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable state.
     pub fn workspace_id_for_batch(
         &self,
         batch_id: &ChangeBatchId,
@@ -658,12 +569,6 @@ impl ChangeBatchStore {
             .map_err(|_| unavailable())
     }
 
-    /// Atomically retains one intent and claims the workspace for it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay bytes, a stale base revision, or a second active
-    /// batch on the same workspace.
     pub fn retain_claimed_intent(
         &mut self,
         workspace_id: &str,
@@ -676,8 +581,6 @@ impl ChangeBatchStore {
         {
             return Err(invalid("ChangeBatch intent is invalid"));
         }
-        // A proposal is retained only when its batch id is the canonical
-        // derivation of the framed proposal content it carries.
         validate_change_batch_identity_derivation(&event.identity)
             .map_err(|_| invalid("ChangeBatch identity is not canonically derived"))?;
         let event_bytes = canonical_bytes(event)?;
@@ -756,11 +659,6 @@ impl ChangeBatchStore {
         Ok(retention)
     }
 
-    /// Loads one proposal record with its durable receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state.
     pub fn batch_record(
         &self,
         batch_id: &ChangeBatchId,
@@ -793,11 +691,6 @@ impl ChangeBatchStore {
         }))
     }
 
-    /// Loads the workspace binding owned by one exact retained batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown batch or corrupt workspace binding.
     pub fn workspace_binding_for_batch(
         &self,
         batch_id: &ChangeBatchId,
@@ -806,11 +699,6 @@ impl ChangeBatchStore {
         load_binding(&self.connection, &record.workspace_id)
     }
 
-    /// Loads every retained proposal record for one Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state or an unbounded record backlog.
     pub fn records_for_job(
         &self,
         job_id: &ExecutionJobId,
@@ -841,11 +729,6 @@ impl ChangeBatchStore {
             .collect()
     }
 
-    /// Appends one progress fact that does not move the workspace state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay bytes or a duplicated sequence.
     pub fn append_progress(
         &mut self,
         event: &ChangeBatchProgressEvent,
@@ -858,11 +741,6 @@ impl ChangeBatchStore {
         Ok(retention)
     }
 
-    /// Retains one progress fact that moves the workspace between two states.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale workspace state, foreign batches, or changed replay bytes.
     pub fn retain_workspace_progress(
         &mut self,
         workspace_id: &str,
@@ -909,12 +787,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Retains the exact apply checkpoint and its applied receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign batch, stale state, or a receipt that does not bind
-    /// the retained identity and base revision.
     pub fn retain_applied_checkpoint(
         &mut self,
         workspace_id: &str,
@@ -932,11 +804,6 @@ impl ChangeBatchStore {
         )
     }
 
-    /// Retains one validated checkpoint with its exact validation receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign batch, stale state, or changed replay bytes.
     pub fn retain_validated_checkpoint(
         &mut self,
         workspace_id: &str,
@@ -981,8 +848,6 @@ impl ChangeBatchStore {
             if existing != receipt {
                 return Err(conflict());
             }
-            // The proven checkpoint is already durable, so only its progress
-            // fact is retained here.
             if load_progress_bytes(&transaction, &batch_id, event.sequence)?.is_some() {
                 if load_progress_bytes(&transaction, &batch_id, event.sequence)?.as_deref()
                     != Some(progress_bytes.as_slice())
@@ -1047,11 +912,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Loads the ordered progress ledger of one batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt or out-of-order stored events.
     pub fn progress_events(
         &self,
         batch_id: &ChangeBatchId,
@@ -1064,11 +924,6 @@ impl ChangeBatchStore {
         Ok(events)
     }
 
-    /// Retains one terminal progress fact together with its final receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale state, foreign batches, or changed replay bytes.
     pub fn retain_terminal_workspace_receipt(
         &mut self,
         workspace_id: &str,
@@ -1081,11 +936,6 @@ impl ChangeBatchStore {
         self.retain_checkpoint_receipt(workspace_id, event, receipt, expected, next, now)
     }
 
-    /// Retains one validation receipt against the retained proposal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown batch, a stale result revision, or changed replay.
     pub fn retain_validation_receipt(
         &mut self,
         batch_id: &ChangeBatchId,
@@ -1141,11 +991,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Loads the exact accepted diagnostic baseline for one batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state.
     pub fn diagnostic_baseline(
         &self,
         batch_id: &ChangeBatchId,
@@ -1175,11 +1020,6 @@ impl ChangeBatchStore {
         }
     }
 
-    /// Retains one durable diagnostic decision for one batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed replay bytes or a changed base revision.
     pub fn retain_diagnostic_evaluation(
         &mut self,
         batch_id: &ChangeBatchId,
@@ -1226,11 +1066,6 @@ impl ChangeBatchStore {
         }
     }
 
-    /// Loads one durable diagnostic decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state.
     pub fn diagnostic_evaluation(
         &self,
         batch_id: &ChangeBatchId,
@@ -1248,11 +1083,6 @@ impl ChangeBatchStore {
         bytes.map(|bytes| decode(&bytes)).transpose()
     }
 
-    /// Atomically retains one exact one-shot Observer intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid request, a stale checkpoint, or changed replay bytes.
     pub fn retain_observation_request(
         &mut self,
         workspace_id: &str,
@@ -1338,11 +1168,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Loads and revalidates one exact durable Observer request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored state.
     pub fn observation_request(
         &self,
         batch_id: &ChangeBatchId,
@@ -1360,11 +1185,6 @@ impl ChangeBatchStore {
         bytes.map(|bytes| decode(&bytes)).transpose()
     }
 
-    /// Retains the exact one-shot Provider open before it may be sent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign intent, an invalid open, or changed replay bytes.
     pub fn retain_observation_model_open(
         &mut self,
         batch_id: &ChangeBatchId,
@@ -1422,11 +1242,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Loads and revalidates durable Provider exchange state by model identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt canonical bytes or an invalid retained receipt.
     pub fn observation_model_record(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1505,11 +1320,6 @@ impl ChangeBatchStore {
         }))
     }
 
-    /// Returns the unfinished or pending-terminal Observer open for one Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt state or an unbounded recovery backlog.
     pub fn pending_observation_model_open(
         &self,
         job_id: &ExecutionJobId,
@@ -1535,11 +1345,6 @@ impl ChangeBatchStore {
         self.single_exchange_for_job(job_id, &exchanges)
     }
 
-    /// Returns the already-cancelled Observer open for one Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt state or an unbounded recovery backlog.
     pub fn cancelled_observation_model_open(
         &self,
         job_id: &ExecutionJobId,
@@ -1587,9 +1392,6 @@ impl ChangeBatchStore {
     }
 
     /// Retains the first cancellation time before retiring an Observer exchange.
-    ///
-    /// # Errors
-    ///
     /// Rejects an unknown exchange or an invalid cancellation time.
     pub fn cancel_observation_model(
         &mut self,
@@ -1629,16 +1431,6 @@ impl ChangeBatchStore {
         Ok(cancelled_at)
     }
 
-    /// Retains one contiguous, content-bound Observer model frame.
-    ///
-    /// Only the strict response text, terminal usage, and stable terminal kind
-    /// are retained. Provider reasoning, tool data, and raw envelopes never
-    /// enter the store.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown exchange, changed replay bytes, or a second terminal
-    /// frame.
     pub fn retain_observation_model_chunk(
         &mut self,
         frame: &ObservationModelFrame<'_>,
@@ -1743,11 +1535,6 @@ impl ChangeBatchStore {
         })
     }
 
-    /// Retains the unique exact Observer receipt after a terminal response.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid binding, a non-terminal exchange, or changed replay.
     pub fn retain_observation_receipt(
         &mut self,
         receipt: &ObservationReceipt,
@@ -1819,14 +1606,6 @@ impl ChangeBatchStore {
         Ok(StoreRetention::Inserted)
     }
 
-    /// Accepts one checkpoint only after an exact typed observation fact.
-    ///
-    /// Stale or foreign revision and digest facts return `Stale` without
-    /// changing the accepted revision or releasing the active batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable or corrupt durable state.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_observed_checkpoint(
         &mut self,
@@ -1847,10 +1626,6 @@ impl ChangeBatchStore {
         )
     }
 
-    /// Exercises the pure revision gate without pretending to own a lease.
-    ///
-    /// # Errors
-    /// Returns the same unavailable or corrupt-state error as the production gate.
     #[cfg(any(test, feature = "test-support"))]
     pub fn accept_revision_without_lease_for_test(
         &mut self,
@@ -1962,14 +1737,6 @@ impl ChangeBatchStore {
     }
 }
 
-/// Sorts and validates secret-safe applied-file summaries for one receipt.
-///
-/// # Errors
-///
-/// Rejects more than 20 touched paths, conflicting source/destination paths,
-/// non-portable paths, non-canonical digests or modes, negative byte counts,
-/// and operation/optional-field combinations that cannot represent an exact
-/// Add, Update, Delete, or Move.
 pub fn canonical_applied_file_summaries(
     summaries: &[AppliedFileSummary],
 ) -> Result<Vec<AppliedFileSummary>, ChangeBatchStoreError> {
@@ -1990,13 +1757,6 @@ pub fn canonical_applied_file_summaries(
     Ok(result)
 }
 
-/// Derives a stable digest from canonical sorted file summaries using a domain
-/// separator, explicit optional-value tags, and unsigned 64-bit length framing.
-///
-/// # Errors
-///
-/// Returns the same strict validation failures as
-/// [`canonical_applied_file_summaries`].
 pub fn derive_delta_digest(
     summaries: &[AppliedFileSummary],
 ) -> Result<Sha256Digest, ChangeBatchStoreError> {
@@ -2340,8 +2100,6 @@ struct StoredRecord {
     workspace_id: String,
 }
 
-/// Mints the workspace accepted-revision anchor on its first claim, and
-/// rejects any claim whose base revision contradicts the anchored revision.
 fn mint_workspace_anchor(
     connection: &Connection,
     workspace_id: &str,
@@ -2451,7 +2209,6 @@ fn require_validation_cleanup_identity(
     Ok(())
 }
 
-/// Decodes every stored progress fact of one batch in sequence order.
 fn stored_progress(
     connection: &Connection,
     batch_id: &ChangeBatchId,
@@ -2472,9 +2229,6 @@ fn stored_progress(
     .collect()
 }
 
-/// Replays one batch's stored ledger and validates the new fact against it
-/// before anything is written, so an out-of-sequence, identity-changing,
-/// illegal, or post-terminal fact can never become durable.
 fn checked_progress_ledger(
     connection: &Connection,
     event: &ChangeBatchProgressEvent,
@@ -2523,7 +2277,6 @@ fn load_progress_bytes(
         .map_err(|_| unavailable())
 }
 
-/// Bounded shape checks for one submitted Provider frame.
 fn valid_frame(frame: &ObservationModelFrame<'_>) -> bool {
     valid_progress_sequence(frame.sequence)
         && valid_digest(&frame.chunk_digest)
@@ -2544,9 +2297,6 @@ fn require_valid_progress(event: &ChangeBatchProgressEvent) -> Result<(), Change
     Ok(())
 }
 
-/// Checks a receipt against the canonical receipt rules before it may be
-/// retained: the identity and base revision must bind the retained proposal,
-/// and each status must claim exactly the proven tree it is allowed to claim.
 fn validate_receipt(
     receipt: &ChangeBatchReceipt,
     identity: &ChangeBatchIdentity,
@@ -2672,7 +2422,6 @@ mod tests {
         }
     }
 
-    /// A second, distinct proposal for the same workspace.
     fn other_identity(fill: char) -> ChangeBatchIdentity {
         let mut identity = identity();
         identity.patch_digest = digest(fill);
@@ -2898,7 +2647,6 @@ mod tests {
         (directory, store)
     }
 
-    /// Retains the workspace anchor and one claimed proposal, ready for progress.
     fn claim(store: &mut ChangeBatchStore) -> ChangeBatchIdentity {
         let identity = identity();
         store
@@ -2916,7 +2664,6 @@ mod tests {
         identity
     }
 
-    /// Drives the canonical ledger prefix up to `apply_started`.
     fn advance_to_apply_started(store: &mut ChangeBatchStore, identity: &ChangeBatchIdentity) {
         for (sequence, state, summary) in [
             (1, ChangeBatchProgressState::Proposed, "proposed"),
@@ -2934,8 +2681,6 @@ mod tests {
         }
     }
 
-    /// Drives the canonical ledger prefix through the applied checkpoint, which
-    /// leaves the workspace `validation_pending` at progress sequence 4.
     fn advance_to_validation_pending(store: &mut ChangeBatchStore, identity: &ChangeBatchIdentity) {
         advance_to_apply_started(store, identity);
         store
@@ -2948,8 +2693,6 @@ mod tests {
             .expect("applied checkpoint");
     }
 
-    /// Records the validation phase of the ledger without changing the
-    /// durable checkpoint, leaving the batch ready for its one observation.
     fn advance_to_observation_ready(store: &mut ChangeBatchStore, identity: &ChangeBatchIdentity) {
         store
             .retain_workspace_progress(
@@ -3209,7 +2952,6 @@ mod tests {
         );
     }
 
-    /// Retains the one-shot Observer request for the accepted checkpoint.
     fn request_observation(store: &mut ChangeBatchStore, identity: &ChangeBatchIdentity) {
         store
             .retain_observation_request(
@@ -3226,8 +2968,6 @@ mod tests {
             .expect("retain observation request");
     }
 
-    /// Drives the canonical ledger to the observation phase and retains the
-    /// model-open frame, returning the single model exchange in use.
     fn open_observation_exchange(
         store: &mut ChangeBatchStore,
         identity: &ChangeBatchIdentity,
@@ -3241,7 +2981,6 @@ mod tests {
         ModelExchangeId(EXCHANGE.to_owned())
     }
 
-    /// Builds one bounded Provider frame carrying the sequenced `response_delta`.
     fn observation_frame<'frame>(
         exchange: &ModelExchangeId,
         sequence: i64,
@@ -3259,7 +2998,6 @@ mod tests {
         }
     }
 
-    /// Retains one streamed Provider frame, which never carries terminal state.
     fn retain_observation_chunk(
         store: &mut ChangeBatchStore,
         exchange: &ModelExchangeId,

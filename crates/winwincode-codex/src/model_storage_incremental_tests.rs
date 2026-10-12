@@ -258,8 +258,6 @@ fn mutate_before_seal_writer_transaction(
             {
                 let mut result = recorded_for_hook.lock().unwrap();
                 if result.is_none() {
-                    // This is a real second WAL writer, invoked while the
-                    // production BEGIN statement is prepared, before its lock.
                     *result = Some((|| -> Result<usize, rusqlite::Error> {
                         let writer = Connection::open(&writer_path)?;
                         writer.execute_batch("BEGIN IMMEDIATE;")?;
@@ -407,8 +405,6 @@ fn model_response_seal_rejects_corrupt_historical_payload_and_wrong_exchange() {
         } else {
             chunk.model_exchange_id.0 = "mdl_other".into();
         }
-        // Seed a prior immutable frame table. The historical reader must check
-        // the same payload and exact exchange contract as the live bridge.
         store
             .retain_model_call_frame("run", "call", &chunk)
             .unwrap();
@@ -489,8 +485,6 @@ fn sealed_model_response_rejects_append_and_corrupt_seal() {
         store.load_model_call_frames("run", "call").unwrap(),
         vec![final_response_fixture()]
     );
-    // Simulate a corrupt historical marker in this isolated fixture. The live
-    // writer is protected above; the reader still rejects old corrupt state.
     store
         .lock()
         .unwrap()
@@ -617,8 +611,6 @@ fn retained_model_open_lookup_reads_only_the_exact_request() {
     {
         let connection = store.lock().unwrap();
         for index in 0..500 {
-            // A foreign private row has a valid index key but deliberately is
-            // not a generated ModelOpen. Reading it would fail the live lookup.
             let bytes=serde_json::to_vec(&serde_json::json!({"kind":"foreign-private-record","modelExchangeId":format!("foreign-{index}"),"syntheticPadding":"x".repeat(4096)})).unwrap();
             foreign_bytes += bytes.len();
             connection.execute("INSERT INTO execution_outbox(delivery_id,family,correlation_key,acknowledgement_required,state,frame_digest,frame_json) VALUES(?1,'model_open',?1,0,'sent_attempt','foreign',?2)",params![format!("foreign-{index}"),bytes]).unwrap();

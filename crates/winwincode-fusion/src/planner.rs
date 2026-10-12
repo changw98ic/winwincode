@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//!
-//! ADR-0037 P4–P5: Evidence Planner + pluggable `EvidenceProvider`.
-//!
-//! Investigation is not "ask models again". For a disputed claim the planner
-//! emits an [`InvestigationPlan`] that names unknowns, target facts, and the
-//! cheapest provider likely to reduce uncertainty (escalation ladder L0–L7).
-
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -15,29 +8,19 @@ use crate::knowledge::{
     ClaimNode, ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord,
 };
 
-/// Escalation ladder (ADR-0037 §验证升级阶梯).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EvidenceLevel {
-    /// L0 LLM reasoning / cross-model inspection.
     LlmReasoning,
-    /// L1 blind cross review of an existing evidence item.
     CrossReview,
-    /// L2 lexical / semantic search.
     Search,
-    /// L3 `CodeGraph` / AST / LSP structural facts.
     CodeGraph,
-    /// L4 static analysis.
     StaticAnalysis,
-    /// L5 targeted tests.
     Test,
-    /// L6 minimal reproduction.
     Reproduction,
-    /// L7 runtime traces / concurrency evidence.
     Runtime,
 }
 
-/// One planned acquisition step for a disputed claim.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationAction {
@@ -56,7 +39,6 @@ pub enum InformationGain {
     Low,
 }
 
-/// P4 output: what is unknown, what would resolve it, who can acquire it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationPlan {
@@ -67,7 +49,6 @@ pub struct InvestigationPlan {
     pub actions: Vec<InvestigationAction>,
 }
 
-/// R3 is not only "find new evidence" (ADR-0037).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum InvestigationMode {
@@ -77,7 +58,6 @@ pub enum InvestigationMode {
     CrossVerification,
 }
 
-/// Host capability advertisement for planner routing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderCapability {
     pub provider: String,
@@ -86,7 +66,6 @@ pub struct ProviderCapability {
     pub cost_rank: u8,
 }
 
-/// Uniform evidence acquisition port (ADR-0037 §Provider 接口).
 pub trait EvidenceProvider: Send + Sync + std::fmt::Debug {
     fn provider_id(&self) -> &'static str;
     fn can_handle(&self, action: &InvestigationAction) -> bool;
@@ -97,21 +76,17 @@ pub trait EvidenceProvider: Send + Sync + std::fmt::Debug {
     ) -> BoxFuture<'static, Result<Vec<FusionEvidenceRecord>, String>>;
 }
 
-/// Structured investigation result (P0-2). `producedNewEvidence` alone is not enough.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum InvestigationOutcome {
     SupportingEvidence,
     CounterEvidence,
-    /// Executed and found nothing relevant (still a fact).
     NegativeFinding,
-    /// Executed but empty/inconclusive for this claim.
     NoRelevantFinding,
     ProviderFailure,
     NotApplicable,
 }
 
-/// What one provider actually did (P0-3 audit).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderExecutionRecord {
@@ -124,7 +99,6 @@ pub struct ProviderExecutionRecord {
     pub evidence_ids: Vec<String>,
 }
 
-/// Claim semantics drive tool routing (P0-4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClaimKind {
@@ -184,7 +158,6 @@ pub fn classify_claim_kind(claim: &ClaimNode) -> ClaimKind {
     ClaimKind::Other
 }
 
-/// Provider order is claim-type specific — not a fixed five-provider tour.
 #[must_use]
 pub fn provider_route_for(kind: ClaimKind) -> Vec<(&'static str, &'static str)> {
     match kind {
@@ -221,7 +194,6 @@ pub fn provider_route_for(kind: ClaimKind) -> Vec<(&'static str, &'static str)> 
     }
 }
 
-/// Plans a dispute investigation without repeating the original vote prompt.
 #[must_use]
 pub fn plan_investigation(
     claim: &ClaimNode,
@@ -265,7 +237,6 @@ pub fn plan_investigation(
             "runtime" => EvidenceLevel::Runtime,
             "reproduction" => EvidenceLevel::Reproduction,
             "cross_review" => EvidenceLevel::CrossReview,
-            // `git`/`ci` and any unknown provider fall back to search-level evidence.
             _ => EvidenceLevel::Search,
         };
         push_action(
@@ -284,7 +255,6 @@ pub fn plan_investigation(
         );
     }
 
-    // Cheapest high-gain first, but keep claim-type order stable within a gain tier.
     actions.sort_by_key(|action| {
         (
             action.expected_information_gain,
@@ -315,7 +285,6 @@ fn push_action(
     let known = capabilities.iter().any(|cap| {
         cap.provider == provider && (cap.capability == capability || cap.capability == "*")
     });
-    // Keep the action even if the host has no adapter yet (escalation queue).
     let _ = known;
     actions.push(InvestigationAction {
         provider: provider.to_owned(),
@@ -361,12 +330,10 @@ fn default_unknowns(claim: &ClaimNode) -> Vec<String> {
     unknowns
 }
 
-/// Evidence planner port for hosts that override planning policy.
 pub trait EvidencePlanner: Send + Sync + std::fmt::Debug {
     fn plan(&self, claim: &ClaimNode, capabilities: &[ProviderCapability]) -> InvestigationPlan;
 }
 
-/// Default planner implementing ADR-0037 P4.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultEvidencePlanner;
 
@@ -376,12 +343,6 @@ impl EvidencePlanner for DefaultEvidencePlanner {
     }
 }
 
-/// Executes one plan step against a provider registry (escalation ladder).
-///
-/// # Errors
-///
-/// Returns an error when no registered [`EvidenceProvider`] can handle the
-/// action, or when that provider's investigation fails.
 pub async fn execute_plan_step(
     providers: &[Arc<dyn EvidenceProvider>],
     action: &InvestigationAction,
@@ -398,7 +359,6 @@ pub async fn execute_plan_step(
     ))
 }
 
-/// Merge provider output into the claim evidence lists (additive by default).
 pub fn merge_evidence(
     claim: &mut ClaimNode,
     records: &mut Vec<FusionEvidenceRecord>,
@@ -419,7 +379,6 @@ pub fn merge_evidence(
     }
 }
 
-/// Recompute state after evidence merge (never Refuted without verified counter).
 #[must_use]
 pub fn recompute_state(claim: &ClaimNode) -> ClaimState {
     if claim.state == ClaimState::Confirmed || claim.state == ClaimState::Refuted {
@@ -437,7 +396,6 @@ pub fn recompute_state(claim: &ClaimNode) -> ClaimState {
     ClaimState::Discovered
 }
 
-/// Strength helper for synthesizer/summary layers.
 #[must_use]
 pub fn strongest_evidence(
     records: &[FusionEvidenceRecord],
@@ -489,7 +447,6 @@ mod tests {
                 .iter()
                 .any(|action| action.capability == "targeted_repro")
         );
-        // Must not be a "just ask the LLM again" plan.
         assert!(
             plan.actions
                 .iter()
@@ -523,13 +480,11 @@ mod tests {
     }
 }
 
-/// P5: `CodeGraph` structural evidence provider (ADR-0037).
 #[derive(Debug)]
 pub struct CodeGraphEvidenceProvider {
     backend: Arc<dyn CodeGraphEvidenceBackend>,
 }
 
-/// Minimal structural queries needed for root-cause disputes.
 pub trait CodeGraphEvidenceBackend: Send + Sync + std::fmt::Debug {
     fn find_writers(&self, symbol: &str) -> BoxFuture<'static, Result<Vec<String>, String>>;
     fn trace_ownership(&self, symbol: &str) -> BoxFuture<'static, Result<Vec<String>, String>>;
@@ -539,11 +494,9 @@ pub trait CodeGraphEvidenceBackend: Send + Sync + std::fmt::Debug {
     ) -> BoxFuture<'static, Result<Vec<String>, String>>;
     fn find_readers(&self, symbol: &str) -> BoxFuture<'static, Result<Vec<String>, String>>;
     fn find_callers(&self, symbol: &str) -> BoxFuture<'static, Result<Vec<String>, String>>;
-    /// Absence of synchronization is itself a finding (`NEGATIVE_FINDING`).
     fn find_sync(&self, symbol: &str) -> BoxFuture<'static, Result<Vec<String>, String>>;
 }
 
-/// Real backend over the `codegraph` CLI (project `.codegraph/` index).
 #[derive(Debug, Clone)]
 pub struct CliCodeGraphBackend {
     pub project_path: String,
@@ -718,7 +671,6 @@ impl CodeGraphEvidenceProvider {
         Self { backend }
     }
 
-    /// Provider bound to the local `codegraph` CLI index.
     #[must_use]
     pub fn cli(project_path: impl Into<String>) -> Self {
         Self::new(Arc::new(CliCodeGraphBackend::new(project_path)))

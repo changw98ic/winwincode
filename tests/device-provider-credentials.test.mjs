@@ -35,9 +35,6 @@ function providerEnvironment(prefix, credential) {
   }
 }
 
-// This fixture replaces the external Device API. The real encrypted payload is
-// decrypted by its receiving Device key, so valid credential bytes are observed
-// across the production encryption boundary without any socket or model call.
 function receivingDevice() {
   const keyPair = createECDH('prime256v1')
   keyPair.generateKeys()

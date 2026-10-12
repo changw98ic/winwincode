@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Effective authority time advances between Worker observations. A delayed
-//! receipt cannot move it backwards, and a quiet owner cannot freeze a lease.
-
 use std::sync::{Arc, Mutex};
 
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -67,8 +64,6 @@ fn parse_timestamp(instant: &Instant) -> Option<OffsetDateTime> {
         return None;
     }
     let timestamp = OffsetDateTime::parse(&instant.0, &Rfc3339).ok()?;
-    // The parser accepts leap seconds by normalization. Authority timestamps
-    // use the exact millisecond spelling, so normalization is not permitted.
     (format_timestamp(timestamp) == *instant).then_some(timestamp)
 }
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Offline mechanism regression fixtures. Execution belongs to regression_runner.
 use super::*;
 use crate::identity::{DeviceIdentitySeed, ensure_device_identity};
 use crate::store::WorkerProcessRecord;
@@ -149,8 +148,6 @@ fn daemon(path: &Path, transport: Arc<LocalTransport>) -> DeviceDaemon {
         &identity,
     )
     .unwrap();
-    // Test-only boot phase injection. Registry, supervision, frames, fencing,
-    // outbox, ingest and tick methods below are the actual production methods.
     daemon.enrolled = true;
     daemon.hello_announced = true;
     daemon.node_id = "cnd_00000000000000000000000001".to_owned();
@@ -209,8 +206,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
         let supervisor = supervisor(&device, None);
         daemon.set_worker_supervisor(supervisor.clone());
         daemon.set_worker_capacity_source(Arc::new(supervisor.clone()));
-        // Mark only exit notifications as previously sent. Reconciliation
-        // still publishes the initial history and then only changed records.
         daemon.reported_worker_exits = supervisor
             .worker_processes()
             .unwrap()
@@ -252,8 +247,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
             "SessionSupervisor.worker_capacity", "DeviceDaemon.ensure_pending_reports"],
         "measurements": measurements, "classification": "current incremental terminal history contract; formal lease causality unproved" }),
     );
-    // Current reconciliation must not resend unchanged terminal history
-    // in its second heartbeat.
     assert_eq!(
         measurements[0]["reconciliationWorkerCounts"][1], 0,
         "unchanged terminal registry history is repeated in the next heartbeat"
@@ -261,7 +254,6 @@ fn m20_terminal_history_repeats_in_actual_reconciliation() {
 }
 
 fn kill_fixture_group(pid: u32, script: &Path) {
-    // Verify the unique owned script before signalling. Never signal by PID alone.
     let output = Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output();
@@ -384,8 +376,6 @@ fn sc05_five_owned_term_ignoring_workers_block_actual_device_tick() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // A bounded watchdog cleans only the five verified fixture groups if a
-    // production stop/join unexpectedly hangs. No running batch is touched.
     let owned_pids = cleanup.pids.clone();
     let owned_script = script.clone();
     let (finished_tx, finished_rx) = mpsc::channel();
@@ -444,8 +434,6 @@ fn sc05_five_owned_term_ignoring_workers_block_actual_device_tick() {
             break;
         }
     }
-    // Send the final stop receipt and the durable downlink cursor through
-    // the same real daemon exchange, after its process has been reaped.
     let began = Instant::now();
     let final_flush = daemon.tick(began);
     ticks.push(serde_json::json!({ "elapsedMillis": began.elapsed().as_millis(),
@@ -553,8 +541,6 @@ fn sc05_five_owned_term_ignoring_workers_block_actual_device_tick() {
         max_heartbeat_gap < Duration::from_secs(45),
         "serial Worker stops must not delay transmitted heartbeats beyond 45s"
     );
-    // These current-budget positive assertions follow the unchanged45s
-    // target so the old production loop fails at its original timing seam.
     assert_eq!(ticks[0]["acceptedThrough"], 1);
     assert!(
         ticks
@@ -599,8 +585,6 @@ fn incremental_terminal_history_is_published_once_in_actual_reconciliation() {
         let supervisor = supervisor(&device, None);
         daemon.set_worker_supervisor(supervisor.clone());
         daemon.set_worker_capacity_source(Arc::new(supervisor.clone()));
-        // Mark only exit notifications as previously sent. Reconcile history
-        // has no equivalent cursor, so every heartbeat includes it again.
         daemon.reported_worker_exits = supervisor
             .worker_processes()
             .unwrap()
@@ -642,8 +626,6 @@ fn incremental_terminal_history_is_published_once_in_actual_reconciliation() {
             "SessionSupervisor.worker_capacity", "DeviceDaemon.ensure_pending_reports"],
         "measurements": measurements, "classification": "current incremental terminal-history contract; formal lease causality unproved" }),
     );
-    // The current incremental contract omits unchanged terminal history
-    // from the second heartbeat.
     assert_eq!(
         measurements[0]["reconciliationWorkerCounts"][1], 0,
         "unchanged terminal registry history is repeated in the next heartbeat"
@@ -692,7 +674,6 @@ fn indexed_worker_reports_reopen_and_enqueue_mark_preserves_new_state() {
     changed.state = "running".into();
     changed.exit_code = None;
     store.put_worker_process(&changed).unwrap();
-    // An observation queued before a newer state cannot acknowledge that new state.
     store.worker_report_queued("exit", &original).unwrap();
     assert_eq!(
         store.worker_report_candidates("exit", None).unwrap(),
@@ -849,8 +830,6 @@ fn downlink_raw_duplicate_budget_preserves_suffix_gap_zero_and_replay() {
         },
         1
     );
-    // Raw duplicates count towards the visit budget. The deferred malformed
-    // suffix is neither decoded nor acknowledged in this invocation.
     let mut duplicates = vec![owned; 64];
     duplicates.push(serde_json::json!({"invalid": "deferred suffix"}));
     assert_eq!(

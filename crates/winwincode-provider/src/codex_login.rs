@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Read-only binding to the selected device's Codex file login. Codex owns refresh.
-
 use crate::{DeviceProviderError, ResolvedSecret};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};

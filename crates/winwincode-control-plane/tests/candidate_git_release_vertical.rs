@@ -423,8 +423,6 @@ fn delivery_terminal_reader_hold_then_reads_closed_releases_receipt_first_exactl
         .install_git_repository_root(&fixture.repositories)
         .expect("canonical Git retention root");
 
-    // Delivery is already terminal, but its reader WorkRun remains active.
-    // The closure receipt cannot be minted and no release can be authorized.
     control_plane
         .commit_candidate_git_reads_closed(
             &fixture.delivery_id,
@@ -451,8 +449,6 @@ fn delivery_terminal_reader_hold_then_reads_closed_releases_receipt_first_exactl
         fixture.candidate_commit
     );
 
-    // Close the reader as a separate durable Delivery revision.  This is the
-    // exact terminal receipt that the later read-closure commit must bind.
     let reader_closed = delivered_with_reader(false, 2);
     let terminal = commit_delivery_revision(&fixture.control, &reader_closed, 1, 11);
     let reads_closed = control_plane
@@ -465,8 +461,6 @@ fn delivery_terminal_reader_hold_then_reads_closed_releases_receipt_first_exactl
     let expected_reads_closed = reads_closed.clone();
     assert_eq!(closure_counts(&fixture), (1, 1, 1));
 
-    // Simulate losing the response after the outbox/state transaction.  A
-    // restart reconstructs the exact closure receipt without another event.
     drop(reads_closed);
     control_plane
         .shutdown()
@@ -489,8 +483,6 @@ fn delivery_terminal_reader_hold_then_reads_closed_releases_receipt_first_exactl
     assert_eq!(replayed_reads_closed, expected_reads_closed);
     assert_eq!(closure_counts(&fixture), (1, 1, 1));
 
-    // Foreign and tampered authority are rejected before the stable ref is
-    // touched; a moved ref is also fail-closed and leaves the foreign target.
     let foreign = CandidateGitReleaseAuthority::delivery_final_without_future_reads(
         DeliveryId(canonical_id("dlv", 99)),
         CandidateGitTerminalOutcome::Delivered,

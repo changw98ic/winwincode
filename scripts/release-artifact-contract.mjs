@@ -174,7 +174,6 @@ export function assertSourceDateEpoch(sourceDateEpoch) {
   }
 }
 
-/** Read the linker-generated LC_UUID from one thin 64-bit Mach-O artifact. */
 export function machoUuidForFile(path) {
   const bytes = readFileSync(path)
   if (bytes.length < MACH_O_HEADER_BYTES) {
@@ -219,13 +218,6 @@ export function machoUuidForFile(path) {
   return uuids[0]
 }
 
-/**
- * Build one deterministic Cargo environment for either isolated release build.
- *
- * Both cold builds use one stable physical Cargo target directory. Rustc gives
- * the last matching remap precedence, so mappings are ordered from broad host
- * paths to that specific Cargo target.
- */
 export function createReleaseBuildEnvironment({
   baseEnvironment,
   root,

@@ -193,7 +193,6 @@ if held is not None:
   const holders = []
   for (let profile = 0; profile < 3; profile++) holders.push(await acquire(slots(profile)))
   assert.deepEqual(holders.map(holder => holder.slot), [0, 1, 2])
-  // Preparing again while locks are held must leave the same live lock inodes.
   prepareDeviceBenchmarkProviderSlots(input)
   assert.equal((await acquire(slots(3))).slot, null)
   assert.equal((await acquire(slots(3, 'provider-b'))).slot, 0)

@@ -1,15 +1,3 @@
-// UI-608 key-page visual fixture.
-//
-// Mounts the one browser shell over a deterministic Control Plane facade and
-// reports a visual fingerprint of each key page, at whatever viewport the
-// harness has set.  The route in the URL selects which slice of fixture data is
-// served, so one fixture file covers the populated pages and the empty Chat
-// without re-mounting mid-capture.
-//
-// Determinism: the shell receives a fixed clock, every served timestamp and
-// identifier is a literal, the font stack is pinned, and transitions,
-// animations, and scrollbars are switched off.
-
 import {
   captureVisualFingerprint,
   compareVisualFingerprints,
@@ -53,7 +41,6 @@ const modelRoute = {
   credentialReferenceId,
 }
 
-/** Which slice of fixture data this page load serves, taken from the route. */
 const route = location.hash.replace(/^#/u, '')
 const MODE = route === '/chat-empty' ? 'empty-chat' : 'populated'
 const emptyChat = MODE === 'empty-chat'
@@ -276,7 +263,6 @@ function deliveryDetail(delivery) {
   }
 }
 
-/** Every query a failing route needs in order to fail. */
 function serve(request) {
   const result = () => {
     if (request.query === 'delivery.list') {
@@ -343,8 +329,6 @@ const controlPlane = {
   async logout() {},
   async command() { throw new Error('unexpected command') },
   async query(request) {
-    // serve() already applies the response envelope; wrapping again would hide
-    // `result.items` behind a second envelope and fail every model read.
     return serve(request)
   },
   subscribe() {
@@ -353,8 +337,6 @@ const controlPlane = {
   close() {},
 }
 
-// Determinism controls are installed through CSSOM because the harness serves a
-// `style-src 'self'` policy, and the clock is pinned on the shell itself.
 const determinism = new CSSStyleSheet()
 determinism.replaceSync(DETERMINISM_CSS)
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, determinism]
@@ -369,7 +351,6 @@ const application = mountWinWinCodeClient({
   now: () => FIXED_NOW,
 })
 
-/** Read at capture time: the harness applies its viewport override after mount. */
 function currentViewport() {
   return document.documentElement.clientWidth <= NARROW_VIEWPORT.width
     ? NARROW_VIEWPORT
@@ -389,10 +370,6 @@ function waitFor(predicate, label) {
   })()
 }
 
-/**
- * Every key page: the route the shell serves it on, the element that says it
- * has mounted, and the status line that says its first snapshot has landed.
- */
 const PAGES = Object.freeze({
   home: { route: '#/home', selector: '.wwc-home', status: '.wwc-home-status' },
   chat: { route: '#/chat', selector: '.wwc-chat', status: '.wwc-chat-status' },
@@ -428,8 +405,6 @@ async function capturePage(name, captureId) {
     return label.length > 0 && !/^Loading|^Updating/u.test(label)
   }, `${page_.selector} status`)
   await new Promise(resolve_ => { setTimeout(resolve_, 60) })
-  // The page is rooted at its own surface, not at `main`: the Scope selector and
-  // the readiness section are shell-level and already baselined with the shell.
   return fingerprintOf(
     `page/${captureId ?? name}@${viewportLabel()}`,
     'page',
@@ -471,7 +446,6 @@ globalThis.captureVisualOffline = async () => {
 
 globalThis.describeVisualViewport = () => ({ ...currentViewport(), mode: MODE })
 
-/** Compares one captured page against the committed baseline and renders a report. */
 globalThis.compareVisualPages = (expected, actual) => {
   const differences = compareVisualFingerprints(expected, actual)
   return {

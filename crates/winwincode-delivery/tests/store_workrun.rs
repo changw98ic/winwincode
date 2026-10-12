@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![cfg(feature = "test-support")]
+// SPDX-License-Identifier: Apache-2.0
 #![allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,

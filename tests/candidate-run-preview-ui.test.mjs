@@ -1178,7 +1178,6 @@ test('page mounts mode, controls, viewport, and files from one snapshot', async 
 
   const degraded = findByClass(rootElement, 'wwc-candidate-run-preview-file-open')
   assert.ok(degraded)
-  // First file is README.md (enabled); second is /etc/passwd (disabled).
   let openButton = degraded
   let sawEnabled = false
   let sawDisabled = false

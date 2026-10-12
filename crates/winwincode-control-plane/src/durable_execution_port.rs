@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production Worker ingress over the canonical local Control Plane storage.
-//!
-//! Local and remote transports use this same core. The generated Worker frame
-//! is never accepted as lease authority: every job-scoped message first loads
-//! the Registry's opaque accepted-dispatch record from the same `SQLite`
-//! database owned by the running Control Plane.
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -38,32 +31,21 @@ use crate::{
 const OUTCOME_ACK_NAMESPACE: &[u8] = b"winwincode.execution-port.outcome-ack.v1";
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Failure before the Worker ingress can return a canonical generated result.
 #[derive(Debug)]
 pub enum DurableExecutionPortError {
-    /// The Control Plane and Registry connections do not name one local DB.
     Configuration,
-    /// Registry-backed registration, heartbeat, or dispatch-result handling failed.
     Service(ExecutionPortServiceError),
-    /// Durable authority resolution or Registry settlement failed.
     Storage(StorageError),
     /// Authenticated Worker resource completion retains its typed cause.
     WorkerLifecycle(crate::WorkerExecutionLifecycleError),
-    /// The canonical Delivery binding transaction failed.
     SessionBinding(DeliverySessionBindingCommitError),
-    /// The Controller could not continue a successful Delivery stage.
     Controller(DeliveryApplicationError),
-    /// The canonical runtime ledger transaction failed.
     Runtime(RuntimeMessageError),
-    /// The canonical Control Plane Artifact transaction failed.
     Artifact(ArtifactMessageError),
-    /// The canonical Delivery terminal transaction failed.
     Terminal(DeliveryTerminalOutcomeCommitError),
     /// Required accepted-outcome publication remains pending.
     Publication(crate::OutboxError),
-    /// The canonical Control Plane action-policy receipt could not be issued.
     ActionPolicy(ActionPolicyEnforcementError),
-    /// Another production seam owns this generated message kind.
     UnsupportedMessage,
 }
 
@@ -108,8 +90,6 @@ impl std::error::Error for DurableExecutionPortError {
 }
 
 impl DurableExecutionPortError {
-    /// Returns the durable Delivery terminal receipt when the terminal
-    /// transaction already committed and only Worker resource/publication
     /// settlement remains pending. The frozen continuation resumes only after
     /// required resource cleanup and publication complete.
     #[must_use]
@@ -123,38 +103,24 @@ impl DurableExecutionPortError {
     }
 }
 
-/// The closed set of Worker messages whose canonical owner is composed beside
-/// the base Registry/Delivery/runtime ingress.
-///
-/// `ProductSession` terminal handling receives the already loaded immutable Job
-/// and opaque accepted-dispatch authority. Other variants remain typed inside
-/// the generated union and are delegated only after this ingress has selected
-/// their Worker-to-Control-Plane direction.
 pub enum DurableExecutionPortSupplement<'message> {
-    /// `ProductSession` chat `WorkerSession`/`CodexThread` binding owner.
     ProductSessionBinding {
         job: &'message ExecutionJob,
         dispatch: &'message ExecutionDispatchAuthority,
         message: &'message SessionBindingMessage,
     },
-    /// `ProductSession` chat terminal/cancel projection owner.
     ProductSessionOutcome {
         job: &'message ExecutionJob,
         dispatch: &'message ExecutionDispatchAuthority,
         message: &'message JobOutcomeMessage,
     },
-    /// Canonical owner for a job-scoped cancel acknowledgement, model/action
-    /// message, Artifact message, or interaction request.
     JobScopedWorkerMessage {
         dispatch: &'message ExecutionDispatchAuthority,
         message: &'message ExecutionPortMessage,
     },
-    /// Canonical owner for a Worker capability update without a Job lease.
     WorkerMessage(&'message ExecutionPortMessage),
 }
 
-/// Borrowed access to the exact production objects already held by the Server
-/// application lock.
 pub struct DurableExecutionPortContext<'application> {
     control_plane: &'application mut ControlPlane,
     storage: &'application mut SqliteStorage,
@@ -163,41 +129,24 @@ pub struct DurableExecutionPortContext<'application> {
 }
 
 impl DurableExecutionPortContext<'_> {
-    /// Returns the one running Control Plane used by HTTP/WS and Worker ingress.
     pub fn control_plane(&mut self) -> &mut ControlPlane {
         self.control_plane
     }
 
-    /// Returns the Registry/product connection to the same local database.
     pub fn storage(&mut self) -> &mut SqliteStorage {
         self.storage
     }
 
-    /// Returns the Server-configured repository scope, never Worker input.
     #[must_use]
     pub const fn repository_scope(&self) -> &RepositoryScope {
         self.repository_scope
     }
 
-    /// Returns the authoritative ingress time captured by the Server clock.
     #[must_use]
     pub const fn server_time(&self) -> &Instant {
         self.server_time
     }
 
-    /// Validates the causal clock of a dispatch observation. Receiving facts
-    /// does not grant execution authority and remains valid after lease expiry.
-    ///
-    /// The owner must call this only after its own receipt identity and body
-    /// digest lookup proved that the message is new. Exact receipt replay must
-    /// return the stored result before calling this helper. The trusted clock
-    /// must not be copied into the owner request identity, digest, or
-    /// replay-comparison body, because its value necessarily changes across an
-    /// exact replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authority error when Server time predates lease issuance.
     pub fn validate_dispatch_observation(
         &self,
         authority: &ExecutionDispatchAuthority,
@@ -215,24 +164,7 @@ impl DurableExecutionPortContext<'_> {
     }
 }
 
-/// Production composition seam for canonical Worker message owners that need
-/// dependencies beyond the base Control Plane/Registry pair.
-///
-/// Implementations are installed inside the same ingress core; they are not a
-/// second transport or state authority.
 pub trait DurableExecutionPortDelegate {
-    /// Accepts one message selected by [`DurableExecutionPortIngress`].
-    ///
-    /// Every job-scoped owner must resolve its exact durable receipt and body
-    /// digest first. An exact replay returns that original result even after
-    /// lease expiry; a changed body conflicts. Only a first-seen message may
-    /// validate the sealed lease against [`DurableExecutionPortContext::server_time`].
-    /// The trusted clock never enters the owner digest.
-    /// Worker-controlled `sentAt` is an audited fact, never authorization.
-    ///
-    /// # Errors
-    ///
-    /// Returns canonical owner errors through the shared ingress error type.
     fn accept(
         &mut self,
         context: DurableExecutionPortContext<'_>,
@@ -240,11 +172,6 @@ pub trait DurableExecutionPortDelegate {
     ) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError>;
 }
 
-/// Borrowed production core for one Worker-to-Control-Plane dispatch.
-///
-/// The Server can create this value while holding its one application-state
-/// lock, so HTTP/WS operations and the embedded Worker share the exact same
-/// `ControlPlane`, product storage, outbox publisher, and durable event hub.
 pub struct DurableExecutionPortIngress<'application> {
     control_plane: &'application mut ControlPlane,
     storage: &'application mut SqliteStorage,
@@ -254,12 +181,6 @@ pub struct DurableExecutionPortIngress<'application> {
 }
 
 impl<'application> DurableExecutionPortIngress<'application> {
-    /// Binds Worker ingress to the exact local database owned by the running
-    /// Control Plane.
-    ///
-    /// # Errors
-    ///
-    /// Rejects adapter-injected or differently rooted storage connections.
     pub fn new(
         control_plane: &'application mut ControlPlane,
         storage: &'application mut SqliteStorage,
@@ -278,12 +199,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
         })
     }
 
-    /// Binds the base durable ingress and all supplementary canonical owners to
-    /// the same production application objects.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the same split-database composition as [`Self::new`].
     pub fn with_delegate(
         control_plane: &'application mut ControlPlane,
         storage: &'application mut SqliteStorage,
@@ -296,12 +211,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
         Ok(ingress)
     }
 
-    /// Routes one generated Worker message through its canonical durable seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns infrastructure/composition failures. Runtime and terminal
-    /// authority rejections are returned as generated acknowledgement DTOs.
     #[allow(
         clippy::too_many_lines,
         reason = "Keep the exhaustive generated-message dispatch table together"
@@ -355,12 +264,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     winwincode_execution_port::generated::JobDispatchResultMessageStatus::Accepted
                         | winwincode_execution_port::generated::JobDispatchResultMessageStatus::Duplicate
                 ) {
-                    // A sealed replacement is committed by the SessionBinding
-                    // transaction, which atomically fails the predecessor and
-                    // appends the successor. The ordinary append path is only
-                    // for the first dispatch; running it for a replacement
-                    // reuses the immutable predecessor Job and can duplicate
-                    // or reject the successor WorkRun.
                     let replacement = self
                         .storage
                         .load_execution_scope_replacement_authority(&result.job_id)
@@ -430,12 +333,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 self.accept_terminal_outcome(outcome)
             }
             ExecutionPortMessage::ArtifactOpenMessage(artifact) => {
-                // Diagnostic and candidate Artifact frames must settle on the
-                // Control Plane Artifact store. The Device-model delegate is
-                // only for Provider/model payloads; rejecting artifact frames
-                // as UnsupportedMessage makes the HTTP exchange fail and
-                // strands the Worker durable outbox (including verification
-                // runtime.event beside the chunk).
                 let authority = self.dispatch_authority(&artifact.lease.job_id)?;
                 let authority = seal_session_binding_authority(
                     &winwincode_storage::delivery_dispatch_authority(&authority),
@@ -1012,8 +909,6 @@ fn outcome_success(message: &JobOutcomeMessage, replayed: bool) -> JobOutcomeAck
     }
 }
 
-/// Builds the same canonical success acknowledgement for the composed
-/// `ProductSession` terminal owner as for the built-in Delivery owner.
 pub(crate) fn product_session_outcome_output(
     message: &JobOutcomeMessage,
     replayed: bool,

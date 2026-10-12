@@ -1,24 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Owner-facing Device Client local display and control surface for the
-//! `wwc` CLI (plan 11.1 local display, §16.8: the CLI is always the
-//! no-desktop fallback).
-//!
-//! The commands drive the canonical [`winwincode_device_client`] library —
-//! the same connect-code lifecycle the daemon uses — and never re-implement
-//! code generation, digesting, or policy persistence. Three boundaries are
-//! deliberate:
-//!
-//! - The plaintext connect code exists only inside the process that
-//!   generated it. `refresh-code` reveals it exactly once (the same
-//!   reveal-once discipline as `user create`'s temporary password); `status`
-//!   can only ever show the digest-era metadata.
-//! - Publishing requires an adopted enrollment, so a pending publication
-//!   frame can never be stranded on the placeholder stream the daemon could
-//!   not re-key.
-//! - The foreground Device service owns `clientInstanceId` rotation;
-//!   administrative CLI commands never impersonate a new daemon launch.
-
 use std::fmt;
 use std::path::Path;
 
@@ -32,19 +13,13 @@ use winwincode_device_client::{
     load_device_identity,
 };
 
-/// Secret-free view of the published connect code (plan 11.1 display row).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectCodeView {
-    /// Canonical `cct_` connect code id.
     pub connect_code_id: String,
-    /// Monotonic publication generation.
     pub generation: u64,
-    /// Lifecycle state (`active` or `revoked`).
     pub state: String,
-    /// RFC 3339 expiry stamp.
     pub expires_at: String,
-    /// Whole seconds until expiry; negative once the window passed.
     pub remaining_seconds: Option<i64>,
 }
 
@@ -81,35 +56,20 @@ const fn lock_state_label(lock_state: ClientLockState) -> &'static str {
     }
 }
 
-/// Secret-free Device Client status view (plan 11.1 local display).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceStatusView {
-    /// Stable local device id.
     pub device_id: String,
-    /// Server-assigned `clientNodeId`; empty before enrollment.
     pub client_node_id: String,
-    /// Server-assigned public `Client ID`; empty before enrollment.
     pub public_client_id: String,
-    /// Whether the enrollment was adopted.
     pub enrolled: bool,
-    /// Whether the node currently accepts new connections.
     pub accepting_connections: bool,
-    /// Machine-level lock state.
     pub lock_state: String,
-    /// Worker sessions currently in the `running` state of the local
-    /// worker-process registry (WORKER-100.2).
     pub running_worker_sessions: u64,
-    /// The published connect code, if any.
     pub connect_code: Option<ConnectCodeView>,
-    /// Foreground service process and restart state.
     pub service: DeviceServiceStatus,
 }
 
-/// Human- and JSON-readable result of one `wwc device` command.
-///
-/// The plaintext connect code appears only in `CodeRefreshed`; it is never
-/// persisted or shown again by any later command.
 #[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "status",
@@ -117,45 +77,25 @@ pub struct DeviceStatusView {
     rename_all_fields = "camelCase"
 )]
 pub enum DeviceAdminOutcome {
-    /// The durable device status (no plaintext code material).
     Status {
-        /// The device view.
         device: DeviceStatusView,
     },
-    /// A new connect code was published; the plaintext is revealed once.
     CodeRefreshed {
-        /// The published code's metadata.
         code: ConnectCodeView,
-        /// The only plaintext reveal of this generation.
         connect_code: String,
-        /// Whole seconds until the code expires.
         valid_seconds: i64,
     },
-    /// The lock policy changed, or was already in the requested state.
     PolicyUpdated {
-        /// Whether new connections are accepted.
         accepting_connections: bool,
-        /// Machine-level lock state.
         lock_state: String,
     },
 }
 
-/// Failure of one `wwc device` command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceAdminError {
-    /// The data directory holds no device identity: the Device Client never
-    /// ran here.
     NotInitialized,
-    /// The device has not completed enrollment with a Server, so a published
-    /// code could never be re-keyed onto the assigned node.
     NotEnrolled,
-    /// The command cannot be completed. `code` is stable for scripting.
-    Failed {
-        /// Stable machine-readable failure code.
-        code: &'static str,
-        /// Human-readable explanation in the CLI language.
-        message: String,
-    },
+    Failed { code: &'static str, message: String },
 }
 
 impl fmt::Display for DeviceAdminError {
@@ -168,13 +108,6 @@ impl fmt::Display for DeviceAdminError {
     }
 }
 
-/// Loads the durable device status (plan 11.1 display).
-///
-/// # Errors
-///
-/// Returns [`DeviceAdminError::NotInitialized`] before the first device
-/// boot, and [`DeviceAdminError::Failed`] when the store cannot serve the
-/// read.
 pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, DeviceAdminError> {
     if !data_directory.exists() {
         return Err(DeviceAdminError::NotInitialized);
@@ -209,18 +142,6 @@ pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, Device
     })
 }
 
-/// Generates and publishes a fresh dynamic connect code (plan 11.3), then
-/// reveals the plaintext exactly once.
-///
-/// The durable publication frame rides the outbox (persist-before-send) and
-/// reaches the Server with the daemon's next exchange; the previous code
-/// generation stops validating challenges immediately.
-///
-/// # Errors
-///
-/// Returns [`DeviceAdminError::NotInitialized`] before the first device
-/// boot, [`DeviceAdminError::NotEnrolled`] before the enrollment adoption,
-/// and [`DeviceAdminError::Failed`] for durable failures.
 pub fn refresh_device_connect_code(
     data_directory: &Path,
 ) -> Result<DeviceAdminOutcome, DeviceAdminError> {
@@ -260,19 +181,6 @@ pub fn refresh_device_connect_code(
     })
 }
 
-/// Locks or unlocks the Client locally (plan 11.1 `锁定 Client`): locking
-/// sets `acceptingConnections = false` plus `lockState = locked`, durably.
-/// The Server uses the published policy when authorizing new access.
-///
-/// Requires an existing device identity: a lock landing on a typo'd data
-/// directory must fail loudly instead of silently locking a nonexistent
-/// device.
-///
-/// # Errors
-///
-/// Returns [`DeviceAdminError::NotInitialized`] before the first device
-/// boot, and [`DeviceAdminError::Failed`] when the store cannot serve the
-/// write.
 pub fn set_device_lock(
     data_directory: &Path,
     locked: bool,

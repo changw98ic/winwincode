@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Git references for acknowledged candidate Artifacts.
-//!
-//! The canonical Control Plane `SQLite` connection owns every intent and
-//! receipt. Git is a non-transactional side effect, so pin and release use a
-//! durable two-phase state machine and exact compare-and-swap reference
-//! updates. Opening this seam reconciles every unfinished side effect before
-//! accepting another operation.
-
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -43,7 +35,6 @@ CREATE TABLE IF NOT EXISTS git_candidate_retentions (
 );
 ";
 
-/// Stable failure categories for candidate Git retention.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateGitRetentionErrorKind {
     InvalidInput,
@@ -55,7 +46,6 @@ pub enum CandidateGitRetentionErrorKind {
     Closed,
 }
 
-/// Secret-safe candidate Git retention failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateGitRetentionError {
     kind: CandidateGitRetentionErrorKind,
@@ -100,7 +90,6 @@ impl fmt::Display for CandidateGitRetentionError {
 
 impl std::error::Error for CandidateGitRetentionError {}
 
-/// Durable state of one candidate reference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateGitRetentionState {
@@ -133,7 +122,6 @@ impl CandidateGitRetentionState {
     }
 }
 
-/// Delivery terminal that permits reference release after reads are closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateGitTerminalOutcome {
@@ -142,7 +130,6 @@ pub enum CandidateGitTerminalOutcome {
     Cancelled,
 }
 
-/// Exact terminal Delivery and read-closure facts authorizing release.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateGitReleaseAuthority {
     delivery_id: DeliveryId,
@@ -152,15 +139,6 @@ pub struct CandidateGitReleaseAuthority {
 }
 
 impl CandidateGitReleaseAuthority {
-    /// Builds the explicit Delivery terminal/read-closure authority.
-    ///
-    /// The application layer must issue `reads_closed_receipt_digest` only
-    /// after every verification and rework reader has reached a durable final
-    /// state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed Delivery or receipt identities.
     pub fn delivery_final_without_future_reads(
         delivery_id: DeliveryId,
         terminal_outcome: CandidateGitTerminalOutcome,
@@ -193,20 +171,17 @@ impl CandidateGitReleaseAuthority {
         self.terminal_outcome
     }
 
-    /// Returns the durable terminal-outcome receipt digest authorizing release.
     #[must_use]
     pub const fn terminal_receipt_digest(&self) -> &Sha256Digest {
         &self.terminal_receipt_digest
     }
 
-    /// Returns the durable read-closure receipt digest authorizing release.
     #[must_use]
     pub const fn reads_closed_receipt_digest(&self) -> &Sha256Digest {
         &self.reads_closed_receipt_digest
     }
 }
 
-/// Stable result of pinning one acknowledged candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateGitPinReceipt {
     artifact_id: ArtifactId,
@@ -273,7 +248,6 @@ impl CandidateGitPinReceipt {
     }
 }
 
-/// Stable receipt committed before the Git reference is deleted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateGitReleaseReceipt {
     artifact_id: ArtifactId,
@@ -709,8 +683,6 @@ impl GitReferenceBackend for SystemGit {
     }
 }
 
-/// Borrowed candidate-retention operations over the canonical Control Plane
-/// `SQLite` connection.
 pub struct CandidateGitRetention<'storage> {
     connection: &'storage mut Connection,
     controlled_root: PathBuf,
@@ -719,16 +691,6 @@ pub struct CandidateGitRetention<'storage> {
 }
 
 impl SqliteStorage {
-    /// Opens the candidate Git retention seam over this storage connection.
-    ///
-    /// `controlled_repository_root` contains repositories only. The lock file
-    /// is derived from this storage's canonical database directory; this API
-    /// never creates a second database or a second state authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing root, a closed storage connection, corrupt durable
-    /// records, or any unfinished Git side effect that cannot be reconciled.
     pub fn git_candidate_retention(
         &mut self,
         controlled_repository_root: impl AsRef<Path>,
@@ -767,18 +729,6 @@ impl SqliteStorage {
 }
 
 impl CandidateGitRetention<'_> {
-    /// Persists a `PinIntent`, creates or verifies the exact stable reference,
-    /// and only then advances to `Pinned`.
-    ///
-    /// The request cannot be built from caller-reported commit fields. It must
-    /// combine an opaque source rebuilt by [`crate::GitSourceResolver`] with
-    /// the exact complete Artifact write receipt used to form the final ack.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an incomplete/foreign acknowledgement, changed replay, missing
-    /// Git object, moved repository, foreign ref, corrupt catalog, or adapter
-    /// failure. An error after `PinIntent` is durable is recovered on reopen.
     pub fn pin_after_final_artifact_ack(
         &mut self,
         acknowledgement: &ArtifactWriteReceipt,
@@ -816,13 +766,6 @@ impl CandidateGitRetention<'_> {
         })
     }
 
-    /// Commits a stable release receipt before deleting the exact reference.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/changed pin authority, changed terminal/read-closure
-    /// facts, moved repository, a foreign ref target, corrupt durable state,
-    /// or adapter failure. An unfinished delete is recovered on reopen.
     pub fn release_after_delivery_final(
         &mut self,
         pin: &CandidateGitPinReceipt,
@@ -850,11 +793,6 @@ impl CandidateGitRetention<'_> {
         })
     }
 
-    /// Loads one exact retained binding by Artifact identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, missing/corrupt rows, or a moved repository.
     pub fn load_by_artifact(
         &mut self,
         artifact_id: &ArtifactId,
@@ -867,18 +805,6 @@ impl CandidateGitRetention<'_> {
         })
     }
 
-    /// Loads every retained candidate binding for one Delivery in stable
-    /// binding-key order.
-    ///
-    /// The read reconciles unfinished Git side effects first, so a caller can
-    /// safely use the returned receipts as the input to the receipt-first
-    /// release operation.  Released rows are returned as well: replaying a
-    /// terminal release must be able to recover its durable release receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed Delivery identities, corrupt rows, a moved
-    /// repository, or an unfinished Git side effect that cannot be recovered.
     pub fn load_by_delivery(
         &mut self,
         delivery_id: &DeliveryId,
@@ -1258,8 +1184,6 @@ pub(crate) fn read_candidate_retention_receipts(
                         ));
                     }
                 }
-                // Return intent state unchanged. Projection availability must
-                // reject it rather than silently advancing the writer's state.
                 CandidateGitRetentionState::PinIntent
                 | CandidateGitRetentionState::ReleaseIntent => {}
             }

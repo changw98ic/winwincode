@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable occupancy lease and fencing-token contract tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,8 +15,6 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 fn temporary_directory(name: &str) -> PathBuf {
     let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-    // Wall-clock nanos keep the directory unique even when the operating
-    // system reuses a previous run's process id.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock")
@@ -67,7 +63,6 @@ fn open(path: PathBuf) -> SqliteStorage {
     SqliteStorage::open(path).expect("storage")
 }
 
-/// Seeds one registered, `online` client node with a `use` grant for `holder`.
 fn seed_client_with_holder(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -118,7 +113,6 @@ fn seed_client_with_holder(
     node_id(seed)
 }
 
-/// Adds one extra `use` grant for another holder on an already seeded client.
 fn grant_extra_holder(storage: &mut SqliteStorage, client: &str, holder: &str, seed: u64) {
     let issuance = AccessGrantIssuance::try_new(
         grant_id(seed),
@@ -201,8 +195,6 @@ fn claim_gate_enforces_grant_presence_lock_and_capacity_conditions() {
     let other = user_id(3);
     let client = seed_client_with_holder(&mut storage, 1, 2, &holder);
 
-    // No grant: the claim is denied before any registry fact is consulted,
-    // and an unknown client node reports precisely.
     {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         expect_kind(
@@ -214,7 +206,6 @@ fn claim_gate_enforces_grant_presence_lock_and_capacity_conditions() {
             OccupancyStoreErrorKind::UnknownClientNode,
         );
 
-        // The happy-path claim passes every condition.
         let record = claimed(&mut ledger, 10, &client, &holder);
         assert_eq!(record.state, OccupancyLeaseState::Reserving);
         assert_eq!(record.fencing_token, 1);
@@ -225,17 +216,12 @@ fn claim_gate_enforces_grant_presence_lock_and_capacity_conditions() {
         assert_eq!(record.created_at, instant(T0));
         assert_eq!(record.claim_request_id, request_id(10));
 
-        // A second lease id while the first is active loses on the active
-        // check.
         expect_kind(
             ledger.atomic_claim(&claim(11, &client, &holder), &instant(T0)),
             OccupancyStoreErrorKind::ActiveLeaseConflict,
         );
     }
 
-    // A node whose presence is `locked` is not `online`, so the presence
-    // condition denies the claim. The independent `lock_state` switch is
-    // exercised against an `online` node in the crate unit tests.
     set_presence(&mut storage, &client, ClientPresenceState::Locked);
     {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
@@ -246,7 +232,6 @@ fn claim_gate_enforces_grant_presence_lock_and_capacity_conditions() {
     }
     set_presence(&mut storage, &client, ClientPresenceState::Online);
 
-    // Offline node denies the claim.
     set_presence(&mut storage, &client, ClientPresenceState::Offline);
     {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
@@ -257,7 +242,6 @@ fn claim_gate_enforces_grant_presence_lock_and_capacity_conditions() {
     }
     set_presence(&mut storage, &client, ClientPresenceState::Online);
 
-    // A capacity-zero node denies the claim despite grant and presence.
     let tiny = seed_client_with_holder(&mut storage, 4, 0, &holder);
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
     expect_kind(
@@ -274,7 +258,6 @@ fn acknowledgement_requires_matching_token_to_reach_occupied() {
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
     let record = claimed(&mut ledger, 20, &client, &holder);
 
-    // A stale or foreign token never promotes the lease.
     expect_kind(
         ledger.record_acknowledgement(
             record.occupancy_lease_id.as_str(),
@@ -291,7 +274,6 @@ fn acknowledgement_requires_matching_token_to_reach_occupied() {
     assert_eq!(unchanged.state, OccupancyLeaseState::Reserving);
     assert_eq!(unchanged.acknowledged_at, None);
 
-    // The exact lease and token ACK promotes reserving to occupied.
     let occupied = ledger
         .record_acknowledgement(
             record.occupancy_lease_id.as_str(),
@@ -306,7 +288,6 @@ fn acknowledgement_requires_matching_token_to_reach_occupied() {
     assert_eq!(occupied.idle_expires_at, Some(instant(T2)));
     assert_eq!(occupied.revision, 2);
 
-    // An ACK replay with the matching token is an idempotent no-op.
     let replay = ledger
         .record_acknowledgement(
             record.occupancy_lease_id.as_str(),
@@ -316,7 +297,6 @@ fn acknowledgement_requires_matching_token_to_reach_occupied() {
         )
         .expect("ack replay");
     assert_eq!(replay.revision, 2);
-    // ...and a mismatched token still fails against the occupied lease.
     expect_kind(
         ledger.record_acknowledgement(
             record.occupancy_lease_id.as_str(),
@@ -327,8 +307,6 @@ fn acknowledgement_requires_matching_token_to_reach_occupied() {
         OccupancyStoreErrorKind::FencingTokenMismatch,
     );
 
-    // A rejected offer can never be acknowledged into occupied. Release the
-    // occupied lease first: only one active lease may exist per client.
     ledger
         .request_release(
             record.occupancy_lease_id.as_str(),
@@ -380,7 +358,6 @@ fn reject_offer_terminals_reserving_with_distinguishing_reasons() {
             .expect("reject");
         assert_eq!(released.state, OccupancyLeaseState::Released);
         assert_eq!(released.release_reason, Some(reason));
-        // Replay with the same reason is an idempotent no-op.
         let replay = ledger
             .reject_offer(
                 record.occupancy_lease_id.as_str(),
@@ -390,8 +367,6 @@ fn reject_offer_terminals_reserving_with_distinguishing_reasons() {
             )
             .expect("reject replay");
         assert_eq!(replay.revision, released.revision);
-        // Holder-release does not belong to the reserving endings: the reason
-        // is validated before any state judgement.
         expect_kind(
             ledger.reject_offer(
                 record.occupancy_lease_id.as_str(),
@@ -403,7 +378,6 @@ fn reject_offer_terminals_reserving_with_distinguishing_reasons() {
         );
     }
 
-    // Holder-release and drain reasons do not belong to reserving endings.
     let record = claimed(&mut ledger, 33, &client, &holder);
     expect_kind(
         ledger.reject_offer(
@@ -414,7 +388,6 @@ fn reject_offer_terminals_reserving_with_distinguishing_reasons() {
         ),
         OccupancyStoreErrorKind::InvalidInput,
     );
-    // Free the lease so the next claim can proceed.
     ledger
         .reject_offer(
             record.occupancy_lease_id.as_str(),
@@ -424,8 +397,6 @@ fn reject_offer_terminals_reserving_with_distinguishing_reasons() {
         )
         .expect("withdraw claim");
 
-    // Rejecting an occupied lease is not a legal transition: the state is
-    // judged before any token comparison.
     let occupied = acknowledged(&mut ledger, 34, &client, &holder);
     expect_kind(
         ledger.reject_offer(
@@ -454,7 +425,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
     let client = seed_client_with_holder(&mut storage, 1, 2, &holder);
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
 
-    // Active worker sessions move the lease to draining.
     let draining = acknowledged(&mut ledger, 40, &client, &holder);
     let draining = ledger
         .request_release(
@@ -467,7 +437,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
     assert_eq!(draining.state, OccupancyLeaseState::Draining);
     assert_eq!(draining.release_reason, None);
 
-    // A retried release request with tasks stays an idempotent no-op.
     let replay = ledger
         .request_release(
             draining.occupancy_lease_id.as_str(),
@@ -478,8 +447,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
         .expect("release replay");
     assert_eq!(replay.revision, draining.revision);
 
-    // A zero-count release against draining is refused: only the automatic
-    // drain completion may release it.
     expect_kind(
         ledger.request_release(
             draining.occupancy_lease_id.as_str(),
@@ -490,7 +457,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
         OccupancyStoreErrorKind::IllegalStateTransition,
     );
 
-    // Drain completion releases automatically with drain_completed.
     let released = ledger
         .drain_complete(draining.occupancy_lease_id.as_str())
         .expect("drain complete");
@@ -504,7 +470,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
         .expect("drain replay");
     assert_eq!(replay.revision, released.revision);
 
-    // No active worker session releases the occupied lease immediately.
     let occupied = acknowledged(&mut ledger, 41, &client, &holder);
     let released = ledger
         .request_release(
@@ -520,8 +485,6 @@ fn release_request_splits_on_task_count_and_drain_completes_automatically() {
         Some(OccupancyReleaseReason::HolderReleased)
     );
 
-    // A terminal release replays with the matching token and reason, and a
-    // drain on an occupied lease is not a legal transition.
     let replay = ledger
         .request_release(
             released.occupancy_lease_id.as_str(),
@@ -547,7 +510,6 @@ fn fencing_tokens_strictly_increase_and_recovery_never_mints() {
     let holder = user_id(2);
     let client = seed_client_with_holder(&mut storage, 1, 2, &holder);
 
-    // First occupancy mints token 1 and the recovery loop reuses it.
     let record = {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         assert_eq!(ledger.current_fencing_token().expect("current"), 0);
@@ -584,8 +546,6 @@ fn fencing_tokens_strictly_increase_and_recovery_never_mints() {
         resumed
     };
 
-    // The device is reachable again; the next new occupancy mints a strictly
-    // higher token.
     set_presence(&mut storage, &client, ClientPresenceState::Online);
     let second = {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
@@ -611,7 +571,6 @@ fn fencing_tokens_strictly_increase_and_recovery_never_mints() {
         second
     };
 
-    // A direct mint moves the counter and the following claim is higher still.
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
     let minted = ledger.mint_fencing_token().expect("mint");
     assert_eq!(minted, 3);
@@ -621,8 +580,6 @@ fn fencing_tokens_strictly_increase_and_recovery_never_mints() {
     assert_eq!(ledger.current_fencing_token().expect("current"), 4);
 }
 
-// The recovery walk covers every transition of the frozen recovery loop in
-// one durable story, so its length is intentional.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn recovery_pending_blocks_preemption_until_reconciliation() {
@@ -632,7 +589,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
     let client = seed_client_with_holder(&mut storage, 1, 2, &holder);
     grant_extra_holder(&mut storage, &client, &other, 5);
 
-    // occupied -> recovery_pending after the heartbeat is lost.
     let record = {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         acknowledged(&mut ledger, 60, &client, &holder)
@@ -647,7 +603,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         assert_eq!(pending.state, OccupancyLeaseState::RecoveryPending);
         assert_eq!(pending.recovery_deadline_at, Some(instant(T4)));
         assert_eq!(pending.fencing_token, record.fencing_token);
-        // Replay marking is an idempotent no-op.
         let replay = ledger
             .mark_recovery_pending(
                 record.occupancy_lease_id.as_str(),
@@ -660,13 +615,9 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         pending
     };
 
-    // The device reconnects with the same identity while reconciliation is
-    // still pending: the node is reachable again but stays occupied.
     set_presence(&mut storage, &client, ClientPresenceState::Online);
     let resumed = {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
-        // No user may preempt a recovery_pending lease: not another holder,
-        // not the original one, even though the node is online again.
         expect_kind(
             ledger.atomic_claim(&claim(61, &client, &other), &instant(T1)),
             OccupancyStoreErrorKind::ActiveLeaseConflict,
@@ -676,7 +627,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
             OccupancyStoreErrorKind::ActiveLeaseConflict,
         );
 
-        // An accepted reconcile with workers still running resumes occupied.
         let resumed = ledger
             .reconcile_resume(
                 pending.occupancy_lease_id.as_str(),
@@ -690,7 +640,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         assert_eq!(resumed.idle_expires_at, Some(instant(T3)));
         assert_eq!(resumed.recovery_deadline_at, None);
         assert_eq!(resumed.last_renewed_at, Some(instant(T2)));
-        // A resume replay to the current state is an idempotent no-op.
         let replay = ledger
             .reconcile_resume(
                 resumed.occupancy_lease_id.as_str(),
@@ -703,7 +652,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         resumed
     };
 
-    // Drop again: occupied -> recovery_pending, then resume to draining.
     set_presence(&mut storage, &client, ClientPresenceState::Offline);
     {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
@@ -740,8 +688,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         assert_eq!(released.state, OccupancyLeaseState::Released);
     }
 
-    // Resuming a non-recovery lease is refused. The device is reachable and
-    // the released node accepts a fresh claim.
     set_presence(&mut storage, &client, ClientPresenceState::Online);
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
     let fresh = claimed(&mut ledger, 63, &client, &holder);
@@ -755,8 +701,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         OccupancyStoreErrorKind::IllegalStateTransition,
     );
 
-    // A reserving lease never enters recovery: the state is judged before the
-    // presence projection.
     expect_kind(
         ledger.mark_recovery_pending(
             fresh.occupancy_lease_id.as_str(),
@@ -766,8 +710,6 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         OccupancyStoreErrorKind::IllegalStateTransition,
     );
 
-    // Marking recovery against an online occupied node is refused: the
-    // heartbeat has not been lost.
     let occupied = ledger
         .record_acknowledgement(
             fresh.occupancy_lease_id.as_str(),
@@ -807,12 +749,10 @@ fn force_release_requires_an_expired_recovery_window() {
             )
             .expect("mark recovery");
 
-        // Before the deadline the safe cleanup is refused.
         expect_kind(
             ledger.force_release(pending.occupancy_lease_id.as_str(), &instant(T2)),
             OccupancyStoreErrorKind::IllegalStateTransition,
         );
-        // At or after the deadline the administrator cleanup releases.
         let released = ledger
             .force_release(pending.occupancy_lease_id.as_str(), &instant(T3))
             .expect("force release");
@@ -822,7 +762,6 @@ fn force_release_requires_an_expired_recovery_window() {
             Some(OccupancyReleaseReason::ForceReleased)
         );
         assert_eq!(released.fencing_token, record.fencing_token);
-        // Replay is idempotent.
         let replay = ledger
             .force_release(released.occupancy_lease_id.as_str(), &instant(T3))
             .expect("force release replay");
@@ -830,9 +769,6 @@ fn force_release_requires_an_expired_recovery_window() {
         released
     };
 
-    // Force release against occupied fails, and the terminal cleanup replays
-    // idempotently instead of re-releasing. The node is reachable again so
-    // the second occupancy can be claimed.
     set_presence(&mut storage, &client, ClientPresenceState::Online);
     let mut ledger = storage.client_occupancy_ledger().expect("ledger");
     let occupied = acknowledged(&mut ledger, 71, &client, &holder);
@@ -840,7 +776,6 @@ fn force_release_requires_an_expired_recovery_window() {
         ledger.force_release(occupied.occupancy_lease_id.as_str(), &instant(T3)),
         OccupancyStoreErrorKind::IllegalStateTransition,
     );
-    // The terminal cleanup replays idempotently instead of re-releasing.
     let replay_again = ledger
         .force_release(released.occupancy_lease_id.as_str(), &instant(T4))
         .expect("force release replay");
@@ -865,13 +800,10 @@ fn idle_expiry_requires_due_deadline_and_zero_active_tasks() {
         )
         .expect("ack");
 
-    // Not yet due: nothing expires.
     let expired = ledger.expire_idle(&instant(T1), |_| 0).expect("idle sweep");
     assert!(expired.is_empty());
-    // Due but tasks are still active: nothing expires.
     let expired = ledger.expire_idle(&instant(T2), |_| 1).expect("idle sweep");
     assert!(expired.is_empty());
-    // Due with no active task: the lease expires.
     let expired = ledger.expire_idle(&instant(T2), |_| 0).expect("idle sweep");
     assert_eq!(expired, vec![occupied.occupancy_lease_id.clone()]);
     let terminal = ledger
@@ -880,15 +812,12 @@ fn idle_expiry_requires_due_deadline_and_zero_active_tasks() {
         .expect("lease");
     assert_eq!(terminal.state, OccupancyLeaseState::Expired);
     assert_eq!(terminal.release_reason, None);
-    // The terminal row is not swept again.
     let expired = ledger.expire_idle(&instant(T3), |_| 0).expect("idle sweep");
     assert!(expired.is_empty());
 
-    // After expiry the node is available and the next claim mints higher.
     let next = claimed(&mut ledger, 81, &client, &holder);
     assert!(next.fencing_token > occupied.fencing_token);
 
-    // A lease without an idle policy never expires.
     let no_idle = ledger
         .record_acknowledgement(
             next.occupancy_lease_id.as_str(),
@@ -958,7 +887,6 @@ fn concurrent_claims_produce_exactly_one_winner() {
     assert_eq!(winners, 1, "exactly one concurrent claim may win");
     assert_eq!(losers, 1, "the losing claim must fail closed");
 
-    // The durable active set holds exactly the winner.
     let mut storage = open(directory);
     let ledger = storage.client_occupancy_ledger().expect("ledger");
     let active = ledger
@@ -1017,8 +945,6 @@ fn snapshots_distinguish_active_leases_from_the_available_projection() {
         .expect("history");
     assert_eq!(by_id, released);
 
-    // A valid idle expiry path can also release: resume this lease through a
-    // zero-task idle sweep after its policy deadline.
     let next = claimed(&mut ledger, 96, &client, &holder);
     let idle = instant(T2);
     let occupied = ledger

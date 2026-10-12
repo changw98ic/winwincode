@@ -1,33 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
-
-// Host clipboard write shared by Web UI copy controls. Success feedback stays
-// with each control; this helper only reports whether the host accepted a write.
-
-/**
- * Write text to the host clipboard, preferring the async Clipboard API and
- * falling back to `execCommand('copy')` on hosts (jsdom, insecure contexts)
- * that omit it.
- * @param text - the exact text to place on the clipboard.
- * @returns true only when the host accepted the write.
- */
 export async function writeClipboard(text: string): Promise<boolean> {
-  // lib.dom types clipboard non-optional, but insecure contexts omit it —
-  // that runtime gap is exactly what this guard detects.
-  /* oxlint-disable-next-line typescript/no-unnecessary-condition */
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text)
       return true
     } catch {
-      // Denied permissions / iframe policy — do not claim success.
       return false
     }
   }
-  // jsdom and older hosts: best-effort execCommand path when present.
-  // execCommand('copy') is the only clipboard fallback where the async API
-  // is missing; deprecated but deliberately retained.
-  /* oxlint-disable typescript/no-deprecated */
   const exec = typeof document.execCommand === 'function'
     ? document.execCommand.bind(document)
     : undefined
@@ -46,5 +26,4 @@ export async function writeClipboard(text: string): Promise<boolean> {
   } finally {
     el.remove()
   }
-  /* oxlint-enable typescript/no-deprecated */
 }

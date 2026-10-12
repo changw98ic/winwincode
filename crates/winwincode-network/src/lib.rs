@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared bounded request retries and cancellable connection recovery. Unknown Provider acceptance does not prohibit retry.
 mod diagnostic;
 pub mod http;
 #[cfg(feature = "journal")]
@@ -28,8 +27,6 @@ pub trait RetryFailure {
             } else if self.retryable() {
                 ErrorKind::TransportInterrupted
             } else {
-                // An explicit permanent error must not become retryable when
-                // upstream protocol failures enter the shared retry policy.
                 ErrorKind::RequestInvalid
             },
             if self.wait_for_connection() {
@@ -85,7 +82,6 @@ impl RequestRetryState {
         self.decision_after(error).immediate_delay()
     }
 
-    /// Queue owners persist this decision instead of adding another retry loop.
     pub fn decision_after(&mut self, error: &impl RetryFailure) -> RetryDecision {
         if error.wait_for_connection() {
             self.connections = self.connections.saturating_add(1);
@@ -106,8 +102,6 @@ impl RequestRetryState {
 impl RequestRetry {
     pub fn new(max_attempts: u32, key: &[u8]) -> Self {
         let mut jitter_key: [u8; 32] = Sha256::digest(key).into();
-        // Independent operations should not wake every request to one Provider
-        // at the same time. A missing entropy source still permits safe retries.
         let _ = getrandom::fill(&mut jitter_key);
         Self {
             max_attempts: max_attempts.max(1),
@@ -126,7 +120,6 @@ impl RequestRetry {
         self.state_at(1)
     }
 
-    /// Restores the next policy attempt saved by the owning durable queue.
     pub fn state_at(self, attempt: u32) -> RequestRetryState {
         RequestRetryState {
             policy: self,
@@ -158,10 +151,6 @@ impl RequestRetry {
         )
     }
 
-    /// Runs one logical request and retains each attempt before rescheduling.
-    ///
-    /// # Errors
-    /// Returns an operation failure, an authority failure or a retention failure.
     pub fn run_blocking<T, E: RetryFailure>(
         &self,
         can_start: impl Fn() -> bool,
@@ -219,10 +208,6 @@ impl RequestRetry {
         }
     }
 
-    /// One layer owns retries. Dropping an active future interrupts its I/O on authority loss.
-    ///
-    /// # Errors
-    /// Returns an operation failure, an authority failure or a retention failure.
     pub async fn run_async<T, E: RetryFailure, F: Future<Output = Result<T, E>>>(
         &self,
         can_start: impl Fn() -> bool,

@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The device exchange vertical over real HTTP: the device-client daemon
-//! runs against a real server (`POST /internal/v1/client/exchange` wired to
-//! `ClientExchangeApplication`) through the std HTTP transport, covering the
-//! whole enrollment lifecycle — enroll with credential issuance, hello
-//! takeover, heartbeat projection, a staged outage with backoff and
-//! redelivery, a manufactured gap answered by `replayFromSequence`, and
-//! durable recovery across a device restart and a server restart. The
-//! assertions land on both sides: the server registry projection and the
-//! device store.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -40,8 +30,6 @@ use winwincode_storage::{
 };
 
 const BOOTSTRAP_PROOF: &str = "device-exchange-loop-test-bootstrap";
-/// Quiet heartbeat cadence: every wire frame in this vertical is staged by
-/// the test, keeping the frame ledger deterministic.
 const QUIET_HEARTBEAT: Duration = Duration::from_mins(2);
 const DRIVE_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -224,10 +212,6 @@ fn exchange_endpoint(address: std::net::SocketAddr) -> String {
     format!("http://{address}/internal/v1/client/exchange")
 }
 
-/// The device-side transport for this vertical: the real std HTTP transport,
-/// plus two staged faults the loop test controls — a connection-refused
-/// outage (frames stay durable and back off) and a one-shot dropped frame
-/// that manufactures a server-side gap.
 struct LoopTransport {
     http: Arc<HttpExchangeTransport>,
     outage_remaining: AtomicUsize,
@@ -475,7 +459,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
 
-    // ---- Device first boot -------------------------------------------------
     let mut store = DeviceStore::open(&device_root).expect("device store should open");
     let first_identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z")
         .expect("device identity should load");
@@ -497,7 +480,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     )
     .expect("daemon start");
 
-    // ---- Phase 1: enroll over real HTTP ------------------------------------
     driver.drive_until(&mut daemon, "the enrollment adoption", |daemon| {
         daemon.is_enrolled()
     });
@@ -507,8 +489,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the daemon must adopt the server-assigned cnd_ identity: {node_id}"
     );
 
-    // Server side: the node was created with the issued credential and the
-    // enrolling instance.
     let record = node_snapshot(&data_directory, &node_id);
     assert_eq!(
         record.presence_state,
@@ -523,8 +503,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .clone()
         .expect("the enrollment issues a persisted credential digest");
     let adopted_public_client_id = record.public_client_id.clone();
-    // Device side: enrollment persisted the server profile and credited the
-    // assigned uplink stream, without advancing the downlink cursor.
     let profile = daemon
         .store_mut()
         .server_profile(&config.server_profile_id)
@@ -542,10 +520,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the assigned stream starts credited with the enroll sequence"
     );
 
-    // ---- Phase 2: hello takeover and heartbeat projection ------------------
-    // The hello is announced automatically after the adoption; it must
-    // settle first (it moves the node online), then two staged heartbeats
-    // drive the projection.
     driver.drive_until(&mut daemon, "the announcement hello to settle", |daemon| {
         daemon.is_enrolled() && daemon.status().frames_sent >= 2
     });
@@ -578,7 +552,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     drop(storage);
     assert!(settled(&mut daemon), "the stream must be fully exchanged");
 
-    // ---- Phase 3: staged outage, backoff, and durable redelivery -----------
     let retry_start = driver.retry_delays.len();
     let exchange_start = daemon.status().exchanges_started;
     transport.outage_remaining.store(3, Ordering::SeqCst);
@@ -613,7 +586,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the durable frames survived the outage and settled once"
     );
 
-    // ---- Phase 4: manufactured gap and replayFromSequence replay -----------
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message())
@@ -626,8 +598,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .map(|frame| frame.sequence)
         .collect::<Vec<_>>();
     assert_eq!(staged_sequences, [9, 10, 11]);
-    // The middle frame is lost in transit: the server cursor sits at 9 while
-    // sequence 11 arrives, so the response carries replayFromSequence = 10.
     transport.drop_sequence.store(10, Ordering::SeqCst);
     driver.drive_until(&mut daemon, "the manufactured gap", |daemon| {
         daemon.status().replays >= 1
@@ -648,8 +618,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the replayed heartbeats execute their projection exactly once"
     );
 
-    // ---- Phase 5: device restart from durable state -------------------------
-    // Three frames stay pending (never exchanged): the crash shape.
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message())
@@ -670,8 +638,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     let mut store = DeviceStore::open(&device_root).expect("restarted device store");
     let second_identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T01:00:00.000Z")
         .expect("restarted identity");
-    // Identity 不变: the adopted identity and the issued credential survive;
-    // only the launch instance rotates.
     assert_eq!(
         second_identity.identity().device_id(),
         first_identity.identity().device_id()
@@ -713,8 +679,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         node_id,
         "the restarted daemon exchanges under the assigned node id"
     );
-    // Outbox 不丢帧 + cursor 连续: the pending frames and the announcement
-    // hello settle contiguously through the instance takeover.
     driver.drive_until(&mut daemon, "the restarted daemon to settle", |daemon| {
         settled(daemon) && daemon.status().acked_through >= 17
     });
@@ -730,7 +694,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the announcement hello took the launch instance over"
     );
 
-    // ---- Phase 6: server restart over the same durable state ---------------
     running.shutdown().await.expect("server shutdown");
     let restarted_server = start_with_client_exchange(&data_directory).await;
     transport
@@ -749,8 +712,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         |daemon| settled(daemon) && daemon.status().acked_through >= 19,
     );
     let status = daemon.status().clone();
-    // The fresh session started at the device restart without any replay;
-    // the server restart must not add one (both cursors are durable).
     assert_eq!(status.replays, 0, "a server restart replays nothing");
     assert_eq!(status.consecutive_failures, 0);
     assert_eq!(status.acked_through, 19);
@@ -764,8 +725,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     assert_eq!(record.presence_state, ClientPresenceState::Online);
     assert!(record.last_heartbeat_at.is_some());
 
-    // Both sides agree at rest: the daemon's durable cursor equals the
-    // registry projection cursor, and the outbox retains nothing.
     let snapshot = daemon.outbox_snapshot().expect("final snapshot");
     assert!(snapshot.frames.is_empty());
     assert_eq!(snapshot.ack_sequence, snapshot.highest_sequence);

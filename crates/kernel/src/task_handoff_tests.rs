@@ -150,7 +150,6 @@ fn compact_request_and_resumed_turn_use_task_state() {
 }
 
 fn run_core_fixture(test: fn() -> BoxFuture<'static, ()>) {
-    // Match the native Core fixture's caller and worker stack sizes.
     std::thread::Builder::new()
         .name("task-state-compaction-test".into())
         .stack_size(16 * 1024 * 1024)
@@ -176,8 +175,6 @@ async fn compact_and_resume_task_state() {
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("AGENTS.md"), BOUNDARY).unwrap();
-    // Device configuration must not select a Core compaction path that skips
-    // the product task-state prompt.
     std::fs::write(
         home.join("config.toml"),
         "[features]\ntoken_budget = true\n",
@@ -280,7 +277,6 @@ fn assert_restored_task_state(model: &HandoffModel, transcript: &str) {
                     })
                 })
         );
-        // These requests add new user/assistant turns to the checkpoint.
         assert!(request_context_tokens(request) <= 30_000 + 512);
         let mut checkpoint = request.clone();
         checkpoint["request"]["input"]
@@ -296,8 +292,6 @@ fn assert_restored_task_state(model: &HandoffModel, transcript: &str) {
                     })
                 })
             });
-        // Independently count the restored checkpoint including host text,
-        // tools and serialized wrappers, before the continuation adds turns.
         let checkpoint_tokens = request_context_tokens(&checkpoint);
         assert!(checkpoint_tokens <= 30_000, "{checkpoint_tokens}");
         assert!(checkpoint_tokens > 29_000, "{checkpoint_tokens}");

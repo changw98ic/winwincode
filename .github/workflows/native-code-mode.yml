@@ -42,16 +42,16 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runner: macos-15
-            timeout_minutes: 120
+            timeout_minutes: 360
           - target: x86_64-apple-darwin
             runner: macos-15-intel
-            timeout_minutes: 300
+            timeout_minutes: 360
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            timeout_minutes: 300
+            timeout_minutes: 360
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
-            timeout_minutes: 300
+            timeout_minutes: 360
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -100,9 +100,17 @@ jobs:
           rustup override set 1.95.0
 
       - name: Install Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
         with:
           version: v0.17.0
+
+      - name: Cache pinned V8 source builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            target/**/gn_out
+            third_party/codex/codex-rs/target/**/gn_out
+          key: v8-gn-${{ matrix.target }}-native-${{ hashFiles('Cargo.lock', 'third_party/codex/codex-rs/Cargo.lock', '.cargo/config.toml', 'third_party/codex/codex-rs/.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
 
       - name: Build product host and exercise the real Kernel
         shell: bash

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resource methods retain their protocol identity independently of MCP tools.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -59,11 +57,6 @@ impl std::fmt::Debug for McpResourceRequest {
     }
 }
 
-/// Resource capabilities use a distinct scheme so an identically named tool
-/// cannot acquire or revoke a resource-method grant.
-///
-/// # Errors
-/// Returns a validation error if the configured server name is invalid.
 pub fn canonical_resource_capability_id(
     server: &str,
     operation: McpResourceOperation,

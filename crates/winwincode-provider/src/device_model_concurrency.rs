@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-Provider model slots shared by every Worker on one Device.
-//! An OS file lock lives for each actual Provider invocation and is released during retry waits.
-
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
@@ -21,7 +18,6 @@ mod tests;
 
 const PROVIDER_MODEL_SLOTS: usize = 3;
 
-/// Exclusive authority to invoke or recover one model exchange.
 #[derive(Debug)]
 pub(crate) struct DeviceModelExchangeOwner {
     file: File,
@@ -29,13 +25,11 @@ pub(crate) struct DeviceModelExchangeOwner {
 
 impl Drop for DeviceModelExchangeOwner {
     fn drop(&mut self) {
-        // A child may retain an alias until exec. Authority ends with this guard.
         let _ = self.file.unlock();
     }
 }
 
 /// An acquired Device-wide Provider slot for exactly one physical attempt.
-/// Moving this value into the model thread keeps the slot until that thread completes.
 #[derive(Debug)]
 pub struct DeviceModelPermit {
     slot: File,
@@ -48,7 +42,6 @@ impl Drop for DeviceModelPermit {
     }
 }
 
-/// A full Provider queue leaves the original request unstarted and retryable.
 #[derive(Debug)]
 pub enum DeviceModelAdmission {
     InvokeAttempt(DeviceModelPermit),
@@ -81,12 +74,7 @@ impl DeviceProviderStore {
             Err(TryLockError::Error(_)) => Err(DeviceProviderError::FilesystemUnavailable),
         }
     }
-    /// Non-blocking admission before creating a first-start exchange record.
     /// Stored replay and recovery carry no physical invocation authority.
-    /// Malformed requests retain their existing bounded failure path.
-    ///
-    /// # Errors
-    /// Returns storage, file permission or OS lock failures; full slots are `Deferred`.
     pub fn try_model_permit(
         &self,
         open: &ModelOpenMessage,
@@ -109,11 +97,6 @@ impl DeviceProviderStore {
         self.try_model_attempt_permit(open)
     }
 
-    /// Acquires a Provider slot for a new invocation of an existing logical exchange.
-    /// Replaying a stored result uses `try_model_permit` and invokes no Provider.
-    ///
-    /// # Errors
-    /// Returns storage, file permission or OS lock failures; full slots are `Deferred`.
     pub fn try_model_attempt_permit(
         &self,
         open: &ModelOpenMessage,
@@ -206,6 +189,5 @@ pub(crate) fn private_slot_file(path: &Path) -> Result<File, DeviceProviderError
     if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
         return Err(DeviceProviderError::StateInvalid);
     }
-    // Keep the inode permanently: unlinking a live lock would create a second slot.
     Ok(file)
 }

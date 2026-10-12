@@ -1,22 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable connect-code, access-grant, and connect-attempt storage.
-//!
-//! This module stores the persisted Control Plane authority for the UU-style
-//! Client connection flow (plan 7.3, 7.4, 11.3, 11.5): one-time
-//! `ClientConnectCode` digests, the `ClientAccessGrant` relationships they
-//! establish, and the fixed-window connect attempt counters that throttle the
-//! user, IP, and Client dimensions. Code and grant states and their legal
-//! transitions follow the frozen state machine in
-//! `docs/contracts/client-control-state-machines.md` (contracts 2 and 3); the
-//! Server only ever persists the SHA-256 digest of a connect code, never the
-//! code itself.
-//!
-//! The atomic consume boundary lives here: consuming an `active` code and
-//! inserting the derived access grant commit in one `SQLite` `IMMEDIATE`
-//! transaction, so a concurrent consume can never produce two grants or a
-//! twice-consumed code.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -85,19 +68,11 @@ CREATE INDEX IF NOT EXISTS client_connect_audit_by_client
     ON client_connect_audit (client_node_id, occurred_at);
 ";
 
-/// Lifecycle state of one `ClientConnectCode` (contract 2).
-///
-/// `consumed`, `expired`, and `revoked` are terminal; `active` is the only
-/// consumable state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectCodeState {
-    /// Published and waiting for one successful consume.
     Active,
-    /// Terminal: the code was consumed by a successful grant creation.
     Consumed,
-    /// Terminal: `expiresAt` passed without a consume.
     Expired,
-    /// Terminal: the Client refreshed or voided the code.
     Revoked,
 }
 
@@ -132,16 +107,10 @@ impl fmt::Display for ConnectCodeState {
     }
 }
 
-/// Lifecycle state of one `ClientAccessGrant` (contract 3).
-///
-/// `active` is the only usable state; `revoked` and `expired` are terminal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessGrantState {
-    /// The user may use the Client subject to occupancy and ACL checks.
     Active,
-    /// Terminal: a holder of manage or share revoked the access.
     Revoked,
-    /// Terminal: a temporary grant's `expiresAt` passed.
     Expired,
 }
 
@@ -174,12 +143,9 @@ impl fmt::Display for AccessGrantState {
     }
 }
 
-/// Trust mode of one `ClientAccessGrant` (plan 11.6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrantTrustMode {
-    /// Valid only for this connection or a short bounded term.
     Temporary,
-    /// Survives re-login; skips the connect code, never occupancy or ACL.
     Trusted,
 }
 
@@ -210,14 +176,10 @@ impl fmt::Display for GrantTrustMode {
     }
 }
 
-/// Origin recorded on one `ClientAccessGrant` (contract 3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrantSource {
-    /// The atomic connect-code consume path; requires the Device Client ACK.
     ConnectCode,
-    /// Created directly by an administrator.
     Administrator,
-    /// Created after a local confirmation on the Device Client.
     LocalConfirmation,
 }
 
@@ -250,11 +212,6 @@ impl fmt::Display for GrantSource {
     }
 }
 
-/// Permission set of one `ClientAccessGrant` (plan 7.4, 11.5).
-///
-/// `use` is mandatory because a grant only ever expresses permission to use
-/// the Client; the canonical stored form is the fixed-order token string, for
-/// example `use+manage+share`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GrantPermissions {
     can_use: bool,
@@ -263,25 +220,17 @@ pub struct GrantPermissions {
 }
 
 impl GrantPermissions {
-    /// The default grant of a subsequent user (plan 11.5).
     pub const USE: Self = Self {
         can_use: true,
         can_manage: false,
         can_share: false,
     };
-    /// The default grant of the first connecting user (plan 11.5).
     pub const USE_MANAGE_SHARE: Self = Self {
         can_use: true,
         can_manage: true,
         can_share: true,
     };
 
-    /// Builds one permission set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a set without `use`: a grant that may not be used grants
-    /// nothing and would silently bypass the occupancy gate.
     pub fn try_new(
         can_use: bool,
         can_manage: bool,
@@ -317,8 +266,6 @@ impl GrantPermissions {
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        // `use` is mandatory, so the two optional tokens fully cover the
-        // canonical string space.
         match (self.can_manage, self.can_share) {
             (false, false) => "use",
             (true, false) => "use+manage",
@@ -347,14 +294,10 @@ impl fmt::Display for GrantPermissions {
     }
 }
 
-/// Rate-limit dimension of one connect attempt counter (plan 11.3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttemptDimension {
-    /// The authenticated user that submitted the code.
     User,
-    /// The network address the attempt originated from.
     Ip,
-    /// The Client the attempt targeted.
     Client,
 }
 
@@ -375,11 +318,6 @@ impl fmt::Display for AttemptDimension {
     }
 }
 
-/// Command that publishes one one-time connect code digest (plan 11.3,
-/// contract 2 initial transition).
-///
-/// The Device Client generates the 8-digit code and only its SHA-256 digest
-/// reaches durable storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodePublication {
     connect_code_id: String,
@@ -392,12 +330,6 @@ pub struct ConnectCodePublication {
 }
 
 impl ConnectCodePublication {
-    /// Builds one validated publication command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-canonical SHA-256 digest, a
-    /// zero generation, a zero attempt count, or a non-canonical expiry.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         connect_code_id: impl Into<String>,
@@ -478,7 +410,6 @@ impl ConnectCodePublication {
     }
 }
 
-/// Server-validated code identity bound into the atomic consume transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeConsume {
     connect_code_id: String,
@@ -487,17 +418,6 @@ pub struct ConnectCodeConsume {
 }
 
 impl ConnectCodeConsume {
-    /// Builds one validated consume command.
-    ///
-    /// `connect_code_id` names the code stored by the Server,
-    /// `presented_code_digest` is the server-side digest of the code the user
-    /// submitted, and `expected_generation` is the stored code generation
-    /// validated by the Server.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-canonical digest, or a zero
-    /// generation.
     pub fn try_new(
         connect_code_id: impl Into<String>,
         presented_code_digest: impl Into<String>,
@@ -535,7 +455,6 @@ impl ConnectCodeConsume {
     }
 }
 
-/// Revocation or refresh reference to one published connect code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeRevocation {
     connect_code_id: String,
@@ -543,11 +462,6 @@ pub struct ConnectCodeRevocation {
 }
 
 impl ConnectCodeRevocation {
-    /// Builds one validated revocation reference.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical code id or an out-of-range revision.
     pub fn try_new(
         connect_code_id: impl Into<String>,
         expected_revision: u64,
@@ -572,10 +486,6 @@ impl ConnectCodeRevocation {
     }
 }
 
-/// Command that creates one `ClientAccessGrant` (plan 7.4).
-///
-/// `grantSource` is supplied by the caller for the standalone creation path;
-/// the atomic connect-code consume path forces `connect_code`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccessGrantIssuance {
     client_access_grant_id: String,
@@ -587,12 +497,6 @@ pub struct AccessGrantIssuance {
 }
 
 impl AccessGrantIssuance {
-    /// Builds one validated grant issuance command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or a `temporary` trust mode without
-    /// an `expiresAt`: a temporary grant is only ever short-lived (plan 11.6).
     pub fn try_new(
         client_access_grant_id: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -661,89 +565,53 @@ impl AccessGrantIssuance {
     }
 }
 
-/// Durable `ClientConnectCode` projection row (plan 7.3).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeRecord {
-    /// Stable Server-side connect code identifier.
     pub connect_code_id: String,
-    /// Canonical SHA-256 digest of the presented code; never the code itself.
     pub code_digest: String,
-    /// Client the code grants access to.
     pub client_node_id: String,
-    /// Device Client process instance that issued the code.
     pub issued_by_instance_id: String,
-    /// Stored code generation.
     pub generation: u64,
-    /// Instant after which the code can no longer be consumed.
     pub expires_at: Instant,
-    /// Verification attempts the code still accepts.
     pub remaining_attempts: u32,
-    /// Machine-level code state.
     pub state: ConnectCodeState,
-    /// Instant the code was published.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Durable `ClientAccessGrant` projection row (plan 7.4).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccessGrantRecord {
-    /// Stable Server-side grant identifier.
     pub client_access_grant_id: String,
-    /// Client the grant applies to.
     pub client_node_id: String,
-    /// User holding the grant.
     pub user_id: String,
-    /// Permission set; always includes `use`.
     pub permissions: GrantPermissions,
-    /// Trust mode of the grant.
     pub trust_mode: GrantTrustMode,
-    /// Machine-level grant state.
     pub state: AccessGrantState,
-    /// Origin of the grant.
     pub grant_source: GrantSource,
-    /// User that created the grant.
     pub granted_by_user_id: String,
-    /// Expiry instant of a temporary grant, if any.
     pub expires_at: Option<Instant>,
-    /// Instant the grant was created.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Result of the atomic consume-and-grant transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectGrantReceipt {
-    /// Exact durable connect code projection after the consume.
     pub code: ConnectCodeRecord,
-    /// Exact durable grant projection after the creation.
     pub grant: AccessGrantRecord,
-    /// True when this user is the first user ever granted on the Client and
-    /// therefore received `use+manage+share` (plan 11.5).
     pub first_user: bool,
 }
 
-/// Durable fixed-window connect attempt counter (plan 11.3).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectAttemptState {
-    /// Rate-limit dimension of the counter.
     pub dimension: AttemptDimension,
-    /// Subject key inside the dimension.
     pub subject_key: String,
-    /// Anchor instant of the current fixed window.
     pub window_started_at: Instant,
-    /// Failed attempts recorded inside the current window.
     pub failed_attempts: u64,
 }
 
-/// Grant authorization or revocation recorded in the connect audit trail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectAuditAction {
-    /// One access grant was created (plan 11.4, step 8).
     AccessGranted,
-    /// One access grant was revoked.
     AccessRevoked,
 }
 
@@ -757,10 +625,6 @@ impl ConnectAuditAction {
     }
 }
 
-/// One connect-domain authorization audit entry.
-///
-/// The connect flow records its authorization decisions in this dedicated
-/// durable audit table; no secret or code material is ever stored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectAuditEntry {
     audit_id: String,
@@ -774,12 +638,6 @@ pub struct ConnectAuditEntry {
 }
 
 impl ConnectAuditEntry {
-    /// Builds one validated audit entry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, an over-long detail, or a
-    /// non-canonical instant.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         audit_id: impl Into<String>,
@@ -859,47 +717,27 @@ impl ConnectAuditEntry {
     }
 }
 
-/// Stable connect-domain failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientConnectStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// The device has disabled new connections.
     ClientConnectionsForbidden,
-    /// The device is locally locked.
     ClientLocked,
-    /// No connect code matches the requested identity or presented digest.
     UnknownConnectCode,
-    /// No access grant matches the requested identity.
     UnknownAccessGrant,
-    /// The connect code is not `active`, so the transition is rejected.
     CodeNotActive,
-    /// The connect code's `expiresAt` has passed.
     ConnectCodeExpired,
-    /// The connect code has no remaining verification attempts.
     AttemptsExhausted,
-    /// The expected generation differs from the Server-owned code.
     GenerationMismatch,
-    /// A connect code digest is already registered.
     ConnectCodeDigestConflict,
-    /// A connect code id is already used.
     ConnectCodeIdConflict,
-    /// An active grant for the user and client already exists, or the grant
-    /// id is already used.
     AccessGrantConflict,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// The supplied `expectedRevision` no longer matches the durable revision.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free connect-domain storage error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientConnectStoreError {
     kind: ClientConnectStoreErrorKind,
@@ -921,19 +759,11 @@ impl fmt::Display for ClientConnectStoreError {
 
 impl std::error::Error for ClientConnectStoreError {}
 
-/// Connect-code, access-grant, and attempt ledger borrowing the sole
-/// product-state `SQLite` authority.
 pub struct ClientConnectLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable connect-code ledger on this same product-state
-    /// database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn client_connect_ledger(
         &mut self,
     ) -> Result<ClientConnectLedger<'_>, ClientConnectStoreError> {
@@ -953,17 +783,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Registers one one-time connect code digest as `active` (plan 11.3,
-    /// contract 2 initial transition).
-    ///
-    /// The Server only stores the digest; the code itself never persists. The
-    /// referenced client node must exist and the expiry must lie in the
-    /// future: publishing an already-expired code is a caller bug.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, an already-registered digest or code
-    /// id, an expiry at or before `now`, or storage failure.
     pub fn publish(
         &mut self,
         publication: &ConnectCodePublication,
@@ -1014,14 +833,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(record)
     }
 
-    /// Refreshes one connect code in a single transaction (contract 2:
-    /// `active -> revoked` triggered by a Client refresh) by revoking the old
-    /// code and publishing the replacement atomically.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a stale `expectedRevision`, an old code that is not `active`,
-    /// an invalid replacement publication, or storage failure.
     pub fn refresh_code(
         &mut self,
         revocation: &ConnectCodeRevocation,
@@ -1092,16 +903,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(record)
     }
 
-    /// Revokes one connect code (contract 2: `active -> revoked`).
-    ///
-    /// Revoking an already-`revoked` code is an accepted idempotent replay
-    /// that leaves the revision untouched; `consumed` and `expired` are
-    /// terminal and reject the transition.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown code, a stale `expectedRevision`, an illegal
-    /// terminal-state transition, or storage failure.
     pub fn revoke_code(
         &mut self,
         revocation: &ConnectCodeRevocation,
@@ -1135,16 +936,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(updated)
     }
 
-    /// Records one failed verification attempt against an `active` code by
-    /// decrementing `remainingAttempts` (plan 7.3, 11.3).
-    ///
-    /// Rate limiting itself is policy enforcement and never changes the code
-    /// state; this only burns one of the code's finite attempts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown code, a stale `expectedRevision`, a code that is
-    /// not `active`, an exhausted attempt budget, or storage failure.
     pub fn record_failed_attempt(
         &mut self,
         connect_code_id: &str,
@@ -1183,14 +974,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(updated)
     }
 
-    /// Projects due `active` codes to `expired` (contract 2 time judgement).
-    ///
-    /// The caller owns the timeout policy: every `active` code whose
-    /// `expiresAt` is at or before `cutoff` is swept.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire_codes_due(
         &mut self,
         cutoff: &Instant,
@@ -1230,30 +1013,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(expired)
     }
 
-    /// Consumes one `active` connect code and creates the derived access
-    /// grant inside one transaction (contract 2 `active -> consumed`,
-    /// contract 3 initial transition, plan 11.4 step 8-9).
-    ///
-    /// Exactly-once semantics: the consume is a single compare-and-swap on
-    /// the code row (`state = 'active'` and the loaded revision), and the
-    /// grant insert obeys the partial unique index of one active grant per
-    /// user and client. A losing concurrent consume observes a terminal code
-    /// and never produces a grant, because its whole transaction rolls back.
-    ///
-    /// The permissions follow plan 11.5 and are derived inside the same
-    /// transaction: the first user ever granted on the Client receives
-    /// `use+manage+share`, every later user receives `use`. The grant source
-    /// is always `connect_code`; administrator and local-confirmation grants
-    /// use [`ClientConnectLedger::create_grant`].
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or digest-mismatched code (indistinguishable by
-    /// design so failures never reveal that a Client belongs to a user), a
-    /// code that is not `active`, an expired code, an exhausted attempt
-    /// budget, a generation mismatch with the stored code, an unknown
-    /// client node, a device policy forbidding new connections, an
-    /// already-active grant for the user and client, or storage failure.
     pub fn consume_and_create_grant(
         &mut self,
         consume: &ConnectCodeConsume,
@@ -1314,8 +1073,6 @@ impl<'storage> ClientConnectLedger<'storage> {
             )
             .map_err(|sql| sql_error(&sql))?;
         if updated != 1 {
-            // The whole transaction aborts, so the grant insert above rolls
-            // back as well: exactly one consume can ever win.
             return Err(error(
                 ClientConnectStoreErrorKind::RevisionConflict,
                 "connect code revision changed during consume",
@@ -1332,16 +1089,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         })
     }
 
-    /// Creates one grant outside the connect-code flow (contract 3 initial
-    /// transition via `administrator` or `local_confirmation`).
-    ///
-    /// The connect-code source is rejected here: that origin may only be
-    /// produced by the atomic consume path that validates Server-owned code state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the `connect_code` source, an unknown client node, an
-    /// already-active grant for the user and client, or storage failure.
     pub fn create_grant(
         &mut self,
         issuance: &AccessGrantIssuance,
@@ -1403,11 +1150,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(record)
     }
 
-    /// Returns the active grant of one user on one client, if any.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or storage failure.
     pub fn active_grant(
         &self,
         client_node_id: &str,
@@ -1418,11 +1160,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         load_active_grant(self.connection()?, client_node_id, user_id)
     }
 
-    /// Returns the newest active connect code of one client node.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_code_for_client(
         &self,
         client_node_id: &str,
@@ -1447,11 +1184,6 @@ impl<'storage> ClientConnectLedger<'storage> {
             .transpose()
     }
 
-    /// Returns every active grant of one user across all clients.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical user identity or storage failure.
     pub fn active_grants_for_user(
         &self,
         user_id: &str,
@@ -1476,11 +1208,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         grants.into_iter().map(access_grant_from_row).collect()
     }
 
-    /// Returns every active grant on one client node.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_grants_for_client(
         &self,
         client_node_id: &str,
@@ -1505,11 +1232,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         grants.into_iter().map(access_grant_from_row).collect()
     }
 
-    /// Returns one durable access grant projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical grant identity or storage failure.
     pub fn grant_snapshot(
         &self,
         client_access_grant_id: &str,
@@ -1518,16 +1240,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         load_access_grant(self.connection()?, client_access_grant_id)
     }
 
-    /// Revokes one access grant (contract 3: `active -> revoked`).
-    ///
-    /// Revocation takes effect immediately without waiting for the Device
-    /// Client. Revoking an already-`revoked` grant is an accepted idempotent
-    /// replay; `expired` is terminal and rejects the transition.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant, a stale `expectedRevision`, an illegal
-    /// terminal-state transition, or storage failure.
     pub fn revoke_grant(
         &mut self,
         client_access_grant_id: &str,
@@ -1570,15 +1282,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(updated)
     }
 
-    /// Projects due temporary grants to `expired` (contract 3 time
-    /// judgement).
-    ///
-    /// Only `active` grants with a non-null `expiresAt` at or before `cutoff`
-    /// are swept; `trusted` grants without an expiry never expire here.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire_grants_due(
         &mut self,
         cutoff: &Instant,
@@ -1618,11 +1321,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(expired)
     }
 
-    /// Returns one durable connect code projection by identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical code identity or storage failure.
     pub fn code_snapshot(
         &self,
         connect_code_id: &str,
@@ -1631,11 +1329,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         load_connect_code(self.connection()?, connect_code_id)
     }
 
-    /// Returns one durable connect code projection by presented digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical digest or storage failure.
     pub fn code_snapshot_by_digest(
         &self,
         code_digest: &str,
@@ -1656,18 +1349,6 @@ impl<'storage> ClientConnectLedger<'storage> {
             .transpose()
     }
 
-    /// Records one failed connect attempt in the fixed window anchored at
-    /// `window_started_at` (plan 11.3).
-    ///
-    /// The caller owns the window policy and derives the anchor from `now`
-    /// with [`connect_attempt_window_anchor`]. A stored counter anchored at
-    /// any other window is reset, so a new window always starts from one
-    /// failed attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid dimension subject key, a non-canonical anchor, or
-    /// storage failure.
     pub fn record_connect_failure(
         &mut self,
         dimension: AttemptDimension,
@@ -1728,15 +1409,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(state)
     }
 
-    /// Returns the failed attempt count recorded in the fixed window
-    /// anchored at `window_started_at`.
-    ///
-    /// A counter anchored at an older window reads as zero.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid dimension subject key, a non-canonical anchor, or
-    /// storage failure.
     pub fn connect_failure_count(
         &self,
         dimension: AttemptDimension,
@@ -1754,13 +1426,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         })
     }
 
-    /// Applies the caller's attempt threshold as policy: true when the
-    /// current window already recorded at least `max_attempts` failures.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a zero threshold, an invalid dimension subject key, a
-    /// non-canonical anchor, or storage failure.
     pub fn connect_attempts_blocked(
         &self,
         dimension: AttemptDimension,
@@ -1778,12 +1443,6 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(count >= max_attempts)
     }
 
-    /// Appends one connect-domain authorization audit entry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical entry, an already-used audit id, or storage
-    /// failure.
     pub fn record_connect_audit(
         &mut self,
         entry: &ConnectAuditEntry,
@@ -1832,16 +1491,6 @@ impl<'storage> ClientConnectLedger<'storage> {
     }
 }
 
-/// Anchor instant of the fixed attempt window that contains `now`.
-///
-/// The canonical `YYYY-MM-DDTHH:MM:SS.sssZ` instant is floored to the nearest
-/// multiple of `window_seconds` since the Unix epoch, giving every attempt in
-/// one wall-clock window the same durable anchor.
-///
-/// # Errors
-///
-/// Rejects a non-canonical instant or a window length outside
-/// `1..=MAX_WINDOW_SECONDS`.
 pub fn connect_attempt_window_anchor(
     now: &Instant,
     window_seconds: u64,
@@ -1897,7 +1546,6 @@ fn parse_two_or_four_digit_year(digits: &[u8]) -> i64 {
     year
 }
 
-/// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
 const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -1908,7 +1556,6 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// Civil date for days since the Unix epoch (Howard Hinnant's algorithm).
 const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
@@ -2119,11 +1766,6 @@ fn require_connect_code(
     load_connect_code(connection, connect_code_id)?.ok_or_else(unknown_connect_code)
 }
 
-/// Applies the frozen consume preconditions to a loaded code row.
-///
-/// A wrong presented digest must be indistinguishable from an unknown code so
-/// a failed attempt never reveals that a Client belongs to any user
-/// (plan 17.5).
 fn ensure_code_consumable(
     code: &ConnectCodeRecord,
     consume: &ConnectCodeConsume,
@@ -2233,8 +1875,6 @@ fn grant_exists_for_client(
     Ok(exists == 1)
 }
 
-/// Read the policy inside the consume transaction so a policy change after
-/// the HTTP preflight cannot be bypassed by a stale node snapshot.
 fn ensure_connections_allowed(
     connection: &rusqlite::Connection,
     client_node_id: &str,
@@ -2487,7 +2127,6 @@ fn validate_sha256_digest(value: &str) -> Result<(), ClientConnectStoreError> {
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), ClientConnectStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [

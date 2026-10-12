@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable effect handoff and bounded dispatch for every Worker role.
-//!
-//! Producers enqueue immutable intents. Only lifecycle drivers dispatch them;
-//! transport acceptance and local model handling never stand for business success.
-
 use super::{
     ActiveJobLifecycle, CodexCoreAdapter, DurableExecutionDelivery, ExecutionAckSequence,
     ExecutionEventCategory, ExecutionOutcomeStatus, ExecutionPortErrorCode,
@@ -28,8 +23,6 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Saves a mandatory effect before its originating operation can be confirmed.
-    /// Never invokes a transport or Provider. Replays keep the exact original bytes.
     pub(super) fn enqueue_effect(
         &mut self,
         message: &ExecutionPortMessage,
@@ -53,14 +46,10 @@ where
         Ok(())
     }
 
-    /// The driver is the sole owner of outbound side effects. Local handoff and
-    /// remote frame acceptance are distinct from reliable enqueue and business success.
     async fn dispatch_execution_effect(
         &mut self,
         message: ExecutionPortMessage,
     ) -> Result<EffectDispatchOutcome, WorkerError> {
-        // Remote model intents use the same current authority gate as the local
-        // Device lane. Exact local started exchanges below may only restore data.
         if self.device_models.is_none()
             && let ExecutionPortMessage::ModelOpenMessage(open) = &message
             && self.local_model_start_deadline(open)?.is_none()
@@ -94,7 +83,6 @@ where
                         "unstarted local model request has no current execution authority",
                     ));
                 }
-                // An exact started exchange restores its result, never another invocation.
                 (Some(std::time::Instant::now()), None)
             }
         } else {
@@ -195,8 +183,6 @@ where
                         return Err(error);
                     }
                     Err(_) => {
-                        // Refusing the legal, small placeholder makes the runtime channel
-                        // unusable. Keep it pending for recovery and preserve business facts.
                         self.delivery_failure = Some(WorkerErrorCode::ExecutionTerminal);
                         return Err(worker_error(
                             WorkerErrorCode::ExecutionTerminal,
@@ -287,8 +273,6 @@ where
             }
             self.pending_candidates.remove(job_id);
         }
-        // The job has stopped. Archive its obsolete evidence and interactive intents;
-        // the explicit failed terminal is retained separately and remains retryable.
         let pending = self
             .codex
             .pending_execution_deliveries()
@@ -330,14 +314,6 @@ where
             && !self.active.contains_key(job_id)
         {
             match &delivery.message {
-                // Durable Control Plane frames must still flush after the
-                // Worker drops an in-memory Job. Blocking RuntimeEvent /
-                // JobOutcome / diagnostic artifact frames here strands
-                // verification evidence forever and leaves Delivery
-                // verdict=null even when Core already produced
-                // independent-verification-result. The frame lease is the
-                // authority; Server validates fencing. Candidate uploads
-                // remain gated by the pending-candidate checks below.
                 ExecutionPortMessage::RuntimeEventMessage(_)
                 | ExecutionPortMessage::JobDispatchResultMessage(_)
                 | ExecutionPortMessage::SessionBindingMessage(_)
@@ -408,9 +384,6 @@ where
                     .requested_model_deliveries
                     .contains(&delivery.delivery_id)
             {
-                // Remote paid calls remain owned by their Core recovery path. The local
-                // Device store deduplicates exact identities and never re-invokes an
-                // already started call; definite local startup refusals can retry here.
                 continue;
             }
             let recovered_interaction = matches!(
@@ -445,24 +418,16 @@ where
             };
             let delivery_id = delivery.delivery_id.clone();
             sent_bytes += frame_bytes;
-            // A shutdown may drop active HTTP I/O. The attempt journal then
-            // retains unknown acceptance until the durable queue reconciles it.
             let sent = self.dispatch_retained_effect(delivery).await;
             if let Err(error) = sent {
                 if error.code == WorkerErrorCode::ModelStartDeferred {
-                    // One full Provider queue must not hold up other Providers or model ACKs.
-                    // Leave its original durable intent pending and continue this bounded scan.
                     deferred.get_or_insert(error);
                     continue;
                 }
                 if error.code != WorkerErrorCode::ExecutionMessageRejected {
-                    // Keep the refused frame first on retry. Worker-wide
-                    // failure yields immediately to control intake/heartbeat.
                     self.outbox_flush_cursor = previous_cursor;
                     return Err(error);
                 }
-                // Permanent refusal has been durably archived and the affected job
-                // stopped (or its optional report projected). Resume other jobs next turn.
                 return Err(error);
             }
             if recovered_interaction {
@@ -474,8 +439,6 @@ where
             {
                 active.last_event_sequence = ExecutionAckSequence(sequence);
             }
-            // The just-completed exchange can enqueue a renewal, cancellation
-            // or ACK. Its receipt is durable; yield before any further I/O.
             if self.port.has_pending_controls() {
                 break;
             }

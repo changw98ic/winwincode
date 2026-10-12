@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Feature-gated offline audit counters for actual Device replay JSON reads.
 use serde::Serialize;
 use std::cell::RefCell;
 #[derive(Clone, Debug, Default, Serialize)]

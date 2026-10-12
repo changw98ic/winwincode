@@ -4,8 +4,6 @@ use super::{ActionBridgeError, ActionGateState, current_binding_and_time, curren
 use sha2::{Digest, Sha256};
 use winwincode_kernel::{KernelActionAuthorization, KernelToolResultReadRequest};
 
-/// A live root `WorkRun` may read its own Core thread's historical receipts.
-/// Delegated reads require a separately scoped result-read policy.
 pub(super) fn authorize(
     state: &ActionGateState,
     request: &KernelToolResultReadRequest,

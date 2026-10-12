@@ -9,7 +9,6 @@ use crate::{
     SignatureVerificationErrorKind, WebhookSignatureVerifier,
 };
 
-/// Application coordinator over the sole connector authority and receipt store.
 pub struct IntegrationFramework {
     storage: Box<dyn IntegrationStoragePort>,
 }
@@ -32,11 +31,6 @@ impl IntegrationFramework {
         self.storage.as_mut()
     }
 
-    /// Registers one connector authority or exactly replays it.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed identity reuse, scope mismatch, or durable failure.
     pub fn register_connector(
         &mut self,
         registration: &ConnectorRegistration,
@@ -44,11 +38,6 @@ impl IntegrationFramework {
         self.storage.register(registration)
     }
 
-    /// Revokes the credential authority used by both inbound and outbound calls.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, scope mismatch, invalid time, or durable failure.
     pub fn revoke_credential(
         &mut self,
         scope: &IntegrationScope,
@@ -60,13 +49,6 @@ impl IntegrationFramework {
             .revoke_credential(scope, integration_id, expected_revision, occurred_at_millis)
     }
 
-    /// Authenticates, normalizes, and durably receipts one webhook. Business
-    /// handling is deferred to the formal-command dispatch outbox.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid signature, revoked credentials, changed replay, stale
-    /// authority, scope mismatch, adapter failure, or durable failure.
     pub fn receive_webhook(
         &mut self,
         request: &InboundWebhookRequest,
@@ -110,11 +92,6 @@ impl IntegrationFramework {
             .accept_inbound(&authority, request, &normalized)
     }
 
-    /// Enqueues one exact outbound operation without changing business state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked credentials, changed key reuse, scope mismatch, or durable failure.
     pub fn enqueue_outbound(
         &mut self,
         request: &OutboundRequest,
@@ -122,12 +99,6 @@ impl IntegrationFramework {
         self.storage.enqueue_outbound(request)
     }
 
-    /// Claims and performs at most one due operation. Retry/dead-letter state is
-    /// committed only to the integration queue and never to business state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked/foreign authority, invalid lease/time, stale claim, or durable failure.
     pub fn deliver_next(
         &mut self,
         scope: &IntegrationScope,
@@ -159,11 +130,6 @@ impl IntegrationFramework {
         Ok(Some(result))
     }
 
-    /// Reads current outbound state for a scoped connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, missing operation, corrupt data, or durable failure.
     pub fn outbound_operation(
         &self,
         scope: &IntegrationScope,

@@ -79,7 +79,6 @@ fn m08_real_diagnostic_queries_isolate_foreign_acked_history() {
             })
             .unwrap();
         assert_eq!(transport_rows, 0);
-        // This fault is confined to an unrelated record in this temporary fixture.
         store.lock().unwrap().execute("UPDATE diagnostic_artifact_upload SET record_json = ?1 WHERE artifact_id = (SELECT MIN(artifact_id) FROM diagnostic_artifact_upload)", [b"{}".as_slice()]).unwrap();
         assert!(!outbox.has_pending(&current).unwrap());
         assert!(outbox.accepted_references(&current).unwrap().is_empty());
@@ -171,7 +170,6 @@ fn indexed_diagnostic_queries_validate_only_the_exact_job() {
             })
             .unwrap();
         assert_eq!(transport_rows, 0);
-        // This fault is confined to an unrelated record in this temporary fixture.
         store.lock().unwrap().execute("UPDATE diagnostic_artifact_upload SET record_json = ?1 WHERE artifact_id = (SELECT MIN(artifact_id) FROM diagnostic_artifact_upload)", [b"{}".as_slice()]).unwrap();
         assert!(!outbox.has_pending(&current).unwrap());
         println!(
@@ -184,7 +182,6 @@ fn indexed_diagnostic_queries_validate_only_the_exact_job() {
     }
 }
 
-// Exact current-Job retained-body fault cases. The selected envelope is intact.
 fn diagnostic_route_fault_rows(store: &AdapterStore) -> Vec<(String, String, Vec<u8>)> {
     let connection = store.lock().unwrap();
     let mut statement = connection
@@ -382,6 +379,5 @@ fn diagnostic_exact_upload_retain_preserves_ack_progress_and_rejects_payload_con
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
-    // Every table row executes before the old behavior is reported as one red.
     assert!(cases.into_iter().all(|exact_replay| exact_replay));
 }

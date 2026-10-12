@@ -16,7 +16,6 @@ function changedRange(left: string, right: string): readonly [number, number] {
   return [start, left.length - end]
 }
 
-/** Read unified Git hunks; headers and no-newline markers never consume lines. */
 export function diffLines(source: string): readonly DiffLine[] {
   let before: number | null = null
   let after: number | null = null
@@ -38,7 +37,6 @@ export function diffLines(source: string): readonly DiffLine[] {
   })
 }
 
-/** Untrusted diff text stays text, including source code that resembles HTML. */
 export function renderDiff(document: Document, source: string): HTMLElement {
   const code = document.createElement('code')
   code.className = 'wwc-review-preview-code'

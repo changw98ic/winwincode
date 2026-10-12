@@ -69,7 +69,6 @@ fn frozen_worktree_is_immune_to_live_workspace_changes() {
             .expect("freeze");
     assert_eq!(snap.commit_id, candidate_commit);
 
-    // Mutate the live workspace after freezing.
     std::fs::write(repo.join("frozen.txt"), "MUTATED").expect("mutate");
     git(&repo, &["add", "frozen.txt"]);
     git(
@@ -128,7 +127,6 @@ fn frozen_worktree_is_read_only() {
         winwincode_worker::snapshot_worktree::freeze_worktree(&repo, &candidate_commit, &frozen)
             .expect("freeze");
 
-    // The frozen copy must not report a dirty tree — a verifier cannot write.
     let status = git(
         &repo,
         &["-C", &frozen.to_string_lossy(), "status", "--porcelain"],

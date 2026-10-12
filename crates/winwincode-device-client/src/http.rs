@@ -1,24 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded HTTP(S) transport for the client exchange endpoint.
-
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::daemon::{ExchangeTransport, ExchangeTransportError};
 
-/// Largest response body accepted from the endpoint (bounded batches of
-/// bounded frames; far above the largest legal exchange response).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-/// Default total request timeout.
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Blocking HTTP(S) implementation of [`ExchangeTransport`].
-///
-/// Redirects and environment proxies are disabled so the bearer credential
-/// is sent only to the configured Server origin. TLS uses the WebPKI roots
-/// provided by `ureq`'s Rustls backend.
 #[derive(Debug)]
 pub struct HttpExchangeTransport {
     endpoint: Mutex<String>,
@@ -27,7 +17,6 @@ pub struct HttpExchangeTransport {
 }
 
 impl HttpExchangeTransport {
-    /// Creates the transport for one absolute HTTP(S) exchange endpoint.
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
@@ -37,35 +26,23 @@ impl HttpExchangeTransport {
         }
     }
 
-    /// Trusts one explicit DER-encoded Server root instead of the WebPKI set.
     #[must_use]
     pub fn with_tls_root_der(mut self, tls_root_der: Vec<u8>) -> Self {
         self.tls_root_der = Some(tls_root_der);
         self
     }
 
-    /// Overrides the total request timeout.
     #[must_use]
     pub fn with_io_timeout(mut self, io_timeout: Duration) -> Self {
         self.io_timeout = io_timeout;
         self
     }
 
-    /// The currently configured endpoint URL.
-    ///
-    /// # Panics
-    ///
-    /// Only when the endpoint mutex is poisoned.
     #[must_use]
     pub fn endpoint(&self) -> String {
         self.endpoint.lock().expect("endpoint mutex").clone()
     }
 
-    /// Re-points the transport at a new endpoint URL.
-    ///
-    /// # Panics
-    ///
-    /// Only when the endpoint mutex is poisoned.
     pub fn set_endpoint(&self, endpoint: impl Into<String>) {
         *self.endpoint.lock().expect("endpoint mutex") = endpoint.into();
     }

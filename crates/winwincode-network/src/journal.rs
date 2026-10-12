@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Secret-free attempt facts and queue budgets survive process restarts.
 use crate::{Acceptance, ErrorKind, NetworkFailure, Phase, Replay, RetryDecision};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,6 @@ pub enum QueuePermit {
     Stopped(NetworkFailure),
 }
 
-/// Only envelope cursor identities are retained; frame bodies and credentials stay in their source stores.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct EnvelopeCursor {
     pub last_sequence: u64,
@@ -65,9 +63,6 @@ fn key(value: &[u8]) -> String {
 }
 
 impl RequestJournal {
-    /// Opens a private, additive journal. It stores hashes and bounded facts only.
-    /// # Errors
-    /// Rejects unsafe files, unavailable storage and invalid persisted state.
     pub fn open(path: &Path) -> Result<Self, NetworkFailure> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -115,9 +110,6 @@ impl RequestJournal {
         ))
     }
 
-    /// Binds a logical request to stable non-secret envelope cursors across restart.
-    /// # Errors
-    /// Rejects malformed identifiers, changed frame identity and unavailable storage.
     pub fn bind_envelope(
         &self,
         operation: &[u8],
@@ -178,12 +170,6 @@ impl RequestJournal {
         Ok(now.max(monotonic))
     }
 
-    /// Atomically records an unknown attempt before its external effect.
-    /// A crash is counted as unknown acceptance on the next prepare.
-    /// The calling queue must serialize each logical operation. A completed
-    /// inference requires its retained completion; it cannot be charged again.
-    /// # Errors
-    /// Storage failures prohibit the external effect.
     pub fn prepare(
         &self,
         operation: &[u8],
@@ -258,16 +244,23 @@ impl RequestJournal {
         Ok(permit)
     }
 
-    /// Retains the outcome before the queue is allowed to reschedule.
-    /// Call success only after the response has passed protocol validation.
-    /// # Errors
-    /// Rejects a foreign attempt and failed persistence.
     pub fn finish(
         &self,
         operation: &[u8],
         sequence: u64,
         failure: Option<NetworkFailure>,
         now: u64,
+    ) -> Result<(), NetworkFailure> {
+        self.finish_with_delay_cap(operation, sequence, failure, now, None)
+    }
+
+    pub fn finish_with_delay_cap(
+        &self,
+        operation: &[u8],
+        sequence: u64,
+        failure: Option<NetworkFailure>,
+        now: u64,
+        max_delay: Option<Duration>,
     ) -> Result<(), NetworkFailure> {
         let now = self.monotonic_now(now)?;
         let operation = key(operation);
@@ -291,6 +284,13 @@ impl RequestJournal {
             params![operation, sql_int(sequence)?, if failure.is_some() { "failed" } else { "completed" }, failure_json, sql_int(now)?]).map_err(|_| storage())?;
         if let Some(failure) = failure {
             apply_failure(&mut state, failure, now);
+            if let Some(max_delay) = max_delay
+                && !state.stopped
+            {
+                let floor = failure.retry_after_ms.unwrap_or(0);
+                let cap = now.saturating_add(crate::policy::duration_millis(max_delay).max(floor));
+                state.ready_at = state.ready_at.min(cap);
+            }
             transaction
                 .execute(
                     "UPDATE network_queue_state SET state_json=?2 WHERE operation_hash=?1",
@@ -317,9 +317,6 @@ impl RequestJournal {
         transaction.commit().map_err(|_| storage())
     }
 
-    /// Indicates that cost/usage is a lower bound after an earlier unknown attempt.
-    /// # Errors
-    /// Returns a storage failure rather than guessing a zero cost.
     pub fn has_unknown_usage(&self, operation: &[u8]) -> Result<bool, NetworkFailure> {
         self.0.lock().map_err(|_| storage())?.query_row(
             "SELECT EXISTS(SELECT 1 FROM network_request_attempts WHERE operation_hash=?1 AND (outcome IN ('in_flight','unknown') OR (outcome='failed' AND json_extract(failure_json,'$.acceptance') != 'not_sent')))",
@@ -412,6 +409,121 @@ mod tests {
             .finish(b"same-control-frame", sequence, None, now)
             .unwrap();
         assert_eq!(sequence, 7);
+        drop(journal);
+        let _ = std::fs::remove_file(path);
+    }
+    fn delay_after_one_failure(
+        tag: &str,
+        failure: NetworkFailure,
+        cap: Option<Duration>,
+    ) -> Option<Duration> {
+        let path = std::env::temp_dir().join(format!(
+            "network-delay-cap-{tag}-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        let journal = RequestJournal::open(&path).unwrap();
+        let now = 1_000;
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"capped", Replay::ReplayExact, 4, now)
+            .unwrap()
+        else {
+            panic!("first attempt");
+        };
+        journal
+            .finish_with_delay_cap(b"capped", sequence, Some(failure), now, cap)
+            .unwrap();
+        let later = now + 600_000;
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"capped", Replay::ReplayExact, 4, later)
+            .unwrap()
+        else {
+            panic!("second attempt");
+        };
+        journal
+            .finish_with_delay_cap(b"capped", sequence, Some(failure), later, cap)
+            .unwrap();
+        let delay = match journal
+            .prepare(b"capped", Replay::ReplayExact, 4, later)
+            .unwrap()
+        {
+            QueuePermit::Waiting(delay, _) => Some(delay),
+            QueuePermit::Stopped(_) => None,
+            QueuePermit::Ready(_) => Some(Duration::ZERO),
+        };
+        drop(journal);
+        let _ = std::fs::remove_file(path);
+        delay
+    }
+
+    #[test]
+    fn caller_delay_cap_bounds_but_never_extends_the_policy_delay() {
+        let failure = NetworkFailure::new(
+            ErrorKind::ConnectionUnavailable,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        let cap = Duration::from_millis(200);
+        let uncapped = delay_after_one_failure("none", failure, None).unwrap();
+        assert!(uncapped > cap, "uncapped {uncapped:?} must exceed the cap");
+        let capped = delay_after_one_failure("small", failure, Some(cap)).unwrap();
+        assert!(capped <= cap, "{capped:?}");
+        assert!(capped > Duration::ZERO);
+        let large =
+            delay_after_one_failure("large", failure, Some(Duration::from_hours(1))).unwrap();
+        assert!(
+            large.abs_diff(uncapped) <= Duration::from_millis(50),
+            "large {large:?} vs uncapped {uncapped:?}"
+        );
+        assert!(large > cap);
+    }
+
+    #[test]
+    fn caller_delay_cap_keeps_retry_after_and_terminal_stops() {
+        let mut deferred = NetworkFailure::new(
+            ErrorKind::ConnectionUnavailable,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        deferred.retry_after_ms = Some(120_000);
+        let delay =
+            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)))
+                .unwrap();
+        assert!(delay >= Duration::from_secs(119), "{delay:?}");
+
+        let terminal = NetworkFailure::new(
+            ErrorKind::Authentication,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        assert!(!terminal.retryable());
+        let path = std::env::temp_dir().join(format!(
+            "network-delay-cap-stop-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        let journal = RequestJournal::open(&path).unwrap();
+        let QueuePermit::Ready(sequence) = journal
+            .prepare(b"stop", Replay::ReplayExact, 4, 1_000)
+            .unwrap()
+        else {
+            panic!("first attempt");
+        };
+        journal
+            .finish_with_delay_cap(
+                b"stop",
+                sequence,
+                Some(terminal),
+                1_000,
+                Some(Duration::from_millis(1)),
+            )
+            .unwrap();
+        assert!(matches!(
+            journal
+                .prepare(b"stop", Replay::ReplayExact, 4, 10_000)
+                .unwrap(),
+            QueuePermit::Stopped(_)
+        ));
         drop(journal);
         let _ = std::fs::remove_file(path);
     }
@@ -539,7 +651,6 @@ mod tests {
                 .unwrap(),
             QueuePermit::Stopped(_)
         ));
-        // A different request gets its own budget. Its interrupted unsafe write requires reconciliation.
         assert!(matches!(
             journal
                 .prepare(b"mutation", Replay::ReconcileFirst, 4, now)

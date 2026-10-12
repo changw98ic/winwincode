@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/// Exact historical receipt requested by Core. Reading it grants no operation
-/// execution or live handle authority.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct KernelToolResultReadRequest {
     pub session_id: String,

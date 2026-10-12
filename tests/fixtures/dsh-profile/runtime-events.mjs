@@ -1,7 +1,6 @@
 import { RUNTIME_VERIFICATION_RESULT_PROTOCOL, RUNTIME_EVENT_SCHEMA_VERSION, runtimeEventId, } from '../../../packages/contracts/dist/index.js';
 const DEFAULT_REMEMBERED_EVENT_LIMIT = 2_048;
 const MAX_REMEMBERED_EVENT_LIMIT = 65_536;
-/** Visible failure at the Codex-to-product projection boundary. */
 export class RuntimeProjectionError extends Error {
     code;
     sessionId;
@@ -673,7 +672,6 @@ function parseEnvelope(event, sessionId) {
     }
     throw new RuntimeProjectionError('INVALID_KERNEL_EVENT', `kernel event ${event.sequence.toString()} has no Codex message envelope`, { sessionId, actualSequence: event.sequence.toString() });
 }
-/** Strict one-session normalizer shared by live delivery and persisted replay. */
 export class CodexRuntimeProjector {
     sessionId;
     kernelSessionId;
@@ -719,7 +717,6 @@ export class CodexRuntimeProjector {
             kernelSequence: this.#kernelSequence.toString(),
         });
     }
-    /** Project one kernel event, returning undefined for a verified recent duplicate. */
     ingest(event) {
         const actual = event.sequence;
         const expected = this.#kernelSequence + 1n;
@@ -767,7 +764,6 @@ export class CodexRuntimeProjector {
         }
         return normalized;
     }
-    /** Replay a contiguous range through the exact live transition. */
     replay(events) {
         const projected = [];
         for (const event of events) {
@@ -778,11 +774,9 @@ export class CodexRuntimeProjector {
         return Object.freeze(projected);
     }
 }
-/** Convenience fold used by cold rebuild paths and deterministic tests. */
 export function projectKernelEvents(options, events) {
     return new CodexRuntimeProjector(options).replay(events);
 }
-/** Live normalized stream with no queue beyond the native kernel's bounded channel. */
 export async function* streamRuntimeEvents(source, options) {
     const projector = new CodexRuntimeProjector(options);
     const streamOptions = {

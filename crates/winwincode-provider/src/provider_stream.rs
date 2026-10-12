@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider-neutral streaming conversion for the central Gateway.
-//!
-//! Provider adapters emit typed wire events. The converter validates their
-//! lifecycle, coalesces content blocks so Provider chunk boundaries do not
-//! change the canonical result, assigns stable tool identities and stream
-//! sequences, and produces the embedded kernel's canonical `ModelPort` JSON.
-//! No old UI message format is accepted.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
@@ -26,7 +18,6 @@ const MAX_STREAM_BLOCKS: usize = 4_096;
 const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Provider tool category mapped to the kernel's canonical response item.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderToolKind {
@@ -34,13 +25,6 @@ pub enum ProviderToolKind {
     Custom,
 }
 
-/// Canonical Provider-neutral identity of one callable tool.
-///
-/// Provider adapters may expose a bounded alias on their wire protocol, but
-/// the alias is never parsed back into this identity. The adapter must retain
-/// an explicit alias-to-identity binding for the whole exchange. Unadvertised
-/// calls use a reserved unavailable namespace so Core can reject the call and
-/// feed back the error without granting access to a hidden tool.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderToolIdentity {
@@ -51,11 +35,6 @@ pub struct ProviderToolIdentity {
 }
 
 impl ProviderToolIdentity {
-    /// Builds one canonical identity after enforcing the Codex tool bounds.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, overlong, or non-identifier names and namespaces.
     pub fn try_new(
         kind: ProviderToolKind,
         name: String,
@@ -91,7 +70,6 @@ impl ProviderToolIdentity {
     }
 }
 
-/// Stable invalid canonical tool identity category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderToolIdentityError {
     InvalidName,
@@ -106,7 +84,6 @@ impl fmt::Display for ProviderToolIdentityError {
 
 impl std::error::Error for ProviderToolIdentityError {}
 
-/// Provider terminal reason which has no arbitrary diagnostic text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderFinishReason {
     Stop,
@@ -116,7 +93,6 @@ pub enum ProviderFinishReason {
     Filtered,
 }
 
-/// Stable Provider stream failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamFailureKind {
     Authentication,
@@ -130,7 +106,6 @@ pub enum ProviderStreamFailureKind {
     Unknown,
 }
 
-/// Bounded Provider failure facts. Arbitrary Provider messages are absent.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderStreamFailure {
     kind: ProviderStreamFailureKind,
@@ -189,7 +164,6 @@ impl fmt::Debug for ProviderStreamFailure {
     }
 }
 
-/// Provider token accounting retained until the terminal canonical event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderTokenUsage {
     pub input_tokens: u64,
@@ -199,10 +173,6 @@ pub struct ProviderTokenUsage {
     pub reasoning_output_tokens: u64,
 }
 
-/// Typed wire event accepted from a selected Provider adapter.
-///
-/// Debug output intentionally reveals only the variant name; response content,
-/// reasoning, tool arguments and Provider request identities remain hidden.
 #[derive(Clone, PartialEq)]
 pub enum ProviderStreamEvent {
     ResponseStarted {
@@ -286,7 +256,6 @@ impl fmt::Debug for ProviderStreamEvent {
     }
 }
 
-/// Stable conversion failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamConversionErrorKind {
     InvalidEvent,
@@ -297,7 +266,6 @@ pub enum ProviderStreamConversionErrorKind {
     SequenceOverflow,
 }
 
-/// Secret-free conversion error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderStreamConversionError {
     kind: ProviderStreamConversionErrorKind,
@@ -337,7 +305,6 @@ impl fmt::Display for ProviderStreamConversionError {
 
 impl std::error::Error for ProviderStreamConversionError {}
 
-/// One ordered, leak-checked canonical `ModelPort` message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CanonicalModelStreamFrame {
     sequence: u64,
@@ -358,13 +325,11 @@ impl CanonicalModelStreamFrame {
         self.sequence
     }
 
-    /// Returns the exact JSON consumed by the embedded kernel's `ModelPort`.
     #[must_use]
     pub fn payload_json(&self) -> &str {
         &self.payload_json
     }
 
-    /// Builds the generated opaque `ExecutionPort` payload for this event.
     #[must_use]
     pub fn encoded_payload(&self) -> EncodedPayload {
         EncodedPayload {
@@ -430,7 +395,6 @@ enum OpenBlock {
     Tool(ToolBlock),
 }
 
-/// Stateful converter tied to one successful Gateway open receipt.
 pub struct ProviderStreamConverter {
     model_exchange_id: String,
     leak_gate: CredentialLeakGate,
@@ -445,8 +409,6 @@ pub struct ProviderStreamConverter {
 }
 
 impl ProviderStreamConverter {
-    /// Binds conversion to the exact route and Credential fingerprint snapshot
-    /// returned by a successful the device Provider runtime call.
     #[must_use]
     pub fn from_gateway_receipt(receipt: &ProviderGatewayOpenReceipt) -> Self {
         Self {
@@ -463,15 +425,6 @@ impl ProviderStreamConverter {
         }
     }
 
-    /// Converts one Provider event into zero or more ordered canonical frames.
-    /// Content deltas are intentionally coalesced until their block ends. This
-    /// makes output independent of Provider chunk segmentation and lets the
-    /// leak gate inspect complete content before any content frame is emitted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid lifecycle order, identity drift, oversized content,
-    /// Credential material, or events after a terminal outcome.
     pub fn ingest(
         &mut self,
         event: ProviderStreamEvent,
@@ -566,8 +519,6 @@ impl ProviderStreamConverter {
                         delta: block.text.clone(),
                     });
                 }
-                // Text may precede the tool call which identifies it as progress.
-                // Do not publish a final-answer phase until the response has ended.
                 self.pending_text.push(block);
                 if !self.tool_calls.is_empty() {
                     messages.extend(self.finish_text(Some("commentary")));
@@ -1276,7 +1227,7 @@ struct ModelReasoningSummary {
 }
 
 #[derive(Serialize)]
-#[allow(clippy::struct_field_names)] // Exact field names are the canonical ModelPort wire contract.
+#[allow(clippy::struct_field_names)]
 struct ModelTokenUsage {
     input_tokens: u64,
     cached_input_tokens: Option<u64>,

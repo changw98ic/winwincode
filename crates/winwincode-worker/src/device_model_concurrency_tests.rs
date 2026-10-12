@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The network fixture withholds every answer until every expected request arrives.
-//! Run the Device lane in a child process to isolate its TLS-root environment.
-
 #[path = "device_model_recovery_tests.rs"]
 mod recovery_tests;
 
@@ -101,7 +98,6 @@ fn run_concurrent_members(per_provider: usize, test_name: &str) {
             Err(_) => break,
         }
     }
-    // Release even a failed run so its fixture and child cannot leak.
     for (_, _, release) in &received {
         let _ = release.send(());
     }
@@ -177,8 +173,6 @@ fn accept_members(
                 let config = Arc::clone(config);
                 let request_tx = request_tx.clone();
                 members.push(thread::spawn(move || {
-                    // macOS inherits the listener's nonblocking mode. This TLS
-                    // fixture uses blocking reads with a finite timeout.
                     socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(WAIT)).unwrap();
                     socket.set_write_timeout(Some(WAIT)).unwrap();
@@ -324,7 +318,6 @@ fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
             // send only queues a task. The three physical invocations must hold
             // their actual slots before the fourth admission probe is meaningful.
             wait_for_invoking_members(directory, &template, provider, per_provider);
-            // The parent still awaits the other nine HTTP requests, so no GLM slot can finish.
             let fourth = member_open(&template, provider, expected);
             assert_eq!(
                 models

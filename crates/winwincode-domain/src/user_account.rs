@@ -1,46 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `UserAccount` domain object for the local Owner login.
-//!
-//! The one `UserAccount` is the durable identity of the local Owner. It keeps
-//! the user-chosen `username`, its normalized login form, the opaque Argon2id
-//! PHC `passwordHash` string, timestamps, and the optimistic-concurrency
-//! `revision`.
-//!
-//! This model owns only the stored invariants. Username normalization and
-//! password hashing stay in their own layers; matching the one
-//! `normalizedUsername` is the storage adapter's responsibility.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Instant, Revision, UserId};
 
-/// Maximum byte length accepted for `username` and `normalizedUsername`.
 const MAX_USERNAME_BYTES: usize = 96;
 
-/// Maximum byte length accepted for an Argon2id PHC `passwordHash` string.
 const MAX_PASSWORD_HASH_BYTES: usize = 512;
 
-/// Validation failure category for one `UserAccount` value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserAccountErrorKind {
-    /// `userId` is not a canonical `usr_` identifier.
     InvalidUserId,
-    /// `username` is empty, overlong, whitespace-padded, or control-bearing.
     InvalidUsername,
-    /// `normalizedUsername` is not a normalized uniqueness key.
     InvalidNormalizedUsername,
-    /// `passwordHash` is not an Argon2id PHC string.
     InvalidPasswordHash,
-    /// A timestamp is not canonical, or `updatedAt` precedes `createdAt`.
     InvalidTimestamp,
-    /// `revision` is not positive.
     InvalidRevision,
 }
 
-/// Validation failure for one `UserAccount` value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserAccountError {
     kind: UserAccountErrorKind,
@@ -48,7 +27,6 @@ pub struct UserAccountError {
 }
 
 impl UserAccountError {
-    /// Closed failure category of this validation failure.
     #[must_use]
     pub const fn kind(&self) -> UserAccountErrorKind {
         self.kind
@@ -63,44 +41,26 @@ impl fmt::Display for UserAccountError {
 
 impl std::error::Error for UserAccountError {}
 
-/// The durable local Owner login account.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserAccount {
-    /// Stable account identity.
     #[serde(rename = "userId")]
     pub user_id: UserId,
-    /// Chosen login name exactly as entered by the operator.
     #[serde(rename = "username")]
     pub username: String,
-    /// Normalized form used for login matching.
     #[serde(rename = "normalizedUsername")]
     pub normalized_username: String,
-    /// Argon2id PHC string; never a plaintext password.
     #[serde(rename = "passwordHash")]
     pub password_hash: String,
-    /// Canonical creation instant.
     #[serde(rename = "createdAt")]
     pub created_at: Instant,
-    /// Canonical last-update instant; never earlier than `createdAt`.
     #[serde(rename = "updatedAt")]
     pub updated_at: Instant,
-    /// Optimistic-concurrency revision; increases with every durable update.
     #[serde(rename = "revision")]
     pub revision: Revision,
 }
 
 impl UserAccount {
-    /// Builds one validated `UserAccount`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical `usr_` identifier, an empty, overlong,
-    /// whitespace-padded, or control-bearing username, a `normalizedUsername`
-    /// that still contains whitespace or uppercase characters, a
-    /// `passwordHash` that is not an Argon2id PHC string, a non-canonical
-    /// timestamp, an `updatedAt` earlier than `createdAt`, or a revision
-    /// that is not positive.
     pub fn new(
         user_id: UserId,
         username: String,

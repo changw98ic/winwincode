@@ -10,7 +10,6 @@ import type {
 export interface PageAnnotationPageOptions {
   readonly root: HTMLElement
   readonly model: PageAnnotationViewModel
-  /** Present only when the host installed a restricted element-pick bridge. */
   readonly pickElement?: () => AnnotationElementSummary | null
 }
 
@@ -37,11 +36,6 @@ function draftLine(draft: PageAnnotationDraft): string {
   return `${draft.pagePath} · ${draft.surfaceKind} · ${target} · ${draft.comment}`
 }
 
-/**
- * RUN-09 annotation surface: shows whether element pick is available, and
- * always offers screenshot-region coordinates. Degradation copy is explicit —
- * the page never claims every site is pickable.
- */
 export function mountPageAnnotationPage(
   options: PageAnnotationPageOptions,
 ): PageAnnotationPage {

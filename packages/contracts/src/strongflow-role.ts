@@ -1,9 +1,6 @@
-/** Canonical StrongFlow roles and the minimal policy applied by Codex Core. */
-
 export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 3 as const
 export const STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION = 2 as const
 
-/** Canonical per-role execution strategy from the generated ExecutionPort schema. */
 export enum RoleExecutionMode {
   React = 'react',
   DelegatedBatch = 'delegated_batch',
@@ -63,7 +60,6 @@ export interface StrongFlowRoleConfiguration {
   readonly roles: readonly StrongFlowRoleSpec[]
 }
 
-/** Minimal canonical v2 host input that configures Codex Core. */
 const DEBUG_PROBE_DEVELOPER_INSTRUCTIONS = 'Investigate the current failure from the read-only candidate workspace. Produce one bounded DebugProbePlan with explicit hypotheses, commands, paths, resource claims, budgets, and a round completion rule. Do not modify candidate files, apply a fix, install or upgrade dependencies, approve, or verify final delivery.'
 
 export interface RoleSessionPolicy {
@@ -162,7 +158,6 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   }),
 })
 
-/** Return the canonical workspace intent for one StrongFlow role. */
 export function strongFlowRoleWorkspaceMode(
   roleId: StrongFlowRoleId,
   executionMode: RoleExecutionMode = RoleExecutionMode.React,
@@ -178,7 +173,6 @@ export function strongFlowRoleWorkspaceMode(
   return ROLE_POLICIES[roleId].workspaceMode
 }
 
-/** Return the minimal immutable policy passed to Codex Core for one role-scoped session. */
 export function strongFlowRoleSessionPolicy(
   roleId: StrongFlowRoleId,
   executionMode: RoleExecutionMode = RoleExecutionMode.React,
@@ -198,7 +192,6 @@ export function strongFlowRoleSessionPolicy(
   })
 }
 
-/** Parse the only runtime role-policy shape. Durable version 1 is rejected here. */
 export function parseRoleSessionPolicy(value: unknown): RoleSessionPolicy {
   if (!isRecord(value)) {
     return configurationError('INVALID_ROLE_POLICY', 'role session policy must be an object')
@@ -236,10 +229,6 @@ export function parseRoleSessionPolicy(value: unknown): RoleSessionPolicy {
   return expected
 }
 
-/**
- * One-time persisted-data migration. It accepts exactly the retired v1 shape
- * and returns canonical v2 + React for the caller to save before replay.
- */
 export function migratePersistedRoleSessionPolicyV1(value: unknown): RoleSessionPolicy {
   if (!isRecord(value)) {
     return configurationError('INVALID_ROLE_POLICY', 'persisted v1 role policy must be an object')

@@ -45,7 +45,6 @@ const RESULTS: Record<string, string> = {
   candidate_missing: '设备上的候选版本已不可用', permission_denied: '没有应用此版本的权限', failed: '应用失败，请检查设备后重试',
 }
 
-/** Applies only the reviewed commit, through the existing Device receipt API. */
 export function mountCandidateApplication(options: CandidateApplicationOptions): { close(): void } {
   const document = options.root.ownerDocument
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = '') => {

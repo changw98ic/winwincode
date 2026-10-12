@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! One Core input call can contain several product questions. Each question
-//! has its own public input identity; only their complete durable answer set
-//! settles the exact Core waiter. Accepted values stay in the private Adapter
-//! database so queue acceptance and process recovery do not lose user input.
-
 use super::{
     CodexPoll, InputResponseMessage, Instant, ProductionCodexAdapter, ProductionCodexError,
     RequestUserInputEvent, StoredInputOperation, StoredInputOperationState, canonical_instant,
@@ -103,8 +98,6 @@ impl ProductionCodexAdapter {
                 question_id: question.id.clone(),
             })
             .collect::<Vec<_>>();
-        // Validate the complete event before retaining any new call intent.
-        // A conflicting replay must not leave a second call or partial prompt.
         self.validate_input_question_replays(run_key, request, &turn_id, &digest, &questions)?;
         let proposed = InputCallIntent {
             turn_id,
@@ -137,8 +130,6 @@ impl ProductionCodexAdapter {
                 .replace_input_call(run_key, &digest, &previous, &call)
                 .map_err(map_store_error)?;
         }
-        // Retain the entire call before exposing any question. Restart may
-        // replay the exact Core event, including already answered questions.
         for question in &call.questions {
             if let Some(answer) = call.answers.get(&question.input_request_id) {
                 self.store
@@ -312,7 +303,6 @@ impl ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        // Invalid identities, values and deadlines never advance the shared clock.
         self.bridge
             .authority()
             .update_now(received_at)
@@ -325,8 +315,6 @@ impl ProductionCodexAdapter {
         self.store
             .resolve_input_call_answer(&operation, &resolution_digest, &previous, &call)
             .map_err(map_store_error)?;
-        // This proof confirms durable acceptance of this answer. It is not
-        // evidence that the entire Core call has consumed its answer set.
         self.outbox
             .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
                 response.clone(),
@@ -415,8 +403,6 @@ impl ProductionCodexAdapter {
                 .map_err(map_store_error)?
                 .ok_or_else(conflict)?;
             let original = self.retained_input_request(&operation)?;
-            // Historical answer intents did not retain the submitted mode.
-            // Validate their values against the original retained prompt.
             interaction_timeout::validate_retained_input_answers(&original, &answer.values)?;
             answers.insert(
                 question.question_id.clone(),

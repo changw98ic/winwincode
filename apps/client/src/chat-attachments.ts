@@ -62,7 +62,6 @@ export function showChatAttachment(document: Document, item: ChatAttachment): vo
   document.body.append(dialog); dialog.showModal()
 }
 
-/** DSH thumbnail rail, with file/paste/drop inputs bound to the existing composer. */
 export function mountChatAttachments(form: HTMLFormElement, button: HTMLButtonElement, changed: () => void) {
   const document = form.ownerDocument
   const input = document.createElement('input'); input.type = 'file'; input.multiple = true; input.hidden = true

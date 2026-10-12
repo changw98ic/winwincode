@@ -13,8 +13,6 @@ function run(extra) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-// Cargo restores its debug binary when running the helper's integration tests.
-// Finish those tests before preparing the authenticated product fixture.
 run(['--workspace', '--no-run'])
 run(['-p', 'winwincode-kernel-helper'])
 prepareCompactKernelHelper({

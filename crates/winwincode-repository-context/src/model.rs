@@ -229,15 +229,6 @@ pub struct RepositoryImpact {
 }
 
 impl RepositoryContext {
-    /// Derives an explainable, conservative verification scope from candidate paths.
-    ///
-    /// File inventory can prove direct changes and same-package test relations. Missing
-    /// graph capabilities remain explicit unknowns and force the full repository suite;
-    /// they never remove repository-mandated test or verify commands.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate, absolute, or non-portable candidate paths.
     pub fn impact_of(
         &self,
         changed_paths: &[String],

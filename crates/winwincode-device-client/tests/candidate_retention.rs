@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! GIT-100.9 coverage: the candidate retention policy, the discard vertical,
-//! and the garbage collection of expired terminal refs — the fail-closed
-//! discard of created branches, the idempotent duplicate discard with the
-//! identical receipt, the oldest-first per-binding policy sweep, and the
-//! crash-resumable GC that never reclaims a pending-attention or drifted
-//! candidate and prunes objects only behind the policy switch. Every
-//! Git-facing scenario runs against a real Git repository. Harness mirrors
-//! `tests/candidate_branch.rs`.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -207,9 +198,6 @@ fn now() -> OffsetDateTime {
     OffsetDateTime::parse(NOW_STAMP, &Rfc3339).expect("the fixed test instant parses")
 }
 
-/// A one-hour terminal retention window: `STAMP` is twelve hours before
-/// `NOW` (expired) and `RECENT_STAMP` thirty minutes (not yet). The
-/// active-candidate limit is two.
 fn policy(retention: Duration, prune: bool) -> CandidateRetentionPolicy {
     policy_with(2, retention, prune)
 }
@@ -240,7 +228,6 @@ fn git(repository: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
-/// A non-asserting Git probe: `true` exactly when the command succeeds.
 fn git_succeeds(repository: &Path, arguments: &[&str]) -> bool {
     let mut command = Command::new("git");
     command.arg("-C").arg(repository);
@@ -250,14 +237,10 @@ fn git_succeeds(repository: &Path, arguments: &[&str]) -> bool {
     command.output().expect("git should run").status.success()
 }
 
-/// Whether one full ref name currently resolves.
 fn ref_exists(repository: &Path, ref_name: &str) -> bool {
     git_succeeds(repository, &["rev-parse", "--verify", "--quiet", ref_name])
 }
 
-/// Creates a repository with one base commit on `main` and returns
-/// (path, base commit). The name is folded into the seed content so two
-/// repositories created within the same second never share a commit id.
 fn init_repository(name: &str) -> (PathBuf, String) {
     let root = temporary_directory(name);
     fs::create_dir_all(&root).expect("repository directory should be created");
@@ -283,7 +266,6 @@ fn init_repository(name: &str) -> (PathBuf, String) {
     (root, commit)
 }
 
-/// Creates a follow-up commit with a fixed worker author and returns its id.
 fn add_candidate_commit(repository: &Path, message: &str) -> String {
     fs::write(repository.join("file.txt"), format!("{message}\n")).expect("file should be written");
     git(repository, &["add", "-A"]);
@@ -304,7 +286,6 @@ fn add_candidate_commit(repository: &Path, message: &str) -> String {
     git(repository, &["rev-parse", "HEAD"])
 }
 
-/// Publishes the stable candidate ref for one frozen commit.
 fn write_candidate_ref(repository: &Path, commit: &str) {
     git(
         repository,
@@ -338,7 +319,6 @@ fn discard_request(commit: &str, stamp: &str) -> CandidateDiscardRequest {
     }
 }
 
-/// Maps one binding onto a repository.
 fn map_binding(store: &mut DeviceStore, repository: &Path, binding: &str) {
     store
         .put_path_mapping(&PathMappingRecord {
@@ -354,7 +334,6 @@ fn map_binding(store: &mut DeviceStore, repository: &Path, binding: &str) {
         .expect("the binding should map");
 }
 
-/// The durable outbox frames of one candidate: (sequence, payload).
 fn apply_result_frames(store: &mut DeviceStore) -> Vec<(u64, ClientCandidateApplyResultPayload)> {
     store
         .pending_outbox_envelopes()
@@ -374,8 +353,6 @@ fn apply_result_frames(store: &mut DeviceStore) -> Vec<(u64, ClientCandidateAppl
         .collect()
 }
 
-/// One decoded JSON text per durable outbox frame — the local-data-boundary
-/// scan input.
 fn pending_frame_text(store: &mut DeviceStore) -> String {
     store
         .pending_outbox_envelopes()
@@ -390,21 +367,16 @@ fn pending_frame_text(store: &mut DeviceStore) -> String {
         .join("\n")
 }
 
-/// Acknowledges every frame through `sequence` exactly as the daemon's
-/// exchange loop does after the server answers.
 fn acknowledge_through(store: &mut DeviceStore, sequence: u64) {
     OutboxSession::new()
         .acknowledge(store, sequence)
         .expect("the acknowledgement should persist");
 }
 
-/// Progresses one candidate's lifecycle along the contract 6 table.
 fn progress_to(store: &mut DeviceStore, commit: &str, target: LocalCandidateState) {
     progress_candidate_lifecycle(store, commit, target).expect("the transition records");
 }
 
-/// A scenario bundle: one store root plus one real repository with one base
-/// commit and one frozen candidate commit whose stable ref is published.
 struct Scenario {
     root: PathBuf,
     repository: PathBuf,
@@ -425,8 +397,6 @@ fn scenario(name: &str) -> Scenario {
     }
 }
 
-/// Seeds mapping, the scenario candidate's retention, and the occupancy
-/// mirror, then hands the store to a started daemon.
 fn seeded_daemon(name: &str, state: &Scenario) -> DeviceDaemon {
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     map_binding(&mut store, &state.repository, BINDING);
@@ -440,8 +410,6 @@ fn seeded_daemon(name: &str, state: &Scenario) -> DeviceDaemon {
     started_daemon(name, &state.root)
 }
 
-/// Seeds mapping and the occupancy mirror only — for tests that retain
-/// their own candidates with explicit stamps.
 fn mapped_daemon(name: &str, state: &Scenario) -> DeviceDaemon {
     let mut store = DeviceStore::open(&state.root).expect("store should open");
     map_binding(&mut store, &state.repository, BINDING);
@@ -450,8 +418,6 @@ fn mapped_daemon(name: &str, state: &Scenario) -> DeviceDaemon {
     started_daemon(name, &state.root)
 }
 
-/// Creates the candidate's local branch through the real branch engine and
-/// returns the branch name.
 fn create_branch(daemon: &mut DeviceDaemon, commit: &str) -> String {
     let report = create_candidate_branch(
         daemon,
@@ -501,7 +467,6 @@ fn a_discard_deletes_the_created_branch_and_stamps_the_discarded_uplink() {
         "the created branch is the discard's deleted branch"
     );
 
-    // The created branch is gone; the stable candidate ref survives until GC.
     assert!(
         !ref_exists(&state.repository, &branch_ref),
         "the created branch must be deleted"
@@ -511,20 +476,17 @@ fn a_discard_deletes_the_created_branch_and_stamps_the_discarded_uplink() {
         "the stable candidate ref is not GC's business during a discard"
     );
 
-    // The registry row moved to the terminal discarded state.
     let record = candidate_local_ref(daemon.store_mut(), &state.candidate_commit)
         .expect("the registry should read")
         .expect("the candidate row");
     assert_eq!(record.local_state, LocalCandidateState::Discarded);
 
-    // The durable discard record carries the first stamp and the target.
     let durable = candidate_discard_record(daemon.store_mut(), &state.candidate_commit)
         .expect("the discard record should read")
         .expect("the discard record");
     assert_eq!(durable.target_branch, branch);
     assert_eq!(durable.created_at, STAMP);
 
-    // The uplink: one discarded apply_result frame stamped C + L.
     let frames = apply_result_frames(daemon.store_mut());
     assert_eq!(frames.len(), 2, "the branch creation and discard frames");
     let (sequence, payload) = &frames[1];
@@ -574,7 +536,6 @@ fn a_discard_deletes_the_created_branch_and_stamps_the_discarded_uplink() {
     );
     assert!(*sequence > 0);
 
-    // Local-data boundary: no path rides any frame.
     let frame_text = pending_frame_text(daemon.store_mut());
     assert!(!frame_text.contains(state.root.to_str().expect("UTF-8 root")));
     assert!(!frame_text.contains(state.repository.to_str().expect("UTF-8 repo")));
@@ -629,7 +590,6 @@ fn a_repeated_discard_is_a_duplicate_reporting_the_identical_receipt() {
     .expect("the first discard");
     let replay = discard_candidate(
         &mut daemon,
-        // A replay may carry a fresh stamp; the first one stays durable.
         &discard_request(&state.candidate_commit, "2026-09-04T09:00:00.000Z"),
     )
     .expect("the replayed discard");
@@ -667,7 +627,6 @@ fn applied_unknown_and_foreign_discards_fail_closed() {
     let state = scenario("discard-refusals");
     let mut daemon = seeded_daemon("discard-refusals", &state);
 
-    // An applied candidate is a delivered fact: discard refuses.
     progress_to(
         daemon.store_mut(),
         &state.candidate_commit,
@@ -689,13 +648,11 @@ fn applied_unknown_and_foreign_discards_fail_closed() {
     );
     assert!(apply_result_frames(daemon.store_mut()).is_empty());
 
-    // An unknown candidate fails closed with the missing verdict.
     let unknown = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     let error = discard_candidate(&mut daemon, &discard_request(unknown, STAMP))
         .expect_err("an unknown candidate must refuse");
     assert_eq!(error.kind(), CandidateRetentionErrorKind::CandidateMissing);
 
-    // A foreign binding refuses before anything is read from Git.
     let error = discard_candidate(
         &mut daemon,
         &CandidateDiscardRequest {
@@ -707,7 +664,6 @@ fn applied_unknown_and_foreign_discards_fail_closed() {
     .expect_err("a foreign binding must refuse");
     assert_eq!(error.kind(), CandidateRetentionErrorKind::Conflict);
 
-    // A malformed candidate reference is refused as invalid input.
     let error = discard_candidate(
         &mut daemon,
         &CandidateDiscardRequest {
@@ -727,7 +683,6 @@ fn applied_unknown_and_foreign_discards_fail_closed() {
 
 #[test]
 fn a_drifted_or_checked_out_created_branch_refuses_the_discard() {
-    // Drifted: the branch no longer holds the candidate commit.
     let state = scenario("discard-drifted");
     let mut daemon = seeded_daemon("discard-drifted", &state);
     let branch = create_branch(&mut daemon, &state.candidate_commit);
@@ -762,7 +717,6 @@ fn a_drifted_or_checked_out_created_branch_refuses_the_discard() {
     cleanup(&state.root);
     cleanup(&state.repository);
 
-    // Checked out: the branch is the user's current checkout.
     let state = scenario("discard-checked-out");
     let mut daemon = seeded_daemon("discard-checked-out", &state);
     let branch = create_branch(&mut daemon, &state.candidate_commit);
@@ -795,7 +749,6 @@ fn a_discard_fails_closed_without_an_occupancy_mirror() {
     .expect("the retention should record");
     store.close().expect("store should close");
 
-    // No mirror was ever persisted for this store.
     let mut daemon = started_daemon("discard-no-mirror", &state.root);
     let error = discard_candidate(
         &mut daemon,
@@ -881,7 +834,6 @@ fn the_retention_policy_discards_the_oldest_active_beyond_the_limit() {
     }
     store.close().expect("store should close");
 
-    // The sweep is idempotent: a re-run finds exactly the limit and stops.
     let mut daemon = resumed_daemon("policy-sweep-resume", &state.root);
     let report = enforce_retention_policy(&mut daemon, BINDING, &policy(HOUR, false))
         .expect("the resumed sweep should run");
@@ -916,8 +868,6 @@ fn failed_and_terminal_rows_are_never_counted_by_the_policy() {
     progress_to(daemon.store_mut(), &failed, LocalCandidateState::Failed);
     progress_to(daemon.store_mut(), &applied, LocalCandidateState::Applied);
 
-    // One active candidate, limit one: nothing is discarded, whatever the
-    // failed and applied rows look like.
     let report = enforce_retention_policy(&mut daemon, BINDING, &policy(HOUR, false))
         .expect("the sweep should run");
     assert_eq!(report.active_before, 1);
@@ -944,7 +894,6 @@ fn a_policy_sweep_stops_fail_closed_when_a_discard_is_refused() {
         &retention(&state.candidate_commit, BINDING, NEW_STAMP),
     )
     .expect("the newest retention records");
-    // The oldest candidate's branch drifted, so its discard must refuse.
     let branch = create_branch(&mut daemon, &oldest);
     git(
         &state.repository,
@@ -972,10 +921,6 @@ fn a_policy_sweep_stops_fail_closed_when_a_discard_is_refused() {
     cleanup(&state.repository);
 }
 
-/// The prepared GC matrix: five terminal candidates (one settled-expired,
-/// one retention-pending, one pending-attention with an unacked frame, one
-/// drifted, one checkout-unavailable), one non-terminal candidate, and a
-/// stray ref no registry row owns.
 struct GcMatrix {
     state: Scenario,
     store: DeviceStore,
@@ -993,7 +938,6 @@ impl GcMatrix {
     }
 }
 
-/// Builds the GC matrix exactly as its doc comment describes.
 fn gc_matrix(name: &str) -> GcMatrix {
     let state = scenario(name);
     let commits = [
@@ -1016,8 +960,6 @@ fn gc_matrix(name: &str) -> GcMatrix {
         write_candidate_ref(&state.repository, commit);
     }
     write_candidate_ref(&state.repository, retained_past);
-    // A stray ref inside the namespace that no registry row owns: another
-    // device sharing this repository could have written it.
     write_candidate_ref(&state.repository, &state.base_commit);
 
     let mut store = DeviceStore::open(&state.root).expect("store should open");
@@ -1025,10 +967,6 @@ fn gc_matrix(name: &str) -> GcMatrix {
     mirror_the_lease(&mut store);
     store.close().expect("store should close");
 
-    // Retain the four candidates that need upstream frames, then acknowledge
-    // exactly the first three — the unacked candidate's frame keeps its
-    // pending attention. The unmapped candidate is retained against a
-    // binding that maps no local checkout.
     let mut daemon = started_daemon(name, &state.root);
     for (commit, binding, stamp) in [
         (applied_past, BINDING, STAMP),
@@ -1043,7 +981,6 @@ fn gc_matrix(name: &str) -> GcMatrix {
     acknowledge_through(&mut store, 3);
     store.close().expect("store should close");
 
-    // Progress every terminal candidate and record the frameless ones.
     let mut daemon = resumed_daemon(&format!("{name}-progress"), &state.root);
     record_candidate_retention(
         daemon.store_mut(),
@@ -1065,7 +1002,6 @@ fn gc_matrix(name: &str) -> GcMatrix {
         progress_to(daemon.store_mut(), commit, target);
     }
     let store = daemon.into_store();
-    // The drifted candidate's ref now resolves elsewhere.
     git(
         &state.repository,
         &[
@@ -1087,10 +1023,6 @@ fn gc_matrix(name: &str) -> GcMatrix {
     }
 }
 
-/// The six-candidate GC matrix: collected, retention-pending,
-/// pending-attention (unacked), drifted, checkout-unavailable, and a
-/// non-terminal row the scan must not even examine — plus a stray ref the
-/// device never retained.
 #[test]
 fn gc_collects_expired_terminal_refs_and_defers_everything_else() {
     let mut matrix = gc_matrix("gc-matrix");
@@ -1134,7 +1066,6 @@ fn gc_collects_expired_terminal_refs_and_defers_everything_else() {
         GcDeferralReason::CheckoutUnavailable
     );
 
-    // The collected ref is gone; every deferred ref and the stray ref stay.
     assert!(
         !ref_exists(&state.repository, &candidate_ref(&matrix.applied_past)),
         "the expired settled ref must be reclaimed"
@@ -1154,14 +1085,11 @@ fn gc_collects_expired_terminal_refs_and_defers_everything_else() {
         ref_exists(&state.repository, &candidate_ref(&state.base_commit)),
         "a stray ref this device never retained is never reclaimed"
     );
-    // The retained (non-terminal) candidate still reconciles as verified.
     let reconciliations =
         reconcile_retained_candidates(&matrix.store).expect("the reconciliation should scan");
     assert_eq!(reconciliations.len(), 1);
     assert_eq!(reconciliations[0].verdict, CandidateRefVerdict::Verified);
 
-    // The re-run is idempotent: the collected row is skipped, the rest
-    // defers exactly the same way.
     let rerun = collect_expired_candidates(&mut matrix.store, &policy(HOUR, false), &now())
         .expect("the resumed collection should run");
     assert_eq!(rerun.already_collected, 1);
@@ -1191,8 +1119,6 @@ fn gc_resumes_after_a_crash_between_ref_deletion_and_bookkeeping() {
         LocalCandidateState::Applied,
     );
 
-    // Simulate the crash: the ref was already deleted but no collection
-    // record was written.
     git(
         &state.repository,
         &["update-ref", "-d", &candidate_ref(&state.candidate_commit)],
@@ -1211,7 +1137,6 @@ fn gc_resumes_after_a_crash_between_ref_deletion_and_bookkeeping() {
     );
     store.close().expect("store should close");
 
-    // A further run only reports the durable collection.
     let mut store = DeviceStore::open(&state.root).expect("restarted store should open");
     let rerun = collect_expired_candidates(&mut store, &policy(HOUR, false), &now())
         .expect("the idempotent rerun should run");
@@ -1239,7 +1164,6 @@ fn gc_prunes_objects_only_behind_the_policy_switch() {
         LocalCandidateState::Applied,
     );
 
-    // An unreachable loose object the candidate refs do not hold.
     let dangling = git(
         &state.repository,
         &[
@@ -1258,7 +1182,6 @@ fn gc_prunes_objects_only_behind_the_policy_switch() {
         "the dangling object exists before the collection"
     );
 
-    // The conservative default never prunes.
     collect_expired_candidates(&mut store, &policy(HOUR, false), &now())
         .expect("the collection should run");
     assert!(
@@ -1267,8 +1190,6 @@ fn gc_prunes_objects_only_behind_the_policy_switch() {
     );
     store.close().expect("store should close");
 
-    // With the switch on, the next collection prunes the repository —
-    // here demonstrated on a fresh scenario with the same shapes.
     let state = scenario("gc-prune-on");
     let mut daemon = seeded_daemon("gc-prune-on", &state);
     retain_candidate(
@@ -1345,12 +1266,10 @@ fn an_invalid_policy_or_request_fails_closed() {
         );
     }
 
-    // An empty binding id refuses the sweep.
     let error = enforce_retention_policy(&mut daemon, "", &policy(HOUR, false))
         .expect_err("an empty binding must refuse");
     assert_eq!(error.kind(), CandidateRetentionErrorKind::InvalidInput);
 
-    // A malformed discard request refuses before anything is read.
     let error = discard_candidate(
         &mut daemon,
         &CandidateDiscardRequest {

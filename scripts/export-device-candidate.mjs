@@ -112,8 +112,6 @@ function actualUsage(call) {
     rows: attempts.map(attempt => attempt.usage) }
 }
 
-// Shared runtimes retain all task jobs. Select this Delivery's durable jobs,
-// including Controller role Sessions, before decoding or aggregating receipts.
 function taskReceiptJobs(directory, scope) {
   if (scope === undefined && existsSync(join(directory, 'runtime-binding.json'))) {
     const report = JSON.parse(readFileSync(join(directory, 'device-task-result.json')))
@@ -131,8 +129,6 @@ function taskReceiptJobs(directory, scope) {
   } finally { server.close() }
 }
 
-// Only exact active jobs can contribute pending Core approvals. Return IDs,
-// never the private StoredRun payload, prompts, or command details.
 export function readDevicePendingApprovalIds(directory, runs) {
   const active = runs.filter(run => ['leased', 'running'].includes(run.state))
   if (active.length === 0 || !existsSync(join(directory, 'device-data'))) return []
@@ -154,7 +150,6 @@ export function readDevicePendingApprovalIds(directory, runs) {
       }
     } finally { registry.close() }
   } else {
-    // A directly hosted Worker has a single canonical runtime directory.
     paths.add(join(deviceDirectory, 'codex-runtime', 'worker-codex.sqlite3'))
   }
   for (const path of [...paths].sort()) {
@@ -175,7 +170,6 @@ export function readDevicePendingApprovalIds(directory, runs) {
   return [...pending].sort()
 }
 
-// Export identity/accounting facts only; prompts, tool output and credentials stay private.
 export function readDeviceExecutionReceipts(directory, scope) {
   const selectedJobs = taskReceiptJobs(directory, scope)
   const deviceDirectory = existsSync(join(directory, 'device-data')) ? realpathSync(join(directory, 'device-data')) : null
@@ -352,7 +346,6 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
   return { evidence, sha256: digest(bytes) }
 }
 
-// Export retained Git objects, never the mutable Worker checkout or model text.
 export function exportDeviceCandidate(directory, taskInputPath, evidenceDirectory = directory) {
   const reportBytes = readFileSync(join(evidenceDirectory, 'device-task-result.json'))
   const report = JSON.parse(reportBytes)

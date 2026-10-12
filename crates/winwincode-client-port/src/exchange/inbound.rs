@@ -1,18 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receive-side exchange state: instance guard, sequence validation,
-//! contiguous acknowledgement advancement, and deduplication.
-//!
-//! One [`InboundStream`] covers one direction of one client node; both peers
-//! run the same machinery. `ingest` returns the fixed contract outcomes for
-//! one received frame: `duplicate`, `rejected_conflict`, `gap` with
-//! `replayFromSequence`, `reacquire_required` on a changed
-//! `clientInstanceId`, and acceptance that advances the contiguous
-//! acknowledgement. The same-instance resume row of the contract
-//! (`replay_required`) is expressed by the combination of the acknowledgement
-//! cursor staying durable and the sender's outbox replaying everything the
-//! peer has not confirmed yet.
-
 use crate::exchange::dedup::CommandIdentity;
 use crate::exchange::dedup::DedupRegister;
 use crate::exchange::dedup::DedupVerdict;
@@ -20,62 +7,37 @@ use crate::exchange::frame::FrameIdentity;
 use crate::exchange::sequence::AckCursor;
 use crate::exchange::sequence::SequenceVerdict;
 
-/// Command-level outcome attached to an accepted frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
-    /// The command identity was unseen; the caller executes it.
     Fresh,
-    /// The command identity was already accepted with the same payload
-    /// digest; the caller must not execute it a second time.
     IdempotentReplay,
 }
 
-/// Fixed contract outcome for one received frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestDecision {
-    /// The frame was accepted and the contiguous acknowledgement advanced.
     Accepted {
-        /// The new highest consecutively accepted sequence.
         ack_sequence: u64,
-        /// What the caller must do with an attached command.
         command: CommandOutcome,
     },
-    /// The frame replayed an already accepted frame; confirm it without
-    /// executing again.
     Duplicate {
-        /// The unchanged contiguous acknowledgement.
         ack_sequence: u64,
     },
-    /// A frame or command identity was reused with a different payload;
-    /// accepted data is never overwritten and the acknowledgement does not
-    /// move.
     RejectedConflict {
-        /// The unchanged contiguous acknowledgement.
         ack_sequence: u64,
     },
-    /// The frame was structurally invalid; nothing was recorded.
     RejectedMalformed {
-        /// The unchanged contiguous acknowledgement.
         ack_sequence: u64,
     },
-    /// A future sequence arrived; the acknowledgement stays and the sender
-    /// must replay from `replay_from_sequence`.
     Gap {
-        /// The unchanged contiguous acknowledgement.
         ack_sequence: u64,
-        /// The first missing sequence (`replayFromSequence`).
         replay_from_sequence: u64,
     },
-    /// The frame claims a `clientInstanceId` other than the current one; the
-    /// old instance is superseded and its frames are refused.
     ReacquireRequired {
-        /// The unchanged contiguous acknowledgement.
         ack_sequence: u64,
     },
 }
 
 impl IngestDecision {
-    /// Returns the contiguous acknowledgement after the decision.
     #[must_use]
     pub const fn ack_sequence(&self) -> u64 {
         match *self {
@@ -88,8 +50,6 @@ impl IngestDecision {
         }
     }
 
-    /// Returns the replay hint; only a gap carries one (`状态为 gap
-    /// 时必须返回 replayFromSequence，其他状态不得附带该字段`).
     #[must_use]
     pub const fn replay_from_sequence(&self) -> Option<u64> {
         match *self {
@@ -101,49 +61,30 @@ impl IngestDecision {
         }
     }
 
-    /// Returns whether the decision accepted a new frame.
     #[must_use]
     pub const fn accepted(&self) -> bool {
         matches!(self, Self::Accepted { .. })
     }
 }
 
-/// Tracks the current `clientInstanceId` of one stream and classifies
-/// instance changes.
-///
-/// The three verdicts encode the contract rows around `client.hello`: a
-/// first instance joins, a same-instance resume replays unconfirmed frames
-/// (`replay_required`), and an instance replacement supersedes the old one
-/// (`reacquire_required`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstanceTracker {
     current: Option<String>,
 }
 
-/// Outcome of observing one `clientInstanceId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceVerdict {
-    /// No instance was recorded; this one becomes current.
     FirstInstance,
-    /// The current instance re-appeared; both sides replay unconfirmed
-    /// frames from their cursors.
     Resumed,
-    /// A different instance appeared; the old instance is superseded and its
-    /// commands and grants are refused from now on.
-    Replaced {
-        /// The instance that was replaced.
-        superseded: String,
-    },
+    Replaced { superseded: String },
 }
 
 impl InstanceTracker {
-    /// Creates a tracker that has not seen an instance yet.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Creates a tracker that already knows the current instance.
     #[must_use]
     pub fn with_initial(instance: impl Into<String>) -> Self {
         Self {
@@ -151,13 +92,11 @@ impl InstanceTracker {
         }
     }
 
-    /// Returns the current instance, if one is recorded.
     #[must_use]
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
     }
 
-    /// Classifies one observed `clientInstanceId` and records the outcome.
     #[must_use]
     pub fn observe(&mut self, client_instance_id: &str) -> InstanceVerdict {
         match self.current.take() {
@@ -177,7 +116,6 @@ impl InstanceTracker {
     }
 }
 
-/// Receive-side state machine for one stream of one client node.
 #[derive(Debug, Clone)]
 pub struct InboundStream {
     instances: InstanceTracker,
@@ -187,8 +125,6 @@ pub struct InboundStream {
 }
 
 impl InboundStream {
-    /// Creates a stream that learns the client instance from the first frame
-    /// it accepts and refuses later instance changes.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -199,7 +135,6 @@ impl InboundStream {
         }
     }
 
-    /// Creates a stream bound to a known current client instance.
     #[must_use]
     pub fn with_instance(instance: impl Into<String>) -> Self {
         Self {
@@ -208,68 +143,46 @@ impl InboundStream {
         }
     }
 
-    /// Disables the instance guard for adapters that authenticate instances
-    /// elsewhere.
     #[must_use]
     pub fn without_instance_guard(mut self) -> Self {
         self.instance_guard = false;
         self
     }
 
-    /// Classifies one observed `clientInstanceId` (the `client.hello` path)
-    /// and records the outcome.
     #[must_use]
     pub fn observe_instance(&mut self, client_instance_id: &str) -> InstanceVerdict {
         self.instances.observe(client_instance_id)
     }
 
-    /// Returns the current client instance, if one is recorded.
     #[must_use]
     pub fn current_instance(&self) -> Option<&str> {
         self.instances.current()
     }
 
-    /// Returns the highest consecutively accepted sequence
-    /// (`ackSequence`).
     #[must_use]
     pub const fn ack_sequence(&self) -> u64 {
         self.ack.ack_sequence()
     }
 
-    /// Returns the sequence the next accepted frame must carry.
     #[must_use]
     pub fn next_expected(&self) -> Option<u64> {
         self.ack.next_expected()
     }
 
-    /// Returns how many frame identities are retained for deduplication.
     #[must_use]
     pub fn retained_dedup_frames(&self) -> usize {
         self.dedup.retained_frames()
     }
 
-    /// Returns how many command identities are retained.
     #[must_use]
     pub fn retained_commands(&self) -> usize {
         self.dedup.retained_commands()
     }
 
-    /// Forgets deduplicated frame identities covered by `sequence`; frames
-    /// at or below a persisted acknowledgement are duplicates by sequence
-    /// position regardless of the retained record.
     pub fn compact_dedup_through(&mut self, sequence: u64) -> usize {
         self.dedup.compact_frames_through(sequence)
     }
 
-    /// Ingests one frame and returns the fixed contract outcome.
-    ///
-    /// `command` carries the `idempotencyKey` identity for command kinds;
-    /// non-command facts (`report`/`ack`/`response`/`request`) pass `None`.
-    ///
-    /// Acceptance records both identities, advances the contiguous
-    /// acknowledgement, and reports whether an attached command is fresh or
-    /// an idempotent replay. Conflicts and gaps never advance the
-    /// acknowledgement and never record state.
     #[allow(clippy::too_many_lines)]
     pub fn ingest(
         &mut self,
@@ -307,17 +220,12 @@ impl InboundStream {
                 ack_sequence,
                 replay_from_sequence,
             },
-            SequenceVerdict::Duplicate => {
-                match self.dedup.check_frame(identity) {
-                    DedupVerdict::Conflict => IngestDecision::RejectedConflict { ack_sequence },
-                    // Frames at or below the contiguous acknowledgement are
-                    // duplicates by sequence position even when the identity
-                    // record was already compacted.
-                    DedupVerdict::Duplicate | DedupVerdict::New => {
-                        IngestDecision::Duplicate { ack_sequence }
-                    }
+            SequenceVerdict::Duplicate => match self.dedup.check_frame(identity) {
+                DedupVerdict::Conflict => IngestDecision::RejectedConflict { ack_sequence },
+                DedupVerdict::Duplicate | DedupVerdict::New => {
+                    IngestDecision::Duplicate { ack_sequence }
                 }
-            }
+            },
             SequenceVerdict::Accept => {
                 let command_outcome = match command {
                     None => CommandOutcome::Fresh,
@@ -424,8 +332,6 @@ mod tests {
                 replay_from_sequence: 2
             }
         );
-        // The sender replays from `replayFromSequence`; filling the gap
-        // accepts the buffered sequence too.
         assert_eq!(
             stream.ingest("inst-1", &identity(2), None),
             IngestDecision::Accepted {
@@ -470,15 +376,11 @@ mod tests {
         let mut stream = InboundStream::with_instance("inst-1");
         stream.ingest("inst-1", &identity(1), None);
         stream.ingest("inst-1", &identity(2), None);
-        // The frame identity (messageId, sequence) is retained with its
-        // accepted digest; the same identity with a different payload digest
-        // is refused instead of being silently confirmed.
         let tampered = FrameIdentity::new("msg-2", 2, "sha256:dead");
         assert_eq!(
             stream.ingest("inst-1", &tampered, None),
             IngestDecision::RejectedConflict { ack_sequence: 2 }
         );
-        // Once the record is compacted away, the sequence position decides.
         stream.compact_dedup_through(2);
         assert_eq!(
             stream.ingest("inst-1", &tampered, None),
@@ -537,8 +439,6 @@ mod tests {
                 ..
             }
         ));
-        // The sender rebuilt the frame at the next sequence but reused the
-        // key with the same payload: accept the frame, but do not re-execute.
         let rebuilt = FrameIdentity::new("msg-2", 2, "sha256:aa");
         assert_eq!(
             stream.ingest("inst-1", &rebuilt, Some(&command)),

@@ -9,15 +9,11 @@ const repositoryScope = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
-// Planted markers: if any secret-unsafe identifier reaches the summary these
-// strings become readable page text and the browser assertion fails.
 const SECRET_MARKER = 'vault-locator-secret-marker'
 const CREDENTIAL_MARKER = 'crd_00000000000000000000000001'
 let complete = true
 const queries = []
 let blockedQuery = null
-// Heartbeats and observation instants are published relative to the real browser
-// clock so staleness classification observes the same facts in every run.
 const FRESH_HEARTBEAT = new Date(Date.now() - 30_000).toISOString()
 const RECENT_HEARTBEAT = new Date(Date.now() - 60_000).toISOString()
 const ROTATED_AT = new Date(Date.now() - 48 * 3_600_000).toISOString()
@@ -366,8 +362,6 @@ globalThis.usageHealthReady = () => true
 function summary() {
   const panel = document.querySelector('.wwc-usage-health')
   if (panel === null) return { present: false }
-  // The panel is the secret boundary. The host settings page legitimately
-  // renders credential references, so only the panel text is scanned.
   const attributes = [...panel.querySelectorAll('*')]
     .flatMap(node => node.getAttributeNames().map(name => `${name}=${node.getAttribute(name)}`))
   const visible = [panel.textContent, ...attributes].join(' ')

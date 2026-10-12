@@ -208,7 +208,6 @@ class PublicSmoke:
             write_record(attempt / 'result.json', report)
             return report
         except Exception as error:
-            # Host errors must not disclose credentials or arbitrary host diagnostics.
             report = dict(identity, status='failed', errorType=type(error).__name__)
             write_record(attempt / 'result.json', report)
             return report

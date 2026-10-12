@@ -160,7 +160,6 @@ fn snapshot_candidate_binding_and_dispatch_commit_and_replay_together() {
     );
     assert_eq!(first.dispatch.topic, "verification.snapshot.dispatch");
 
-    // Reopen after the commit, before the dispatch is consumed, as after a crash.
     drop(storage);
     let mut storage = SqliteStorage::open(&root).expect("reopen committed snapshot");
     let durable = storage

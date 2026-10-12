@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared Rust types for the canonical `WinWinCode` `ExecutionPort`.
-//!
-//! The wire declarations are generated from
-//! `schema/winwincode/v1/execution-port.schema.json`; the schema remains the
-//! only source of public message shapes.
-
 pub mod accounting;
 pub mod action_enforcement;
 pub mod action_gateway;

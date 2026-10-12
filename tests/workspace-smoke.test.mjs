@@ -1,17 +1,13 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
 import { selectSuccessfulMainlineRun } from '../scripts/verify-mainline-release-source.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const workflowPath = resolve(root, '.github/workflows/native-release.yml')
-const workflow = readFileSync(workflowPath, 'utf8')
 const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
 const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
-const registryWorkflowPath = resolve(root, '.github/workflows/core-registry-publish.yml')
-const registryWorkflow = readFileSync(registryWorkflowPath, 'utf8')
 
 test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
@@ -67,60 +63,6 @@ test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () 
   assert.ok(mainlineWorkflow.includes(
     'bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net',
   ))
-})
-
-test('product release verifies one successful exact-commit mainline run before the four-target matrix', () => {
-  assert.match(workflow, /^name: Product release matrix$/mu)
-  assert.match(workflow, /^  workflow_dispatch:$/mu)
-  assert.match(workflow, /^      source_commit:$/mu)
-  assert.match(workflow, /^        required: true$/mu)
-  assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
-  assert.doesNotMatch(workflow, /corepack pnpm verify(?:\s|$)/u)
-  assert.match(workflow, /^  actions: read$/mu)
-  assert.match(workflow, /^  verify-source:$/mu)
-  assert.ok(workflow.includes('test "${SELECTED_REF}" = "refs/heads/${DEFAULT_BRANCH}"'))
-  assert.ok(workflow.includes('ref: ${{ github.event.repository.default_branch }}'))
-  assert.ok(workflow.includes('node scripts/verify-mainline-release-source.mjs'))
-  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
-  assert.ok(workflow.includes('--default-branch "${DEFAULT_BRANCH}"'))
-  assert.match(workflow, /^    needs: verify-source$/mu)
-  assert.ok(workflow.includes('SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}'))
-  assert.ok(workflow.includes('ref: ${{ env.SOURCE_COMMIT }}'))
-  const targetMatrix = [
-    ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
-    ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
-    ['aarch64-apple-darwin', 'macos-15'],
-    ['x86_64-apple-darwin', 'macos-15-intel'],
-  ]
-  assert.deepEqual(
-    [...workflow.matchAll(/^          - target: (.+)$/gmu)].map(match => match[1]).toSorted(),
-    targetMatrix.map(([target]) => target).toSorted(),
-  )
-  for (const [target, runner] of targetMatrix) {
-    assert.match(
-      workflow,
-      new RegExp(`- target: ${target}\\n            runner: ${runner}`, 'u'),
-      `native release workflow is missing ${target} on ${runner}`,
-    )
-  }
-  assert.notEqual(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '')
-  assert.ok(workflow.includes('node-version-file: .node-version'))
-  assert.ok(workflow.includes('rustup toolchain install 1.95.0'))
-  assert.ok(workflow.includes('rustup target add "${{ matrix.target }}" --toolchain 1.95.0'))
-  assert.equal(
-    [...workflow.matchAll(
-      /mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/gmu,
-    )].length,
-    1,
-  )
-  assert.equal([...workflow.matchAll(/^          version: "v0\.17\.0"$/gmu)].length, 1)
-  assert.equal([...workflow.matchAll(/^      RUSTC_WRAPPER: "sccache"$/gmu)].length, 1)
-  assert.equal([...workflow.matchAll(/^      SCCACHE_GHA_ENABLED: "true"$/gmu)].length, 1)
-  assert.equal([...workflow.matchAll(/^      SCCACHE_IDLE_TIMEOUT: "0"$/gmu)].length, 1)
-  assert.doesNotMatch(workflow, /Select installed Rust compiler cache/u)
-  assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
-  const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
-  assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
 })
 
 test('mainline source verifier accepts only the default-branch exact-SHA successful push', () => {
@@ -193,137 +135,4 @@ test('mainline source verifier accepts only the default-branch exact-SHA success
     }),
     /default branch identity is invalid/u,
   )
-})
-
-test('product release workflow passes immutable source identity to the canonical gate', () => {
-  assert.ok(existsSync(resolve(root, 'scripts/run-release-artifact-gate.mjs')))
-  assert.ok(workflow.includes('node scripts/run-release-artifact-gate.mjs'))
-  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
-  assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")"'))
-  assert.doesNotMatch(workflow, /GITHUB_SHA/u)
-  assert.ok(workflow.includes('--output release-artifacts'))
-  const productUploadStep = workflow.match(
-    /      - name: Upload release artifacts\n[\s\S]*?(?=\n      - name:)/u,
-  )?.[0]
-  assert.notEqual(productUploadStep, undefined)
-  assert.ok(productUploadStep.includes('name: ${{ matrix.target }}'))
-  assert.doesNotMatch(workflow, /name: release-\$\{\{ matrix\.target \}\}/u)
-  assert.ok(workflow.includes('path: release-artifacts/${{ matrix.target }}/'))
-  assert.ok(workflow.includes('if-no-files-found: error'))
-  assert.doesNotMatch(workflow, /run-native-release-gate|native-package|name: native-/u)
-  assert.ok(workflow.includes('timeout-minutes: ${{ matrix.timeout_minutes }}'))
-  assert.match(
-    workflow,
-    /target: x86_64-apple-darwin\n\s+runner: macos-15-intel\n\s+timeout_minutes: 300/u,
-  )
-})
-
-test('product release workflow binds the helper signing keys without embedding key material', () => {
-  const releaseStep = workflow.match(
-    /      - name: Build product release artifacts and write evidence\n[\s\S]*?(?=\n      - name:)/u,
-  )?.[0]
-  assert.notEqual(releaseStep, undefined)
-  assert.ok(releaseStep.includes(
-    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
-  ))
-  assert.ok(releaseStep.includes(
-    'WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}',
-  ))
-  assert.doesNotMatch(
-    releaseStep,
-    /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX:\s*["']?[0-9a-f]{64}["']?/u,
-  )
-})
-
-test('product release workflow blocks uploads until target security verification passes', () => {
-  const securityCommand = 'node scripts/verify-release-artifact-security.mjs'
-  const securityStep = workflow.match(
-    /      - name: Verify release artifact security\n[\s\S]*?(?=\n      - name:)/u,
-  )?.[0]
-  assert.notEqual(securityStep, undefined)
-  assert.ok(securityStep.includes(
-    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
-  ))
-  assert.ok(workflow.includes(securityCommand))
-  assert.ok(workflow.includes('--target "${{ matrix.target }}"'))
-  assert.ok(workflow.includes('--expected-commit "${SOURCE_COMMIT}"'))
-  assert.ok(workflow.includes('--evidence release-artifacts'))
-  assert.ok(workflow.includes('--output release-artifact-security-report.json'))
-  assert.ok(securityStep.includes('id: security'))
-  assert.ok(securityStep.includes('continue-on-error: true'))
-  const securityOffset = workflow.indexOf(securityCommand)
-  const productUploadOffset = workflow.indexOf('      - name: Upload release artifacts')
-  const securityUploadOffset = workflow.indexOf('name: release-security-${{ matrix.target }}')
-  assert.ok(securityOffset < productUploadOffset)
-  assert.ok(securityOffset < securityUploadOffset)
-  assert.ok(workflow.includes('path: release-artifact-security-report.json'))
-  assert.ok(workflow.includes("if: ${{ always() && steps.security.outcome != 'skipped' }}"))
-  assert.ok(workflow.includes("if: ${{ steps.security.outcome == 'success' }}"))
-  assert.ok(workflow.includes('      - name: Enforce release artifact security'))
-  assert.ok(workflow.includes('SECURITY_OUTCOME: ${{ steps.security.outcome }}'))
-  assert.ok(workflow.includes('test "${SECURITY_OUTCOME}" = "success"'))
-  assert.ok(workflow.includes('key_file="${RUNNER_TEMP}/helper-release-private-input"'))
-  assert.ok(workflow.includes('umask 077'))
-  assert.ok(workflow.includes('trap \'rm -f -- "$key_file"\' EXIT'))
-  assert.ok(workflow.includes(
-    'printf \'%s\' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"',
-  ))
-  assert.ok(workflow.includes('--sensitive-input "$key_file"'))
-  assert.doesNotMatch(
-    workflow,
-    /--output\s+["']?release-artifacts[/\\]release-artifact-security/u,
-  )
-})
-
-test('product release emits a verified Worker-only input for Community Core', () => {
-  assert.ok(existsSync(resolve(root, 'scripts/stage-community-core-worker-runtime.mjs')))
-  assert.ok(workflow.includes('corepack pnpm release:core-worker \\'))
-  assert.equal(workflow.includes('corepack pnpm release:core-worker --'), false)
-  assert.ok(workflow.includes('--artifact-root "release-artifacts/${{ matrix.target }}"'))
-  assert.ok(workflow.includes('--output "community-core-worker/${{ matrix.target }}"'))
-  assert.ok(workflow.includes('name: community-core-worker-${{ matrix.target }}'))
-  assert.ok(workflow.includes('path: community-core-worker/${{ matrix.target }}/'))
-})
-
-test('product release assembles one signed Community Core candidate after all targets pass', () => {
-  assert.match(workflow, /^  community-core-candidate:$/mu)
-  assert.ok(workflow.includes('      - product-release'))
-  assert.ok(workflow.includes('cargo_args=(package --locked --no-verify)'))
-  assert.ok(workflow.includes('CARGO_TARGET_DIR="${cargo_root}" cargo "${cargo_args[@]}"'))
-  assert.ok(workflow.includes('npm pack "./$(dirname "${manifest}")"'))
-  assert.ok(workflow.includes('git archive --format=tar HEAD -- "${contract_paths[@]}"'))
-  assert.ok(workflow.includes('zstd --quiet -19 -T0'))
-  assert.ok(workflow.includes('corepack pnpm release:core-finalize \\'))
-  assert.equal(workflow.includes('corepack pnpm release:core-finalize --'), false)
-  assert.ok(workflow.includes(
-    'WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}',
-  ))
-  assert.ok(workflow.includes('name: community-core-release-${{ env.SOURCE_COMMIT }}'))
-})
-
-test('registry publication accepts only a signed release and publishes exact archives', () => {
-  assert.match(registryWorkflow, /^  workflow_dispatch:$/mu)
-  assert.ok(registryWorkflow.includes('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}'))
-  assert.ok(registryWorkflow.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'))
-  assert.ok(registryWorkflow.includes('node publisher/scripts/verify-community-core-release.mjs \\'))
-  assert.ok(registryWorkflow.includes('test "$(git -C source rev-parse HEAD)" = \\'))
-  assert.ok(registryWorkflow.includes('cargo publish --locked --no-verify -p "${crate}"'))
-  assert.ok(registryWorkflow.includes(
-    'npm publish "${CORE_INPUT}/${archive}" --access public --provenance --tag alpha',
-  ))
-  assert.ok(registryWorkflow.includes('sha256sum "${downloaded}"'))
-})
-
-test('release download instructions recreate the exact aggregate evidence roots', () => {
-  const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
-  assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"',
-  ))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "community-core-worker-$TARGET" --dir "community-core-worker/$TARGET"',
-  ))
-  assert.ok(releasing.includes('release-artifacts/` 的一级目录因此精确为四个 Rust target'))
-  assert.ok(releasing.includes('release-security-reports/` 与产品 evidence root 分离'))
-  assert.ok(releasing.includes('`community-core-worker/` 每个平台只含 Worker'))
 })

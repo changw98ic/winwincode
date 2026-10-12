@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `StrongFlow` role policy and strict semantic stage-product preparation.
-//!
-//! This module deliberately stops before durable identity allocation. It
-//! validates one already-authenticated [`ExecutionJob`], prepares the exact
-//! Codex Core role policy, and converts a final Planner assistant message into
-//! one canonical semantic product. The production adapter remains responsible
-//! for assigning the lease-bound runtime event identity and retaining it in its
-//! existing outbox before delivery.
-
 use std::{
     collections::{BTreeSet, HashSet},
     fmt,
@@ -26,19 +17,14 @@ use winwincode_kernel::{
     RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
 };
 
-/// Media type consumed by the production Planning-to-PlanReview authority.
 pub const PLANNER_SOLUTION_MEDIA_TYPE: &str = "application/vnd.winwincode.planner-solution+json";
 
-/// Protocol consumed by the production Solution Review authority.
 pub const PLANNER_SOLUTION_PROTOCOL: &str = "winwincode.planner-solution.v1";
 
-/// JSON media type consumed by the verification verdict authority.
 pub const VERIFICATION_JSON_MEDIA_TYPE: &str = "application/json";
 
-/// First read-only verification event protocol.
 pub const VERIFICATION_SESSION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
 
-/// Final independent verification result protocol.
 pub const VERIFICATION_RESULT_PROTOCOL: &str = "winwincode.independent-verification-result.v1";
 
 const ROLE_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -49,10 +35,6 @@ const DELEGATED_EXECUTOR_INSTRUCTIONS: &str = "Produce only one bounded ChangeBa
 const DELEGATED_REMEDIATOR_INSTRUCTIONS: &str = "Produce only one bounded Repair proposal from reviewed findings in the read-only candidate workspace. Return the canonical RepairEnvelope, ChangeBatch proposal, and content-addressed Artifact references. Do not modify workspace files, apply the repair, broaden scope, approve, or verify your own work.";
 const DEBUG_PROBE_DEVELOPER_INSTRUCTIONS: &str = "Investigate the current failure from the read-only candidate workspace. Produce one bounded DebugProbePlan with explicit hypotheses, commands, paths, resource claims, budgets, and a round completion rule. Do not modify candidate files, apply a fix, install or upgrade dependencies, approve, or verify final delivery.";
 
-/// Fixed structured-output schema for the generated canonical
-/// `ChangeBatchProposal` DTO. Bounds and closed fields mirror the execution
-/// port contract; the schema is constructed in Rust so a turn never reads a
-/// mutable repository schema file at runtime.
 #[must_use]
 pub fn change_batch_proposal_json_schema() -> Value {
     json!({
@@ -91,7 +73,6 @@ pub fn change_batch_proposal_json_schema() -> Value {
     })
 }
 
-/// Stable stage-product failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StageProductErrorCode {
     InvalidJob,
@@ -101,13 +82,6 @@ pub enum StageProductErrorCode {
     NonCanonicalOutput,
 }
 
-/// Seals every role- and workspace-relevant Job field used to open a Codex
-/// session. The production adapter persists this digest beside the run and
-/// requires an exact match before it reuses or resumes the session.
-///
-/// # Errors
-///
-/// Returns a bounded error if the generated Job cannot be canonically encoded.
 pub fn stage_product_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, StageProductError> {
     let bytes = serde_json::to_vec(job).map_err(|_| {
         StageProductError::new(
@@ -118,12 +92,6 @@ pub fn stage_product_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, Stag
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
-/// Seals the immutable logical Job fields shared by replacement attempts.
-///
-/// # Errors
-///
-/// Returns a bounded error if the generated Job cannot be canonically encoded
-/// or its required attempt field is absent from the generated representation.
 pub fn stage_product_logical_job_digest(
     job: &ExecutionJob,
 ) -> Result<Sha256Digest, StageProductError> {
@@ -145,9 +113,6 @@ pub fn stage_product_logical_job_digest(
             "ExecutionJob logical replacement authority has no attempt",
         ));
     }
-    // A replacement is a new run and attempt of the same logical work.  Run
-    // identity is deliberately carried by the exact digest, not this logical
-    // digest, so a successor can be checked against its predecessor.
     if let Some(scope) = object.get_mut("scope").and_then(Value::as_object_mut) {
         scope.remove("attempt");
         scope.remove("workRunId");
@@ -161,7 +126,6 @@ pub fn stage_product_logical_job_digest(
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
-/// Bounded failure which never retains the rejected model output.
 #[derive(Debug, Eq, PartialEq)]
 pub struct StageProductError {
     code: StageProductErrorCode,
@@ -173,7 +137,6 @@ impl StageProductError {
         Self { code, message }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> StageProductErrorCode {
         self.code
@@ -188,7 +151,6 @@ impl fmt::Display for StageProductError {
 
 impl std::error::Error for StageProductError {}
 
-/// Semantic payload ready for lease-bound runtime event identity allocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedStageProduct {
     category: ExecutionEventCategory,
@@ -225,16 +187,6 @@ impl PreparedStageProduct {
     }
 }
 
-/// Returns the canonical Codex Core role policy for one authenticated Job.
-///
-/// Product-session chat jobs intentionally return `None`. `WorkRun` jobs
-/// must use one known `StrongFlow` role and cannot silently fall back to a
-/// process-wide permission profile.
-///
-/// # Errors
-///
-/// Rejects a `StrongFlow` role on a `ProductSession` job or an unknown role on a
-/// `WorkRun` job.
 pub fn role_session_policy(
     job: &ExecutionJob,
     execution_mode: RoleExecutionMode,
@@ -298,16 +250,11 @@ pub fn role_session_policy(
     }
 }
 
-/// Result of the sole persisted role-policy migration entry.
 pub(crate) struct MigratedRoleSessionPolicy {
     pub policy: Option<RoleSessionPolicy>,
     pub migrated: bool,
 }
 
-/// Converts one durable pre-v2 role policy to the generated canonical v2
-/// shape. Version 1 is accepted only here and always becomes `React` before
-/// the caller saves the containing record. Runtime policy parsing never calls
-/// this function.
 pub(crate) fn migrate_persisted_role_session_policy_v1(
     job: &ExecutionJob,
     persisted: Option<&Value>,
@@ -413,10 +360,6 @@ const fn role_policy_workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) 
     }
 }
 
-/// Builds the sealed role prompt with its runtime-owned Snapshot binding.
-///
-/// # Errors
-/// Rejects invalid role input or a missing/foreign Snapshot role binding.
 pub fn snapshot_bound_prompt(
     job: &ExecutionJob,
     snapshot_id: Option<&winwincode_domain::SnapshotId>,
@@ -436,16 +379,6 @@ pub fn snapshot_bound_prompt(
     Ok(prompt)
 }
 
-/// Builds the exact first-turn prompt from the sealed typed Job input.
-///
-/// `ProductSession` Chat keeps its original goal. `WorkRun` turns receive
-/// the canonical `workInput` JSON plus role-specific final-output rules, so a
-/// restart never has to query mutable Delivery state or hide JSON in `goal`.
-///
-/// # Errors
-///
-/// Rejects a missing, oversized, role-incompatible or internally inconsistent
-/// `WorkRun` input.
 pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
     match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(_) => {
@@ -549,7 +482,6 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
     }
 }
 
-/// Model-facing Planner structure; sealed input identities remain host checked.
 #[must_use]
 pub fn planner_solution_json_schema() -> Value {
     fn object(properties: Value) -> Value {
@@ -784,18 +716,6 @@ fn unique_texts(values: &[String], required: bool) -> bool {
         && values.iter().collect::<HashSet<_>>().len() == values.len()
 }
 
-/// Converts the Planner's exact final assistant message into the one semantic
-/// Structured internal planning activity emitted by the Worker.
-///
-/// Durable event identity, sequence, occurrence time, lease, session and
-/// Worker authority are intentionally absent. The Codex outbox owns those
-/// facts and must add them only after this semantic payload succeeds.
-///
-/// # Errors
-///
-/// Rejects non-Planner jobs, malformed or oversized JSON, unknown fields,
-/// another schema/protocol or foreign work input. Safe model representations
-/// are normalized before the canonical product bytes are sealed.
 pub fn prepare_planner_solution_activity(
     job: &ExecutionJob,
     final_message: &[u8],
@@ -836,12 +756,6 @@ pub fn prepare_planner_solution_activity(
     })
 }
 
-/// Prepares the first verification Lifecycle product for the exact frozen
-/// candidate. The adapter emits this before command evidence or a final result.
-///
-/// # Errors
-///
-/// Rejects non-verification roles and malformed candidate references.
 pub fn prepare_verification_policy_attestation(
     job: &ExecutionJob,
     candidate_ref: &str,
@@ -864,7 +778,6 @@ pub fn prepare_verification_policy_attestation(
     )
 }
 
-/// Stable command outcome retained as direct verification evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationEvidenceStatus {
@@ -876,19 +789,12 @@ pub enum VerificationEvidenceStatus {
     InfrastructureError,
 }
 
-/// Direct evidence category derived from the completed Codex command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerificationEvidenceKind {
     Command,
     Test,
 }
 
-/// Prepares a direct Command evidence product from one already-observed Codex
-/// `ExecCommandEnd` outcome. Callers may not use model prose as evidence.
-///
-/// # Errors
-///
-/// Rejects non-verification roles and exit codes outside the transport range.
 pub fn prepare_verification_command_evidence(
     job: &ExecutionJob,
     kind: VerificationEvidenceKind,
@@ -908,13 +814,6 @@ pub fn prepare_verification_command_evidence(
     )
 }
 
-/// Prepares direct command/test evidence and binds it to the exact diagnostic
-/// Artifact reference retained for the same command.
-///
-/// # Errors
-///
-/// Returns an error when the job is not a verification role or any evidence
-/// field exceeds the bounded stage-product contract.
 pub fn prepare_verification_command_evidence_with_artifact(
     job: &ExecutionJob,
     kind: VerificationEvidenceKind,
@@ -947,13 +846,6 @@ pub fn prepare_verification_command_evidence_with_artifact(
     )
 }
 
-/// Converts the verification role's final assistant message into the strict
-/// result Activity consumed by the production verdict authority.
-///
-/// # Errors
-///
-/// Rejects another role, malformed/noncanonical JSON, unknown fields, stale
-/// protocol shape, malformed candidate identity, or an empty finding set.
 pub fn prepare_verification_result_activity(
     job: &ExecutionJob,
     final_message: &[u8],
@@ -961,11 +853,6 @@ pub fn prepare_verification_result_activity(
     prepare_verification_result_activity_for_fusion(job, final_message, None)
 }
 
-/// Converts a verification result while requiring each frozen Fusion claim to
-/// be linked to an observed command or test from this review run.
-///
-/// # Errors
-/// Rejects missing, duplicate, extra, or unbound Fusion investigation claims.
 pub fn prepare_verification_result_activity_for_fusion(
     job: &ExecutionJob,
     final_message: &[u8],

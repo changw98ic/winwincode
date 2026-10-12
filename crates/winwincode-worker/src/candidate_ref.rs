@@ -1,30 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable Candidate Git refs published before Worktree cleanup.
-//!
-//! After the Worker freezes checkout changes into a deterministic candidate
-//! commit, this module records `refs/winwincode/candidates/<candidate-id>`
-//! inside the source repository so the candidate stays resolvable after the
-//! job-private Worktree is removed. The candidate id is the frozen candidate
-//! commit id itself: the freeze is deterministic, so a repeated freeze maps to
-//! the same ref name and only confirms the already-recorded value.
-//!
-//! Failure is fail closed: every ref write either succeeds and is confirmed by
-//! an exact re-read, or returns an error that the freeze path must surface so
-//! the Candidate is never announced as deliverable without its stable ref.
-//! The returned receipt is the recorded summary of one ref write.
-
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
-/// Ref namespace prefix for every frozen Worker candidate.
 pub const CANDIDATE_REF_PREFIX: &str = "refs/winwincode/candidates/";
 
-/// Ref update summary recorded with every candidate ref write.
 pub const CANDIDATE_REF_UPDATE_MESSAGE: &str = "winwincode: freeze candidate";
 
-/// Stable candidate-ref failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateRefErrorCode {
     InvalidInput,
@@ -32,7 +15,6 @@ pub enum CandidateRefErrorCode {
     Git,
 }
 
-/// Bounded candidate-ref failure which does not retain repository content.
 #[derive(Debug)]
 pub struct CandidateRefError {
     code: CandidateRefErrorCode,
@@ -62,7 +44,6 @@ impl CandidateRefError {
         )
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> CandidateRefErrorCode {
         self.code
@@ -77,41 +58,19 @@ impl fmt::Display for CandidateRefError {
 
 impl std::error::Error for CandidateRefError {}
 
-/// Recorded summary of one stable candidate ref write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRefReceipt {
-    /// Full ref name inside the source repository.
     pub ref_name: String,
-    /// Candidate identity; exactly the frozen candidate commit id.
     pub candidate_id: String,
-    /// Frozen candidate commit the ref resolves to.
     pub candidate_commit_id: String,
-    /// Whether the ref already resolved to the same commit (idempotent replay).
     pub preexisting: bool,
 }
 
-/// Returns the exact stable ref name for one candidate id.
-///
-/// # Errors
-///
-/// Rejects an id that is not a lowercase full Git object id, which keeps the
-/// ref name inside the `refs/winwincode/candidates` namespace.
 pub fn candidate_ref_name(candidate_id: &str) -> Result<String, CandidateRefError> {
     validate_candidate_id(candidate_id)?;
     Ok(format!("{CANDIDATE_REF_PREFIX}{candidate_id}"))
 }
 
-/// Records the stable candidate ref for one frozen candidate commit.
-///
-/// The ref is written in the source repository shared with the detached
-/// Worktree, so it keeps resolving after the Worktree is removed. Re-recording
-/// an already-recorded candidate is an idempotent success.
-///
-/// # Errors
-///
-/// Rejects an invalid or unknown candidate commit, a conflicting existing ref
-/// value, and any Git failure; callers must treat every error as "the
-/// candidate is not deliverable".
 pub fn create_candidate_ref(
     repository: &Path,
     candidate_commit_id: &str,

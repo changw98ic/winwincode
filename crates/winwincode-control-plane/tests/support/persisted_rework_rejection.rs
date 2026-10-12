@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Offline regressions with real Git, `SQLite` and the public precise-rework path.
-//! Worker usage below is a deterministic fact fixture, not a model receipt.
-
 use super::*;
 
 #[path = "rework_execution_fixture.rs"]
@@ -36,8 +33,6 @@ fn persisted_rework_same_path_different_hunk_is_rejected_without_expanding_scope
     assert_real_rework_rejection(90, ReworkEscape::SamePathDifferentHunk);
 }
 
-// This is an offline event fact accepted through the actual runtime ingress.
-// The initial writer later becomes Settled when its fail Verdict is committed.
 fn persist_initial_writer_runtime(
     control_plane: &mut ControlPlane,
     scope: &RepositoryScope,
@@ -227,8 +222,6 @@ fn settle_independent_rework_roles(
     fixture: &RealReworkFixture,
     mut control_plane: ControlPlane,
 ) -> ControlPlane {
-    // Each verification role is dispatched and settled only after the writer's
-    // success. No future role bindings are seeded into an earlier revision.
     for (offset, profile, clock) in [(0, "reviewer", 3), (1, "verifier", 4)] {
         let current = load_delivery(&control_plane, fixture.delivery.id());
         control_plane

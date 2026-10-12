@@ -103,8 +103,6 @@ fn prepare_indexed_capacity_backlog(
     for seed in 1..=(size / 1_000) {
         authorities.push(prepare_authority(storage, seed));
     }
-    // All authorities and rows are admitted by the canonical real methods;
-    // each authority stays below the unchanged default limit of 1,024.
     for sequence in 0..size {
         let authority = &authorities[usize::try_from(sequence / 1_000).unwrap()];
         let frame = request(authority, 2_000_000 + sequence, b"offline-frame");
@@ -502,8 +500,6 @@ fn indexed_capacity_backfill_preserves_old_bytes_and_rolls_back_midway_failure()
     let connection = Connection::open(&database).unwrap();
     let before = retained_capacity_frame_rows(&connection);
     downgrade_capacity_layout(&connection);
-    // A real SQL fault occurs after the header backfill has run. The empty
-    // staging table is not a completed layout because no header marker exists.
     connection
         .execute_batch(crate::worker_outbound_queue::OUTBOUND_CAPACITY_SLOTS_SCHEMA)
         .unwrap();

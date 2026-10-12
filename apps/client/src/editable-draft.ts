@@ -33,33 +33,20 @@ export interface EditableDraftState<Values extends DraftValues> {
 }
 
 export interface EditableDraftOptions<Values extends DraftValues> {
-  /** Treat every revision change as relevant when at least one field is dirty. */
   readonly revisionSensitive?: boolean
-  /** Values for these fields are replaced in conflict diagnostics. */
   readonly redactFields?: readonly (keyof Values & string)[]
 }
 
-/** Terminal outcome for one submitted draft, as decided by snapshot evidence. */
 export type DraftSubmissionSettlement = 'in-flight' | 'success' | 'failure' | 'cancelled'
 
 export interface DraftSubmissionEvidence {
-  /** A snapshot reload or transport round trip is still in flight. */
   readonly busy: boolean
-  /** The command transport reported a terminal failure for this submission. */
   readonly failed: boolean
-  /** The reported failure was a user cancellation. */
   readonly cancelled: boolean
-  /** The current snapshot proves the submitted change applied. */
   readonly confirmed: boolean
-  /** The current snapshot proves the submitted change did not apply. */
   readonly refuted: boolean
 }
 
-/**
- * One decision seam for every mounted draft: a submission stays in flight
- * through unrelated reloads and only ends on transport failure or on snapshot
- * evidence, so pages never duplicate a second business state machine.
- */
 export function settleDraftSubmission<Values extends DraftValues>(
   submission: DraftSubmission<Values> | null,
   evidence: DraftSubmissionEvidence,
@@ -92,12 +79,6 @@ function sameValue(left: string | undefined, right: string | undefined): boolean
   return left === right
 }
 
-/**
- * Keep browser-owned form edits separate from the latest server snapshot.
- *
- * The controller deliberately has no storage adapter. Its lifetime is the
- * mounted page, so secrets and ordinary drafts never become persistent state.
- */
 export function createEditableDraft<Values extends DraftValues>(
   options: EditableDraftOptions<Values> = {},
 ): EditableDraft<Values> {
@@ -208,13 +189,9 @@ export function createEditableDraft<Values extends DraftValues>(
       conflicts = Object.freeze(nextConflicts)
       revisionConflict = nextConflicts.length > 0
       if (nextDirty.size === 0) {
-        // Nothing is being edited against the old revision, so the whole
-        // baseline advances and later edits compare against this snapshot.
         baseRevision = snapshot.revision
         baseValues = nextServer
       } else {
-        // Mixed update: clean fields rebase per field, while dirty fields keep
-        // the revision and values their conflict diagnostics came from.
         baseValues = copyValues(nextBase as Values)
       }
     },

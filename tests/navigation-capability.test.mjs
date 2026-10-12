@@ -186,8 +186,6 @@ test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () 
     session: sessionWith([repositoryScope]),
     error: null,
   }).surface.id, 'chat')
-  // An address without a product path and an unknown path both enter the
-  // canonical Chat surface.
   assert.equal(surfaceCapabilityForHash('', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),

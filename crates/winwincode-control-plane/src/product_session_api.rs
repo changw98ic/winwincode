@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generated HTTP-contract adapter for the canonical `ProductSession` service.
-
 use super::product_session_command_context;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
@@ -33,15 +31,10 @@ use super::{
     SubmitChatMessageCommand, corrupt, product_session_state_filters, service_error, storage_error,
 };
 
-/// Trusted time source injected once at the Control Plane composition root.
 pub trait ProductSessionApiClock {
     fn now(&mut self) -> Instant;
 }
 
-/// Sole generated-command/query adapter for the canonical `ProductSession` state.
-///
-/// The adapter owns envelope mapping, stable event identity, pagination, and
-/// public response construction. The Server only authenticates and dispatches.
 pub struct ProductSessionApiService<'storage, 'clock, 'execution> {
     service: ProductSessionService<'storage>,
     clock: &'clock mut dyn ProductSessionApiClock,
@@ -62,8 +55,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         }
     }
 
-    /// Creates a generated API adapter with the exact resolved-secret
-    /// fingerprints already held by the composition root.
     #[must_use]
     pub fn with_output_gate(
         storage: &'storage mut dyn ProductSessionPersistence,
@@ -78,12 +69,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         }
     }
 
-    /// Executes `session.create` and returns its exact generated response.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical `ProductSession` service error for an invalid,
-    /// conflicting, or non-durable command.
     pub fn create(
         &mut self,
         command: SessionCreateCommand,
@@ -115,12 +100,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `chat.submit` and returns its exact generated response.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical `ProductSession` service error for an invalid,
-    /// conflicting, or non-durable command.
     pub fn submit_chat(
         &mut self,
         command: ChatSubmitCommand,
@@ -151,12 +130,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `session.cancel` and returns its exact generated response.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical `ProductSession` service error for stale authority,
-    /// actor mismatch, conflict, or a non-durable command.
     pub fn cancel(
         &mut self,
         command: SessionCancelCommand,
@@ -190,12 +163,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `session.close` independently from cancellation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical `ProductSession` service error for an invalid,
-    /// stale, conflicting, or non-durable command.
     pub fn close(
         &mut self,
         command: SessionCloseCommand,
@@ -223,10 +190,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Persists the title and archive state, independently from turn execution.
-    ///
-    /// # Errors
-    /// Rejects stale revisions and invalid or unauthorized session metadata.
     pub fn update_metadata(
         &mut self,
         command: SessionUpdateCommand,
@@ -263,12 +226,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `session.get` against the canonical durable aggregate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope/page facts, unknown sessions, corrupt state, and
-    /// storage failures.
     pub fn get(
         &self,
         query: SessionGetQuery,
@@ -297,12 +254,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `session.list` with stable scope/filter-bound pagination.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope, state filters, page facts, corrupt state, and
-    /// storage failures.
     pub fn list(
         &self,
         query: SessionListQuery,
@@ -320,12 +271,6 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
         })
     }
 
-    /// Executes `session.messages.list` against the public-only message ledger.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope/page facts, unknown sessions, corrupt state, and
-    /// storage failures.
     pub fn messages(
         &self,
         query: SessionMessagesListQuery,

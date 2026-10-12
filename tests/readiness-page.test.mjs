@@ -56,7 +56,6 @@ class FakeElement {
   value = ''
   #ownText = ''
 
-  // Real DOM textContent aggregates descendants; the fake mirrors that contract.
   get textContent() {
     return this.#ownText + this.children.map(child => child.textContent).join('')
   }

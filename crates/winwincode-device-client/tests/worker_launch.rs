@@ -1,16 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! WORKER-200.2 coverage: the daemon's `client.worker.launch` downlink lane.
-//! A real `SessionSupervisor` (long-lived worker test double over a second
-//! store connection on the same durable database) spawns through the daemon
-//! while a fake exchange endpoint delivers the launch command and captures
-//! the `client.worker.launch_ack`: the accepted grant ack, the stale-stamp
-//! refusal, the stale device-instance binding, the missing launch material,
-//! the idempotent duplicate, and the cross-validation that the
-//! supervisor-written managed-session config is accepted by the fail-closed
-//! reader of the real `winwincode-worker --managed-session` entry.
-//! Harness mirrors `tests/occupancy.rs`.
-
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -62,7 +51,6 @@ fn seed() -> DeviceIdentitySeed {
     }
 }
 
-/// Canonical fixture identities.
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
 const ISSUED_SECRET: [u8; 32] = [0x5d; 32];
@@ -94,8 +82,6 @@ fn issued_credential_material() -> String {
     encoded
 }
 
-/// Opens a store whose identity already adopted the server-issued
-/// enrollment, so daemon sessions start in the enrolled phase.
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
     ensure_device_identity(&mut store, &seed(), STAMP).expect("device identity should load");
@@ -123,7 +109,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     (store, record)
 }
 
-/// One client-to-server frame the fake server received.
 #[derive(Clone, Debug)]
 struct SimFrame {
     kind: String,
@@ -136,9 +121,6 @@ struct ServerState {
     sequences: BTreeSet<u64>,
 }
 
-/// In-memory fake of the exchange endpoint: it records every frame,
-/// acknowledges the contiguous prefix, and delivers one queued downlink
-/// batch per exchange.
 struct ServerSim {
     state: Mutex<ServerState>,
     downlink: Mutex<VecDeque<(Vec<Value>, Vec<WorkerCredentialIssuance>)>>,
@@ -277,8 +259,6 @@ fn daemon_config() -> DaemonConfig {
     }
 }
 
-/// A long-lived worker test double: signals readiness next to the config
-/// file after its handler is in place, then idles; a terminate exits zero.
 const LONG_RUNNING_BODY: &str = "case \"$1\" in\n\
      --recover-interrupted-calls)\n\
        [ \"$#\" -eq 2 ] && [ -r \"$2\" ] || exit 64\n\
@@ -298,8 +278,6 @@ fn write_executable_script(path: &Path, body: &str) {
     fs::set_permissions(path, permissions).expect("script chmod");
 }
 
-/// The launch material fixture: the credential the launch response would
-/// have delivered to the local bridge plus the local worker directories.
 struct FixedMaterial {
     credential: Mutex<Option<String>>,
     directories: Mutex<Option<WorkerLaunchDirectories>>,
@@ -341,9 +319,6 @@ impl WorkerLaunchMaterialSource for FixedMaterial {
     }
 }
 
-/// Composed worker lane: the wired supervisor (over a second connection to
-/// the daemon's durable database) and its local directories. Kills the
-/// spawned worker on drop so a failing assertion leaks no process.
 struct WorkerLane {
     supervisor: SessionSupervisor,
     material: Arc<FixedMaterial>,
@@ -485,7 +460,6 @@ fn force_fence(stamp: OccupancyCommandContext) -> ServerToClientMessage {
     })
 }
 
-/// Drives ticks until `condition` holds or the budget runs out.
 fn drive_until(daemon: &mut DeviceDaemon, mut condition: impl FnMut(&mut DeviceDaemon) -> bool) {
     for _ in 0..600 {
         if condition(daemon) {
@@ -502,7 +476,6 @@ fn drive_until(daemon: &mut DeviceDaemon, mut condition: impl FnMut(&mut DeviceD
     );
 }
 
-/// The settled exchange state: every durable frame delivered and acked.
 fn settled(daemon: &mut DeviceDaemon) -> bool {
     let snapshot = daemon.outbox_snapshot().expect("outbox snapshot");
     snapshot.frames.is_empty() && snapshot.ack_sequence == snapshot.highest_sequence
@@ -547,8 +520,6 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
     daemon.set_worker_supervisor(lane.supervisor.clone());
     daemon.set_worker_launch_material_source(lane.material.clone());
 
-    // The occupancy mirror advances through the real offer lane first: the
-    // launch must fence against the persisted revision.
     sim.queue_downlink(offer(LEASE, 7));
     drive_until(&mut daemon, |daemon| {
         daemon.occupancy_mirror().is_some() && daemon.status().occupancy_offers_acked == 1
@@ -563,8 +534,6 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
     });
     drive_until(&mut daemon, settled);
 
-    // The ack echoes the grant identities, the current mirror revision, and
-    // the stable idempotency key.
     let acks = launch_acks(&sim);
     assert_eq!(acks.len(), 1, "{acks:?}");
     let ack = &acks[0];
@@ -587,8 +556,6 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
         daemon.status()
     );
 
-    // The registry carries the grant identities, the live process, and the
-    // launch binding; the capacity source reports the running session.
     let record = lane
         .supervisor
         .worker_process(WORKER_SESSION)
@@ -610,8 +577,6 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
         "the spawned worker is the live running fact"
     );
 
-    // The private files exist with mode 0600 and the credential content is
-    // exactly the launch-response material.
     let directories = lane.directories();
     wait_for_ready_marker(&directories.data_directory);
     for private in ["managed-session.json", "worker-credential"] {
@@ -657,8 +622,6 @@ fn worker_stop_downlink_fences_identity_stops_one_session_and_replays_idempotent
     });
     wait_for_ready_marker(&lane.directories().data_directory);
 
-    // A stale command revision is rejected before the session lookup or
-    // signal, even though the lease/token pair is current.
     sim.queue_downlink(stop(
         occupancy_stamp(0, "srv-stop-revision", LEASE, 7),
         WORKER_ID,
@@ -674,7 +637,6 @@ fn worker_stop_downlink_fences_identity_stops_one_session_and_replays_idempotent
         json_str("REVISION_CONFLICT")
     );
 
-    // A stale fencing token is rejected before the session lookup or signal.
     sim.queue_downlink(stop(
         occupancy_stamp(1, "srv-stop-stale", LEASE, 9),
         WORKER_ID,
@@ -707,8 +669,6 @@ fn worker_stop_downlink_fences_identity_stops_one_session_and_replays_idempotent
         "exited"
     );
 
-    // A replay of the same idempotency key returns the durable first receipt;
-    // it cannot signal a second process or affect another session.
     sim.queue_downlink(stop(occupancy_stamp(1, "srv-stop", LEASE, 7), WORKER_ID));
     drive_until(&mut daemon, |_daemon| command_acks(&sim).len() == 4);
     assert_eq!(command_acks(&sim)[3]["status"], json_str("accepted"));
@@ -745,9 +705,6 @@ fn unfinished_worker_stop_intent_is_replayed_after_store_restart() {
     ));
     store.close().expect("first device process should close");
 
-    // This is the crash boundary: the intent exists, but no receipt was
-    // committed. A restarted client must recover the same work item rather
-    // than creating a second command identity.
     let mut restarted = DeviceStore::open(&root).expect("restarted store should open");
     let replay = restarted
         .record_worker_stop_intent(&intent)
@@ -914,8 +871,6 @@ fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
     crash_store.close().expect("crash store closes");
     daemon.into_store().close().expect("daemon process closes");
 
-    // The replacement daemon first observes a newer fencing state. Recovery
-    // must still finish the already-authorized local stop.
     let restarted_store = DeviceStore::open(&root).expect("restarted store opens");
     let restarted_identity = load_device_identity(&restarted_store)
         .expect("restarted identity reads")
@@ -988,8 +943,6 @@ fn a_stale_launch_stamp_is_refused_without_touching_the_device() {
     sim.queue_downlink(offer(LEASE, 7));
     drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
 
-    // The launch carries a token the mirror never held: refused before any
-    // local action.
     sim.queue_downlink(launch(
         occupancy_stamp(1, "srv-launch", LEASE, 9),
         grant(&instance_id, LEASE, 9),
@@ -1040,15 +993,12 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
         .expect("daemon should start enrolled");
     let lane = WorkerLane::open(&root, &instance_id, "binding");
     daemon.set_worker_supervisor(lane.supervisor.clone());
-    // The material source only resolves directories. The raw credential must
-    // arrive beside the exact launch frame in the authenticated response.
     let material = Arc::new(FixedMaterial::without_credential(lane.directories()));
     daemon.set_worker_launch_material_source(material);
 
     sim.queue_downlink(offer(LEASE, 7));
     drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
 
-    // Independent old and current launches have distinct immutable grant identities.
     let mut old = grant("cix_PREVIOUS0000000000000000001", LEASE, 7);
     old.worker_launch_grant_id = "wlg_OLDGRANT00000000000000001".into();
     old.worker_instance_id = "wki_OLDINSTANCE00000000000001".into();
@@ -1057,7 +1007,6 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
         daemon.status().worker_launches_rejected == 1
     });
 
-    // The matching launch response carries the one-time raw credential.
     sim.queue_downlink_with_credentials(
         launch(
             occupancy_stamp(1, "srv-launch", LEASE, 7),
@@ -1093,7 +1042,6 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
         "the launch-response credential lands in the 0600 credential file"
     );
     assert_eq!(file_mode(&credential_path), 0o600);
-    // An unknown digest is a no-op.
     let unknown = daemon
         .receive_worker_credential("sha256:unknown", WORKER_CREDENTIAL)
         .expect("unknown delivery");
@@ -1134,8 +1082,6 @@ fn a_replayed_launch_answers_duplicate_without_a_second_process() {
     sim.queue_downlink(offer(LEASE, 7));
     drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
 
-    // The same launch twice: the first spawns, the second is the
-    // one-session-one-worker idempotent replay.
     sim.queue_downlink(launch(
         occupancy_stamp(1, "srv-launch", LEASE, 7),
         grant(&instance_id, LEASE, 7),
@@ -1170,10 +1116,6 @@ fn a_replayed_launch_answers_duplicate_without_a_second_process() {
     cleanup(&root);
 }
 
-/// Cross-validation (WORKER-200.2): the managed-session config the
-/// supervisor writes for a daemon-driven launch must be accepted by the
-/// fail-closed reader of the real `winwincode-worker --managed-session`
-/// entry, field for field.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
@@ -1271,7 +1213,6 @@ fn never_started_launch_receipt_is_reattested_by_the_current_device_instance() {
         occupancy_stamp(1, "rejected-before-crash", LEASE, 7),
         grant(&original, LEASE, 7),
     ));
-    // No supervisor: decision is durable before its ACK reaches Server.
     drive_until(&mut daemon, |daemon| {
         daemon.status().worker_launches_rejected == 1
     });

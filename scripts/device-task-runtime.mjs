@@ -13,7 +13,6 @@ import { runApiProductionVertical } from './run-api-production-vertical.mjs'
 import { benchmarkDeviceEnvironment, deviceProviderSecretValues } from './run-device-task-vertical.mjs'
 import { assertDeviceAgentEnvironmentForwarded, deviceBenchmarkProfileKey } from './device-agent-environment.mjs'
 
-// Stable protocol identities for an already frozen launch, not a retry attempt.
 export function deviceTaskIdentities(experimentId, callId) {
   assert.ok(typeof experimentId === 'string' && experimentId.length > 0)
   assert.ok(typeof callId === 'string' && callId.length > 0)
@@ -25,8 +24,6 @@ export function deviceTaskIdentities(experimentId, callId) {
   return { productSessionId: `psn_${suffix}`, deliveryId: `dlv_${suffix}` }
 }
 
-// Put each frozen task tree in the one registered repository. A private Git
-// index avoids changing the shared checkout while other Sessions execute.
 export function prepareDeviceTaskBaseline(repository, taskInputPath, directory) {
   const { task, digest } = loadDeviceAgentTask(taskInputPath)
   const files = {
@@ -92,9 +89,6 @@ export async function ensureBenchmarkDeviceOccupancy(context) {
   })
 }
 
-// Profile Devices keep their settings and databases separate, but this benchmark
-// consumes the same four Provider accounts. Fixed hard links make their existing
-// OS-lock admission share three slots per Provider across every profile.
 export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, providers }) {
   const privateDirectory = path => {
     mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -112,9 +106,6 @@ export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, provi
   privateDirectory(shared)
   for (const profile of profiles) assert.match(deviceBenchmarkProfileKey(profile), /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u,
     'benchmark configuration must name one Device directory')
-  // The first profile owns device-data, while other profiles have named paths.
-  // Admission may expand, but cannot reassign that retained Device to a different
-  // immutable configuration on restart.
   const baseProfilePath = join(directory, 'base-profile.json')
   const baseProfile = `${JSON.stringify({ schemaVersion: 1,
     configurationId: profiles[0].configurationId, policyKey: deviceBenchmarkProfileKey(profiles[0]) }, null, 2)}\n`
@@ -169,9 +160,6 @@ export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, provi
   }
 }
 
-// Delivery creation checks the registered Device repository HEAD. Register a
-// detached baseline once per Device; concurrent Sessions get separate execution
-// worktrees from the product, while identical baselines share its unique binding.
 export async function registerDeviceTaskRepository(runtime, taskInputPath, directory) {
   const prepared = prepareDeviceTaskBaseline(runtime.repository, taskInputPath, join(directory, 'git-index'))
   let repositories = taskRepositories.get(runtime.devicePath)
@@ -207,9 +195,6 @@ async function registerTaskRepository(runtime, prepared, directory) {
   return { repository, baseline: prepared.baseline, repositoryBindingId }
 }
 
-// Configuration profiles live on separate Device clients because their Worker
-// settings are immutable process inputs. Tasks share the Server and their
-// profile's Device; only product Session/Delivery identities vary per launch.
 export async function withDeviceTaskRuntime({ directory, profiles, providers, agentSettings,
   providerEnvironment = process.env, automaticTaskActions = false, build = false, timeoutMillis }, run) {
   assert.ok(profiles.length > 0 && providers.length > 0)

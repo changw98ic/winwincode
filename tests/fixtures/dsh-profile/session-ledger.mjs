@@ -3,7 +3,6 @@ import { mkdir, open, readFile, rename, rm, stat, } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { RUNTIME_EVENT_SCHEMA_VERSION, } from '../../../packages/contracts/dist/index.js';
 export const RUNTIME_SESSION_LEDGER_SCHEMA_VERSION = 1;
-/** Visible failure at the durable DSH-to-kernel session mapping boundary. */
 export class RuntimeSessionLedgerError extends Error {
     code;
     constructor(code, message, options) {
@@ -157,7 +156,6 @@ function manifestFrom(base, lifecycle) {
         model: lifecycle.model,
     });
 }
-/** Append-only runtime history stored separately from the stock DSH session log. */
 export class RuntimeSessionLedger {
     directory;
     manifestPath;
@@ -282,7 +280,6 @@ export class RuntimeSessionLedger {
         await this.#tail;
         return this.#readUnlocked();
     }
-    /** Remove an unpublished fresh-session ledger after its creation transaction rolls back. */
     async discard() {
         await this.#tail;
         await rm(this.directory, { recursive: true, force: true });

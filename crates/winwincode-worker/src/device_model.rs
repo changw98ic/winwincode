@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-local model lane. Only execution control and public task events use the server port.
-
 #[cfg(test)]
 #[path = "device_model_concurrency_tests.rs"]
 mod concurrency_tests;
@@ -27,7 +25,6 @@ use winwincode_provider::{
 pub(crate) enum DeviceModelSendOutcome {
     Handled,
     Unhandled,
-    /// No Provider thread/call has started; the original durable open is retryable.
     NotStarted,
 }
 
@@ -39,20 +36,10 @@ pub(crate) struct DeviceModels {
     sender: mpsc::Sender<(String, DeviceModelStepOutcome)>,
     receiver: mpsc::Receiver<(String, DeviceModelStepOutcome)>,
     chunks: VecDeque<ModelChunkMessage>,
-    /// Highest Provider sequence already handed to the Worker poll loop.
-    /// Used to re-pull durable Device frames after an in-memory drop or a
-    /// process restart so a post-tool second model call cannot stall at
-    /// sequence 1 while Device already stores the full response.
     delivered_high_water: HashMap<String, i64>,
-    /// Exchange identities this Worker opened through `DeviceModels`.
-    /// Shared Device providers.sqlite3 stores every session's exchanges;
-    /// recover must not re-queue foreign-session frames into this Worker.
     owned_exchanges: HashSet<String>,
-    /// Session identities observed on `ModelOpen` messages this Worker sent.
     session_ids: HashSet<String>,
-    /// Worker instance identities that may own Device frames for this process.
     instance_ids: HashSet<String>,
-    /// Optional durable non-secret intake log shared with `model_bridge`.
     intake_log: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     fail_next_start: bool,
@@ -79,8 +66,6 @@ impl PendingModelOpen {
     }
 }
 
-/// One durable intake log line. Bundled so the writer keeps a flat format
-/// string without an eight-argument signature.
 #[derive(Clone, Copy)]
 pub(crate) struct IntakeLogLine<'a> {
     pub stage: &'a str,
@@ -95,9 +80,6 @@ pub(crate) struct IntakeLogLine<'a> {
 impl DeviceModels {
     pub(crate) fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
         let recovery_store = DeviceProviderStore::open(directory)?;
-        // Managed workers keep durable diagnostics beside Codex runtime. The
-        // provider directory itself is shared across Worker sessions on one
-        // Device, so only an explicit env path is honoured — no derived fallback.
         let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG").map(PathBuf::from);
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
@@ -317,7 +299,6 @@ impl DeviceModels {
         self.chunks.push_front(chunk);
     }
 
-    /// Drops a non-owned Device frame without pinning this Worker's queue.
     pub(crate) fn drop_chunk(&mut self, chunk: &ModelChunkMessage) {
         self.chunks.retain(|queued| {
             queued.model_exchange_id != chunk.model_exchange_id || queued.sequence != chunk.sequence
@@ -412,18 +393,6 @@ impl DeviceModels {
         Ok(())
     }
 
-    /// Re-queues durable Provider frames above the last delivered sequence.
-    ///
-    /// Device providers.sqlite3 is authoritative for completed exchanges. After
-    /// an in-memory drop or a Worker restart the live queue can stall at
-    /// sequence 1 even though later frames already exist; replaying only the
-    /// missing tail keeps the durable model-call ledger contiguous.
-    ///
-    /// The Device store is shared by every Worker session on one Device.
-    /// Recovering another session's exchange and then failing authority would
-    /// pin this Worker's in-memory queue on a foreign frame and starve its own
-    /// verification exchange. Only owned / identity-matching exchanges are
-    /// re-queued.
     fn recover_from_durable_store(&mut self) -> Result<(), DeviceProviderError> {
         let version = self.recovery_store.model_data_version()?;
         if self.recovery_version == Some(version) {
@@ -694,7 +663,6 @@ mod tests {
             1,
             "same identity never launches two calls"
         );
-        // No configured provider: the background task produces a local failure without HTTP.
         let (_, chunks) = models
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -777,7 +745,6 @@ mod tests {
         let mut models = DeviceModels::open(&root).expect("open device models");
         models.note_worker_instance_id(&owned_wki);
         models.session_ids.insert(owned_wsn.clone());
-        // Simulate the verification ModelOpen that marked ownership.
         models.owned_exchanges.insert(owned_exchange.clone());
 
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap()).collect();
@@ -820,7 +787,6 @@ mod tests {
                 )
                 .expect("seed durable verification exchange");
         }
-        // Fresh process: owned_exchanges empty, but Worker re-seeded identity.
         let mut models = DeviceModels::open(&root).expect("open device models");
         models.session_ids.insert(wsn.clone());
         models.note_worker_instance_id(&wki);

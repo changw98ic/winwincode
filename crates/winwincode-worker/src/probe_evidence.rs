@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable raw evidence for one host-sealed `DebugProbe` execution.
-//!
-//! Process output enters this module before crossing the scheduler seam. Raw
-//! bytes remain in private, content-addressed blobs; callers receive only
-//! authority-bound Artifact references and byte counts. The later typed
-//! evidence bundle is retained beside the same capture after the `ExecutionPort`
-//! normalizer contract has sealed it.
-
 use std::{
     fmt, fs,
     fs::{File, OpenOptions},
@@ -94,7 +86,6 @@ CREATE TABLE probe_bundle (
 PRAGMA user_version = 1;
 ";
 
-/// Stable private-store failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeEvidenceStoreErrorKind {
     InvalidInput,
@@ -105,7 +96,6 @@ pub(crate) enum ProbeEvidenceStoreErrorKind {
     Unavailable,
 }
 
-/// Secret-safe failure returned by the durable probe evidence module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeEvidenceStoreError {
     kind: ProbeEvidenceStoreErrorKind,
@@ -131,7 +121,6 @@ impl fmt::Display for ProbeEvidenceStoreError {
 
 impl std::error::Error for ProbeEvidenceStoreError {}
 
-/// Authority-bound manifest for the exact stdout and stderr capture.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProbeRawArtifactManifest {
@@ -165,7 +154,6 @@ impl ProbeRawArtifactManifest {
         &self.streams
     }
 
-    /// Returns stdout and stderr references in their canonical role order.
     #[must_use]
     pub(crate) fn artifact_references(&self) -> Vec<ArtifactReference> {
         self.streams
@@ -181,8 +169,6 @@ impl ProbeRawArtifactManifest {
     }
 }
 
-/// Prepared bounded capture. It stays Worker-private until its exact L0
-/// receipt can be committed atomically with the manifest.
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedProbeCapture<'capture> {
     intent: &'capture ValidatedProbeExecutionIntent,
@@ -216,7 +202,6 @@ impl<'capture> PreparedProbeCapture<'capture> {
     }
 }
 
-/// Exact host-selected normalization inputs bound before probe execution.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProbeNormalizationContext {
     binding: StoredNormalizationBinding,
@@ -253,7 +238,6 @@ struct SerializedCompletedExecution {
 
 type RetainedBundleRow = (String, String, String, i64, String);
 
-/// Exact authority and reference required to read one raw stream.
 #[derive(Clone, Debug)]
 pub(crate) struct ProbeRawArtifactReadRequest<'read> {
     intent: &'read ValidatedProbeExecutionIntent,
@@ -276,25 +260,19 @@ impl<'read> ProbeRawArtifactReadRequest<'read> {
     }
 }
 
-/// Deep Worker-private store for probe raw Artifacts and normalized bundles.
 #[derive(Debug)]
 pub(crate) struct DurableProbeEvidenceStore {
     connection: Mutex<Connection>,
     blob_root: PathBuf,
 }
 
-/// Durable recovery point for one exact probe execution.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RecoveredProbeEvidence {
-    /// Raw streams and the exact L0 execution receipt can be normalized again
-    /// without starting the process a second time.
     ReceiptRetained {
         manifest: ProbeRawArtifactManifest,
         receipt: ProbeExecutionReceipt,
         normalization: ProbeNormalizationContext,
     },
-    /// Raw streams, L0 receipt, canonical bundle, and bounded projection were
-    /// all durably verified and can be replayed without process or parser work.
     Complete {
         manifest: ProbeRawArtifactManifest,
         receipt: ProbeExecutionReceipt,
@@ -303,7 +281,6 @@ pub(crate) enum RecoveredProbeEvidence {
     },
 }
 
-/// Verified normalized evidence retained as one canonical bundle Artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RetainedProbeEvidenceBundle {
     bundle_artifact_ref: ArtifactReference,
@@ -311,8 +288,6 @@ pub(crate) struct RetainedProbeEvidenceBundle {
     projection: ProbeEvidenceProjection,
 }
 
-/// Exact prior bundle selected by durable host round context, never inferred
-/// from wall-clock completion order or a model-provided probe identifier.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProbePriorEvidenceReference {
     artifact_ref: ArtifactReference,
@@ -345,7 +320,6 @@ impl RetainedProbeEvidenceBundle {
 }
 
 impl DurableProbeEvidenceStore {
-    /// Opens the private store and verifies its one canonical schema.
     pub(crate) fn open(root: impl AsRef<Path>) -> Result<Self, ProbeEvidenceStoreError> {
         let root = root.as_ref();
         ensure_private_directory(root)?;
@@ -378,12 +352,6 @@ impl DurableProbeEvidenceStore {
         })
     }
 
-    /// Atomically retains the authority-bound raw manifest and exact L0 receipt.
-    ///
-    /// Blob files are synced before the `SQLite` transaction. A crash may leave
-    /// an unreachable content-addressed blob, but can never expose a capture
-    /// without its process status and timing facts. Exact repeats return the
-    /// original manifest; any changed authority, bytes, or receipt conflicts.
     pub(crate) fn persist_completed_execution(
         &self,
         capture: &PreparedProbeCapture<'_>,
@@ -525,11 +493,6 @@ impl DurableProbeEvidenceStore {
         Ok(manifest.clone())
     }
 
-    /// Persists one already-sealed normalized bundle as a canonical Artifact.
-    ///
-    /// The exact raw manifest and L0 receipt must already be retained by
-    /// [`Self::persist_completed_execution`]. Exact replays are idempotent;
-    /// changed bundle bytes or semantic digests conflict.
     pub(crate) fn persist_bundle(
         &self,
         intent: &ValidatedProbeExecutionIntent,
@@ -664,8 +627,6 @@ impl DurableProbeEvidenceStore {
         Ok(false)
     }
 
-    /// Reads and fully revalidates the canonical bundle Artifact, when one
-    /// exists, without rerunning a parser or consulting the workspace.
     pub(crate) fn read_bundle(
         &self,
         intent: &ValidatedProbeExecutionIntent,
@@ -694,13 +655,6 @@ impl DurableProbeEvidenceStore {
         Ok(evidence)
     }
 
-    /// Binds host-selected normalization inputs before probe execution.
-    ///
-    /// The optional prior reference must come from durable host round context.
-    /// This store never guesses a predecessor from probe identifiers or wall
-    /// clock order. Every supplied prior is rebound to private journal bytes
-    /// and both of its digests before the `ExecutionPort` selects comparable or
-    /// explicitly incompatible baseline evidence.
     pub(crate) fn prepare_normalization(
         &self,
         current_intent: &ValidatedProbeExecutionIntent,
@@ -741,7 +695,6 @@ impl DurableProbeEvidenceStore {
         })
     }
 
-    /// Returns the latest exact recovery point for a validated intent.
     pub(crate) fn recover(
         &self,
         intent: &ValidatedProbeExecutionIntent,
@@ -782,7 +735,6 @@ impl DurableProbeEvidenceStore {
         }
     }
 
-    /// Recovers the exact manifest for a validated intent after restart.
     pub(crate) fn recover_capture(
         &self,
         intent: &ValidatedProbeExecutionIntent,
@@ -797,8 +749,6 @@ impl DurableProbeEvidenceStore {
         Ok(Some(manifest))
     }
 
-    /// Reads one exact raw stream after revalidating authority, role, reference,
-    /// metadata, content length, and digest.
     pub(crate) fn read_raw(
         &self,
         request: &ProbeRawArtifactReadRequest<'_>,

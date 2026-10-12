@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anonymous evidence packs shared by host and Device semantic judges.
-
 use crate::analysis::{FusionCandidateClaims, FusionClaimPosition};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// R4 judge input is an evidence pack (R1+R3), never vote counts (ADR-0036).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JudgeRequest {
@@ -18,7 +15,6 @@ pub struct JudgeRequest {
     pub evidence_pack: Vec<Value>,
 }
 
-/// Builds one anonymous semantic judgment request from independently collected claims.
 #[must_use]
 pub fn build_blind_judge_request(
     claims: &[FusionCandidateClaims],
@@ -37,10 +33,6 @@ pub fn build_blind_judge_request(
 }
 
 impl JudgeRequest {
-    /// Produces the same anonymous premise at every runtime entry.
-    ///
-    /// # Errors
-    /// Returns a JSON serialization failure.
     pub fn premise(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&json!({
             "question": self.question,
@@ -94,11 +86,6 @@ fn is_blind_metadata_key(key: &str) -> bool {
     )
 }
 
-/// R3 evidence rows collected for disputed claims, canonicalized and deduped.
-///
-/// Evidence provenance is retained as evidence content; respondent identity is
-/// deliberately omitted. Repeated identical support therefore cannot become a
-/// vote-count signal.
 fn build_judge_evidence_pack(claims: &[FusionCandidateClaims], claim_key: &str) -> Vec<Value> {
     let mut rows = BTreeMap::<(String, String, String), Value>::new();
     for candidate in claims {

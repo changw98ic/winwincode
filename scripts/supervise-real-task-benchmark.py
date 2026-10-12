@@ -42,7 +42,6 @@ def supervise(directory, node):
     assert json.loads((directory / 'build-progress.json').read_text())['phase'] == 'complete'
     for artifact in build['artifacts']:
         assert hashlib.sha256(Path(artifact['path']).read_bytes()).hexdigest() == artifact['sha256']
-    # A second supervisor must never create another paid controller.
     with (directory / 'supervisor-claim.json').open('x', encoding='utf-8') as handle:
         os.chmod(handle.fileno(), 0o600)
         json.dump({'pid': os.getpid(), 'processStartedAt': identity(os.getpid()),
