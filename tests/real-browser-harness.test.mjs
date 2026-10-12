@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import {
   BoundedEventBuffer,
   DevTools,
+  freePort,
 } from './fixtures/real-browser-harness.mjs'
 import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.mjs'
 
@@ -24,6 +28,39 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new Event('close'))
   }
 }
+
+test('failed browser startup releases the owned child before returning', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-startup-failure-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const chromePath = join(directory, 'chrome-fixture')
+  const pidPath = join(directory, 'chrome.pid')
+  writeFileSync(chromePath, `#!/bin/sh\nprintf '%s' "$$" > '${pidPath}'\nexec sleep 600\n`, { mode: 0o700 })
+  await assert.rejects(DevTools.launch({
+    chromePath,
+    directory,
+    debugPort: await freePort(),
+    startupTimeoutMillis: 1_000,
+  }), /Chrome DevTools endpoint did not start/u)
+  const pid = Number(readFileSync(pidPath, 'utf8'))
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+})
+
+test('browser startup retains bounded diagnostics when the executable exits', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-startup-exit-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const chromePath = join(directory, 'chrome-fixture')
+  writeFileSync(chromePath, `#!/bin/sh\nprintf '${'x'.repeat(9_000)}\nfixture browser startup failed\n' >&2\nexit 7\n`, { mode: 0o700 })
+  await assert.rejects(DevTools.launch({
+    chromePath,
+    directory,
+    debugPort: await freePort(),
+  }), error => {
+    assert.match(error.message, /Chrome exited before its DevTools endpoint started/u)
+    assert.match(error.message, /fixture browser startup failed/u)
+    assert.ok(error.message.length <= 8_300)
+    return true
+  })
+})
 
 test('bounded event buffers retain only the newest samples', () => {
   const events = new BoundedEventBuffer(3)

@@ -1,0 +1,111 @@
+diff --git a/codex-rs/core/src/tools/code_mode/terminal_tests.rs b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+index 708dfbe0..ff881a6e 100644
+--- a/codex-rs/core/src/tools/code_mode/terminal_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+@@ -203,6 +203,15 @@ fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHan
+ 
+ #[tokio::test]
+ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_on_replay() {
++    handoff_offer_fixture(false).await;
++}
++
++#[tokio::test]
++async fn required_offer_failure_keeps_the_accepted_handoff_unpublished() {
++    handoff_offer_fixture(true).await;
++}
++
++async fn handoff_offer_fixture(fail_required_offer: bool) {
+     use crate::tools::context::ToolCallSource;
+     use crate::tools::context::ToolInvocation;
+     use crate::tools::context::ToolPayload;
+@@ -271,6 +280,17 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
+     .execute(&pool)
+     .await
+     .unwrap();
++    if fail_required_offer {
++        sqlx::query(
++            "CREATE TRIGGER fail_required_handoff_offer BEFORE INSERT ON tool_fact_events
++            WHEN json_extract(NEW.fact_json,'$.kind')='request'
++                AND json_extract(NEW.fact_json,'$.fact.attempt.delivery')='offered'
++            BEGIN SELECT RAISE(ROLLBACK,'required handoff offer fixture'); END",
++        )
++        .execute(&pool)
++        .await
++        .unwrap();
++    }
+     let tool = Arc::new(DiagnosticHandoffTool {
+         effects: AtomicUsize::new(0),
+         accepted: AtomicUsize::new(0),
+@@ -281,8 +301,49 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
+             invocation.clone(),
+             /*terminal_outcome_reached*/ None,
+         )
+-        .await
+-        .unwrap();
++        .await;
++    if fail_required_offer {
++        assert!(matches!(
++            first,
++            Err(crate::function_tool::FunctionCallError::Fatal(_))
++        ));
++        assert!(
++            !session
++                .services
++                .code_mode_service
++                .terminal_handoffs
++                .is_pending(&cell),
++            "a handoff cannot be observed before its required offered receipt commits"
++        );
++        let events = store
++            .list_tool_fact_events(&session.thread_id.to_string(), 0, 200)
++            .await
++            .unwrap();
++        let fact = &events.last().unwrap().fact;
++        let attempt = fact.attempt.as_ref().unwrap();
++        assert_eq!(
++            attempt.execution,
++            codex_state::ToolExecutionStatus::Completed
++        );
++        assert_eq!(
++            attempt.disposition,
++            codex_state::ToolOutputDisposition::Accepted
++        );
++        assert_eq!(attempt.delivery, codex_state::ToolOutputDelivery::Pending);
++        assert!(
++            store
++                .read_tool_results(fact.request_sequence)
++                .await
++                .unwrap()
++                .accepted
++                .is_some()
++        );
++        assert_eq!(tool.effects.load(Ordering::SeqCst), 1);
++        assert_eq!(tool.accepted.load(Ordering::SeqCst), 1);
++        pool.close().await;
++        return;
++    }
++    let first = first.unwrap();
+     let Some(ToolContinuation::YieldToHost(handoff)) = &first.continuation else {
+         panic!("the first accepted output must retain its typed continuation");
+     };
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 4ab146b8..56ee49c6 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -936,6 +936,8 @@ impl ToolRegistry {
+                         "failed to record optional tool diagnostic progress");
+                 }
+                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
++                // Publishing the handoff lets the outer cell render its receipt immediately.
++                facts.offered().await?;
+                 if let Some(continuation) = &result.continuation
+                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
+                         &invocation.source
+@@ -956,7 +958,6 @@ impl ToolRegistry {
+                     &result.payload,
+                     result.result.as_ref(),
+                 );
+-                facts.offered().await?;
+                 Ok(result)
+             }
+             Err(err) => {

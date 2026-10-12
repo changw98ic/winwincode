@@ -222,13 +222,26 @@ async fn validation_case_control_with_store_fault(
         )
     };
     let queued_controls = Arc::clone(&controls.queued);
+    let validation_marker_root = workspaces_root.clone();
+    let wait_for_validation = seconds > 0.0 && !pending_fault;
     let enqueue = std::thread::spawn(move || {
+        if wait_for_validation {
+            let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while validation_start_marker_count(&validation_marker_root) == 0 {
+                assert!(
+                    std::time::Instant::now() < start_deadline,
+                    "validation must start before control intake"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
+        let queued_ms = origin.elapsed().as_millis();
         queued_controls
             .lock()
             .unwrap()
             .push_back((ExecutionMessageId(id("xmsg", 'N')), message));
-        origin.elapsed().as_millis()
+        queued_ms
     });
     let mut max_drive_millis = 0;
     let fixture_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -435,8 +448,10 @@ async fn mechanism_m11_actual_long_validation_preserves_renewal_and_heartbeat() 
 #[tokio::test]
 async fn mechanism_m11_driver_renewal_service_bound_red() {
     let slow = Box::pin(validation_case(2.0)).await;
+    let queued = slow["queuedRenewalAtMillis"].as_u64().unwrap();
+    let confirmed = slow["controlReceipts"][0][1].as_u64().unwrap();
     assert!(
-        slow["controlReceipts"][0][1].as_u64().unwrap() < 300,
+        confirmed.checked_sub(queued).unwrap() < 300,
         "renewal must be serviced during long validation; actual receipt={slow}"
     );
 }
@@ -448,8 +463,10 @@ async fn validation_case(seconds: f64) -> serde_json::Value {
 #[tokio::test]
 async fn mechanism_m11_actual_long_validation_services_remote_cancel() {
     let slow = validation_case_control(2.0, true).await;
+    let queued = slow["queuedRenewalAtMillis"].as_u64().unwrap();
+    let confirmed = slow["controlReceipts"][0][1].as_u64().unwrap();
     assert!(
-        slow["controlReceipts"][0][1].as_u64().unwrap() < 300,
+        confirmed.checked_sub(queued).unwrap() < 300,
         "remote cancellation must be durably consumed before validation completes: {slow}"
     );
     assert_eq!(slow["remainingValidation"], false);

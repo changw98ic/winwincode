@@ -142,9 +142,8 @@ impl DeviceProviderStore {
         }
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
-        )?;
+        enable_device_wal(&connection)?;
+        connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let key = if version == 15 {
             load_device_key(&connection)?
@@ -909,6 +908,23 @@ impl DeviceProviderStore {
                 let _ = self.connection.execute_batch("ROLLBACK");
                 Err(error)
             }
+        }
+    }
+}
+
+fn enable_device_wal(connection: &Connection) -> Result<(), DeviceProviderError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+            // Concurrent first opens can contend during SQLite's journal-mode
+            // lock upgrade even when the connection has a busy timeout.
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result.map_err(Into::into),
         }
     }
 }

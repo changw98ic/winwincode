@@ -375,9 +375,13 @@ export async function waitForServer(controlUrl, child, errors) {
   throw new Error(`standalone Server did not become healthy:\n${errors.join('')}`)
 }
 
-async function devtoolsUrl(port) {
-  const deadline = Date.now() + 20_000
+async function devtoolsUrl(port, { chrome, startupError, timeoutMillis }) {
+  const deadline = Date.now() + timeoutMillis
   while (Date.now() < deadline) {
+    if (startupError() !== null) throw startupError()
+    if (chrome.exitCode !== null || chrome.signalCode !== null) {
+      throw new Error('Chrome exited before its DevTools endpoint started')
+    }
     try {
       const response = await fetch(`http://127.0.0.1:${String(port)}/json/version`)
       if (response.ok) return (await response.json()).webSocketDebuggerUrl
@@ -417,7 +421,7 @@ export class DevTools {
   pending = new Map()
   listeners = new Map()
 
-  static async launch({ chromePath, directory, debugPort }) {
+  static async launch({ chromePath, directory, debugPort, startupTimeoutMillis = 20_000 }) {
     const chrome = spawn(chromePath, [
       '--headless=new',
       '--disable-gpu',
@@ -427,13 +431,38 @@ export class DevTools {
       `--remote-debugging-port=${String(debugPort)}`,
       `--user-data-dir=${resolve(directory, 'chrome-profile')}`,
       'about:blank',
-    ], { detached: process.platform !== 'win32', stdio: 'ignore' })
-    const socket = new WebSocket(await devtoolsUrl(debugPort))
-    await new Promise((resolvePromise, reject) => {
-      socket.addEventListener('open', resolvePromise, { once: true })
-      socket.addEventListener('error', reject, { once: true })
+    ], { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] })
+    let startupError = null
+    let diagnostics = ''
+    chrome.on('error', error => { startupError = error })
+    chrome.stderr.on('data', bytes => {
+      diagnostics = `${diagnostics}${bytes.toString('utf8')}`.slice(-8_192)
     })
-    return { chrome, devtools: new DevTools(socket) }
+    let socket = null
+    try {
+      const url = await devtoolsUrl(debugPort, {
+        chrome,
+        startupError: () => startupError,
+        timeoutMillis: startupTimeoutMillis,
+      })
+      socket = new WebSocket(url)
+      await new Promise((resolvePromise, reject) => {
+        const timer = setTimeout(() => reject(new Error('Chrome DevTools socket did not open')), 5_000)
+        socket.addEventListener('open', () => {
+          clearTimeout(timer)
+          resolvePromise()
+        }, { once: true })
+        socket.addEventListener('error', error => {
+          clearTimeout(timer)
+          reject(error)
+        }, { once: true })
+      })
+      return { chrome, devtools: new DevTools(socket) }
+    } catch (error) {
+      socket?.close()
+      if (chrome.pid !== undefined) await stopChild(chrome, 'SIGTERM')
+      throw new Error(`${error.message}\n${diagnostics}`, { cause: error })
+    }
   }
 
   send(method, params = {}, sessionId = undefined, timeoutMillis = this.commandTimeoutMillis) {

@@ -1623,6 +1623,16 @@
         "codex-rs/state/src/runtime/tool_sharing_tests.rs",
         "codex-rs/state/src/tool_execution.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-handoff-receipt-order",
+      "file": "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+      "planned": false,
+      "patchSha256": "f0558550cd340670569e3663444de544fa81018b92dbb48c5f53ebc8f168bbe1",
+      "targets": [
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/code_mode/terminal_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

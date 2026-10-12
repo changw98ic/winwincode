@@ -100,6 +100,13 @@ fn concurrent_first_open_uses_one_current_schema_and_identity() {
 }
 
 #[test]
+fn repeated_concurrent_first_open_keeps_one_current_schema_and_identity() {
+    for _ in 0..16 {
+        concurrent_first_open_uses_one_current_schema_and_identity();
+    }
+}
+
+#[test]
 fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
     let directory = TestDirectory::new("immutable-response");
     let store = DeviceProviderStore::open(&directory.0).unwrap();

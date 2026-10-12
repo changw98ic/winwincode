@@ -936,6 +936,8 @@ impl ToolRegistry {
                         "failed to record optional tool diagnostic progress");
                 }
                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+                // Publishing the handoff lets the outer cell render its receipt immediately.
+                facts.offered().await?;
                 if let Some(continuation) = &result.continuation
                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
                         &invocation.source
@@ -956,7 +958,6 @@ impl ToolRegistry {
                     &result.payload,
                     result.result.as_ref(),
                 );
-                facts.offered().await?;
                 Ok(result)
             }
             Err(err) => {

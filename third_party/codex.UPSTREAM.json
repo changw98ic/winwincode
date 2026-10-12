@@ -117,6 +117,7 @@
     "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
     "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
     "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
-    "upstream/patches/codex/0111-tool-call-request-result-pairs.patch"
+    "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch"
   ]
 }
