@@ -127,7 +127,10 @@ function acknowledgedCoreHistory(database, jobId) {
   const completedCommands = [...calls.values()].filter(call => call.toolName.endsWith('exec_command')
     && call.execution === 'completed' && call.disposition === 'accepted' && call.delivery === 'offered'
     && typeof call.cellId === 'string' && call.cellId.length > 0)
-  return { retained, streamKeys: [...streams], completedCommands }
+  const completedInputs = [...calls.values()].filter(call => call.toolName.endsWith('write_stdin')
+    && call.execution === 'completed' && call.disposition === 'accepted' && call.delivery === 'offered'
+    && typeof call.cellId === 'string' && call.cellId.length > 0)
+  return { retained, streamKeys: [...streams], completedCommands, completedInputs }
 }
 
 function historyFingerprint(database, streamKeys) {
@@ -234,9 +237,17 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
   const markerCodes = [...holdMarker].map(character => character.charCodeAt(0)).join(',')
   const historyScript = `// @exec: {"yield_time_ms":1000}
     const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");
+    const commandInput=ALL_TOOLS.find(tool=>tool.name.endsWith("write_stdin"));
+    if(!command || !commandInput) throw new Error("command tools missing");
     for(let index=0;index<${COMMAND_HISTORY_SIZE};index++) {
-      const result=await tools[command.name]({cmd:"true",yield_time_ms:1000});
+      let result=await tools[command.name]({
+        cmd:index===0?"read -r gate; test $gate = ready":"true",tty:index===0,yield_time_ms:1000});
+      if(index===0 && result.session_id===undefined) throw new Error("interactive history command did not yield");
+      let chars=index===0?"ready\\n":"";
+      while(result.exit_code===undefined && result.session_id!==undefined) {
+        result=await tools[commandInput.name]({session_id:result.session_id,chars,yield_time_ms:1000});
+        chars="";
+      }
       if(result.exit_code!==0) throw new Error("history command failed");
     }
     text({completedCommands:${COMMAND_HISTORY_SIZE},holdMarker:String.fromCharCode(${markerCodes})});`
@@ -285,6 +296,8 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
         }, 'all 512 real completed commands are business acknowledged and compacted before measurement', 60_000, 250)
         assert.equal(history.completedCommands.length, COMMAND_HISTORY_SIZE,
           'all historical commands are actual completed nested Core operations with business ACK')
+        assert.ok(history.completedInputs.length >= 1,
+          'the first real command waits for actual stdin and its completed input poll is business acknowledged')
         assert.ok(history.retained.length >= COMMAND_HISTORY_SIZE)
         const original = historyPrefix(worker, history.streamKeys)
         assert.ok(original.heads.every(head => head.ack_sequence === head.highest_sequence))
@@ -342,7 +355,8 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
         assert.equal(new Set(calls.map(call => call.source)).size, 1, 'all loaded execution calls use the same Device Provider store')
         return { historyJobId: live.job_id, liveJobId: live.job_id, workerStore: historicalStore,
           workerInstanceId: originalAuthority.worker_instance_id,
-          acknowledgedCommands: history.completedCommands.length, retainedCoreFacts: history.retained.length,
+          acknowledgedCommands: history.completedCommands.length,
+          acknowledgedCommandInputs: history.completedInputs.length, retainedCoreFacts: history.retained.length,
           retainedHistoryFrames: original.rows, historyDigest: original.digest, historyReadyAt,
           leaseSeconds: LEASE_SECONDS, heartbeatRenewals: observed.length - 1, measuredPeriods: observed,
           originalDeadline: claimed.expires_at, measuredDeadline: starting.lease.expires_at,
