@@ -50,9 +50,18 @@ fn validation_start_marker_count(root: &Path) -> usize {
     let mut directories = vec![root.to_path_buf()];
     let mut count = 0;
     while let Some(directory) = directories.pop() {
-        for entry in std::fs::read_dir(directory).unwrap() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("validation marker directory scan failed: {error}"),
+        };
+        for entry in entries {
             let entry = entry.unwrap();
-            let kind = entry.file_type().unwrap();
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("validation marker entry scan failed: {error}"),
+            };
             if kind.is_dir() {
                 directories.push(entry.path());
             } else if kind.is_file() && entry.file_name() == "validation-started" {
@@ -62,6 +71,20 @@ fn validation_start_marker_count(root: &Path) -> usize {
     }
     count
 }
+
+#[test]
+fn validation_marker_scan_observes_directory_creation_and_cleanup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let output = fixture.path().join("validation-output");
+    assert_eq!(validation_start_marker_count(&output), 0);
+    std::fs::create_dir_all(&output).unwrap();
+    assert_eq!(validation_start_marker_count(&output), 0);
+    std::fs::write(output.join("validation-started"), b"started").unwrap();
+    assert_eq!(validation_start_marker_count(&output), 1);
+    std::fs::remove_dir_all(&output).unwrap();
+    assert_eq!(validation_start_marker_count(&output), 0);
+}
+
 async fn validation_case_control(seconds: f64, cancel: bool) -> serde_json::Value {
     validation_case_control_with_cleanup_fault(seconds, cancel, false).await
 }
