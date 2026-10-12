@@ -1,0 +1,85 @@
+diff --git a/codex-rs/app-server-client/src/lib.rs b/codex-rs/app-server-client/src/lib.rs
+index cb9375f2..2ab13c6b 100644
+--- a/codex-rs/app-server-client/src/lib.rs
++++ b/codex-rs/app-server-client/src/lib.rs
+@@ -1115,7 +1115,16 @@ mod tests {
+             (SessionSource::Exec, ApiSessionSource::Exec),
+             (SessionSource::Cli, ApiSessionSource::Cli),
+         ] {
++            let phase_started = std::time::Instant::now();
++            eprintln!(
++                "[session-source-phase] source={expected_source:?} phase=before_start elapsed={:?}",
++                phase_started.elapsed()
++            );
+             let client = start_test_client(session_source).await;
++            eprintln!(
++                "[session-source-phase] source={expected_source:?} phase=before_thread_start elapsed={:?}",
++                phase_started.elapsed()
++            );
+             let parsed: ThreadStartResponse = client
+                 .request_typed(ClientRequest::ThreadStart {
+                     request_id: RequestId::Integer(2),
+@@ -1126,14 +1135,35 @@ mod tests {
+                 })
+                 .await
+                 .expect("thread/start should succeed");
++            eprintln!(
++                "[session-source-phase] source={expected_source:?} phase=after_thread_start elapsed={:?}",
++                phase_started.elapsed()
++            );
+             assert_eq!(parsed.thread.source, expected_source);
++            eprintln!(
++                "[session-source-phase] source={expected_source:?} phase=before_shutdown elapsed={:?}",
++                phase_started.elapsed()
++            );
+             client.shutdown().await.expect("shutdown should complete");
++            eprintln!(
++                "[session-source-phase] source={expected_source:?} phase=after_shutdown elapsed={:?}",
++                phase_started.elapsed()
++            );
+         }
+     }
+ 
+     #[tokio::test]
+     async fn threads_started_via_app_server_are_visible_through_typed_requests() {
++        let phase_started = std::time::Instant::now();
++        eprintln!(
++            "[thread-visible-phase] phase=before_start elapsed={:?}",
++            phase_started.elapsed()
++        );
+         let client = start_test_client(SessionSource::Cli).await;
++        eprintln!(
++            "[thread-visible-phase] phase=before_thread_start elapsed={:?}",
++            phase_started.elapsed()
++        );
+ 
+         let response: ThreadStartResponse = client
+             .request_typed(ClientRequest::ThreadStart {
+@@ -1145,6 +1175,10 @@ mod tests {
+             })
+             .await
+             .expect("thread/start should succeed");
++        eprintln!(
++            "[thread-visible-phase] phase=before_thread_read elapsed={:?}",
++            phase_started.elapsed()
++        );
+         let read = client
+             .request_typed::<codex_app_server_protocol::ThreadReadResponse>(
+                 ClientRequest::ThreadRead {
+@@ -1158,8 +1192,16 @@ mod tests {
+             .await
+             .expect("thread/read should return the newly started thread");
+         assert_eq!(read.thread.id, response.thread.id);
++        eprintln!(
++            "[thread-visible-phase] phase=before_shutdown elapsed={:?}",
++            phase_started.elapsed()
++        );
+ 
+         client.shutdown().await.expect("shutdown should complete");
++        eprintln!(
++            "[thread-visible-phase] phase=after_shutdown elapsed={:?}",
++            phase_started.elapsed()
++        );
+     }
+ 
+     #[tokio::test]

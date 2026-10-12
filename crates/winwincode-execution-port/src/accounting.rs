@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Financial-only statements from a trusted Device adapter. Provider payloads
-//! and credentials remain on the Device; this authority cannot execute work.
-
 use crate::{action_enforcement::ActionEnforcementSigningKey, generated::ExecutionLeaseStamp};
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{ModelExchangeId, Sha256Digest};
 
 pub const MAX_ACCOUNTING_STATEMENT_BYTES: usize = 2 * 1024 * 1024;
 
-/// Bounded financial query page; callers restart from zero after the final page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PendingAccountingPage {
@@ -17,7 +13,6 @@ pub struct PendingAccountingPage {
     pub next_offset: Option<u64>,
 }
 
-/// One immutable Provider receipt; absent metrics remain unknown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderAccountingReceipt {
@@ -30,8 +25,6 @@ pub struct ProviderAccountingReceipt {
     pub cost_microunits: Option<u64>,
 }
 
-/// A closed attempt's complete call manifest and available Provider receipts.
-/// Later statements may fill absent metrics, while known facts are immutable.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttemptAccountingStatement {
@@ -41,8 +34,6 @@ pub struct AttemptAccountingStatement {
     pub signature: Sha256Digest,
 }
 
-/// Signature-verified financial authority. Callers cannot construct this proof
-/// from JSON or bypass verification when importing durable Provider facts.
 #[derive(Clone, Debug)]
 pub struct VerifiedAccountingStatement(AttemptAccountingStatement);
 
@@ -54,9 +45,6 @@ impl VerifiedAccountingStatement {
 }
 
 impl AttemptAccountingStatement {
-    /// Produces the authority required by the durable receipt consumer.
-    /// # Errors
-    /// Rejects an invalid statement or signature.
     pub fn verified(
         &self,
         key: &ActionEnforcementSigningKey,
@@ -64,9 +52,6 @@ impl AttemptAccountingStatement {
         self.verify(key)?;
         Ok(VerifiedAccountingStatement(self.clone()))
     }
-    /// Signs a bounded statement using the explicit trusted Device key.
-    /// # Errors
-    /// Rejects malformed identities, duplicate slots, and oversized statements.
     pub fn sign(&mut self, key: &ActionEnforcementSigningKey) -> Result<(), &'static str> {
         self.validate()?;
         self.signature = key.accounting_signature(&self.unsigned_bytes()?);
@@ -74,9 +59,6 @@ impl AttemptAccountingStatement {
         Ok(())
     }
 
-    /// Checks the financial-only signature with a distinct MAC domain.
-    /// # Errors
-    /// Rejects unsigned, changed, malformed, or oversized statements.
     pub fn verify(&self, key: &ActionEnforcementSigningKey) -> Result<(), &'static str> {
         self.validate()?;
         self.encode()?;
@@ -94,9 +76,6 @@ impl AttemptAccountingStatement {
         Ok(())
     }
 
-    /// Encodes a bounded accounting statement.
-    /// # Errors
-    /// Rejects serialization or body-limit violations.
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
         let bytes = serde_json::to_vec(self).map_err(|_| "invalid accounting encoding")?;
         if bytes.len() > MAX_ACCOUNTING_STATEMENT_BYTES {
@@ -105,9 +84,6 @@ impl AttemptAccountingStatement {
         Ok(bytes)
     }
 
-    /// Decodes a bounded statement; signature verification remains mandatory.
-    /// # Errors
-    /// Rejects malformed and oversized input.
     pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.is_empty() || bytes.len() > MAX_ACCOUNTING_STATEMENT_BYTES {
             return Err("accounting statement too large");

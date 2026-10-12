@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Connect-code and access-grant application service vertical tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -155,7 +153,6 @@ fn service_consumes_codes_exactly_once_and_derives_user_permissions() {
         assert_eq!(first.grant.permissions, GrantPermissions::USE_MANAGE_SHARE);
         assert_eq!(first.code.state, ConnectCodeState::Consumed);
 
-        // A replayed consume never wins and never creates a second grant.
         let replay = codes
             .consume_and_grant(
                 &consume(10),
@@ -167,7 +164,6 @@ fn service_consumes_codes_exactly_once_and_derives_user_permissions() {
         first
     };
 
-    // A later user only receives `use`.
     {
         let mut codes = ConnectCodeService::new(&mut storage);
         codes
@@ -192,7 +188,6 @@ fn service_consumes_codes_exactly_once_and_derives_user_permissions() {
         assert_eq!(second.grant.expires_at, Some(instant(T1)));
     }
 
-    // Grants are durably visible per user and client.
     {
         let mut grants = AccessGrantService::new(&mut storage);
         let active_alice = grants
@@ -258,7 +253,6 @@ fn service_revocation_is_immediate_and_terminal_states_hold() {
         let mut grants = AccessGrantService::new(&mut storage);
         let revoked = grants.revoke_grant(&grant_id_owned, 1).expect("revoke");
         assert_eq!(revoked.state, AccessGrantState::Revoked);
-        // Revocation is immediately visible to the query surface.
         assert!(
             grants
                 .active_grant(&client, &alice)
@@ -271,10 +265,8 @@ fn service_revocation_is_immediate_and_terminal_states_hold() {
                 .expect("active grants")
                 .is_empty()
         );
-        // Revoking a revoked grant is an idempotent replay.
         let replay = grants.revoke_grant(&grant_id_owned, 2).expect("replay");
         assert_eq!(replay.state, AccessGrantState::Revoked);
-        // The connect-code source can never bypass the consume path.
         expect_kind(
             &grants
                 .create_grant(
@@ -288,7 +280,6 @@ fn service_revocation_is_immediate_and_terminal_states_hold() {
         );
     }
 
-    // Codes revoke and refresh through the service with frozen transitions.
     {
         let mut codes = ConnectCodeService::new(&mut storage);
         codes
@@ -313,7 +304,6 @@ fn service_revocation_is_immediate_and_terminal_states_hold() {
             .revoke_code(&ConnectCodeRevocation::try_new(code_id(41), 1).expect("revocation"))
             .expect("revoke");
         assert_eq!(revoked.state, ConnectCodeState::Revoked);
-        // Revoking a refresh-revoked code is an idempotent replay.
         let replay = codes
             .revoke_code(&ConnectCodeRevocation::try_new(code_id(41), 2).expect("revocation"))
             .expect("replay revoke");
@@ -396,7 +386,6 @@ fn service_expires_temporary_grants_and_codes_by_time_judgement() {
                 .expect("active grant")
                 .is_none()
         );
-        // The trusted grant without an expiry never expires.
         assert!(
             grants
                 .active_grant(&client, &bob)
@@ -418,7 +407,6 @@ fn service_expires_temporary_grants_and_codes_by_time_judgement() {
         );
         let expired = codes.expire_codes_due(&instant(T1)).expect("sweep");
         assert_eq!(expired, vec![code_id(60)]);
-        // An expired code can no longer be consumed even before the sweep.
         codes
             .publish(&publication(61, &client, T1), &instant(T0))
             .expect("publish");
@@ -459,7 +447,6 @@ fn service_throttles_connect_attempts_with_fixed_windows() {
                 .connect_attempts_blocked(AttemptDimension::Ip, "203.0.113.9", &anchor, 4)
                 .expect("not blocked")
         );
-        // Other dimensions and subjects count independently.
         assert!(
             !codes
                 .connect_attempts_blocked(AttemptDimension::User, &user_id(9), &anchor, 1)
@@ -475,7 +462,6 @@ fn service_throttles_connect_attempts_with_fixed_windows() {
             .record_connect_failure(AttemptDimension::Ip, "203.0.113.9", &next_window)
             .expect("record in next window");
         assert_eq!(reset.failed_attempts, 1);
-        // The user dimension only accepts canonical user ids.
         expect_kind(
             &codes
                 .record_connect_failure(AttemptDimension::User, "someone", &anchor)
@@ -525,7 +511,6 @@ fn service_burns_attempts_and_reports_exhaustion_before_consume() {
                 .expect_err("consume exhausted code"),
             ClientConnectServiceErrorKind::AttemptsExhausted,
         );
-        // Malformed publications are rejected before any durable write.
         let malformed = ConnectCodePublication::try_new(
             code_id(81),
             "sha256:short",
@@ -542,7 +527,6 @@ fn service_burns_attempts_and_reports_exhaustion_before_consume() {
         );
     }
 
-    // The exhausted consume rolled back: the client still has no grant.
     {
         let mut grants = AccessGrantService::new(&mut storage);
         assert!(

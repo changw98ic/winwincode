@@ -45,9 +45,6 @@ const imported = specifier => import(
 
 const { windowBounds, mountWindowedList } = await imported('components/windowed-list.js')
 
-// The windowed list ships as the shared large-list facility.  Its canonical
-// budget (design page 04/06 rows at one 60px row height) stays fixed even
-// though the community client no longer mounts a delivery workbench.
 const rowHeightPx = 60
 const viewportRows = 24
 const overscanRows = 6
@@ -128,8 +125,6 @@ test('the windowed list sizes spacers instead of rendering hidden rows', () => {
     scroller.children[0].style.getPropertyValue('--wwc-window-spacer-height'),
     `${String((900 - overscanRows) * rowHeightPx)}px`,
   )
-  // The window only pins to the tail once the scroll position enters the last
-  // window-sized block, so the hidden tail here is still spacer-sized.
   const hiddenTailRows = 1_000 - (900 - overscanRows) - renderedRows
   assert.equal(
     scroller.children[2].style.getPropertyValue('--wwc-window-spacer-height'),

@@ -1,8 +1,7 @@
-use std::thread;
 use std::time::Duration;
 
-use super::RuntimeCommand;
 use super::RuntimeState;
+use super::timer_scheduler::TimerScheduler;
 use super::value::value_to_error_text;
 
 pub(super) struct ScheduledTimeout {
@@ -32,14 +31,13 @@ pub(super) fn schedule_timeout(
         .ok_or_else(|| "runtime state unavailable".to_string())?;
     let timeout_id = state.next_timeout_id;
     state.next_timeout_id = state.next_timeout_id.saturating_add(1);
-    let runtime_command_tx = state.runtime_command_tx.clone();
+    let scheduler = state
+        .timer_scheduler
+        .get_or_insert_with(|| TimerScheduler::new(state.runtime_command_tx.clone()));
+    scheduler.schedule(timeout_id, Duration::from_millis(delay_ms))?;
     state
         .pending_timeouts
         .insert(timeout_id, ScheduledTimeout { callback });
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(delay_ms));
-        let _ = runtime_command_tx.send(RuntimeCommand::TimeoutFired { id: timeout_id });
-    });
 
     Ok(timeout_id)
 }
@@ -56,6 +54,12 @@ pub(super) fn clear_timeout(
         return Err("runtime state unavailable".to_string());
     };
     state.pending_timeouts.remove(&timeout_id);
+    if let Some(scheduler) = state.timer_scheduler.as_ref() {
+        scheduler.cancel(timeout_id);
+    }
+    if state.pending_timeouts.is_empty() {
+        state.timer_scheduler = None;
+    }
     Ok(())
 }
 
@@ -67,7 +71,11 @@ pub(super) fn invoke_timeout_callback(
         let state = scope
             .get_slot_mut::<RuntimeState>()
             .ok_or_else(|| "runtime state unavailable".to_string())?;
-        state.pending_timeouts.remove(&timeout_id)
+        let callback = state.pending_timeouts.remove(&timeout_id);
+        if state.pending_timeouts.is_empty() {
+            state.timer_scheduler = None;
+        }
+        callback
     };
     let Some(callback) = callback else {
         return Ok(());

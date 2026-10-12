@@ -35,7 +35,6 @@ export interface QueryInvalidation {
   readonly actor?: Actor
   readonly scope?: Scope
   readonly queries?: readonly QueryRequest['query'][]
-  /** Security and retention boundaries discard the handoff snapshot as well as freshness. */
   readonly discard?: boolean
 }
 
@@ -60,7 +59,6 @@ export interface QueryCache<
   close(): void
 }
 
-/** Cache-only lifecycle seam shared by feature view-models; it owns no business state. */
 export interface QueryCacheLifecycle<
   ProductQueryRequest extends QueryRequest = QueryRequest,
 > {
@@ -165,7 +163,6 @@ interface QueryCacheClientErrorFields {
   readonly retryable: boolean
 }
 
-/** Error raised by cache lifecycle and correlation checks before a transport is involved. */
 export class QueryCacheClientError extends Error {
   readonly kind: BrowserControlClientErrorKind
   readonly code: string
@@ -238,10 +235,6 @@ function scopeIdentity(scope: Scope): string {
   return stableJson(scope)
 }
 
-/**
- * Stable transport-snapshot identity. Request IDs are deliberately excluded so
- * one authoritative snapshot can be handed to several independently correlated callers.
- */
 export function queryCacheKey(query: QueryRequest): string {
   return stableJson({
     actor: query.actor,

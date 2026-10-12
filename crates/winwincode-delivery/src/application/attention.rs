@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Business Attention transitions.
-
 use std::ops::Deref;
 
 use winwincode_domain::{AttentionItemId, WorkRunId};
@@ -33,8 +31,6 @@ pub enum AttentionDecision {
 pub struct ResolveAttentionInput {
     pub expected_revision: u64,
     pub attention_item_id: AttentionItemId,
-    /// Canonical machine run that produced the item. Human review identity is
-    /// recovered from the validated solution-review context.
     pub work_run_id: Option<WorkRunId>,
     pub expected_context: String,
     pub actor: String,
@@ -43,7 +39,6 @@ pub struct ResolveAttentionInput {
     pub now_millis: u64,
 }
 
-/// One application-owned Attention resolution ready for its dedicated journal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAttentionTransition {
     source_delivery: Delivery,
@@ -88,16 +83,6 @@ impl Deref for ResolvedAttentionTransition {
     }
 }
 
-/// Resolves one current business Attention item without starting execution.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, actor, item, `WorkRun`, `Spec`, frozen context,
-/// time, or decision state. No snapshot is returned on error.
-///
-/// # Panics
-/// This transition does not intentionally panic; all indexed data is checked
-/// before use.
 pub fn resolve_attention(
     delivery: &Delivery,
     input: ResolveAttentionInput,
@@ -121,6 +106,39 @@ pub fn resolve_attention(
             )
         })?;
     let item = &delivery.snapshot().attention_items[item_index];
+    validate_attention_resolution(delivery, item, &input)?;
+    let solution_review_settlement = resolve_typed_review_context(delivery, item, &input)?;
+    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
+    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "computed verdict Attention must be resolved before stage movement",
+        ));
+    }
+    let resolved = apply_resolution(
+        delivery.clone().into_snapshot(),
+        input,
+        item_index,
+        verdict_actions,
+        solution_review_settlement,
+    )?;
+    Ok(ResolvedAttentionTransition {
+        source_delivery: delivery.clone(),
+        delivery: resolved,
+    })
+}
+
+fn validate_attention_resolution(
+    delivery: &Delivery,
+    item: &AttentionItem,
+    input: &ResolveAttentionInput,
+) -> Result<(), CoordinationError> {
+    if super::candidate_rejection::rejection_attention_fact(item).is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "a rejected candidate cannot resume through generic Attention resolution; its execution result and source remain retained",
+        ));
+    }
     if item.delivery_id != *delivery.id()
         || item.delivery_spec_id != delivery.snapshot().spec.id
         || item.status != AttentionItemStatus::Open
@@ -182,25 +200,7 @@ pub fn resolve_attention(
             ));
         }
     }
-    let solution_review_settlement = resolve_typed_review_context(delivery, item, &input)?;
-    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
-    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "computed verdict Attention must be resolved before stage movement",
-        ));
-    }
-    let resolved = apply_resolution(
-        delivery.clone().into_snapshot(),
-        input,
-        item_index,
-        verdict_actions,
-        solution_review_settlement,
-    )?;
-    Ok(ResolvedAttentionTransition {
-        source_delivery: delivery.clone(),
-        delivery: resolved,
-    })
+    Ok(())
 }
 
 fn resolve_typed_review_context(
@@ -353,11 +353,6 @@ fn apply_resolution(
         if actions.is_empty() {
             next_delivery_status(item_type, review_decision)?
         } else {
-            // A computed-verdict Attention (CompleteVerification /
-            // RetryVerification) is resolved only to collect missing direct
-            // evidence.  The previous verdict cannot authorize a second
-            // computation, so invalidate the current verdict while the
-            // append-only journal retains the prior revision history.
             if input.decision == AttentionDecision::Resolved
                 && item_type == AttentionItemType::VerificationBlocked
                 && actions.contains(&VerdictAttentionAction::RetryVerification)

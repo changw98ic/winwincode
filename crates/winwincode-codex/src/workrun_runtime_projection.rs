@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable `StrongFlow` stage-product projection over the canonical runtime stream.
-//!
-//! The projector accepts only trusted Codex lifecycle facts. It prepares the
-//! role-specific semantic product, assigns a deterministic event identity, and
-//! gives the complete generated frame to the existing runtime replay state
-//! machine before the caller may expose it or complete the turn.
-
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
+    sync::Mutex,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,7 +23,9 @@ use winwincode_execution_port::{
         ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
         ExecutionJob, ExecutionLeaseStamp, RuntimeEventMessage, RuntimeEventMessageKind,
     },
-    replay::{ReplayAuthority, ReplayDecision, ReplaySnapshot, ReplayStore},
+    replay::{
+        ReplayAuthority, ReplayDecision, ReplayFrame, ReplayReadQuery, ReplaySnapshot, ReplayStore,
+    },
     runtime_replay::{RuntimeReplayError, RuntimeReplayIdentity, RuntimeReplayResponder},
 };
 
@@ -45,7 +41,6 @@ const JSON_CONTENT_TYPE: &str = "application/json";
 const VERIFICATION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
 pub(crate) const VERIFICATION_POLICY_SOURCE: &str = "policy:session";
 
-/// Lease-bound identity and timestamps supplied by the production adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkRunRuntimeContext<'identity> {
     pub lease: &'identity ExecutionLeaseStamp,
@@ -55,7 +50,6 @@ pub struct WorkRunRuntimeContext<'identity> {
     pub sent_at: &'identity Instant,
 }
 
-/// Trusted fields from one completed Codex command.
 #[derive(Clone, Copy, Debug)]
 pub struct StageCommandEnd<'source> {
     pub command: &'source [String],
@@ -66,7 +60,6 @@ pub struct StageCommandEnd<'source> {
     pub artifact: Option<&'source ArtifactReference>,
 }
 
-/// Trusted fields from one completed Codex turn.
 #[derive(Clone, Copy, Debug)]
 pub struct StageTurnCompletion<'source> {
     pub turn_id: &'source str,
@@ -74,7 +67,6 @@ pub struct StageTurnCompletion<'source> {
     pub failed: bool,
 }
 
-/// Durable projection result for one trusted Codex source fact.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkRunRuntimeRetention {
     Ready {
@@ -90,7 +82,6 @@ pub enum WorkRunRuntimeRetention {
     },
 }
 
-/// Fail-closed stage runtime projection error.
 #[derive(Debug)]
 pub enum WorkRunRuntimeProjectionError<AuthorityError, StoreError> {
     Product(StageProductError),
@@ -123,10 +114,19 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Stateless coordinator over the existing durable runtime replay authority.
 #[derive(Debug, Default)]
 pub struct WorkRunRuntimeProjector {
     responder: RuntimeReplayResponder,
+    policy_rows: Mutex<Option<HashMap<(String, String), CachedPolicyRow>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedPolicyRow {
+    event_id: String,
+    sequence: u64,
+    semantic_digest: String,
+    frame_digest: String,
+    observed_highest: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -141,11 +141,10 @@ impl WorkRunRuntimeProjector {
     pub const fn new() -> Self {
         Self {
             responder: RuntimeReplayResponder::new(),
+            policy_rows: Mutex::new(None),
         }
     }
 
-    /// Feedback for correcting a rejected result, derived only from this
-    /// lease's retained command receipts and sealed stage input.
     pub(crate) fn verification_repair_prompt<S: ReplayStore>(
         store: &mut S,
         context: WorkRunRuntimeContext<'_>,
@@ -154,27 +153,23 @@ impl WorkRunRuntimeProjector {
         let snapshot = load_snapshot(store, &replay_identity(context))?;
         let catalog = evidence_catalog(&snapshot)?;
         let mut sources = catalog.into_iter().map(|(source_id, binding)| {
-            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome)})
+            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome), "command_digest":binding.command_digest})
         }).collect::<Vec<_>>();
         sources.sort_by(|left, right| left["source_id"].as_str().cmp(&right["source_id"].as_str()));
         let input = serde_json::to_string(&job.work_input)
             .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?;
+        let evidence_instruction = if sources.is_empty() {
+            "There are no retained verification command receipts. First run each assigned criterion's exact verificationMethod through exec_command in this read-only checkout and wait for completion. Only then return the verdict JSON. Tool names and command text are not source_id values."
+        } else {
+            "Run every assigned exact verificationMethod that is missing from the cited command receipts through exec_command in this read-only checkout. An inspection command does not replace the assigned method. Wait for completion and cite its actual source_id. If the assigned method reports missing or stale host test receipts, report fail with that command receipt; automatic rework must regenerate the host receipts. Do not claim pass from inspection or create a passing receipt yourself."
+        };
         Ok(format!(
-            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. If further evidence is needed, run the exact assigned verification command in this same read-only candidate checkout. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions.\nSealed workInput: {input}\nRetained direct receipts: {}",
+            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. If further evidence is needed, run the exact assigned verification command in this same read-only candidate checkout. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions. {evidence_instruction}\nSealed workInput: {input}\nRetained direct receipts: {}",
             serde_json::to_string(&sources)
                 .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?
         ))
     }
 
-    /// Retains one verification read-only policy for this runtime before direct
-    /// evidence; later turns replay that same attestation.
-    ///
-    /// Non-verification roles produce no stage product at turn start.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed source identity, stale stage input, replay conflicts,
-    /// or durable store failures.
     pub fn retain_turn_started<S, A>(
         &self,
         store: &mut S,
@@ -209,12 +204,6 @@ impl WorkRunRuntimeProjector {
         .map(Some)
     }
 
-    /// Retains one direct Command or Test outcome after the policy event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown source, missing policy predecessor, malformed direct
-    /// outcome, changed duplicate, replay conflict, or durable store failure.
     pub fn retain_exec_command_end<S, A>(
         &self,
         store: &mut S,
@@ -233,7 +222,7 @@ impl WorkRunRuntimeProjector {
         validate_source_id(command_end.turn_id)?;
         validate_source_id(command_end.call_id)?;
         let identity = replay_identity(context);
-        let snapshot = load_snapshot(store, &identity)?;
+        let mut snapshot = self.policy_snapshot(store, &identity, job)?;
         if !snapshot_has_policy(&snapshot, job)? {
             return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
         }
@@ -248,13 +237,26 @@ impl WorkRunRuntimeProjector {
             command_end.artifact,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let source = source_key("evidence", command_end.turn_id, Some(command_end.call_id));
+        let event_id =
+            projected_event_id(job, &source).map_err(WorkRunRuntimeProjectionError::Product)?;
+        let exact = load_exact_snapshot(store, &identity, &event_id.0, 0)?;
+        snapshot.ack_sequence = exact.ack_sequence;
+        snapshot.highest_sequence = exact.highest_sequence;
+        if let Some(frame) = exact
+            .events
+            .into_iter()
+            .find(|frame| frame.event_id == event_id.0)
+        {
+            snapshot.events.push(frame);
+        }
         self.retain_product_with_snapshot(
             store,
             authority,
             context,
             Projection {
                 job,
-                source: &source_key("evidence", command_end.turn_id, Some(command_end.call_id)),
+                source: &source,
                 product: &product,
             },
             &snapshot,
@@ -262,18 +264,6 @@ impl WorkRunRuntimeProjector {
         .map(Some)
     }
 
-    /// Retains the strict Planner or verification final Activity before turn
-    /// completion is allowed to become terminal.
-    ///
-    /// A failed Codex turn produces no semantic result. Successful relevant
-    /// turns require a canonical final message; verification references are
-    /// resolved only against earlier direct evidence in this runtime stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing or malformed final JSON, stale stage facts, result
-    /// references without an earlier direct event, changed duplicates, replay
-    /// conflicts, or durable store failures.
     pub fn retain_turn_completed<S, A>(
         &self,
         store: &mut S,
@@ -291,12 +281,6 @@ impl WorkRunRuntimeProjector {
         )
     }
 
-    /// Retains the independent verification result together with exact claims
-    /// recovered from this run's durable Fusion panel.
-    ///
-    /// # Errors
-    /// Rejects malformed final output, invalid or stale Evidence, and durable
-    /// replay conflicts.
     pub fn retain_turn_completed_with_fusion_claims<S, A>(
         &self,
         store: &mut S,
@@ -330,6 +314,7 @@ impl WorkRunRuntimeProjector {
                     return Err(WorkRunRuntimeProjectionError::InvalidSource);
                 }
                 let bound = bind_verification_evidence(
+                    job,
                     final_message,
                     &snapshot,
                     expected_fusion_claim_keys,
@@ -375,7 +360,7 @@ impl WorkRunRuntimeProjector {
         S: ReplayStore,
         A: ReplayAuthority<Context = RuntimeReplayIdentity>,
     {
-        let snapshot = load_snapshot(store, &replay_identity(context))?;
+        let snapshot = self.policy_snapshot(store, &replay_identity(context), job)?;
         self.retain_product_with_snapshot(
             store,
             authority,
@@ -387,6 +372,109 @@ impl WorkRunRuntimeProjector {
             },
             &snapshot,
         )
+    }
+
+    fn policy_snapshot<S: ReplayStore, AuthorityError>(
+        &self,
+        store: &mut S,
+        identity: &RuntimeReplayIdentity,
+        job: &ExecutionJob,
+    ) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+        let key = (
+            identity.stream_key().as_str().to_owned(),
+            stage_product_job_digest(job)
+                .map_err(WorkRunRuntimeProjectionError::Product)?
+                .0,
+        );
+        let cached = self
+            .policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .as_ref()
+            .and_then(|rows| rows.get(&key))
+            .cloned();
+        if let Some(cached) = cached {
+            let snapshot = load_exact_snapshot(store, identity, &cached.event_id, cached.sequence)?;
+            let frame = snapshot
+                .events
+                .iter()
+                .find(|frame| frame.event_id == cached.event_id)
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if frame.sequence != cached.sequence
+                || frame.digest != cached.semantic_digest
+                || frame_digest(frame) != cached.frame_digest
+                || snapshot.highest_sequence < cached.observed_highest
+                || !snapshot_has_policy(&snapshot, job)?
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            if snapshot.highest_sequence > cached.observed_highest {
+                validate_policy_tail(
+                    store,
+                    identity,
+                    cached.observed_highest,
+                    snapshot.highest_sequence,
+                )?;
+            }
+            let mut rows = self
+                .policy_rows
+                .lock()
+                .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            let row = rows
+                .as_mut()
+                .and_then(|rows| rows.get_mut(&key))
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if snapshot.highest_sequence < row.observed_highest {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            row.observed_highest = snapshot.highest_sequence;
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let canonical = projected_event_id(job, VERIFICATION_POLICY_SOURCE)
+            .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let mut snapshot = load_exact_snapshot(store, identity, &canonical.0, 0)?;
+        if snapshot.highest_sequence > snapshot.events.len() as u64 {
+            snapshot = load_snapshot(store, identity)?;
+        }
+        let Some(policy) = retained_policy(&snapshot)? else {
+            if snapshot
+                .events
+                .iter()
+                .any(|frame| frame.event_id == canonical.0)
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            return Ok(ReplaySnapshot {
+                events: Vec::new(),
+                ..snapshot
+            });
+        };
+        let frame = snapshot
+            .events
+            .iter()
+            .find(|frame| frame.event_id == policy.event.event_id.0)
+            .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        validate_runtime_frame(frame, identity)?;
+        if !snapshot_has_policy(&snapshot, job)? {
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let cached = cached_policy_row(frame, snapshot.highest_sequence);
+        self.policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .get_or_insert_with(HashMap::new)
+            .insert(key, cached);
+        Ok(ReplaySnapshot {
+            events: vec![frame.clone()],
+            ..snapshot
+        })
     }
 
     fn retain_product_with_snapshot<S, A>(
@@ -403,9 +491,6 @@ impl WorkRunRuntimeProjector {
     {
         let event_id = projected_event_id(projection.job, projection.source)
             .map_err(WorkRunRuntimeProjectionError::Product)?;
-        // The policy attests this runtime's frozen candidate, not a single
-        // model turn. Reuse its original identity, including a frame retained
-        // by an older adapter, when a format correction starts another turn.
         let existing = if projection.source == VERIFICATION_POLICY_SOURCE {
             retained_policy(snapshot)?
         } else {
@@ -523,6 +608,107 @@ fn replay_identity(context: WorkRunRuntimeContext<'_>) -> RuntimeReplayIdentity 
     }
 }
 
+fn cached_policy_row(frame: &ReplayFrame, observed_highest: u64) -> CachedPolicyRow {
+    CachedPolicyRow {
+        event_id: frame.event_id.clone(),
+        sequence: frame.sequence,
+        semantic_digest: frame.digest.clone(),
+        frame_digest: frame_digest(frame),
+        observed_highest,
+    }
+}
+
+fn frame_digest(frame: &ReplayFrame) -> String {
+    format!("sha256:{:x}", Sha256::digest(&frame.frame))
+}
+
+fn validate_runtime_frame<AuthorityError, StoreError>(
+    frame: &ReplayFrame,
+    identity: &RuntimeReplayIdentity,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
+    let message: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let canonical =
+        serde_json::to_vec(&message).map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let event = serde_json::to_vec(&message.event)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    if canonical != frame.frame
+        || message.kind != RuntimeEventMessageKind::RuntimeEvent
+        || message.schema_version != SchemaVersion::WinwincodeV1
+        || message.event.event_id.0 != frame.event_id
+        || u64::try_from(message.event.sequence.0).ok() != Some(frame.sequence)
+        || format!("sha256:{:x}", Sha256::digest(event)) != frame.digest
+        || winwincode_execution_port::runtime_replay::runtime_event_stream_key(&message)
+            != identity.stream_key()
+    {
+        return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+    }
+    Ok(())
+}
+
+fn validate_policy_tail<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    mut after: u64,
+    through: u64,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    while after < through {
+        let limit = usize::try_from((through - after).min(256))
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let mut snapshot = if let Some(snapshot) = store
+            .load_indexed(
+                &identity.stream_key(),
+                ReplayReadQuery::After {
+                    sequence: after,
+                    max_events: limit,
+                },
+            )
+            .map_err(WorkRunRuntimeProjectionError::Store)?
+        {
+            snapshot
+        } else {
+            let mut snapshot = load_snapshot(store, identity)?;
+            snapshot
+                .events
+                .retain(|frame| frame.sequence > after && frame.sequence <= through);
+            snapshot
+        };
+        snapshot.events.retain(|frame| frame.sequence <= through);
+        if snapshot.highest_sequence < through
+            || snapshot.events.is_empty()
+            || retained_policy(&snapshot)?.is_some()
+        {
+            return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+        }
+        for frame in &snapshot.events {
+            if frame.sequence != after + 1 {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            after = frame.sequence;
+        }
+    }
+    Ok(())
+}
+
+fn load_exact_snapshot<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    event_id: &str,
+    sequence: u64,
+) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    if let Some(snapshot) = store
+        .load_indexed(
+            &identity.stream_key(),
+            ReplayReadQuery::Conflict { event_id, sequence },
+        )
+        .map_err(WorkRunRuntimeProjectionError::Store)?
+    {
+        return Ok(snapshot);
+    }
+    load_snapshot(store, identity)
+}
+
 fn load_snapshot<S, AuthorityError>(
     store: &mut S,
     identity: &RuntimeReplayIdentity,
@@ -592,14 +778,13 @@ fn snapshot_has_policy<AuthorityError, StoreError>(
 }
 
 fn bind_verification_evidence<AuthorityError, StoreError>(
+    job: &ExecutionJob,
     final_message: &str,
     snapshot: &ReplaySnapshot,
     expected_fusion_claim_keys: Option<&[String]>,
 ) -> Result<Vec<u8>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
     let result: ModelVerificationResult = crate::structured_result::decode(final_message)
         .map_err(|()| WorkRunRuntimeProjectionError::InvalidModelResult)?;
-    // Providers may serialize schema-constrained JSON with different key order
-    // or whitespace. Bind typed fields, then serialize the authoritative result.
     let catalog = evidence_catalog(snapshot)?;
     let fusion_investigations = bind_fusion_investigations(
         expected_fusion_claim_keys,
@@ -614,6 +799,33 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                 || finding.explanation.trim() == "OBSERVED_RESULT"
             {
                 return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
+            if let Some(method) = finding.criterion_id.as_ref().and_then(|id| {
+                job.work_input
+                    .as_ref()?
+                    .work_contract
+                    .criteria
+                    .iter()
+                    .find(|criterion| criterion.id.0 == *id)?
+                    .verification_method
+                    .as_deref()
+            }) {
+                let approved = verification_method_digest(method)
+                    .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                let observed = finding
+                    .evidence_sources
+                    .iter()
+                    .filter_map(|source| catalog.get(&source.source_id))
+                    .filter(|evidence| evidence.command_digest.as_ref() == Some(&approved))
+                    .collect::<Vec<_>>();
+                if observed.is_empty()
+                    || finding.verdict == "pass"
+                        && !observed
+                            .iter()
+                            .any(|evidence| evidence.outcome == BoundEvidenceOutcome::Succeeded)
+                {
+                    return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+                }
             }
             let evidence_sources = finding
                 .evidence_sources
@@ -631,9 +843,6 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
             Ok(BoundVerificationFinding {
                 finding_id: finding.finding_id,
                 criterion_id: finding.criterion_id,
-                // A successful inspection proves that the command ran, not
-                // that its output satisfies the business criterion. Retain
-                // the model finding and bind execution facts separately.
                 verdict: finding.verdict,
                 explanation: finding.explanation,
                 evidence_sources,
@@ -728,9 +937,6 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         .or_else(|| value.get("exitCode"))
         .and_then(Value::as_i64);
     match status.as_deref() {
-        // Timeout, cancel, policy denial, infrastructure failure and plain
-        // failure are all terminal failures — the categories stay documented
-        // here even though they share one outcome.
         Some(
             "timed-out"
             | "timeout"
@@ -754,7 +960,6 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
     }
 }
 
-/// Core's final-output constraint. Runtime evidence binding remains authoritative.
 pub(crate) fn verification_result_json_schema() -> Value {
     verification_result_schema(false)
 }
@@ -925,6 +1130,7 @@ struct EvidenceBinding {
     kind: EvidenceKind,
     event_id: String,
     outcome: BoundEvidenceOutcome,
+    command_digest: Option<Sha256Digest>,
 }
 
 fn evidence_catalog<AuthorityError, StoreError>(
@@ -961,6 +1167,12 @@ fn evidence_catalog<AuthorityError, StoreError>(
                 kind,
                 event_id: message.event.event_id.0,
                 outcome: sealed_command_outcome(&value),
+                command_digest: value
+                    .get("command_digest")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?,
             },
         );
         if previous.is_some() {
@@ -976,8 +1188,6 @@ fn decode_payload(payload: &EncodedPayload) -> Option<Vec<u8>> {
     (digest == payload.payload_digest).then_some(bytes)
 }
 
-/// Bind a successful check after literal inspection commands to the approved
-/// method. The original Core invocation remains in the source call's rollout.
 fn verification_command_digest(
     job: &ExecutionJob,
     end: StageCommandEnd<'_>,
@@ -1013,8 +1223,6 @@ fn inspection_tail_digest(command: &[String]) -> Option<Sha256Digest> {
     if inspections.is_empty() || !inspections.iter().all(|words| is_literal_inspection(words)) {
         return None;
     }
-    // ponytail: only literal inspection prefixes qualify. General shell flow
-    // needs per-process completion facts, not guesses from a shell exit code.
     let mut pending = vec![tree.root_node()];
     let mut last_command = None;
     let mut last_start = 0;
@@ -1300,7 +1508,7 @@ mod tests {
                 description: "The exact fixture behavior is verified.".to_owned(),
                 required: true,
                 required_evidence_class: "machine".into(),
-                verification_method: Some("Run the exact fixture check.".to_owned()),
+                verification_method: Some("cargo test".to_owned()),
             }],
             id: contract_id.clone(),
             objective: "Implement fixture".to_owned(),
@@ -1496,6 +1704,43 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn inspection_receipt_cannot_finish_an_assigned_test_before_react_correction() {
+        for verdict in ["pass", "fail"] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let mut job = job("reviewer");
+            job.work_input.as_mut().unwrap().work_contract.criteria[0].verification_method =
+                Some("cargo test".to_owned());
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            let mut result: Value = serde_json::from_str(VERIFICATION_RESULT).unwrap();
+            result["findings"][0]["verdict"] = serde_json::json!(verdict);
+            result["findings"][0]["evidence_sources"] =
+                serde_json::json!([{"source_id":"call-command"}]);
+            let message = serde_json::to_string(&result).unwrap();
+            let before = store.0.clone();
+            assert!(
+                matches!(
+                    projector.retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    ),
+                    Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+                ),
+                "{verdict} with only an inspection must request correction"
+            );
+            assert_eq!(store.0, before);
+        }
     }
 
     #[test]
@@ -2406,4 +2651,5 @@ mod tests {
             "command"
         );
     }
+    include!("storage_workrun_regression.rs");
 }

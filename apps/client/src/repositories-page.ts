@@ -21,7 +21,6 @@ export interface RepositoriesPageOptions {
 
 export interface RepositoriesPage {
   close(): void
-  /** Show or hide the area; selection state survives visibility changes. */
   setVisible(visible: boolean): void
 }
 
@@ -44,15 +43,9 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-/** §16.5: the unavailable read keeps the shown cards and explains itself. */
 const UNAVAILABLE_TEXT
   = '暂时无法列出仓库，请检查连接后重试。'
 
-/**
- * Mount the signed-in repository area for the selected Client device. The
- * area renders the same shell audit constraints as the Clients area: titles
- * as styled paragraphs and one polite alert channel of its own.
- */
 export function mountRepositoriesPage(options: RepositoriesPageOptions): RepositoriesPage {
   const document = options.root.ownerDocument
   const region = element(document, 'section', 'wwc-repositories')
@@ -107,8 +100,6 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
   function updateCard(refs: RepositoryCardRefs, repository: ControlPlaneRepositorySummary): void {
     refs.card.setAttribute('aria-label', `${repository.displayName} (${repository.defaultBranch})`)
     refs.name.textContent = repository.displayName
-    // §16.5: no absolute path is ever rendered; only Server-owned display
-    // names, branches, dirty state, and the short HEAD hash appear.
     const availabilityText = repositoryAvailabilityText(repository)
     refs.availability.textContent = availabilityText ?? ''
     refs.availability.dataset.tone = repositoryAvailabilityTone(repository)
@@ -134,8 +125,6 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
     cardCollection.update(snapshot.repositories)
     const loading = snapshot.status === 'loading' && snapshot.repositories.length === 0
     empty.textContent = '该设备还没有被授权的仓库。'
-    // An unavailable read explains itself through the alert channel and never
-    // claims the empty state, mirroring the Clients area semantics.
     empty.hidden = snapshot.clientId === null
       || loading
       || unavailable

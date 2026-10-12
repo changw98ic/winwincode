@@ -2,7 +2,6 @@
 
 import type { SolutionReviewDiagramProjection } from './generated/contracts.js'
 
-/** Render the sealed graph as SVG with a complete, readable text equivalent. */
 export function solutionDiagram(document: Document, diagram: SolutionReviewDiagramProjection, markerId: string): HTMLElement {
   const figure = document.createElement('figure')
   figure.className = 'wwc-review-diagram'

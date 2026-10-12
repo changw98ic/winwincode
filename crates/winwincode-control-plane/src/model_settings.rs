@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scope-inherited model settings and secret-free route resolution.
-//!
-//! Settings persist only Provider/model identifiers. Resolution joins the
-//! selected identifiers to the current [`crate::ProviderCatalogService`] and
-//! returns the generated [`ModelRoute`]. Credential reference metadata comes
-//! from that catalog join; this module never resolves a secret, performs policy
-//! admission, or invokes a Provider.
-
 use std::fmt::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
@@ -41,12 +33,10 @@ use winwincode_provider::credential_leak_gate::{
 const STATE_SCHEMA: &str = "winwincode.model-settings.v1";
 const STREAM_PREFIX: &str = "model-settings:";
 const EVENT_TOPIC: &str = "model.settings.changed.v1";
-/// Canonical local default used before a target has durable settings.
 pub const DEFAULT_WORKER_CONCURRENCY_LIMIT: u64 = 1;
 const MAX_WORKER_CONCURRENCY_LIMIT: u64 = 10_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// A setting target in the exact supported inheritance hierarchy.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelSettingsTarget {
@@ -65,7 +55,6 @@ pub enum ModelSettingsTarget {
     },
 }
 
-/// Provider/model identifiers saved as one scope override.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSelection {
@@ -73,7 +62,6 @@ pub struct ModelSelection {
     pub model_id: String,
 }
 
-/// The complete settings value atomically replaced at one target revision.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsValues {
@@ -81,7 +69,6 @@ pub struct ModelSettingsValues {
     pub worker_concurrency_limit: u64,
 }
 
-/// Exact durable override plus its currently resolved effective route.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsProjection {
@@ -92,22 +79,13 @@ pub struct ModelSettingsProjection {
     pub revision: u64,
 }
 
-/// Durable settings facts read without catalog resolution.
-///
-/// The stored selection may be temporarily unresolved (for example right
-/// after the catalog dropped the previously selected model), so this read
-/// carries only what is durably stored instead of a resolved route.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredModelSettings {
-    /// Durable optimistic-concurrency revision of the target.
     pub revision: u64,
-    /// Stored Provider/model override, resolved only on demand.
     pub selection: Option<ModelSelection>,
-    /// Durable Worker concurrency limit.
     pub worker_concurrency_limit: u64,
 }
 
-/// Scoped idempotency identity and optimistic settings revision.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsRequest {
@@ -117,7 +95,6 @@ pub struct ModelSettingsRequest {
     pub expected_revision: u64,
 }
 
-/// Durable model-settings mutation category.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelSettingsChange {
@@ -125,7 +102,6 @@ pub enum ModelSettingsChange {
     LegacyMigrated,
 }
 
-/// Durable result of one model-settings mutation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsMutationReceipt {
@@ -137,7 +113,6 @@ pub struct ModelSettingsMutationReceipt {
     pub projection: ModelSettingsProjection,
 }
 
-/// Stable route-setting and resolution failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelSettingsErrorKind {
     InvalidRequest,
@@ -154,7 +129,6 @@ pub enum ModelSettingsErrorKind {
     Storage,
 }
 
-/// Bounded error that never copies a model setting or Provider diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelSettingsError {
     kind: ModelSettingsErrorKind,
@@ -208,7 +182,6 @@ impl ModelSettingsError {
         )
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn kind(&self) -> ModelSettingsErrorKind {
         self.kind
@@ -336,7 +309,6 @@ struct CommandReceipt {
     digest: Sha256Digest,
 }
 
-/// Durable scope-setting service and deterministic route resolver.
 pub struct ModelSettingsService<'a> {
     storage: &'a mut dyn ProductStateStorage,
 }
@@ -347,15 +319,6 @@ impl<'a> ModelSettingsService<'a> {
         Self { storage }
     }
 
-    /// Replaces the complete settings value at one exact target.
-    ///
-    /// A non-empty selection must resolve through the current inherited
-    /// Provider catalog before it is committed. Clearing an override resumes
-    /// parent inheritance.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, unavailable, stale, or conflicting input.
     pub fn update(
         &mut self,
         request: &ModelSettingsRequest,
@@ -396,13 +359,6 @@ impl<'a> ModelSettingsService<'a> {
         )
     }
 
-    /// Applies the one generated `settings.update` contract as a complete
-    /// atomic replacement.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported scopes, invalid concurrency, a stale route
-    /// reference, revision conflicts, and changed-body request replays.
     pub fn update_generated(
         &mut self,
         command: &SettingsUpdateCommand,
@@ -438,13 +394,6 @@ impl<'a> ModelSettingsService<'a> {
         })
     }
 
-    /// Projects one target's durable revision and concurrency together with
-    /// the currently resolved inherited route.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when a configured Provider/model is missing or disabled,
-    /// or when the durable state belongs to another target.
     pub fn project(
         &mut self,
         target: &ModelSettingsTarget,
@@ -465,21 +414,6 @@ impl<'a> ModelSettingsService<'a> {
         Ok(projection)
     }
 
-    /// Returns one target's durable revision, stored selection, and
-    /// concurrency limit without resolving the stored selection through the
-    /// current Provider catalog.
-    ///
-    /// This bounded read exists for converge-style callers, such as the
-    /// Server startup model authority, that must observe the current revision
-    /// even when the stored selection is temporarily unresolved after a
-    /// catalog change. Unlike [`Self::project`], an unresolved selection is
-    /// returned as stored instead of failing the read; serving paths keep
-    /// using [`Self::project`] so an invalid default stays a hard error.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unsupported target or durable state that belongs to
-    /// another target.
     pub fn stored_configuration(
         &mut self,
         target: &ModelSettingsTarget,
@@ -493,13 +427,6 @@ impl<'a> ModelSettingsService<'a> {
         })
     }
 
-    /// Serves the generated `settings.get` response from one service-owned
-    /// projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported scopes, malformed query authority/page fields, or
-    /// unavailable configured Provider/model state.
     pub fn get(
         &mut self,
         query: &SettingsGetQuery,
@@ -522,16 +449,6 @@ impl<'a> ModelSettingsService<'a> {
         })
     }
 
-    /// Imports the old generated `ModelRoute` exactly once.
-    ///
-    /// Only Provider/model identifiers survive migration. The legacy
-    /// Credential reference is intentionally discarded and the resolved route
-    /// always receives the current reference from Provider Catalog.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable route, a repeated migration, stale revision, or
-    /// a conflicting scoped request replay.
     pub fn migrate_legacy_once(
         &mut self,
         request: &ModelSettingsRequest,
@@ -571,17 +488,6 @@ impl<'a> ModelSettingsService<'a> {
         )
     }
 
-    /// Resolves the most-specific configured override to the generated route.
-    ///
-    /// Setting priority is `ProductSession`, Repository, Project, Organization.
-    /// The first configured setting wins. If that explicit setting is disabled
-    /// or missing from the effective catalog, resolution fails closed rather
-    /// than silently falling back to a parent setting.
-    ///
-    /// # Errors
-    ///
-    /// Returns a distinct error for no setting, missing/disabled Provider, or
-    /// missing/disabled model.
     pub fn resolve(
         &mut self,
         target: &ModelSettingsTarget,
@@ -598,12 +504,6 @@ impl<'a> ModelSettingsService<'a> {
             .ok_or_else(ModelSettingsError::no_route)
     }
 
-    /// Returns the first configured selection and its durable settings source
-    /// without resolving it through the current Provider catalog.
-    ///
-    /// This read exists for the server-owned `ModelRoute` availability join: an
-    /// invalid default must remain visible as `default_route_invalid` instead
-    /// of making the whole bounded route list unavailable.
     pub(crate) fn effective_selection_source(
         &mut self,
         target: &ModelSettingsTarget,
@@ -622,8 +522,6 @@ impl<'a> ModelSettingsService<'a> {
         Ok(None)
     }
 
-    /// Returns the exact most-specific-to-broadest Catalog source chain used
-    /// by route resolution.
     pub(crate) fn effective_catalog_scopes(
         target: &ModelSettingsTarget,
     ) -> Result<Vec<Scope>, ModelSettingsError> {

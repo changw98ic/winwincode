@@ -22,7 +22,7 @@ pub(super) struct DelegateTarget {
     pub(super) delegate: Arc<dyn CodeModeSessionDelegate>,
 }
 
-pub(super) struct FailedSession {
+pub(super) struct RetiredSession {
     pub(super) cleanup: SessionCleanup,
     pub(super) cells: Vec<CellOwner>,
 }
@@ -189,11 +189,9 @@ impl SessionRegistry {
         })
     }
 
-    pub(super) fn remove_session(&mut self, session_id: &SessionId) -> Vec<CellOwner> {
-        let Some(session) = self.records.remove(session_id) else {
-            return Vec::new();
-        };
-        session
+    pub(super) fn remove_session(&mut self, session_id: &SessionId) -> Option<RetiredSession> {
+        let session = self.records.remove(session_id)?;
+        let cells = session
             .cells
             .into_values()
             .map(|cell_id| CellOwner {
@@ -201,10 +199,14 @@ impl SessionRegistry {
                 cell_id,
                 delegate: Arc::clone(&session.delegate),
             })
-            .collect()
+            .collect();
+        Some(RetiredSession {
+            cleanup: session.cleanup,
+            cells,
+        })
     }
 
-    pub(super) fn drain(&mut self) -> Vec<FailedSession> {
+    pub(super) fn drain(&mut self) -> Vec<RetiredSession> {
         let sessions = std::mem::take(&mut self.records);
         sessions
             .into_iter()
@@ -218,7 +220,7 @@ impl SessionRegistry {
                         delegate: Arc::clone(&session.delegate),
                     })
                     .collect();
-                FailedSession {
+                RetiredSession {
                     cleanup: session.cleanup,
                     cells,
                 }

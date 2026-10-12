@@ -1,0 +1,1016 @@
+diff --git a/codex-rs/code-mode/src/remote_session.rs b/codex-rs/code-mode/src/remote_session.rs
+index 50264212..dbd0a6a1 100644
+--- a/codex-rs/code-mode/src/remote_session.rs
++++ b/codex-rs/code-mode/src/remote_session.rs
+@@ -23,6 +23,7 @@ use codex_http_client::OutboundProxyPolicy;
+ use codex_install_context::InstallContext;
+ use tokio::sync::Semaphore;
+ use tokio::sync::watch;
++use tokio_util::sync::CancellationToken;
+ 
+ use self::connection::Connection;
+ use self::connection::ConnectionError;
+@@ -258,6 +259,7 @@ enum SessionState {
+     Opening {
+         remote: RemoteSession,
+         result_rx: watch::Receiver<Option<Result<SessionBinding, String>>>,
++        cancellation: CancellationToken,
+     },
+     Open(SessionBinding),
+     Closing,
+@@ -360,11 +362,13 @@ impl SessionInner {
+                             generation,
+                         };
+                         let (result_tx, result_rx) = watch::channel(None);
++                        let cancellation = CancellationToken::new();
+                         *state = SessionState::Opening {
+                             remote: remote.clone(),
+                             result_rx: result_rx.clone(),
++                            cancellation: cancellation.clone(),
+                         };
+-                        (result_rx, Some((remote, result_tx)))
++                        (result_rx, Some((remote, result_tx, cancellation)))
+                     }
+                     SessionState::Opening { result_rx, .. } => (result_rx.clone(), None),
+                     SessionState::Open(binding) if binding.connection.is_alive() => {
+@@ -380,13 +384,17 @@ impl SessionInner {
+                     }
+                 }
+             };
+-            if let Some((remote, result_tx)) = start {
++            if let Some((remote, result_tx, cancellation)) = start {
+                 let inner = Arc::clone(self);
+                 tokio::spawn(async move {
+-                    inner.open(remote, result_tx).await;
++                    inner.open(remote, result_tx, cancellation).await;
+                 });
+             }
+-            return wait_for_watch(result_rx).await;
++            let result = wait_for_watch(result_rx).await;
++            if self.shutdown_requested.load(Ordering::Acquire) {
++                return Err("code mode session is shutting down".to_string());
++            }
++            return result;
+         }
+     }
+ 
+@@ -394,6 +402,7 @@ impl SessionInner {
+         self: Arc<Self>,
+         remote: RemoteSession,
+         result_tx: watch::Sender<Option<Result<SessionBinding, String>>>,
++        cancellation: CancellationToken,
+     ) {
+         let result = match self.host.connection().await {
+             Ok(connection) => {
+@@ -402,6 +411,7 @@ impl SessionInner {
+                         remote.clone(),
+                         Arc::clone(&self.delegate),
+                         self.limits.clone(),
++                        cancellation,
+                     )
+                     .await;
+                 cleanup.map(|cleanup| SessionBinding {
+@@ -464,7 +474,12 @@ impl SessionInner {
+                         *state = SessionState::Closed;
+                         ShutdownAction::Finish
+                     }
+-                    SessionState::Opening { result_rx, .. } => {
++                    SessionState::Opening {
++                        result_rx,
++                        cancellation,
++                        ..
++                    } => {
++                        cancellation.cancel();
+                         ShutdownAction::WaitForOpen(result_rx.clone())
+                     }
+                     SessionState::Open(binding) if !binding.connection.is_alive() => {
+diff --git a/codex-rs/code-mode/src/remote_session/connection.rs b/codex-rs/code-mode/src/remote_session/connection.rs
+index f5533f18..54606b64 100644
+--- a/codex-rs/code-mode/src/remote_session/connection.rs
++++ b/codex-rs/code-mode/src/remote_session/connection.rs
+@@ -50,6 +50,7 @@ use tokio_util::sync::CancellationToken;
+ use tracing::debug;
+ use tracing::warn;
+ 
++use self::deadline::TransportDeadline;
+ use self::driver::ConnectionDriver;
+ use self::driver::DriverCommand;
+ use self::driver::DriverEvent;
+@@ -60,6 +61,7 @@ use self::reader::drive_reader;
+ use self::transport::ConnectionReader;
+ use self::transport::ConnectionWriter;
+ 
++mod deadline;
+ mod driver;
+ mod reader;
+ mod transport;
+@@ -491,6 +493,7 @@ impl Connection {
+         session: RemoteSession,
+         delegate: Arc<dyn CodeModeSessionDelegate>,
+         limits: CodeModeSessionCellExecutionLimits,
++        opening_cancellation: CancellationToken,
+     ) -> Result<SessionCleanup, String> {
+         if limits != CodeModeSessionCellExecutionLimits::default()
+             && !self
+@@ -503,18 +506,29 @@ impl Connection {
+             ));
+         }
+         let cleanup = SessionCleanup::new();
+-        let cancellation = CallerCancellation::new();
++        let cancellation = CallerCancellation {
++            token: opening_cancellation,
++            armed: true,
++        };
+         let (response_tx, response_rx) = oneshot::channel();
+-        self.send(DriverCommand::OpenSession {
+-            session,
+-            delegate,
+-            limits,
+-            cleanup: cleanup.clone(),
+-            caller_cancellation: cancellation.token(),
+-            response_tx,
+-        })
+-        .await?;
+-        let result = self.receive(response_rx).await;
++        let result = self
++            .with_transport_deadline(Duration::ZERO, "open", async {
++                self.send(DriverCommand::OpenSession {
++                    session,
++                    delegate,
++                    limits,
++                    cleanup: cleanup.clone(),
++                    caller_cancellation: cancellation.token(),
++                    response_tx,
++                })
++                .await?;
++                let result = self.receive(response_rx).await;
++                if result.is_err() {
++                    cleanup.wait().await;
++                }
++                result
++            })
++            .await;
+         cancellation.disarm();
+         result?;
+         Ok(cleanup)
+@@ -527,14 +541,19 @@ impl Connection {
+     ) -> Result<StartedCell, String> {
+         let cancellation = CallerCancellation::new();
+         let (response_tx, response_rx) = oneshot::channel();
+-        self.send(DriverCommand::Execute {
+-            session,
+-            request,
+-            caller_cancellation: cancellation.token(),
+-            response_tx,
+-        })
+-        .await?;
+-        let delivered = match self.receive(response_rx).await {
++        let delivered = match self
++            .with_transport_deadline(Duration::ZERO, "execute start", async {
++                self.send(DriverCommand::Execute {
++                    session,
++                    request,
++                    caller_cancellation: cancellation.token(),
++                    response_tx,
++                })
++                .await?;
++                self.receive(response_rx).await
++            })
++            .await
++        {
+             Ok(delivered) => delivered,
+             Err(err) => {
+                 cancellation.disarm();
+@@ -594,12 +613,15 @@ impl Connection {
+ 
+     pub(super) async fn shutdown_session(&self, session: RemoteSession) -> Result<(), String> {
+         let (response_tx, response_rx) = oneshot::channel();
+-        self.send(DriverCommand::ShutdownSession {
+-            session,
+-            response_tx,
++        self.with_transport_deadline(Duration::ZERO, "shutdown", async {
++            self.send(DriverCommand::ShutdownSession {
++                session,
++                response_tx,
++            })
++            .await?;
++            self.receive(response_rx).await
+         })
+-        .await?;
+-        self.receive(response_rx).await
++        .await
+     }
+ 
+     async fn with_transport_deadline<T>(
+@@ -608,17 +630,16 @@ impl Connection {
+         request_type: &str,
+         request: impl Future<Output = Result<T, String>>,
+     ) -> Result<T, String> {
+-        let deadline = runtime_timeout.saturating_add(DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT);
+-        match tokio::time::timeout(deadline, request).await {
+-            Ok(result) => result,
+-            Err(_) => {
+-                warn!(request_type, "code-mode host request exceeded its deadline");
+-                let reason =
+-                    format!("code-mode host timed out waiting for {request_type} response");
+-                mark_connection_dead(&self.alive, &self.failure, reason.clone());
+-                self.cancellation.cancel();
+-                Err(reason)
+-            }
++        self.transport_deadline()
++            .run(runtime_timeout, request_type, request)
++            .await
++    }
++
++    fn transport_deadline(&self) -> TransportDeadline {
++        TransportDeadline {
++            alive: Arc::clone(&self.alive),
++            failure: Arc::clone(&self.failure),
++            cancellation: self.cancellation.clone(),
+         }
+     }
+ 
+diff --git a/codex-rs/code-mode/src/remote_session/connection/deadline.rs b/codex-rs/code-mode/src/remote_session/connection/deadline.rs
+new file mode 100644
+index 00000000..fcecff42
+--- /dev/null
++++ b/codex-rs/code-mode/src/remote_session/connection/deadline.rs
+@@ -0,0 +1,39 @@
++use std::future::Future;
++use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::time::Duration;
++
++use tokio_util::sync::CancellationToken;
++use tracing::warn;
++
++use super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT;
++use super::mark_connection_dead;
++
++#[derive(Clone)]
++pub(super) struct TransportDeadline {
++    pub(super) alive: Arc<AtomicBool>,
++    pub(super) failure: Arc<std::sync::Mutex<Option<String>>>,
++    pub(super) cancellation: CancellationToken,
++}
++
++impl TransportDeadline {
++    pub(super) async fn run<T>(
++        &self,
++        runtime_timeout: Duration,
++        request_type: &str,
++        request: impl Future<Output = Result<T, String>>,
++    ) -> Result<T, String> {
++        let deadline = runtime_timeout.saturating_add(DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT);
++        match tokio::time::timeout(deadline, request).await {
++            Ok(result) => result,
++            Err(_) => {
++                warn!(request_type, "code-mode host request exceeded its deadline");
++                let reason =
++                    format!("code-mode host timed out waiting for {request_type} response");
++                mark_connection_dead(&self.alive, &self.failure, reason.clone());
++                self.cancellation.cancel();
++                Err(reason)
++            }
++        }
++    }
++}
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs b/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
+index b994b648..94350bed 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
+@@ -27,6 +27,10 @@ impl SessionCleanup {
+         for owner in cells {
+             notify_cell_closed(&owner.delegate, &owner.cell_id);
+         }
++        self.complete();
++    }
++
++    pub(super) fn complete(&self) {
+         self.inner.complete.cancel();
+     }
+ 
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs b/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
+index 446c9c6a..22c361bd 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
+@@ -1,8 +1,10 @@
+ use std::sync::Arc;
++use std::time::Duration;
+ 
+ use codex_code_mode_protocol::CellId;
+ use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
+ use codex_code_mode_protocol::CodeModeSessionDelegate;
++use codex_code_mode_protocol::DEFAULT_EXEC_YIELD_TIME_MS;
+ use codex_code_mode_protocol::ExecuteRequest;
+ use codex_code_mode_protocol::WaitOutcome;
+ use codex_code_mode_protocol::WaitRequest;
+@@ -76,6 +78,7 @@ impl ConnectionDriver {
+         response_tx: oneshot::Sender<Result<(), String>>,
+     ) -> bool {
+         if self.sessions.contains(&session.id) || self.requests.contains_pending_open(&session) {
++            cleanup.complete();
+             let _ = response_tx.send(Err(format!(
+                 "code-mode session {} is already open",
+                 session.id
+@@ -85,6 +88,7 @@ impl ConnectionDriver {
+         let limits = match WireSessionCellExecutionLimits::try_from(limits) {
+             Ok(limits) => limits,
+             Err(error) => {
++                cleanup.complete();
+                 let _ = response_tx.send(Err(format!(
+                     "failed to encode code-mode session execution limits: {error}"
+                 )));
+@@ -94,6 +98,7 @@ impl ConnectionDriver {
+         let request_id = match self.requests.allocate_id() {
+             Ok(id) => id,
+             Err(err) => {
++                cleanup.complete();
+                 let _ = response_tx.send(Err(err));
+                 return false;
+             }
+@@ -109,6 +114,7 @@ impl ConnectionDriver {
+         let frame = match EncodedFrame::encode(&message) {
+             Ok(frame) => frame,
+             Err(err) => {
++                cleanup.complete();
+                 let _ = response_tx.send(Err(format!(
+                     "failed to encode code-mode open-session request: {err}"
+                 )));
+@@ -142,6 +148,10 @@ impl ConnectionDriver {
+             let _ = response_tx.send(Err(err));
+             return true;
+         }
++        let initial_timeout =
++            Duration::from_millis(request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS))
++                .saturating_add(Duration::from_secs(1))
++                .saturating_add(super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT);
+         let request = match request.try_into() {
+             Ok(request) => request,
+             Err(err) => {
+@@ -180,6 +190,7 @@ impl ConnectionDriver {
+             request_id,
+             PendingRequest::Execute {
+                 session,
++                initial_timeout,
+                 response_tx,
+                 initial_response_tx,
+                 initial_response_rx,
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/delegate_runtime.rs b/codex-rs/code-mode/src/remote_session/connection/driver/delegate_runtime.rs
+index fb01f878..59342a00 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/delegate_runtime.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/delegate_runtime.rs
+@@ -21,10 +21,11 @@ use tokio::sync::mpsc;
+ use tokio_util::sync::CancellationToken;
+ 
+ use super::ConnectionDriver;
++use super::cleanup::SessionCleanup;
+ use super::notify_cell_closed;
+ use super::session_registry::CellOwner;
+ use super::session_registry::DelegateTarget;
+-use super::session_registry::FailedSession;
++use super::session_registry::RetiredSession;
+ use super::types::DriverEvent;
+ 
+ const MAX_RECENT_DELEGATE_REQUEST_IDS: usize = 4096;
+@@ -228,7 +229,7 @@ impl DelegateRuntime {
+         effects
+     }
+ 
+-    pub(super) fn fail_all(&mut self, failed_sessions: Vec<FailedSession>) {
++    pub(super) fn fail_all(&mut self, failed_sessions: Vec<RetiredSession>) {
+         for (_, call) in self.calls.drain() {
+             call.revoke();
+         }
+@@ -334,10 +335,18 @@ impl ConnectionDriver {
+         self.apply_delegate_effects(effects)
+     }
+ 
+-    pub(super) fn close_session_locally(&mut self, session_id: &SessionId) -> DelegateEffects {
++    pub(super) fn close_session_locally(
++        &mut self,
++        session_id: &SessionId,
++    ) -> (DelegateEffects, Option<SessionCleanup>) {
+         self.requests.remove_unclaimed_for_session(session_id);
+-        let owners = self.sessions.remove_session(session_id);
+-        self.delegates.close_cells(owners)
++        match self.sessions.remove_session(session_id) {
++            Some(session) => (
++                self.delegates.close_cells(session.cells),
++                Some(session.cleanup),
++            ),
++            None => (DelegateEffects::empty(), None),
++        }
+     }
+ 
+     pub(super) fn apply_delegate_effects(&mut self, effects: DelegateEffects) -> bool {
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/request_tracker.rs b/codex-rs/code-mode/src/remote_session/connection/driver/request_tracker.rs
+index d39981ac..1a9bda25 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/request_tracker.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/request_tracker.rs
+@@ -1,10 +1,12 @@
+ use std::collections::HashMap;
+ use std::collections::VecDeque;
++use std::time::Duration;
+ 
+ use codex_code_mode_protocol::host::RequestId;
+ use codex_code_mode_protocol::host::SessionId;
+ use codex_code_mode_protocol::host::WireCellId;
+ use tokio::sync::mpsc;
++use tokio_util::sync::CancellationToken;
+ 
+ use super::types::DeferredWait;
+ use super::types::DriverEvent;
+@@ -26,6 +28,7 @@ pub(super) struct RequestTracker {
+     unclaimed_executes: HashMap<RequestId, UnclaimedExecute>,
+     initial_responses: HashMap<RequestId, InitialResponse>,
+     deferred_waits: VecDeque<DeferredWait>,
++    deadlines: HashMap<RequestId, CancellationToken>,
+     next_request_id: i64,
+ }
+ 
+@@ -36,6 +39,7 @@ impl RequestTracker {
+             unclaimed_executes: HashMap::new(),
+             initial_responses: HashMap::new(),
+             deferred_waits: VecDeque::new(),
++            deadlines: HashMap::new(),
+             next_request_id: 1,
+         }
+     }
+@@ -76,6 +80,19 @@ impl RequestTracker {
+         pending: PendingRequest,
+         event_tx: &mpsc::Sender<DriverEvent>,
+     ) {
++        if matches!(
++            pending,
++            PendingRequest::OpenSession { .. }
++                | PendingRequest::Execute { .. }
++                | PendingRequest::Terminate { .. }
++                | PendingRequest::ShutdownSession { .. }
++        ) {
++            self.start_deadline(
++                id,
++                super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT,
++                event_tx,
++            );
++        }
+         self.pending.insert(id, pending);
+         if let Some(cancellation) = self
+             .pending
+@@ -87,17 +104,52 @@ impl RequestTracker {
+     }
+ 
+     pub(super) fn remove_pending(&mut self, id: RequestId) -> Option<PendingRequest> {
++        if let Some(stop) = self.deadlines.remove(&id) {
++            stop.cancel();
++        }
+         self.pending.remove(&id)
+     }
+ 
+-    pub(super) fn insert_initial_response(&mut self, id: RequestId, response: InitialResponse) {
++    pub(super) fn insert_initial_response(
++        &mut self,
++        id: RequestId,
++        response: InitialResponse,
++        timeout: Duration,
++        event_tx: &mpsc::Sender<DriverEvent>,
++    ) {
++        self.start_deadline(id, timeout, event_tx);
+         self.initial_responses.insert(id, response);
+     }
+ 
+     pub(super) fn remove_initial_response(&mut self, id: RequestId) -> Option<InitialResponse> {
++        if let Some(stop) = self.deadlines.remove(&id) {
++            stop.cancel();
++        }
+         self.initial_responses.remove(&id)
+     }
+ 
++    fn start_deadline(
++        &mut self,
++        id: RequestId,
++        timeout: Duration,
++        event_tx: &mpsc::Sender<DriverEvent>,
++    ) {
++        let stop = CancellationToken::new();
++        self.deadlines.insert(id, stop.clone());
++        let event_tx = event_tx.clone();
++        let deadline = tokio::time::Instant::now() + timeout;
++        tokio::spawn(async move {
++            tokio::select! {
++                _ = stop.cancelled() => {}
++                _ = tokio::time::sleep_until(deadline) => {
++                    let _ = event_tx.send(DriverEvent::Failed(format!(
++                        "code-mode host exceeded transport deadline for request {id:?}"
++                    ))).await;
++                }
++            }
++        });
++    }
++
+     pub(super) fn insert_unclaimed_execute(&mut self, id: RequestId, execute: UnclaimedExecute) {
+         self.unclaimed_executes.insert(id, execute);
+     }
+@@ -181,6 +233,9 @@ impl RequestTracker {
+     }
+ 
+     pub(super) fn fail_all(&mut self, reason: &str) {
++        for (_, stop) in self.deadlines.drain() {
++            stop.cancel();
++        }
+         for (_, pending) in self.pending.drain() {
+             pending.fail(reason.to_string());
+         }
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs b/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
+index 17f69736..f36baddf 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
+@@ -169,16 +169,19 @@ impl ConnectionDriver {
+                 Ok(_) => {
+                     let reason =
+                         "code-mode host returned an invalid open-session response".to_string();
++                    cleanup.complete();
+                     let _ = response_tx.send(Err(reason.clone()));
+                     self.fail(reason);
+                     return false;
+                 }
+                 Err(err) => {
++                    cleanup.complete();
+                     let _ = response_tx.send(Err(err));
+                 }
+             },
+             PendingRequest::Execute {
+                 session,
++                initial_timeout,
+                 response_tx,
+                 initial_response_tx,
+                 initial_response_rx,
+@@ -213,6 +216,8 @@ impl ConnectionDriver {
+                             cell_id: remote_cell_id.clone(),
+                             response_tx: initial_response_tx,
+                         },
++                        initial_timeout,
++                        &self.event_tx,
+                     );
+                     let started = StartedCell::from_result_receiver(public_id, initial_response_rx);
+                     if cancellation.is_cancelled() || response_tx.is_closed() {
+@@ -311,8 +316,12 @@ impl ConnectionDriver {
+                 response_tx,
+             } => match result {
+                 Ok(HostResponse::SessionClosed { session_id }) if session_id == session.id => {
+-                    let effects = self.close_session_locally(&session.id);
+-                    if !self.apply_delegate_effects(effects) {
++                    let (effects, cleanup) = self.close_session_locally(&session.id);
++                    let applied = self.apply_delegate_effects(effects);
++                    if let Some(cleanup) = cleanup {
++                        cleanup.complete();
++                    }
++                    if !applied {
+                         return false;
+                     }
+                     let _ = response_tx.send(Ok(()));
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs b/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
+index 8668baa2..77d8d4a5 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
+@@ -22,7 +22,7 @@ pub(super) struct DelegateTarget {
+     pub(super) delegate: Arc<dyn CodeModeSessionDelegate>,
+ }
+ 
+-pub(super) struct FailedSession {
++pub(super) struct RetiredSession {
+     pub(super) cleanup: SessionCleanup,
+     pub(super) cells: Vec<CellOwner>,
+ }
+@@ -189,11 +189,9 @@ impl SessionRegistry {
+         })
+     }
+ 
+-    pub(super) fn remove_session(&mut self, session_id: &SessionId) -> Vec<CellOwner> {
+-        let Some(session) = self.records.remove(session_id) else {
+-            return Vec::new();
+-        };
+-        session
++    pub(super) fn remove_session(&mut self, session_id: &SessionId) -> Option<RetiredSession> {
++        let session = self.records.remove(session_id)?;
++        let cells = session
+             .cells
+             .into_values()
+             .map(|cell_id| CellOwner {
+@@ -201,10 +199,14 @@ impl SessionRegistry {
+                 cell_id,
+                 delegate: Arc::clone(&session.delegate),
+             })
+-            .collect()
++            .collect();
++        Some(RetiredSession {
++            cleanup: session.cleanup,
++            cells,
++        })
+     }
+ 
+-    pub(super) fn drain(&mut self) -> Vec<FailedSession> {
++    pub(super) fn drain(&mut self) -> Vec<RetiredSession> {
+         let sessions = std::mem::take(&mut self.records);
+         sessions
+             .into_iter()
+@@ -218,7 +220,7 @@ impl SessionRegistry {
+                         delegate: Arc::clone(&session.delegate),
+                     })
+                     .collect();
+-                FailedSession {
++                RetiredSession {
+                     cleanup: session.cleanup,
+                     cells,
+                 }
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/types.rs b/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
+index 7b561b33..b283450f 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
+@@ -1,4 +1,5 @@
+ use std::sync::Arc;
++use std::time::Duration;
+ 
+ use codex_code_mode_protocol::CellId;
+ use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
+@@ -102,7 +103,17 @@ impl CancellableRequest {
+         tokio::spawn(async move {
+             tokio::select! {
+                 _ = caller_cancellation.cancelled() => {
+-                    let _ = event_tx.send(DriverEvent::RequestCancelled(id)).await;
++                    if event_tx.send(DriverEvent::RequestCancelled(id)).await.is_err() {
++                        return;
++                    }
++                    tokio::select! {
++                        _ = watcher_stop.cancelled() => {}
++                        _ = tokio::time::sleep(super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT) => {
++                            let _ = event_tx.send(DriverEvent::Failed(format!(
++                                "code-mode host did not acknowledge cancellation for request {id:?}"
++                            ))).await;
++                        }
++                    }
+                 }
+                 _ = watcher_stop.cancelled() => {}
+             }
+@@ -143,6 +154,7 @@ pub(super) enum PendingRequest {
+     },
+     Execute {
+         session: RemoteSession,
++        initial_timeout: Duration,
+         response_tx: oneshot::Sender<Result<DeliveredExecute, String>>,
+         initial_response_tx: oneshot::Sender<Result<RuntimeResponse, String>>,
+         initial_response_rx: oneshot::Receiver<Result<RuntimeResponse, String>>,
+@@ -184,7 +196,15 @@ impl PendingRequest {
+ 
+     pub(super) fn fail(self, reason: String) {
+         match self {
+-            Self::OpenSession { response_tx, .. } | Self::ShutdownSession { response_tx, .. } => {
++            Self::OpenSession {
++                cleanup,
++                response_tx,
++                ..
++            } => {
++                cleanup.complete();
++                let _ = response_tx.send(Err(reason));
++            }
++            Self::ShutdownSession { response_tx, .. } => {
+                 let _ = response_tx.send(Err(reason));
+             }
+             Self::Execute { response_tx, .. } => {
+diff --git a/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs b/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs
+index fc6f0814..43a7f264 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs
+@@ -19,6 +19,7 @@ use codex_code_mode_protocol::host::WireResult;
+ use codex_code_mode_protocol::host::WireRuntimeResponse;
+ use codex_code_mode_protocol::host::WireWaitOutcome;
+ use serde_json::json;
++use tokio_util::sync::CancellationToken;
+ 
+ use super::Connection;
+ use super::RemoteSession;
+@@ -110,10 +111,13 @@ impl Drop for FakeHost {
+ 
+ // Fault-injection peer only. All client operation/timeout/cancellation behavior is actual Rust.
+ const FAKE_HOST_BODY: &str = r#"
+-import copy, json, os, pathlib, struct, sys
++import copy, json, os, pathlib, struct, sys, threading, time
+ root = pathlib.Path(ROOT)
+ (root / 'pid').write_text(str(os.getpid()))
+ blocked_once = False
++write_lock = threading.Lock()
++opening_id = None
++opening_session = None
+ def read_exact(length):
+     result = b''
+     while len(result) < length:
+@@ -128,8 +132,12 @@ def send(template, request_id=None, session_id=None):
+         if 'sessionId' in message: message['sessionId'] = session_id
+         if 'result' in message and 'sessionId' in message['result'].get('value', {}): message['result']['value']['sessionId'] = session_id
+     payload = json.dumps(message, separators=(',', ':')).encode()
+-    sys.stdout.buffer.write(struct.pack('<I', len(payload)) + payload)
+-    sys.stdout.buffer.flush()
++    with write_lock:
++        sys.stdout.buffer.write(struct.pack('<I', len(payload)) + payload)
++        sys.stdout.buffer.flush()
++def release_later(template, request_id, session_id=None):
++    while not (root / 'release').exists(): time.sleep(0.005)
++    send(template, request_id, session_id)
+ while True:
+     prefix = read_exact(4)
+     if prefix is None: break
+@@ -141,21 +149,31 @@ while True:
+     if kind == 'connection/hello':
+         send('hello'); (root / 'handshake').touch(); continue
+     if kind == 'operation/cancel':
+-        (root / 'cancel').touch(); send('cancel', message['id']); continue
++        (root / 'cancel').touch()
++        if MODE in ('opening_ignore_cancel', 'wait_ignore_cancel'): continue
++        if MODE == 'opening_commit_race': send('open', opening_id, opening_session)
++        else: send('cancel', message['id'])
++        continue
+     if kind != 'operation/request': continue
+     request = message['request']; method = request['method']; request_id = message['id']; session_id = request['sessionId']
+-    block = {'open':'session/open', 'start':'session/execute', 'close':'session/shutdown', 'wait':'session/wait', 'terminate':'session/terminate', 'opening_outer_cancel':'session/open'}.get(MODE)
++    block = {'open':'session/open', 'start':'session/execute', 'close':'session/shutdown', 'wait':'session/wait', 'terminate':'session/terminate', 'opening_outer_cancel':'session/open', 'opening_ignore_cancel':'session/open', 'opening_commit_race':'session/open', 'wait_ignore_cancel':'session/wait'}.get(MODE)
+     if method == block and not blocked_once:
++        opening_id = request_id; opening_session = session_id
+         blocked_once = True; (root / ('withheld-' + MODE)).touch(); continue
+     if method == 'session/open': send('open', request_id, session_id)
+     elif method == 'session/execute':
+         send('start', request_id)
+-        if MODE == 'initial' and not blocked_once:
+-            blocked_once = True; (root / 'withheld-initial').touch()
++        if MODE in ('initial', 'long_initial') and not blocked_once:
++            blocked_once = True; (root / ('withheld-' + MODE)).touch()
++            if MODE == 'long_initial': threading.Thread(target=release_later, args=('initial', request_id), daemon=True).start()
+         else: send('initial', request_id)
+     elif method == 'session/wait': send('wait', request_id)
+     elif method == 'session/terminate': send('terminate', request_id); send('closed', session_id=session_id)
+-    elif method == 'session/shutdown': send('close', request_id, session_id)
++    elif method == 'session/shutdown':
++        if MODE == 'opening_commit_race':
++            (root / 'withheld-abandoned-close').touch()
++            threading.Thread(target=release_later, args=('close', request_id, session_id), daemon=True).start()
++        else: send('close', request_id, session_id)
+ "#;
+ 
+ fn remote() -> RemoteSession {
+@@ -183,7 +201,6 @@ async fn advance_transport_interval() {
+ }
+ 
+ #[tokio::test(flavor = "current_thread")]
+-#[ignore = "mechanism audit: FC-R01 known transport-deadline defect"]
+ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
+     let mut missing = Vec::new();
+     for mode in ["open", "start", "initial", "close", "wait", "terminate"] {
+@@ -201,6 +218,7 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
+                         remote(),
+                         Arc::new(NoopCodeModeSessionDelegate),
+                         CodeModeSessionCellExecutionLimits::default(),
++                        CancellationToken::new(),
+                     )
+                     .await
+                     .unwrap(),
+@@ -233,6 +251,7 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
+                     remote(),
+                     Arc::new(NoopCodeModeSessionDelegate),
+                     CodeModeSessionCellExecutionLimits::default(),
++                    CancellationToken::new(),
+                 )
+                 .await
+                 .map(|_| ())
+@@ -288,14 +307,13 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
+         fake.assert_reaped().await;
+         let row = json!({"id":"FC-R01","phase":mode,"legal_handshake":true,"virtual_elapsed_s":70,"future_finished":finished_after_70s,"connection_alive_before_fixture_cleanup":alive_after_70s,"outer_cancel_frames":cancel_frames,"result":result,"owned_process_reaped":true,"source":"actual Connection::spawn and stdio driver"});
+         eprintln!("MECHANISM_RECEIPT {row}");
+-        if matches!(mode, "wait" | "terminate") {
+-            assert!(
+-                finished_after_70s && !alive_after_70s,
+-                "actual transport-deadline positive control failed"
+-            );
+-        } else if !finished_after_70s {
++        if !finished_after_70s {
+             missing.push(mode);
+         }
++        assert!(
++            !alive_after_70s,
++            "IPC deadline must retire the failed connection: {mode}"
++        );
+     }
+     assert!(
+         missing.is_empty(),
+@@ -304,7 +322,6 @@ async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
+ }
+ 
+ #[tokio::test(flavor = "current_thread")]
+-#[ignore = "mechanism audit: FC-R01 known Opening cancellation defect"]
+ async fn mechanism_fcr01_opening_outer_cancel_retires_shutdown() {
+     use super::super::OwnedCodeModeHost;
+     use super::super::ProcessOwnedCodeModeSession;
+@@ -323,27 +340,184 @@ async fn mechanism_fcr01_opening_outer_cancel_retires_shutdown() {
+     for _ in 0..20 {
+         tokio::task::yield_now().await;
+     }
+-    advance_transport_interval().await;
+-    let opening_pending = !execute_task.is_finished();
+-    let shutdown_pending = !shutdown_task.is_finished();
+-    execute_task.abort();
+-    let _ = execute_task.await;
+-    tokio::time::sleep(Duration::from_millis(100)).await;
+-    let shutdown_after_outer_cancel = !shutdown_task.is_finished();
+-    let cancel_frames = fake.cancellations();
+-    let connection = host.live_connection().unwrap();
+-    connection.cancellation.cancel();
++    fake.observed("cancel").await;
++    let opening_result = tokio::time::timeout(Duration::from_secs(2), execute_task)
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(opening_result.is_err());
+     let shutdown_result = tokio::time::timeout(Duration::from_secs(2), shutdown_task)
+         .await
+         .unwrap()
+         .unwrap();
++    assert!(shutdown_result.is_ok());
++    let cancel_frames = fake.cancellations();
++    let connection = host.live_connection().unwrap();
++    assert!(
++        connection.is_alive(),
++        "acknowledged opening cancellation preserves the shared host"
++    );
++    connection.cancellation.cancel();
+     fake.assert_reaped().await;
+-    let row = json!({"id":"FC-R01","phase":"Opening + actual SessionInner::drive_shutdown","virtual_elapsed_s":70,"open_pending":opening_pending,"shutdown_pending":shutdown_pending,"shutdown_pending_after_outer_execute_abort":shutdown_after_outer_cancel,"cancel_frames_after_outer_abort":cancel_frames,"shutdown_result_after_owned_connection_cancel":format!("{shutdown_result:?}"),"owned_process_reaped":true});
++    let row = json!({"id":"FC-R01","phase":"Opening + actual SessionInner::drive_shutdown","open_returned_error":true,"shutdown_returned":true,"cancel_frames":cancel_frames,"shutdown_result":format!("{shutdown_result:?}"),"owned_process_reaped":true});
+     eprintln!("MECHANISM_RECEIPT {row}");
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn opening_shutdown_waits_for_committed_session_cleanup() {
++    use super::super::OwnedCodeModeHost;
++    use super::super::ProcessOwnedCodeModeSession;
++    let fake = FakeHost::new("opening_commit_race");
++    let host = Arc::new(OwnedCodeModeHost::new(fake.program.clone()));
++    let session = Arc::new(ProcessOwnedCodeModeSession::with_host(
++        Arc::new(NoopCodeModeSessionDelegate),
++        Arc::clone(&host),
++        CodeModeSessionCellExecutionLimits::default(),
++    ));
++    let executing = Arc::clone(&session);
++    let execute_task = tokio::spawn(async move { executing.execute(request()).await.map(|_| ()) });
++    fake.observed("withheld-opening_commit_race").await;
++    let shutting_down = Arc::clone(&session);
++    let shutdown_task = tokio::spawn(async move { shutting_down.shutdown().await });
++    fake.observed("withheld-abandoned-close").await;
+     assert!(
+-        !shutdown_after_outer_cancel,
+-        "outer execute cancellation must retire Opening and pending shutdown"
++        !shutdown_task.is_finished(),
++        "shutdown must await the exact committed session close acknowledgement"
++    );
++    std::fs::write(fake.root.join("release"), "release").unwrap();
++    assert!(
++        tokio::time::timeout(Duration::from_secs(2), shutdown_task)
++            .await
++            .unwrap()
++            .unwrap()
++            .is_ok()
++    );
++    assert!(
++        tokio::time::timeout(Duration::from_secs(2), execute_task)
++            .await
++            .unwrap()
++            .unwrap()
++            .is_err()
++    );
++    host.live_connection().unwrap().cancellation.cancel();
++    fake.assert_reaped().await;
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn dropped_stdio_caller_requires_bounded_cancel_acknowledgement() {
++    let fake = FakeHost::new("wait_ignore_cancel");
++    let connection = Arc::new(
++        Connection::spawn(&fake.program)
++            .await
++            .map_err(|err| err.to_string())
++            .unwrap(),
+     );
++    let cleanup = connection
++        .open_session(
++            remote(),
++            Arc::new(NoopCodeModeSessionDelegate),
++            CodeModeSessionCellExecutionLimits::default(),
++            CancellationToken::new(),
++        )
++        .await
++        .unwrap();
++    let started = connection.execute(remote(), request()).await.unwrap();
++    let cell_id = started.cell_id.clone();
++    assert!(matches!(
++        started.initial_response().await.unwrap(),
++        RuntimeResponse::Yielded { .. }
++    ));
++    let waiting = Arc::clone(&connection);
++    let wait_task = tokio::spawn(async move {
++        waiting
++            .wait(
++                remote(),
++                WaitRequest {
++                    cell_id,
++                    yield_time_ms: 600_001,
++                },
++            )
++            .await
++    });
++    fake.observed("withheld-wait_ignore_cancel").await;
++    wait_task.abort();
++    let _ = wait_task.await;
++    fake.observed("cancel").await;
++    advance_transport_interval().await;
++    assert!(!connection.is_alive());
++    tokio::time::timeout(Duration::from_secs(2), cleanup.wait())
++        .await
++        .unwrap();
++    fake.assert_reaped().await;
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn opening_shutdown_retires_an_unacknowledged_cancel() {
++    use super::super::OwnedCodeModeHost;
++    use super::super::ProcessOwnedCodeModeSession;
++    let fake = FakeHost::new("opening_ignore_cancel");
++    let host = Arc::new(OwnedCodeModeHost::new(fake.program.clone()));
++    let session = Arc::new(ProcessOwnedCodeModeSession::with_host(
++        Arc::new(NoopCodeModeSessionDelegate),
++        Arc::clone(&host),
++        CodeModeSessionCellExecutionLimits::default(),
++    ));
++    let executing = Arc::clone(&session);
++    let execute_task = tokio::spawn(async move { executing.execute(request()).await.map(|_| ()) });
++    fake.observed("withheld-opening_ignore_cancel").await;
++    let shutting_down = Arc::clone(&session);
++    let shutdown_task = tokio::spawn(async move { shutting_down.shutdown().await });
++    fake.observed("cancel").await;
++    advance_transport_interval().await;
++    assert!(execute_task.is_finished());
++    assert!(shutdown_task.is_finished());
++    assert!(execute_task.await.unwrap().is_err());
++    assert!(shutdown_task.await.unwrap().is_ok());
++    assert!(host.live_connection().is_none());
++    fake.assert_reaped().await;
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn stdio_initial_deadline_allows_the_requested_long_yield() {
++    let fake = FakeHost::new("long_initial");
++    let connection = Arc::new(
++        Connection::spawn(&fake.program)
++            .await
++            .map_err(|err| err.to_string())
++            .unwrap(),
++    );
++    let cleanup = connection
++        .open_session(
++            remote(),
++            Arc::new(NoopCodeModeSessionDelegate),
++            CodeModeSessionCellExecutionLimits::default(),
++            CancellationToken::new(),
++        )
++        .await
++        .unwrap();
++    let mut execute = request();
++    execute.yield_time_ms = Some(600_001);
++    let started = connection.execute(remote(), execute).await.unwrap();
++    let initial = tokio::spawn(started.initial_response());
++    fake.observed("withheld-long_initial").await;
++    advance_transport_interval().await;
++    assert!(!initial.is_finished());
++    assert!(connection.is_alive());
++    std::fs::write(fake.root.join("release"), "release").unwrap();
++    assert!(matches!(
++        tokio::time::timeout(Duration::from_secs(2), initial)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap(),
++        RuntimeResponse::Yielded { .. }
++    ));
++    connection.shutdown_session(remote()).await.unwrap();
++    tokio::time::timeout(Duration::from_secs(2), cleanup.wait())
++        .await
++        .unwrap();
++    connection.cancellation.cancel();
++    fake.assert_reaped().await;
+ }
+ 
+ #[tokio::test(flavor = "current_thread")]
+@@ -358,6 +532,7 @@ async fn mechanism_fcr01_stdio_long_yield_request_is_accepted() {
+             remote(),
+             Arc::new(NoopCodeModeSessionDelegate),
+             CodeModeSessionCellExecutionLimits::default(),
++            CancellationToken::new(),
+         )
+         .await
+         .unwrap();

@@ -613,7 +613,7 @@ fn make_worker_healthy(storage: &mut SqliteStorage, worker: u64, instance: u64, 
 }
 
 #[test]
-fn disconnected_fence_rejects_late_result_and_allows_one_higher_replacement() {
+fn disconnected_fence_retains_late_fact_without_restoring_execution_authority() {
     let root = temporary_directory("failure-fence");
     let worker_scope = scope(1);
     let worker_pool = pool(1);
@@ -664,7 +664,15 @@ fn disconnected_fence_rejects_late_result_and_allows_one_higher_replacement() {
         .expect("registry")
         .record_dispatch_result(&dispatch_result(&old_claim, 36))
         .expect("late result");
-    assert_eq!(late.status, DispatchResultStatus::RejectedExpiredLease);
+    assert_eq!(late.status, DispatchResultStatus::Accepted);
+    assert!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_live_lease(&old_claim.job_id, &instant(4))
+            .expect("fenced lease stays inactive")
+            .is_none()
+    );
     let replacement = claim(2, 2, 37, 2, 11, 3);
     assert_eq!(
         storage

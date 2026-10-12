@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! JEV-01 `OpenJev` runtime adapter contract tests.
-//!
-//! These tests keep Jev fail-open for Coding Agent Worker: Provider outage
-//! never becomes a hard Worker failure.
-
 use std::{future::Future, sync::Arc, time::Duration};
 
 use winwincode_provider::{
@@ -80,7 +75,6 @@ fn contract_gate_covers_three_capability_mocks() {
                 .expect("batch");
             assert_eq!(batch.evaluations.len(), capabilities.max_batch_size.min(2));
         }
-        // Capability diversity is part of the contract coverage.
         assert!(seen_batches.windows(2).any(|pair| pair[0] != pair[1]));
     });
 }
@@ -99,7 +93,6 @@ fn jev_outage_does_not_block_coding_agent_worker() {
         assert!(run.value.is_none());
         assert!(run.observation.is_none());
         assert!(!run.failures.is_empty());
-        // The worker-side effect is "continue without Jev", not an Err channel.
         let worker_status = if run.value.is_none() {
             "continued-without-jev"
         } else {
@@ -141,7 +134,6 @@ dtypes = ["float32", "float16", "bfloat16"]
     );
     let run =
         block_on(JevRuntime::new(providers, runtime_config).evaluate(hypothesis(), cpu_options()));
-    // Local gap fails, remote mock succeeds: remote fallback path is live.
     assert!(run.value.is_some());
     assert_eq!(
         run.observation.expect("observation").provider_id,
@@ -173,7 +165,7 @@ fn capability_mismatch_and_invalid_payload_fail_open() {
         assert_eq!(run.failures[0].kind, JevProviderErrorKind::Unsupported);
 
         let invalid = MockJevProvider::healthy("invalid")
-            .with_device(JevDevice::Auto) // Auto is rejected by the runtime contract
+            .with_device(JevDevice::Auto)
             .with_scores(JevScores::try_new(0.8, 0.1, 0.1).expect("valid"));
         let run = runtime(vec![Arc::new(invalid)])
             .evaluate(hypothesis(), cpu_options())

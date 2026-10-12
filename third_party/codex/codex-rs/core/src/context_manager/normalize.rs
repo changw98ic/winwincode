@@ -8,6 +8,8 @@ use codex_protocol::openai_models::InputModality;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::context::CodeModeResultUnavailable;
+use crate::context::ContextualUserFragment;
 use crate::util::error_or_panic;
 use tracing::info;
 
@@ -79,19 +81,29 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                     }),
                 ));
             }
-            ResponseItem::CustomToolCall { id, call_id, .. }
-                if !custom_tool_output_ids.contains(call_id.as_str()) =>
-            {
-                error_or_panic(format!(
-                    "Custom tool call output is missing for call id: {call_id}"
-                ));
+            ResponseItem::CustomToolCall {
+                id,
+                call_id,
+                name,
+                namespace,
+                ..
+            } if !custom_tool_output_ids.contains(call_id.as_str()) => {
+                let output = if name == "exec" && namespace.is_none() {
+                    info!("Code Mode result is unavailable for call id: {call_id}");
+                    CodeModeResultUnavailable.render()
+                } else {
+                    error_or_panic(format!(
+                        "Custom tool call output is missing for call id: {call_id}"
+                    ));
+                    "aborted".to_string()
+                };
                 missing_outputs_to_insert.push((
                     idx,
                     ResponseItemEnvelope::new(ResponseItem::CustomToolCallOutput {
                         id: synthetic_output_id("ctco", id.as_deref()),
                         call_id: call_id.clone(),
                         name: None,
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                        output: FunctionCallOutputPayload::from_text(output),
                         internal_chat_message_metadata_passthrough: None,
                     }),
                 ));

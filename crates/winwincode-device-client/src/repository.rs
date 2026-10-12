@@ -1,51 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local repository registration, listing, removal, and launch-time
-//! revalidation (plan sections 8.1, 9.3, 13.1–13.3, and 13.5).
-//!
-//! The registration check chain follows plan §13.2 exactly:
-//!
-//! ```text
-//! canonicalize (symlinks resolved, replacement detected)
-//!   ↓
-//! directory exists and is readable
-//!   ↓
-//! confirm-or-initialize Git (an explicit confirmation is required for init)
-//!   ↓
-//! Git common directory
-//!   ↓
-//! HEAD / branch / dirty state
-//!   ↓
-//! random rbd_ RepositoryBindingId
-//!   ↓
-//! local binding → absolute path (path mapping, never uploaded)
-//!   ↓
-//! safe metadata report (`client.repository.upsert`, no absolute paths)
-//! ```
-//!
-//! [`revalidate_repository`] re-runs the same chain against the stored
-//! canonical path and returns the current plan 13.5 state; the Worker epic
-//! must call it before every worker launch instead of trusting the last scan
-//! (`每次 Worker Launch 前必须重新 canonicalize`). When the fresh scan
-//! disagrees with the durable scan projection, a `client.repository.status`
-//! report is enqueued automatically.
-//!
-//! Local-data boundary: the canonical path and the Git common directory live
-//! only in the local `repository_path_mapping` / `repository_local_state`
-//! tables and are returned only to local callers. Every server-bound frame
-//! (`client.repository.upsert`, `client.repository.removed`,
-//! `client.repository.status`) carries the binding identity, the derived
-//! fingerprint, and scan facts — never an absolute path.
-//!
-//! Git interconnect: the scan delegates every Git probe to the independent
-//! inspector in [`crate::repository_git`], which shells out to the system
-//! `git` binary through `std::process::Command` — the same dependency-free
-//! convention `winwincode-repository-context` uses for its baseline
-//! snapshots; no new crate dependency is introduced. The local Git
-//! installation must exist, a remote origin may be empty, and GitHub is
-//! never required — the Server only ever sees the commit, branch, dirty
-//! projection, and binding identity (plan §13.3).
-
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
@@ -69,38 +23,21 @@ use crate::store::{
     availability_wire_name,
 };
 
-// The fingerprint rule is owned and documented by the Git inspector; the
-// registry re-exports it so every historical import path keeps working.
 pub use crate::repository_git::repository_fingerprint;
 
-/// Canonical repository binding id prefix, matching the schema's
-/// `RepositoryBindingId` pattern (`rbd_` + 26 Crockford characters).
 const REPOSITORY_BINDING_ID_PREFIX: &str = "rbd_";
-/// Upper bound on binding-id regeneration when the random draw collides with
-/// a stored binding (practically unreachable with 26 Crockford characters).
 const MAX_BINDING_ID_ATTEMPTS: usize = 4;
-/// Display-name bound shared with the other server-visible identifiers.
 const MAX_DISPLAY_NAME_BYTES: usize = 200;
 const MAX_ID_BYTES: usize = 200;
 
-/// Explicit confirmations a registration accepts. `git init` never runs
-/// without [`RegistrationOptions::confirm_git_init`] (plan §13.3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegistrationOptions {
-    /// Whether a non-Git directory may be initialized (`wwc repo add --init`).
     pub confirm_git_init: bool,
 }
 
-/// Why the registration check chain refused a directory. `availability` is
-/// the plan 13.5 state the refusal maps to; a refused registration persists
-/// nothing locally and reports nothing to the Server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistrationRejection {
-    /// The seven-state projection of the failure (`unavailable`, `moved`,
-    /// `invalid_git`, `permission_denied`, or `scan_failed`).
     pub availability: RepositoryAvailability,
-    /// Local-only human-readable reason (absolute paths allowed; this never
-    /// reaches a frame).
     pub detail: String,
 }
 
@@ -113,27 +50,14 @@ impl RegistrationRejection {
     }
 }
 
-/// Failure of a repository registry operation.
 #[derive(Debug)]
 pub enum RepositoryRegistryError {
-    /// The durable store failed.
     Store(DeviceStoreError),
-    /// The operation reports a frame, so it requires an adopted enrollment:
-    /// a pending repository frame on the placeholder stream could never be
-    /// re-keyed onto the server-assigned node.
     NotEnrolled,
-    /// The binding id is unknown locally.
     NotFound,
-    /// The directory is already registered under another binding id.
-    AlreadyRegistered {
-        /// The binding id the canonical path is registered under.
-        repository_binding_id: String,
-    },
-    /// The registration check chain refused the directory.
+    AlreadyRegistered { repository_binding_id: String },
     Rejected(RegistrationRejection),
-    /// A caller-supplied value is invalid.
     InvalidInput(String),
-    /// A frame could not be encoded or the outbox rejected the append.
     Protocol(String),
 }
 
@@ -175,8 +99,6 @@ impl From<DeviceStoreError> for RepositoryRegistryError {
     }
 }
 
-/// The facts one scan observed about a directory. Absolute paths stay
-/// local-only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RepositoryScan {
     canonical_path: PathBuf,
@@ -184,91 +106,44 @@ struct RepositoryScan {
     branch: String,
     head_commit: String,
     dirty_state: RepositoryDirtyState,
-    /// Whether this scan ran `git init` (only a confirmed registration may).
     git_initialized_by_scan: bool,
 }
 
-/// Result of one successful registration (plan §13.1 `repo add`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RepositoryRegistration {
-    /// The freshly generated binding identity (`rbd_`).
     pub repository_binding_id: String,
-    /// Local-only canonical absolute path of the binding.
     pub canonical_path: PathBuf,
-    /// Local-only Git common directory, when Git reported one.
     pub git_common_directory: Option<PathBuf>,
-    /// Whether this registration initialized Git after explicit confirmation.
     pub git_initialized_by_registration: bool,
-    /// The safe projection the enqueued `client.repository.upsert` carries.
     pub projection: RepositoryBindingProjection,
-    /// Durable outbox sequence of the enqueued upsert frame.
     pub upsert_outbox_sequence: u64,
 }
 
-/// Result of one removal (plan §13.1 `repo remove`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRemoval {
-    /// The binding id that was removed.
     pub repository_binding_id: String,
-    /// Durable outbox sequence of the enqueued `client.repository.removed`.
     pub removed_outbox_sequence: u64,
 }
 
-/// Result of one launch-time revalidation (plan §13.5): the current
-/// seven-state projection of a binding, whatever the check chain found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RepositoryRevalidation {
-    /// The binding that was revalidated.
     pub repository_binding_id: String,
-    /// Current availability state (`available`/`dirty` on a healthy scan;
-    /// the failure state otherwise).
     pub availability: RepositoryAvailability,
-    /// Current HEAD commit; empty when the scan could not read one.
     pub head_commit: String,
-    /// Current working-tree dirty projection (`clean` when unreadable).
     pub dirty_state: RepositoryDirtyState,
-    /// Fingerprint over HEAD and branch (`sha256:…`).
     pub repository_fingerprint: String,
-    /// RFC 3339 stamp of this scan.
     pub last_scanned_at: String,
-    /// Whether this revalidation enqueued a `client.repository.status`
-    /// report because the projection differs from the durable one.
     pub status_reported: bool,
-    /// Durable outbox sequence of the enqueued status frame, when one was
-    /// enqueued.
     pub status_outbox_sequence: Option<u64>,
-    /// Local-only detail of a failed scan; empty on a healthy scan.
     pub detail: String,
 }
 
-/// One binding row joined with its latest durable scan projection
-/// (plan §13.1 `repo list`). Absolute paths stay local-only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryBindingSummary {
-    /// The path mapping row (canonical path, Git common directory, last
-    /// canonicalization stamp, availability vocabulary).
     pub mapping: PathMappingRecord,
-    /// The latest durable scan projection, when one exists.
     pub scan: Option<RepositoryLocalStateRecord>,
 }
 
-/// Registers a directory as a repository binding (plan §13.1 `repo add`).
-///
-/// Runs the plan §13.2 check chain, persists the local path mapping plus the
-/// scan projection, and enqueues the durable `client.repository.upsert`
-/// frame (persist-before-send). The durable outbox stream must already be
-/// bound (`DeviceStore::bind_outbox_stream`), and the node identity must be
-/// the server-assigned `clientNodeId` — a registration before the enrollment
-/// adoption is refused so its frame can never be stranded.
-///
-/// # Errors
-///
-/// Returns [`RepositoryRegistryError::Rejected`] when the check chain refuses
-/// the directory (the seven-state reason rides the rejection),
-/// [`RepositoryRegistryError::AlreadyRegistered`] when the canonical path is
-/// bound already, [`RepositoryRegistryError::NotEnrolled`] before the
-/// enrollment adoption, and the remaining variants for durable or encoding
-/// failures.
 pub fn register_repository(
     store: &mut DeviceStore,
     client_node_id: &str,
@@ -286,7 +161,6 @@ pub fn register_repository(
         });
     }
 
-    // Plan §13.2: the binding id is drawn only after every check passed.
     let binding_id = fresh_binding_id(store)?;
     let stamp = rfc3339(now);
     let availability = scan_availability(scan.dirty_state);
@@ -321,11 +195,6 @@ pub fn register_repository(
         repository_fingerprint: fingerprint,
         last_scanned_at: stamp.clone(),
     };
-    // Plan §9.3: `client.repository.upsert` is a C-class command carrying
-    // expectedRevision + idempotencyKey and no fencing stamp; v1 has no
-    // server-initiated repository change, so the expected revision is the
-    // fresh binding's 0. The scan stamp keeps the key deterministic per scan
-    // and unique across scans of the same binding.
     let message = ClientToServerMessage::RepositoryUpsert(ClientRepositoryUpsertPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -351,17 +220,6 @@ pub fn register_repository(
     })
 }
 
-/// Removes a repository binding (plan §13.1 `repo remove`): the durable
-/// `client.repository.removed` frame is enqueued first (persist-before-send)
-/// and the path mapping plus scan projection are then deleted atomically, so
-/// the Server invalidates its projection and the local absolute path leaves
-/// the store in one step.
-///
-/// # Errors
-///
-/// Returns [`RepositoryRegistryError::NotFound`] for an unknown binding id,
-/// [`RepositoryRegistryError::NotEnrolled`] before the enrollment adoption,
-/// and the remaining variants for durable or encoding failures.
 pub fn remove_repository(
     store: &mut DeviceStore,
     client_node_id: &str,
@@ -381,8 +239,6 @@ pub fn remove_repository(
     let message = ClientToServerMessage::RepositoryRemoved(ClientRepositoryRemovedPayload {
         command: CommandContext {
             expected_revision: 0,
-            // One removal per binding lifetime: a re-added directory always
-            // draws a fresh binding id, so the key never collides.
             idempotency_key: format!("repository-removed-{repository_binding_id}"),
         },
         repository_binding_id: repository_binding_id.to_owned(),
@@ -404,24 +260,6 @@ pub fn remove_repository(
     })
 }
 
-/// Re-runs the registration check chain against a binding's stored canonical
-/// path and returns the current plan 13.5 state (the Worker epic calls this
-/// before every worker launch; the result is never taken from the last
-/// scan). Revalidation never initializes Git and never moves the binding: a
-/// missing or replaced directory maps to `moved`, and the stored canonical
-/// path stays authoritative so a later restore revalidates back.
-///
-/// When the fresh projection differs from the durable scan projection
-/// (availability, HEAD, or dirty state), a `client.repository.status` report
-/// is enqueued automatically and [`RepositoryRevalidation::status_reported`]
-/// is set.
-///
-/// # Errors
-///
-/// Returns [`RepositoryRegistryError::NotFound`] for an unknown binding id,
-/// [`RepositoryRegistryError::NotEnrolled`] before the enrollment adoption,
-/// and the remaining variants for durable or encoding failures. Scan
-/// failures are values (`moved`, `invalid_git`, …), not errors.
 pub fn revalidate_repository(
     store: &mut DeviceStore,
     client_node_id: &str,
@@ -456,9 +294,6 @@ pub fn revalidate_repository(
                     scan.git_common_directory,
                 )
             }
-            // A failed revalidation keeps the binding where it was: only the
-            // projection moves to the failure state, with nothing claimed
-            // about a tree that could not be read.
             Err(rejection) => (
                 rejection.availability,
                 String::new(),
@@ -490,9 +325,6 @@ pub fn revalidate_repository(
     }
     store.put_path_mapping(&mapping)?;
 
-    // Plan §13.5: report when the fresh scan disagrees with the durable
-    // projection. A missing previous projection (never written by this lane)
-    // counts as a difference so the Server learns the current state.
     let differs = previous.as_ref().is_none_or(|previous| {
         previous.availability != availability
             || previous.dirty_state != dirty_state
@@ -531,12 +363,6 @@ pub fn revalidate_repository(
     })
 }
 
-/// Lists every local binding with its latest durable scan projection
-/// (plan §13.1 `repo list`), in binding-id order. Reads only — no scan runs.
-///
-/// # Errors
-///
-/// Returns a store failure when a read fails or the store is closed.
 pub fn list_bindings(
     store: &DeviceStore,
 ) -> Result<Vec<RepositoryBindingSummary>, RepositoryRegistryError> {
@@ -549,9 +375,6 @@ pub fn list_bindings(
     Ok(summaries)
 }
 
-/// The availability a healthy scan reports: `dirty` when the working tree
-/// has local modifications, `available` otherwise (plan §13.5 treats the two
-/// as distinct states).
 const fn scan_availability(dirty_state: RepositoryDirtyState) -> RepositoryAvailability {
     match dirty_state {
         RepositoryDirtyState::Clean => RepositoryAvailability::Available,
@@ -559,11 +382,6 @@ const fn scan_availability(dirty_state: RepositoryDirtyState) -> RepositoryAvail
     }
 }
 
-/// The registration check chain (plan §13.2), shared by registration and
-/// revalidation. `allow_git_init` permits `git init` after an explicit
-/// confirmation; `missing_maps_to_moved` switches the missing-directory and
-/// replaced-directory failures from `unavailable` (nothing was ever bound) to
-/// `moved` (a bound path disappeared or changed shape).
 fn scan_repository(
     requested_path: &Path,
     allow_git_init: bool,
@@ -583,9 +401,6 @@ fn scan_repository(
     })
 }
 
-/// Chain step 1: canonicalize with symlink resolution and replacement
-/// detection. At revalidation a directory entry that became a symlink is
-/// exactly the "软链接替换" shape: the bound path no longer is the directory.
 fn canonicalize_entry(
     requested_path: &Path,
     missing_maps_to_moved: bool,
@@ -651,7 +466,6 @@ fn canonicalize_entry(
     }
 }
 
-/// Chain step 2: the canonical path must be an existing, readable directory.
 fn require_readable_directory(
     canonical_path: &Path,
     missing_maps_to_moved: bool,
@@ -703,12 +517,7 @@ fn require_readable_directory(
     Ok(())
 }
 
-/// Chain steps 3–5 on the already-canonical directory: confirm-or-initialize
-/// Git, the Git common directory, then HEAD / branch / dirty state. The
-/// probes live in [`crate::repository_git`]; this wrapper maps the
-/// inspector's stable refusal classification onto the registry's rejection
-/// vocabulary unchanged.
-#[allow(clippy::type_complexity)] // the five scan facts in plan §13.2 order
+#[allow(clippy::type_complexity)]
 fn scan_git_state(
     canonical_path: &Path,
     allow_git_init: bool,
@@ -725,8 +534,6 @@ fn scan_git_state(
     ))
 }
 
-/// The failure state for a missing or reshaped path: `moved` when a binding
-/// already pointed there, `unavailable` when nothing was ever bound.
 fn missing_rejection(missing_maps_to_moved: bool, detail: String) -> RegistrationRejection {
     RegistrationRejection::new(
         if missing_maps_to_moved {
@@ -738,8 +545,6 @@ fn missing_rejection(missing_maps_to_moved: bool, detail: String) -> Registratio
     )
 }
 
-/// Draws a fresh binding id, re-drawing on the (practically unreachable)
-/// collision with a stored binding.
 fn fresh_binding_id(store: &DeviceStore) -> Result<String, RepositoryRegistryError> {
     for _ in 0..MAX_BINDING_ID_ATTEMPTS {
         let candidate = generate_prefixed_id(REPOSITORY_BINDING_ID_PREFIX)?;
@@ -752,7 +557,6 @@ fn fresh_binding_id(store: &DeviceStore) -> Result<String, RepositoryRegistryErr
     ))
 }
 
-/// Finds the binding a canonical path is already registered under, if any.
 fn binding_for_canonical_path(
     store: &DeviceStore,
     canonical_path: &Path,
@@ -765,7 +569,6 @@ fn binding_for_canonical_path(
         .map(|mapping| mapping.repository_binding_id))
 }
 
-/// The server-visible repository display name: the canonical directory name.
 fn display_name(canonical_path: &Path) -> Result<String, RepositoryRegistryError> {
     let name = canonical_path.file_name().map_or_else(
         || "repository".to_owned(),
@@ -780,8 +583,6 @@ fn display_name(canonical_path: &Path) -> Result<String, RepositoryRegistryError
     Ok(name)
 }
 
-/// Repository frames report facts, so the sender stream must carry the
-/// server-assigned node; an unbound or placeholder stream is refused.
 fn require_stream_identity(
     client_node_id: &str,
     client_instance_id: &str,
@@ -797,9 +598,6 @@ fn require_stream_identity(
     Ok(())
 }
 
-/// Appends one durable repository frame to the outbox
-/// (persist-before-send), using the same message-id convention as the
-/// daemon's enqueue path.
 pub(crate) fn enqueue_repository_frame(
     store: &mut DeviceStore,
     client_node_id: &str,
@@ -830,7 +628,6 @@ pub(crate) fn enqueue_repository_frame(
     Ok(expected)
 }
 
-/// Maps an outbox state-machine failure onto the registry error set.
 fn map_outbox_error(
     error: winwincode_client_port::exchange::OutboxError<DeviceStoreError>,
 ) -> RepositoryRegistryError {
@@ -846,7 +643,6 @@ fn map_outbox_error(
     }
 }
 
-/// RFC 3339 UTC stamp of the caller's clock observation.
 fn rfc3339(time: OffsetDateTime) -> String {
     crate::canonical_rfc3339(time)
 }

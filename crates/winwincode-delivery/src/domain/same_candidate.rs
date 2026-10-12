@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! An unchanged Remediator authorizes another independent review of the same candidate.
 use super::{
     Delivery, DeliverySnapshot, DeliveryStatus, DeliveryValidationError,
     DeliveryValidationErrorCode, SessionBinding, validation_error,
@@ -24,7 +23,6 @@ pub struct SameCandidateReverificationFact {
     pub binding_prefix_digest: Sha256Digest,
 }
 
-/// Private, non-deserializable authority produced after exact terminal and rework joins.
 #[derive(Clone, Debug)]
 pub struct VerifiedUnchangedReworkRecovery {
     fact: SameCandidateReverificationFact,
@@ -42,8 +40,6 @@ fn prefix(
     floor: usize,
 ) -> Result<Sha256Digest, DeliveryValidationError> {
     let bindings = snapshot.session_bindings.get(..floor).ok_or_else(invalid)?;
-    // Runtime attachment may legitimately follow a lease. Seal immutable
-    // execution identities and business scope instead of those attachments.
     let identities: Vec<_> = bindings
         .iter()
         .map(|b| {
@@ -65,9 +61,6 @@ fn prefix(
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
-/// Seals an exact accepted rework source and a failed Remediator terminal fact.
-/// # Errors
-/// Rejects altered source, active competitors, foreign jobs, or incomplete authorization.
 pub fn verify_unchanged_rework_recovery(
     current: &Delivery,
     source: &Delivery,
@@ -144,9 +137,6 @@ pub fn verify_unchanged_rework_recovery(
 }
 
 impl VerifiedUnchangedReworkRecovery {
-    /// Applies recovery inside the same terminal transaction. The failed run stays failed.
-    /// # Errors
-    /// Rejects any terminal transition other than the exact next revision of the sealed source.
     pub fn apply(
         &self,
         source: &Delivery,
@@ -248,7 +238,6 @@ pub(crate) fn validate_fact(snapshot: &DeliverySnapshot) -> Result<(), DeliveryV
     Ok(())
 }
 
-/// Selects the latest writer, or the exact producer named by the active recovery fact.
 #[must_use]
 pub fn selected_writer(snapshot: &DeliverySnapshot) -> Option<&SessionBinding> {
     if let Some(fact) = &snapshot.same_candidate_reverification {
@@ -269,7 +258,6 @@ pub fn selected_writer(snapshot: &DeliverySnapshot) -> Option<&SessionBinding> {
         .max_by_key(|b| (b.bound_at_millis, b.attempt))
 }
 
-/// The latest Reviewer after the recovery floor starts the current full review round.
 #[must_use]
 pub fn verification_round_floor(snapshot: &DeliverySnapshot) -> usize {
     let minimum = snapshot

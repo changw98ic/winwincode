@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control Plane-issued receipts for Worker action execution.
-//!
-//! The Worker derives Policy facts from the same normalized tool request it is
-//! about to execute. The Control Plane signs those facts after evaluating the
-//! canonical Action Policy ledger. A receipt is claimed durably before the
-//! tool executor is called, so an exact replay never repeats the side effect.
-
 use std::{
     fmt,
     fs::{self, OpenOptions},
@@ -27,7 +20,7 @@ use crate::{
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
         ActionEnforcementReceiptMessageKind, ActionEnforcementRequestMessage,
-        ActionEnforcementRequestMessageKind, ActionPolicyKind,
+        ActionEnforcementRequestMessageKind, ActionPolicyKind, ExecutionLeaseStamp,
     },
 };
 
@@ -36,13 +29,10 @@ const POLICY_CONDITION_NAMESPACE: &[u8] = b"winwincode.action-policy-enforcement
 const RECEIPT_SIGNATURE_NAMESPACE: &[u8] = b"winwincode.action-enforcement-receipt-signature.v1";
 const RECEIPT_USE_SCHEMA_VERSION: &str = "winwincode.action-enforcement-use.v1";
 
-/// Secret signing key shared only by the issuing Control Plane and its Worker.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ActionEnforcementSigningKey([u8; 32]);
 
 impl ActionEnforcementSigningKey {
-    /// Authenticates the financial-only reconciliation endpoint, including after
-    /// execution credentials have expired. This token grants no execution rights.
     #[must_use]
     pub fn accounting_query_token(&self) -> Sha256Digest {
         self.accounting_signature(b"pending-attempt-query.v1")
@@ -57,11 +47,6 @@ impl ActionEnforcementSigningKey {
             ))
         ))
     }
-    /// Constructs a signing key from 256 bits of caller-owned secret material.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the all-zero value rather than installing a public sentinel key.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, ActionEnforcementError> {
         if bytes.iter().all(|byte| *byte == 0) {
             return Err(ActionEnforcementError::InvalidKey);
@@ -69,30 +54,21 @@ impl ActionEnforcementSigningKey {
         Ok(Self(bytes))
     }
 
-    /// Consumes the Worker-owned copy into a receipt verifier.
     #[must_use]
     pub const fn into_verifier(self) -> ActionEnforcementVerifier {
         ActionEnforcementVerifier(self)
     }
 }
 
-/// Control Plane receipt signer.
 #[derive(Clone)]
 pub struct ActionEnforcementIssuer(ActionEnforcementSigningKey);
 
 impl ActionEnforcementIssuer {
-    /// Installs the caller-owned action receipt signing key.
     #[must_use]
     pub const fn new(key: ActionEnforcementSigningKey) -> Self {
         Self(key)
     }
 
-    /// Signs the complete immutable receipt in place.
-    ///
-    /// # Errors
-    ///
-    /// Returns an encoding error when the generated receipt cannot be
-    /// represented as canonical JSON.
     pub fn sign(
         &self,
         receipt: &mut ActionEnforcementReceiptMessage,
@@ -101,17 +77,11 @@ impl ActionEnforcementIssuer {
         Ok(())
     }
 
-    /// Returns the matching Worker verifier without exposing raw key bytes.
     #[must_use]
     pub fn verifier(&self) -> ActionEnforcementVerifier {
         ActionEnforcementVerifier(self.0.clone())
     }
 
-    /// Verifies that a durable receipt still has its exact issued signature.
-    ///
-    /// # Errors
-    ///
-    /// Rejects altered or non-canonical receipt bytes.
     pub fn verify_signature(
         &self,
         receipt: &ActionEnforcementReceiptMessage,
@@ -128,18 +98,10 @@ impl ActionEnforcementIssuer {
     }
 }
 
-/// Worker-side verifier for Control Plane action receipts.
 #[derive(Clone)]
 pub struct ActionEnforcementVerifier(ActionEnforcementSigningKey);
 
 impl ActionEnforcementVerifier {
-    /// Verifies the signature and every action, invocation, lease, session, and
-    /// Policy fact bound into a permit receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a denied, malformed, forged, stale, cross-action, or
-    /// cross-authority receipt before the action can be claimed or executed.
     pub fn verify(
         &self,
         action: &WorkerActionRequest,
@@ -151,18 +113,26 @@ impl ActionEnforcementVerifier {
         self.verify_outcome(action, receipt)
     }
 
-    /// Verifies the signature and immutable action facts for either a permit
-    /// or reject outcome. Callers must branch on the verified decision before
-    /// entering a tool handler.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, forged, stale, cross-action, or cross-authority receipts.
     pub fn verify_outcome(
         &self,
         action: &WorkerActionRequest,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<ActionNormalization, ActionEnforcementError> {
+        self.verify_outcome_with_current_lease(action, receipt, &action.authority.lease)
+    }
+
+    pub fn verify_outcome_with_current_lease(
+        &self,
+        action: &WorkerActionRequest,
+        receipt: &ActionEnforcementReceiptMessage,
+        current_lease: &ExecutionLeaseStamp,
+    ) -> Result<ActionNormalization, ActionEnforcementError> {
+        if !crate::execution_identity::retained_lease_matches_current(
+            &action.authority.lease,
+            current_lease,
+        ) {
+            return Err(ActionEnforcementError::ReceiptMismatch);
+        }
         let normalization = normalize_action(&action.intent, &action.request)
             .map_err(|_| ActionEnforcementError::InvalidAction)?;
         if !normalization.comparison.matches {
@@ -181,8 +151,9 @@ impl ActionEnforcementVerifier {
             || receipt.subject_sha256 != facts.subject_sha256
             || receipt.matched_condition_sha256 != facts.matched_condition_sha256
             || receipt.sent_at != receipt.evaluated_at
-            || receipt.evaluated_at.0 < receipt.lease.issued_at.0
-            || receipt.evaluated_at.0 >= receipt.lease.expires_at.0
+            || !crate::execution_identity::canonical_instant(&receipt.evaluated_at)
+            || receipt.evaluated_at.0 < current_lease.issued_at.0
+            || receipt.evaluated_at.0 >= current_lease.expires_at.0
             || !canonical_id(&receipt.message_id.0, "xmsg_")
             || !canonical_id(&receipt.request_id.0, "req_")
             || receipt.actor.kind != winwincode_domain::UserActorKind::User
@@ -205,7 +176,6 @@ impl ActionEnforcementVerifier {
     }
 }
 
-/// Stable action facts sent to the Control Plane and bound into its receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionEnforcementFacts {
     pub policy_kind: ActionPolicyKind,
@@ -214,11 +184,6 @@ pub struct ActionEnforcementFacts {
     pub matched_condition_sha256: Vec<Sha256Digest>,
 }
 
-/// Builds the sole generated enforcement request from a pending normalized action.
-///
-/// # Errors
-///
-/// Rejects invalid or intent-mismatched actions before any Worker message is emitted.
 pub fn prepare_action_enforcement_request(
     message_id: ExecutionMessageId,
     sent_at: Instant,
@@ -247,11 +212,6 @@ pub fn prepare_action_enforcement_request(
     })
 }
 
-/// Derives secret-free Policy facts from the canonical normalization.
-///
-/// # Errors
-///
-/// Returns an encoding error only if the typed normalization cannot be encoded.
 pub fn action_enforcement_facts(
     normalization: &ActionNormalization,
 ) -> Result<ActionEnforcementFacts, ActionEnforcementError> {
@@ -296,7 +256,6 @@ pub fn action_enforcement_facts(
     })
 }
 
-/// Computes the shared Action Policy condition digest.
 #[must_use]
 pub fn policy_condition_sha256(condition: &str) -> Sha256Digest {
     namespaced_digest(POLICY_CONDITION_NAMESPACE, condition.as_bytes())
@@ -318,38 +277,24 @@ fn enum_name(value: &impl Serialize) -> Result<String, ActionEnforcementError> {
         .ok_or(ActionEnforcementError::Encoding)
 }
 
-/// Outcome of the mandatory durable receipt claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionReceiptClaim {
     Fresh,
     AlreadyConsumed,
 }
 
-/// Durable store used by the Worker immediately before a side effect.
 pub trait ActionReceiptUseStore {
-    /// Claims a signed receipt exactly once.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Conflict` when an invocation identity was already claimed by a
-    /// different receipt, and `Storage` for unavailable durable state.
     fn claim(
         &mut self,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<ActionReceiptClaim, ActionReceiptUseError>;
 }
 
-/// File-backed Worker receipt store. Each invocation is durably created once.
 pub struct FileActionReceiptUseStore {
     directory: PathBuf,
 }
 
 impl FileActionReceiptUseStore {
-    /// Opens the action receipt directory owned by one Worker data root.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Storage` if the directory cannot be created or synchronized.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ActionReceiptUseError> {
         let directory = root.as_ref().join("action-enforcement-receipts");
         fs::create_dir_all(&directory).map_err(|_| ActionReceiptUseError::Storage)?;
@@ -446,7 +391,6 @@ fn restrict_file(_path: &Path) -> Result<(), ActionReceiptUseError> {
     Ok(())
 }
 
-/// Stable Worker receipt claim failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionReceiptUseError {
     Conflict,
@@ -464,7 +408,6 @@ impl fmt::Display for ActionReceiptUseError {
 
 impl std::error::Error for ActionReceiptUseError {}
 
-/// Stable receipt preparation or verification failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionEnforcementError {
     InvalidKey,

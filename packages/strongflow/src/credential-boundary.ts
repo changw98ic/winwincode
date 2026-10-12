@@ -55,7 +55,6 @@ function textContainsCredentialMaterial(
   return false
 }
 
-/** Detect raw secrets before a Delivery fact can enter durable storage or a response. */
 export function containsRawCredentialMaterial(
   value: unknown,
   sensitiveValues: readonly string[] = [],

@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The repository directory route over real HTTP (REPO-100.4): the
-//! `GET /api/v1/repositories?clientId=…` projection of the durable repository
-//! bindings (plan 13.4, REPO-100.3 facade shape), covering the sign-in
-//! requirement, the query identity validation, the dual Client+Repository
-//! grant visibility, per-user directory sets, and the revalidate evidence:
-//! an availability change applied through the repository service is consumed
-//! by the next directory read.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -206,7 +198,6 @@ fn repositories_get(path: &str, cookie: &str) -> String {
     )
 }
 
-/// Same GET with no credential at all.
 fn anonymous_get(path: &str) -> String {
     format!(
         "GET {path} HTTP/1.1\r\nHost: control.example\r\nOrigin: {ORIGIN}\r\nConnection: close\r\n\r\n"
@@ -272,8 +263,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// Initializes the Owner with a password, then signs in; returns
-/// (cookie, userId).
 async fn initialize_and_login_owner(address: std::net::SocketAddr) -> (String, String) {
     let response = http_request(
         address,
@@ -305,9 +294,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-// ---- durable staging (the Device-Client side of the projection) -----------
-
-/// Seeds one registered, `online` Client node under a fixed public id.
 fn stage_device(data_directory: &Path) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut registry = ClientRegistryService::new(&mut storage);
@@ -331,8 +317,6 @@ fn stage_device(data_directory: &Path) {
         .expect("presence online");
 }
 
-/// Reports one binding the way the Device Client does at launch (available,
-/// clean); returns the durable revision.
 fn upsert_binding(
     data_directory: &Path,
     binding_id: &str,
@@ -361,7 +345,6 @@ fn upsert_binding(
         .revision
 }
 
-/// Creates one active `use` Client access grant for `user_id`.
 fn stage_client_grant(data_directory: &Path, node: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let issuance = AccessGrantIssuance::try_new(
@@ -408,7 +391,6 @@ fn stage_managing_client_grant(data_directory: &Path, node: &str, user_id: &str)
         .expect("managing client grant");
 }
 
-/// Creates one active repository access grant for `user_id`.
 fn stage_repository_grant(data_directory: &Path, binding_id: &str, user_id: &str) {
     stage_repository_grant_with_permissions(
         data_directory,
@@ -434,10 +416,6 @@ fn stage_repository_grant_with_permissions(
         .expect("repository grant");
 }
 
-/// Applies one rescan outcome through the repository service (the server-side
-/// consumption of a device revalidation); returns the new revision. A
-/// non-`available` outcome reports a dirty work tree, which the frozen
-/// consistency rule accepts for every non-`available` state.
 fn apply_rescan(
     data_directory: &Path,
     binding_id: &str,
@@ -458,8 +436,6 @@ fn apply_rescan(
         .revision
 }
 
-// ---- tests ----------------------------------------------------------------
-
 #[tokio::test]
 async fn repository_directory_requires_a_signed_in_session() {
     let data_directory = test_directory("repo-dir-auth");
@@ -475,7 +451,6 @@ async fn repository_directory_requires_a_signed_in_session() {
     assert_eq!(status_of(&response), "401", "{response}");
     assert_eq!(wire_code(&response), "AUTHENTICATION_REQUIRED");
 
-    // No credential at all is the same rejection.
     let response = http_request(
         address,
         &anonymous_get("/api/v1/repositories?clientId=927351842"),
@@ -528,8 +503,6 @@ async fn repository_directory_rejects_malformed_and_unknown_client_identities() 
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
 
-/// The Owner holds the Client grant and the repository grant on `alpha`, so
-/// `alpha` is visible and `beta` (repository grant missing) is not.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn repository_directory_follows_owner_authorization_and_facade_shape() {
@@ -558,7 +531,6 @@ async fn repository_directory_follows_owner_authorization_and_facade_shape() {
     stage_managing_client_grant(&data_directory, NODE, &owner_id);
     stage_repository_grant(&data_directory, &alpha_binding_id(), &owner_id);
 
-    // The Owner sees exactly alpha, field by field in the facade shape.
     let response = http_request(
         address,
         &repositories_get("/api/v1/repositories?clientId=927351842", &owner_cookie),
@@ -610,10 +582,6 @@ async fn repository_directory_follows_owner_authorization_and_facade_shape() {
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
 
-/// Revalidate evidence: the directory is a live projection of the durable
-/// binding facts, so an availability change applied through the repository
-/// service (what a device revalidation produces) is consumed by the next
-/// directory read without any cache in between.
 #[tokio::test]
 async fn repository_directory_reflects_revalidated_availability() {
     let data_directory = test_directory("repo-dir-revalidate");
@@ -664,7 +632,6 @@ async fn repository_directory_reflects_revalidated_availability() {
         "the launch report projects available"
     );
 
-    // The device reports the directory moved; the projection moves with it.
     let revision = apply_rescan(
         &data_directory,
         &alpha_binding_id(),
@@ -678,7 +645,6 @@ async fn repository_directory_reflects_revalidated_availability() {
         "the directory consumes the revalidated availability"
     );
 
-    // A later revalidation restores availability as a dirty work tree.
     let revision = apply_rescan(
         &data_directory,
         &alpha_binding_id(),

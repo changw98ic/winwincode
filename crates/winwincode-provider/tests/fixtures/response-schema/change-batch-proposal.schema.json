@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "acceptanceCriteriaIds": {
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    },
+    "disposition": {
+      "enum": [
+        "final",
+        "continue",
+        "probe"
+      ],
+      "type": "string"
+    },
+    "patch": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "validationProfile": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "acceptanceCriteriaIds",
+    "disposition",
+    "patch",
+    "schemaVersion",
+    "validationProfile"
+  ],
+  "type": "object"
+}

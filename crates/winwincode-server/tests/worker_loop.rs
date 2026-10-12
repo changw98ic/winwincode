@@ -1,29 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The worker loop vertical (WORKER-200.2): the full worker chain over a
-//! real server and a real Device Client daemon — no fake responder on the
-//! device side. The daemon enrolls over the real HTTP exchange, occupies
-//! the device (claim → offer → ack → `occupied`), and then answers the
-//! `client.worker.launch` command the `POST /api/v1/sessions` flow enqueues:
-//! the fencing stamp passes, the launch material (the one-time worker
-//! credential the `201` launch response delivered exactly once) is matched
-//! against the grant digest, the wired `SessionSupervisor` writes the 0600
-//! credential/config files and spawns a stub worker process (field-checking
-//! script: it verifies every managed-session contract field before idling
-//! and exiting zero on SIGTERM — the real `--managed-session` parser is
-//! cross-validated against supervisor-written configs by the device-client
-//! suite), and the `client.worker.launch_ack` consumes the grant exactly
-//! once. The vertical then pins the surrounding behaviors: the heartbeat
-//! running count following the registry, non-holder rejection, the
-//! idempotent replay of an accepted acknowledgement, the supervisor stop
-//! path, `cancel_and_release` stopping the lease workers, and a stale
-//! launch after a force fence being refused by the daemon's mirror.
-//!
-//! Assertions land on both durable sides throughout: the server's launch
-//! grant ledger and registry projection, and the device store's worker
-//! process registry, occupancy mirror, release intents, and exchange
-//! cursors.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
@@ -54,10 +30,7 @@ use winwincode_client_port::domain::ClientCapacityReport;
 use winwincode_client_port::domain::ClientOccupancyReleaseMode;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::WorkerLaunchAckStatus;
-use winwincode_client_port::domain::WorkerLaunchGrant;
-use winwincode_client_port::domain::WorkerLaunchGrantState as WireGrantState;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
-use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ClientWorkerLaunchAckPayload;
 use winwincode_client_port::messages::CommandContext;
@@ -73,7 +46,6 @@ use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, HttpExchangeTransport,
     SessionSupervisor, SupervisorConfig, TickOutcome, WORKER_STATE_EXITED, WORKER_STATE_RUNNING,
     WorkerLaunchDirectories, WorkerLaunchMaterialSource, ensure_device_identity,
-    load_device_identity,
 };
 use winwincode_domain::Instant;
 use winwincode_domain::OrganizationId;
@@ -97,12 +69,8 @@ const OWNER_PASSWORD: &str = "initial-owner-password";
 const SCHEMA_VERSION: &str = "winwincode/v1";
 const VALID_UNTIL: &str = "2100-01-01T00:00:00.000Z";
 const EXCHANGE_ENDPOINT_PATH: &str = "/internal/v1/client/exchange";
-/// The enrollment acceptance pins this server-requested heartbeat cadence,
-/// so the real daemon completes launches and drains in milliseconds.
 const SERVER_HEARTBEAT_MS: u32 = 200;
 const DRIVE_DEADLINE: Duration = Duration::from_secs(30);
-/// The recovery window of the sweep application: short enough that the
-/// force-release deadline passes within the test.
 const RECOVERY_WINDOW: Duration = Duration::from_millis(50);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 static NEXT_CODE_ID: AtomicU64 = AtomicU64::new(1);
@@ -239,8 +207,6 @@ async fn start_server(data_directory: &Path) -> winwincode_server::RunningServer
     .expect("start server with client surface")
 }
 
-// ---- HTTP helpers ----------------------------------------------------------
-
 async fn http_request(address: std::net::SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
     stream
@@ -253,35 +219,6 @@ async fn http_request(address: std::net::SocketAddr, request: &str) -> String {
         .await
         .expect("read response");
     String::from_utf8(response).expect("HTTP response")
-}
-
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
-    let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "POST {EXCHANGE_ENDPOINT_PATH} HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("write request");
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("read response");
-    let response = String::from_utf8(response).expect("HTTP response");
-    let status = response.lines().next().expect("status line").to_owned();
-    let body = response.split_once("\r\n\r\n").map(|(_, body)| body);
-    let parsed = body.and_then(|body| serde_json::from_str(body).ok());
-    (status, parsed)
 }
 
 fn bearer_post(path: &str, body: &str, proof: &str) -> String {
@@ -385,8 +322,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-// ---- staging bodies --------------------------------------------------------
-
 fn occupancy_body(client_id: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -414,8 +349,6 @@ fn launch_body(client_id: &str, binding_id: &str, session: u64) -> String {
     })
     .to_string()
 }
-
-// ---- device daemon helpers -------------------------------------------------
 
 fn seed() -> DeviceIdentitySeed {
     DeviceIdentitySeed {
@@ -453,7 +386,6 @@ fn daemon_config(endpoint: &str) -> DaemonConfig {
     }
 }
 
-/// Starts one daemon session over the real std HTTP transport.
 fn start_daemon(endpoint: &str, device_root: &Path, stamp: &str) -> DeviceDaemon {
     let mut store = DeviceStore::open(device_root).expect("device store should open");
     let identity = ensure_device_identity(&mut store, &seed(), stamp).expect("device identity");
@@ -466,18 +398,6 @@ fn start_daemon(endpoint: &str, device_root: &Path, stamp: &str) -> DeviceDaemon
     .expect("daemon start")
 }
 
-/// The device credential material of the daemon (for the one hand-built
-/// uplink frame the idempotency phase posts directly).
-fn device_credential(device_root: &Path) -> String {
-    let store = DeviceStore::open(device_root).expect("device store connection");
-    let identity = load_device_identity(&store)
-        .expect("identity read")
-        .expect("enrolled identity");
-    identity.credential().material_hex().clone()
-}
-
-/// Drives the daemon loop until `predicate` holds, sleeping only the
-/// durations the loop schedules.
 fn drive_until(
     daemon: &mut DeviceDaemon,
     what: &str,
@@ -509,8 +429,6 @@ fn settled(daemon: &mut DeviceDaemon) -> bool {
     snapshot.frames.is_empty() && snapshot.ack_sequence == snapshot.highest_sequence
 }
 
-/// The canonical wall-clock instant of now, offset by whole seconds, in the
-/// fixed 24-character shape the durable lexicographic comparisons rely on.
 fn canonical_now(offset_seconds: i64) -> Instant {
     let value = time::OffsetDateTime::now_utc() + time::Duration::seconds(offset_seconds);
     let millis = value.nanosecond() / 1_000_000;
@@ -526,11 +444,6 @@ fn canonical_now(offset_seconds: i64) -> Instant {
     ))
 }
 
-// ---- the device-side launch material ----------------------------------------
-
-/// The local bridge the vertical plays: it receives the one-time worker
-/// credential exactly as the `201` launch response delivered it and owns the
-/// local worker directories under the device root.
 struct LaunchResponseMaterial {
     credentials: Mutex<HashMap<String, String>>,
     worker_root: PathBuf,
@@ -568,11 +481,6 @@ impl WorkerLaunchMaterialSource for LaunchResponseMaterial {
     }
 }
 
-/// The stub worker binary: a field-checking script. It verifies every
-/// managed-session contract field before signalling readiness, idles, and
-/// exits zero on SIGTERM — process-level behavior stays fully controlled
-/// while the config parsing itself is cross-validated against the real
-/// `winwincode-worker` reader by the device-client suite.
 const STUB_WORKER_BODY: &str = r#"config="$2"
 for field in clientNodeId clientInstanceId occupancyLeaseId occupancyFencingToken \
              repositoryBindingId workerSessionId workerId workerInstanceId \
@@ -613,8 +521,6 @@ fn file_mode(path: &Path) -> u32 {
         .mode()
         & 0o777
 }
-
-// ---- durable-state readers --------------------------------------------------
 
 fn node_snapshot(data_directory: &Path, node_id: &str) -> winwincode_storage::ClientNodeRecord {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -671,36 +577,6 @@ fn audit_actions(data_directory: &Path, grant_id: &str) -> Vec<String> {
         .collect()
 }
 
-fn next_client_sequence(data_directory: &Path, node: &str) -> u64 {
-    let mut storage = SqliteStorage::open(data_directory).expect("storage");
-    let mut registry = ClientRegistryService::new(&mut storage);
-    registry
-        .exchange_cursors(node)
-        .expect("cursors")
-        .expect("cursors exist")
-        .client_to_server_ack_sequence
-        + 1
-}
-
-fn downlink_ack_cursor(data_directory: &Path, node: &str) -> u64 {
-    let mut storage = SqliteStorage::open(data_directory).expect("storage");
-    let cursors = {
-        let mut registry = ClientRegistryService::new(&mut storage);
-        registry
-            .exchange_cursors(node)
-            .expect("cursors")
-            .expect("cursors exist")
-            .server_to_client_ack_sequence
-    };
-    let high_water = storage
-        .client_downlink_outbox()
-        .expect("outbox")
-        .high_water(node)
-        .expect("high water");
-    cursors.max(high_water)
-}
-
-/// Publishes one connect code digest the way the Device Client would.
 fn publish_connect_code(data_directory: &Path, node: &str, instance: &str, code: &str) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -720,8 +596,6 @@ fn publish_connect_code(data_directory: &Path, node: &str, instance: &str, code:
     code.to_owned()
 }
 
-/// Consumes one published code directly, staging the active `use` grant a
-/// connected user would hold.
 fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -751,8 +625,6 @@ fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str)
         .expect("atomic consume and grant");
 }
 
-/// Stages one visible repository binding with an active `use` grant for the
-/// user; returns the binding id.
 fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> String {
     let binding_id = fresh_binding_id();
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -793,10 +665,6 @@ fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> St
     binding_id
 }
 
-/// Enqueues one Server → Client frame directly into the durable downlink
-/// outbox at the next free stream position — the exact delivery surface the
-/// real launch flow writes through, used here to stage a stale launch the
-/// device must refuse.
 fn enqueue_downlink_frame(
     data_directory: &Path,
     node: &str,
@@ -833,9 +701,6 @@ fn enqueue_downlink_frame(
         .expect("stale frame appends");
 }
 
-/// Polls the durable downlink outbox until the signed launch frame of the
-/// in-flight `POST /api/v1/sessions` flow appears and answers the grant id
-/// it carries. The daemon is parked while the frame is captured.
 fn wait_for_launch_grant(data_directory: &Path, node: &str) -> String {
     let deadline = StdInstant::now() + Duration::from_secs(20);
     loop {
@@ -879,7 +744,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     let address = running.local_address();
     let endpoint = format!("http://{address}{EXCHANGE_ENDPOINT_PATH}");
 
-    // ---- Phase 0: Owner, enrollment, capacity, worker lane, occupancy -----
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
     let mut daemon = start_daemon(&endpoint, &device_root, "2026-09-04T00:00:00.000Z");
@@ -888,8 +752,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     });
     let node_id = daemon.client_node_id().to_owned();
 
-    // Relaunch once to cover instance takeover before wiring the worker lane;
-    // the first hello already landed the capacity required by the claim gate.
     daemon
         .into_store()
         .close()
@@ -901,8 +763,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             && node_snapshot(&data_directory, &node_id).max_concurrent_worker_sessions == 4
     });
 
-    // Wire the worker lane: the local supervisor over a second connection to
-    // the same durable device store, every daemon hook attached.
     let stub_binary = worker_root.join("stub-winwincode-worker");
     fs::create_dir_all(&worker_root).expect("worker root creates");
     write_stub_worker(&stub_binary);
@@ -910,9 +770,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         SupervisorConfig {
             client_node_id: node_id.clone(),
             client_instance_id: device_instance.clone(),
-            // The exchange endpoint the tests serve is plain HTTP; the
-            // managed-session contract enforces the https origin form (the
-            // stub never connects to it).
             server_origin: format!("https://127.0.0.1:{}", address.port()),
             model_route: None,
             worker_binary_path: Some(stub_binary.clone()),
@@ -927,7 +784,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     daemon.set_worker_launch_material_source(material.clone());
     daemon.set_worker_capacity_source(Arc::new(supervisor.clone()));
     daemon.set_lease_worker_controller(Arc::new(supervisor.clone()));
-    let daemon_credential = device_credential(&device_root);
 
     consume_code_as(
         &data_directory,
@@ -943,7 +799,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     let public_client_id = node_snapshot(&data_directory, &node_id).public_client_id;
     let binding_id = stage_visible_binding(&data_directory, &node_id, &owner_id);
 
-    // ---- Phase 1: occupancy (claim → offer → ack → occupied) ---------------
     let claim_request = cookie_post(
         "/api/v1/clients/occupancy",
         &occupancy_body(&public_client_id),
@@ -972,13 +827,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(mirror.occupancy_lease_id, lease_one_id);
     assert_eq!(mirror.fencing_token, token_one);
 
-    // ---- Phase 2: the holder launches; the daemon consumes the grant -------
-    // The launch flow's 201 answers only after the device consumed the
-    // grant, so the POST runs concurrently while the vertical drives the
-    // daemon: the launch command is signed (durable downlink frame), the
-    // daemon fences it, spawns through the supervisor, and the launch ack
-    // consumes the grant exactly once — then the 201 body delivers the
-    // one-time worker credential material.
     device_provider::stage_chat(&data_directory, &node_id, &owner_id, 100);
     let launch_request = cookie_post(
         "/api/v1/sessions",
@@ -990,8 +838,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         assert_eq!(status_of(&response), "201", "launch response: {response}");
         response
     });
-    // The signed launch frame is durable before the flow answers; capture
-    // its grant id from the outbox while the daemon is still parked.
     let grant_one_id = wait_for_launch_grant(&data_directory, &node_id);
     drive_until(
         &mut daemon,
@@ -1023,9 +869,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert!(grant_one.consumed_at.is_some());
     assert_eq!(worker_session_one, grant_one.worker_session_id);
     assert_eq!(worker_instance_one, grant_one.worker_instance_id);
-    // The browser response stays secret-free; credential material travels
-    // with the launch frame through the Device exchange sidecar and lands in
-    // the worker's private file.
     assert!(body.get("workerCredential").is_none());
     let digest_one = body["credentialDigest"].as_str().expect("digest");
     let worker_data_one = worker_root.join(&worker_session_one).join("data");
@@ -1055,8 +898,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         "every downlink command of this vertical is handled by a lane"
     );
 
-    // The device-side registry carries the grant identities and the stub
-    // process is really alive.
     let record = supervisor
         .worker_process(&worker_session_one)
         .expect("registry read")
@@ -1073,8 +914,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             .expect("running count"),
         1
     );
-    // The private files are mode 0600 and the credential file carries
-    // exactly the Device exchange sidecar material.
     assert_eq!(
         file_mode(&worker_data_one.join("managed-session.json")),
         0o600
@@ -1107,7 +946,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(config["productSessionId"], json!(body["productSessionId"]));
     assert_eq!(config["workRunId"], json!(body["workRunId"]));
 
-    // The heartbeat running count follows the registry.
     drive_until(
         &mut daemon,
         "the heartbeat to report the running worker",
@@ -1117,19 +955,9 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         },
     );
 
-    // ---- Phase 4: a replayed accepted ack is an idempotent no-op -----------
     let revision_before = grant_one.revision;
-    let duplicate_ack = ClientToServerEnvelope {
-        schema_version: SCHEMA_VERSION.to_owned(),
-        message_id: format!(
-            "msg_duplicate_ack_{}",
-            next_client_sequence(&data_directory, &node_id)
-        ),
-        client_node_id: node_id.clone(),
-        client_instance_id: device_instance.clone(),
-        sequence: next_client_sequence(&data_directory, &node_id),
-        occurred_at: "2026-09-04T12:05:00.000Z".to_owned(),
-        message: ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+    let duplicate_ack =
+        ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
             process_closure: None,
             occupancy: OccupancyCommandContext {
                 command: CommandContext {
@@ -1145,20 +973,15 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             worker_instance_id: worker_instance_one.clone(),
             status: WorkerLaunchAckStatus::Accepted,
             error: None,
-        })),
-    };
-    let (status, _) = post_exchange(
-        address,
-        &json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "frames": [serde_json::to_value(&duplicate_ack).expect("ack frame")],
-            "ackSequence": downlink_ack_cursor(&data_directory, &node_id),
-        })
-        .to_string(),
-        Some(&daemon_credential),
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        }));
+    daemon
+        .enqueue(duplicate_ack)
+        .expect("enqueue replayed launch acknowledgement");
+    drive_until(
+        &mut daemon,
+        "the duplicate acknowledgement to settle",
+        settled,
+    );
     let grant_after = launch_grant(&data_directory, &grant_one_id);
     assert_eq!(grant_after.state, WorkerLaunchGrantState::Consumed);
     assert_eq!(
@@ -1170,7 +993,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         vec!["issued".to_owned(), "consumed".to_owned()],
     );
 
-    // ---- Phase 5: the supervisor stop path and the running count -----------
     let stopped = supervisor
         .stop(&worker_session_one, true)
         .expect("graceful stop");
@@ -1185,7 +1007,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         },
     );
 
-    // ---- Phase 6: the second launch and cancel_and_release -----------------
     device_provider::stage_chat(&data_directory, &node_id, &owner_id, 101);
     let launch_request = cookie_post(
         "/api/v1/sessions",
@@ -1214,8 +1035,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         .as_str()
         .expect("session id")
         .to_owned();
-    // The second launch also keeps the browser response secret-free and lands
-    // its sidecar material in an isolated private file.
     assert!(body.get("workerCredential").is_none());
     let digest_two = body["credentialDigest"].as_str().expect("digest");
     assert_ne!(digest_two, grant_one.credential_digest);
@@ -1250,7 +1069,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         |_daemon| node_snapshot(&data_directory, &node_id).reported_running_worker_sessions == 1,
     );
 
-    // cancel_and_release requires the explicit confirmation first.
     let response = http_request(
         address,
         &cookie_delete(
@@ -1280,8 +1098,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(status_of(&response), "200", "{response}");
     assert_eq!(response_body(&response)["occupancy"], json!("draining"));
 
-    // The daemon records the durable intent, the lease controller stops the
-    // supervised worker, and the zeroed running count completes the drain.
     drive_until(
         &mut daemon,
         "the cancel_and_release to stop the worker and drain the lease",
@@ -1327,10 +1143,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     );
     assert_eq!(count_released_leases(&data_directory, "drain_completed"), 1);
 
-    // ---- Phase 7: a stale launch after a force fence is refused ------------
-    // Claim once more, go silent, and let the offline sweep push the lease
-    // into recovery; the overdue force-release fences the device with a
-    // strictly higher token.
     let claim_request = cookie_post(
         "/api/v1/clients/occupancy",
         &occupancy_body(&public_client_id),
@@ -1407,52 +1219,31 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(mirror.occupancy_lease_id, lease_three_id);
     assert_eq!(mirror.fencing_token, fence_token);
 
-    // The stale launch replays the FIRST grant's stamp: its lease/token pair
-    // died with the force fence, so the daemon refuses it and spawns
-    // nothing. The frame rides the real durable downlink outbox.
     let grant_one_replay = launch_grant(&data_directory, &grant_one_id);
+    let receipt: Value = serde_json::from_slice(
+        &daemon
+            .store_mut()
+            .worker_launch_receipt(&grant_one_id)
+            .expect("receipt read")
+            .expect("first launch receipt"),
+    )
+    .expect("receipt JSON");
+    let original: ServerWorkerLaunchPayload =
+        serde_json::from_value(receipt["launch"].clone()).expect("original launch payload");
+    let accepted_before_replay = daemon.status().worker_launches_accepted;
+    let rejected_before_replay = daemon.status().worker_launches_rejected;
     enqueue_downlink_frame(
         &data_directory,
         &node_id,
         &device_instance,
-        ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
-            occupancy: OccupancyCommandContext {
-                command: CommandContext {
-                    expected_revision: mirror.mirror_revision,
-                    idempotency_key: "stale_launch_replay".to_owned(),
-                },
-                occupancy_lease_id: grant_one_replay.occupancy_lease_id.clone(),
-                occupancy_fencing_token: grant_one_replay.occupancy_fencing_token,
-            },
-            launch_grant: WorkerLaunchGrant {
-                worker_launch_grant_id: grant_one_replay.worker_launch_grant_id.clone(),
-                client_node_id: grant_one_replay.client_node_id.clone(),
-                client_instance_id: grant_one_replay.client_instance_id.clone(),
-                occupancy_lease_id: grant_one_replay.occupancy_lease_id.clone(),
-                occupancy_fencing_token: grant_one_replay.occupancy_fencing_token,
-                repository_binding_id: grant_one_replay.repository_binding_id.clone(),
-                product_session_id: grant_one_replay
-                    .product_session_id
-                    .clone()
-                    .unwrap_or_default(),
-                work_run_id: grant_one_replay.work_run_id.as_ref().map(|id| id.0.clone()),
-                worker_session_id: grant_one_replay.worker_session_id.clone(),
-                worker_id: grant_one_replay.worker_id.clone(),
-                worker_instance_id: grant_one_replay.worker_instance_id.clone(),
-                credential_digest: grant_one_replay.credential_digest.clone(),
-                expires_at: grant_one_replay.expires_at.0.clone(),
-                state: WireGrantState::Issued,
-                revision: grant_one_replay.revision,
-            },
-        }),
+        ServerToClientMessage::WorkerLaunch(original),
     );
-    drive_until(&mut daemon, "the stale launch to be refused", |daemon| {
-        daemon.status().worker_launches_rejected == 1 && settled(daemon)
+    drive_until(&mut daemon, "the old launch receipt replay", |daemon| {
+        daemon.status().worker_launches_accepted == accepted_before_replay + 1 && settled(daemon)
     });
     assert_eq!(
-        daemon.status().worker_launches_accepted,
-        2,
-        "the stale launch spawned nothing"
+        daemon.status().worker_launches_rejected,
+        rejected_before_replay
     );
     assert_eq!(
         supervisor
@@ -1478,14 +1269,11 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         mirror_after.fencing_token, fence_token,
         "the stale launch never touched the mirror"
     );
-    // The consumed grant the stale frame named stays consumed: the rejection
-    // changes no durable grant state.
     assert_eq!(
         launch_grant(&data_directory, &grant_one_id).state,
         WorkerLaunchGrantState::Consumed
     );
 
-    // ---- Bilateral closure: both sides agree at rest -----------------------
     drive_until(&mut daemon, "the stream to drain", settled);
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
@@ -1522,8 +1310,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         );
     }
 
-    // Stopping the first (already terminal) worker session is the idempotent
-    // no-op; the registry answers the stored row.
     supervisor
         .stop(&worker_session_one, false)
         .expect("terminal stop is a no-op");

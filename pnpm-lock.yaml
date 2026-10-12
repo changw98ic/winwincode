@@ -20,6 +20,9 @@ importers:
       '@winwincode/control-plane-client':
         specifier: 0.1.0-alpha.2
         version: link:packages/control-plane-client
+      '@winwincode/network-request':
+        specifier: 0.1.0-alpha.2
+        version: link:packages/network-request
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -50,6 +53,9 @@ importers:
       '@winwincode/control-plane-client':
         specifier: 0.1.0-alpha.2
         version: link:../../packages/control-plane-client
+      '@winwincode/network-request':
+        specifier: 0.1.0-alpha.2
+        version: link:../../packages/network-request
       clsx:
         specifier: 2.1.1
         version: 2.1.1
@@ -115,6 +121,11 @@ importers:
       '@winwincode/contracts':
         specifier: 0.1.0-alpha.2
         version: link:../contracts
+      '@winwincode/network-request':
+        specifier: 0.1.0-alpha.2
+        version: link:../network-request
+
+  packages/network-request: {}
 
   packages/strongflow:
     dependencies:

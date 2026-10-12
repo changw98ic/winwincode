@@ -122,8 +122,9 @@ fn source_name(request: &ToolRequest) -> &'static str {
         ToolRequest::File(_) => "file",
         ToolRequest::Git(_) => "git",
         ToolRequest::Shell(_) => "shell",
+        ToolRequest::ProcessInput(_) => "process_input",
         ToolRequest::Network(_) => "network",
-        ToolRequest::Mcp(_) => "mcp",
+        ToolRequest::Mcp(_) | ToolRequest::McpResource(_) => "mcp",
     }
 }
 
@@ -201,12 +202,19 @@ fn intent_for(request: &ToolRequest) -> ActionIntent {
             vec!["GET https://api.example.test/v1/items".to_owned()],
             ActionRisk::Low,
         ),
-        ToolRequest::Mcp(_) => (
+        ToolRequest::Mcp(_) | ToolRequest::McpResource(_) => (
             ActionObject::ExternalResource,
             ActionOperation::Execute,
             ActionScope::External,
             vec!["mcp://fixture.server/read_record".to_owned()],
             ActionRisk::Medium,
+        ),
+        ToolRequest::ProcessInput(_) => (
+            ActionObject::ExternalResource,
+            ActionOperation::Execute,
+            ActionScope::External,
+            vec!["process:123".into()],
+            ActionRisk::High,
         ),
     };
     ActionIntent {

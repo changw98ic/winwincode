@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: Apache-2.0
+use super::execution_facts::digest;
+use codex_state::ToolDiagnostic;
+use codex_state::ToolDiagnosticCall;
+use codex_state::ToolDiagnosticKind;
+use codex_state::ToolWaitEdge;
+use codex_state::ToolWaitNode;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+/// Shared only by one AgentControl tree. Historical edges cannot become live on resume.
+#[derive(Default)]
+pub(crate) struct CompletionWaitGraph {
+    state: Mutex<GraphState>,
+}
+#[derive(Default)]
+struct GraphState {
+    owners: BTreeMap<String, String>,
+    edges: BTreeMap<i64, (ToolWaitEdge, ToolDiagnosticCall)>,
+}
+
+impl CompletionWaitGraph {
+    pub(crate) fn register_owner(&self, thread: &str, owner: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owners
+            .insert(thread.into(), owner.into());
+    }
+
+    pub(crate) fn insert(
+        self: &Arc<Self>,
+        edge: ToolWaitEdge,
+        call: ToolDiagnosticCall,
+    ) -> CompletionWaitLease {
+        let request = edge.request_sequence;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .edges
+            .insert(request, (edge, call));
+        CompletionWaitLease {
+            graph: Arc::clone(self),
+            request,
+        }
+    }
+
+    pub(crate) fn diagnose(&self, thread: &str, owner: &str) -> Option<ToolDiagnostic> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let start = ToolWaitNode::Thread {
+            thread_id: thread.into(),
+            owner_id: owner.into(),
+        };
+        let now = unix_ms();
+        let valid = |node: &ToolWaitNode| {
+            let (thread, owner) = match node {
+                ToolWaitNode::Thread {
+                    thread_id,
+                    owner_id,
+                }
+                | ToolWaitNode::Cell {
+                    thread_id,
+                    owner_id,
+                    ..
+                } => (thread_id, owner_id),
+            };
+            state.owners.get(thread) == Some(owner)
+        };
+        let active: Vec<_> = state
+            .edges
+            .values()
+            .filter(|(edge, _)| {
+                edge.deadline_unix_ms > now
+                    && valid(&edge.source)
+                    && !edge.targets.is_empty()
+                    && edge.targets.iter().all(valid)
+            })
+            .collect();
+        // wait_agent returns on ANY target. An independent target can break a cycle.
+        // Concurrent waits from one cell have unknown JS join semantics; stay conservative.
+        let mut groups: BTreeMap<ToolWaitNode, Vec<_>> = BTreeMap::new();
+        for (edge, call) in active {
+            groups
+                .entry(edge.source.clone())
+                .or_default()
+                .push((edge, call));
+        }
+        let mut closed: BTreeSet<_> = groups
+            .iter()
+            .filter(|(_, groups)| groups.len() == 1)
+            .map(|(node, _)| node.clone())
+            .collect();
+        loop {
+            let next: BTreeSet<_> = closed
+                .iter()
+                .filter(|node| {
+                    groups[*node][0]
+                        .0
+                        .targets
+                        .iter()
+                        .all(|target| closed.contains(target))
+                })
+                .cloned()
+                .collect();
+            if next == closed {
+                break;
+            }
+            closed = next;
+        }
+        if !closed.contains(&start) {
+            return None;
+        }
+        let mut pending = vec![start];
+        let mut visited = BTreeSet::new();
+        let mut edges = Vec::new();
+        let mut evidence = Vec::new();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            let (edge, call) = groups[&node][0];
+            if edges.len() == 8 {
+                return None;
+            }
+            pending.extend(edge.targets.iter().cloned());
+            edges.push(edge.clone());
+            evidence.push(call.clone());
+        }
+        edges.sort_by_key(|edge| edge.request_sequence);
+        evidence.sort_by_key(|call| call.request_sequence);
+        let version = edges.iter().map(|edge| edge.request_sequence).max()?;
+        Some(ToolDiagnostic {
+            schema_version: 1,
+            diagnostic_id: digest(serde_json::json!(["agent-completion-cycle-v1", thread, edges[0].tree_id, visited])),
+            thread_id: thread.into(), kind: ToolDiagnosticKind::WaitCycle, evidence_version: version,
+            progress_source_sequence: None, evidence, wait_graph: edges,
+            question: "Core observed a possible cycle between threads, live cells and agent completion waits. The recorded deadlines can release it. Is waiting justified, or which participant can advance the task?".into(),
+        })
+    }
+}
+
+pub(crate) struct CompletionWaitLease {
+    graph: Arc<CompletionWaitGraph>,
+    request: i64,
+}
+impl Drop for CompletionWaitLease {
+    fn drop(&mut self) {
+        self.graph
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .edges
+            .remove(&self.request);
+    }
+}
+
+pub(crate) fn unix_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+pub(super) fn evidence(fact: &codex_state::ToolExecutionFact) -> ToolDiagnosticCall {
+    ToolDiagnosticCall {
+        request_sequence: fact.request_sequence,
+        logical_id: fact.request.logical_id.clone(),
+        tool_name: fact.request.tool_name.clone(),
+        operation_digest: fact
+            .attempt
+            .as_ref()
+            .map(|attempt| attempt.operation_digest.clone())
+            .unwrap_or_default(),
+        parent_call_id: fact.request.parent_call_id.clone(),
+        cell_id: fact.request.cell_id.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(id: &str, owner: &str) -> ToolWaitNode {
+        ToolWaitNode::Thread {
+            thread_id: id.into(),
+            owner_id: owner.into(),
+        }
+    }
+    fn cell(id: &str, owner: &str) -> ToolWaitNode {
+        ToolWaitNode::Cell {
+            thread_id: id.into(),
+            owner_id: owner.into(),
+            cell_id: format!("cell-{id}"),
+            scope_id: "scope".into(),
+        }
+    }
+    fn add(
+        graph: &Arc<CompletionWaitGraph>,
+        sequence: i64,
+        source: ToolWaitNode,
+        targets: Vec<ToolWaitNode>,
+    ) -> CompletionWaitLease {
+        graph.insert(
+            ToolWaitEdge {
+                tree_id: "tree".into(),
+                request_sequence: sequence,
+                logical_id: format!("request-{sequence}"),
+                source,
+                targets,
+                deadline_unix_ms: unix_ms() + 60_000,
+            },
+            ToolDiagnosticCall {
+                request_sequence: sequence,
+                logical_id: format!("request-{sequence}"),
+                tool_name: "wait".into(),
+                operation_digest: "a".repeat(64),
+                parent_call_id: None,
+                cell_id: None,
+            },
+        )
+    }
+    fn graph() -> Arc<CompletionWaitGraph> {
+        let graph = Arc::new(CompletionWaitGraph::default());
+        graph.register_owner("a", "owner-a");
+        graph.register_owner("b", "owner-b");
+        graph
+    }
+    fn ring(graph: &Arc<CompletionWaitGraph>) -> Vec<CompletionWaitLease> {
+        vec![
+            add(graph, 1, thread("a", "owner-a"), vec![cell("a", "owner-a")]),
+            add(graph, 2, cell("a", "owner-a"), vec![thread("b", "owner-b")]),
+            add(graph, 3, thread("b", "owner-b"), vec![cell("b", "owner-b")]),
+            add(graph, 4, cell("b", "owner-b"), vec![thread("a", "owner-a")]),
+        ]
+    }
+    #[test]
+    fn current_incarnations_are_required_and_dropping_a_wait_releases_the_cycle() {
+        let graph = graph();
+        let mut leases = ring(&graph);
+        let question = graph.diagnose("a", "owner-a").unwrap();
+        assert_eq!(question.wait_graph.len(), 4);
+        assert_eq!(graph.diagnose("a", "owner-a").unwrap(), question);
+        drop(leases.pop());
+        assert!(graph.diagnose("a", "owner-a").is_none());
+        drop(leases);
+        let _leases = ring(&graph);
+        graph.register_owner("b", "new-incarnation");
+        assert!(graph.diagnose("a", "owner-a").is_none());
+        assert!(graph.diagnose("b", "owner-b").is_none());
+    }
+    #[test]
+    fn an_independent_any_target_and_expired_wait_do_not_assert_a_cycle() {
+        let graph = graph();
+        let _leases = ring(&graph);
+        graph.register_owner("independent", "owner-c");
+        {
+            let mut state = graph.state.lock().unwrap();
+            state
+                .edges
+                .get_mut(&2)
+                .unwrap()
+                .0
+                .targets
+                .push(thread("independent", "owner-c"));
+        }
+        assert!(graph.diagnose("a", "owner-a").is_none());
+        {
+            let mut state = graph.state.lock().unwrap();
+            state.edges.get_mut(&2).unwrap().0.targets.pop();
+            state.edges.get_mut(&2).unwrap().0.deadline_unix_ms = unix_ms();
+        }
+        assert!(graph.diagnose("a", "owner-a").is_none());
+    }
+}

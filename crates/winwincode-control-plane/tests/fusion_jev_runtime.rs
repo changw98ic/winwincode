@@ -106,7 +106,6 @@ impl FusionInvestigationPort for Investigation {
                 ordinal < 2,
                 "receipt-backed evidence did not reach verification"
             );
-            // First action has only prose. It must not end the run or call JEV.
             if ordinal == 0 {
                 return Ok(vec![]);
             }

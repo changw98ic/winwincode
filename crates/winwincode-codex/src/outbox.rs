@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Worker-to-Control-Plane delivery ledger.
-//!
-//! This module stores the complete generated frame before the first transport
-//! attempt. A successful send records only an attempt. Frames that require a
-//! canonical response are replayed after restart until that response is
-//! validated and applied.
-
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{ModelExchangeId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::{
+    execution_identity::retained_lease_matches_current,
     generated::{
         ExecutionPortErrorCode, ExecutionPortMessage, JobOutcomeAckMessageStatus,
         JobOutcomeMessage, LeaseWriteStatus, ModelAckMessage, ModelOpenMessage,
@@ -28,7 +22,6 @@ const PENDING: &str = "pending";
 const SENT_ATTEMPT: &str = "sent_attempt";
 const HEARTBEAT_SEQUENCE_KEY_PREFIX: &str = "worker-heartbeat-sequence:";
 
-/// Durable delivery operations over the adapter's one private `SQLite` store.
 #[derive(Clone, Debug)]
 pub(crate) struct ExecutionOutbox {
     store: crate::store::AdapterStore,
@@ -37,9 +30,6 @@ pub(crate) struct ExecutionOutbox {
 impl ExecutionOutbox {
     pub(crate) fn open(store: crate::store::AdapterStore) -> Result<Self, AdapterStoreError> {
         let outbox = Self { store };
-        // A process may have stopped after send and before receipt. Only
-        // response-bearing frames are made pending again. Transport-only
-        // frames retain their sent-attempt record without being duplicated.
         outbox
             .store
             .lock()?
@@ -60,8 +50,19 @@ impl ExecutionOutbox {
             .transaction(|transaction| Self::retain_in_transaction(transaction, message))
     }
 
-    /// Keeps the first complete terminal frame after its transport row is acknowledged.
-    /// The run, terminal snapshot and pending delivery commit in one transaction.
+    pub(crate) fn terminal_outcome(
+        &self,
+        run_key: &str,
+    ) -> Result<Option<JobOutcomeMessage>, AdapterStoreError> {
+        let saved = self.store.lock()?.query_row(
+            "SELECT frame_digest, frame_json FROM execution_terminal_outcome WHERE run_key = ?1",
+            [run_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .optional().map_err(|_| AdapterStoreError::Unavailable)?;
+        saved
+            .map(|(frame_digest, bytes)| decode_terminal_outcome(&frame_digest, &bytes))
+            .transpose()
+    }
+
     pub(crate) fn retain_terminal_in_transaction(
         transaction: &Transaction<'_>,
         run_key: &str,
@@ -71,7 +72,6 @@ impl ExecutionOutbox {
             "SELECT frame_digest, frame_json FROM execution_terminal_outcome WHERE run_key = ?1",
             [run_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
             .optional().map_err(|_| AdapterStoreError::Unavailable)?;
-        // Upgrade an existing pending terminal before its ACK can compact it.
         let saved = if saved.is_some() {
             saved
         } else {
@@ -82,14 +82,7 @@ impl ExecutionOutbox {
                 .optional().map_err(|_| AdapterStoreError::Unavailable)?
         };
         let canonical = if let Some((frame_digest, bytes)) = saved {
-            if digest(&bytes) != frame_digest {
-                return Err(AdapterStoreError::Corrupt);
-            }
-            let message: ExecutionPortMessage =
-                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
-            let ExecutionPortMessage::JobOutcomeMessage(original) = &message else {
-                return Err(AdapterStoreError::Corrupt);
-            };
+            let original = decode_terminal_outcome(&frame_digest, &bytes)?;
             if original.lease != outcome.lease
                 || original.worker_session_id != outcome.worker_session_id
                 || original.session_identity != outcome.session_identity
@@ -98,7 +91,7 @@ impl ExecutionOutbox {
             {
                 return Err(AdapterStoreError::Conflict);
             }
-            message
+            ExecutionPortMessage::JobOutcomeMessage(original)
         } else {
             ExecutionPortMessage::JobOutcomeMessage(outcome.clone())
         };
@@ -116,9 +109,6 @@ impl ExecutionOutbox {
         message: &ExecutionPortMessage,
     ) -> Result<DurableExecutionDelivery, AdapterStoreError> {
         let frame = serde_json::to_vec(message).map_err(|_| AdapterStoreError::Corrupt)?;
-        // A definitively refused auxiliary frame may have a durable bounded wire
-        // projection. Keep its audited source bytes, and reuse that exact projection
-        // for Core replay and runtime gap recovery as well as ordinary retries.
         let projected: Option<(String, Option<Vec<u8>>)> = transaction.query_row(
             "SELECT original_digest, projected_frame FROM execution_delivery_disposition WHERE delivery_id = ?1",
             [message_id(&frame)?], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -157,15 +147,6 @@ impl ExecutionOutbox {
             let same_original = existing_digest == frame_digest && existing_frame == frame;
             let same_terminal_facts = metadata.family == Family::Outcome.as_str()
                 && same_outcome_facts(&existing_frame, &frame)?;
-            // Worker message ids are process-local sequence values.  A
-            // replacement Worker can therefore reconstruct the same logical
-            // transport frame with a fresh timestamp (and, when the sequence
-            // restarts, the same message id) before it has received the
-            // predecessor's response.  Keep the predecessor's bytes as the
-            // canonical replay and never replace them with the reconstruction.
-            // The generated union tag and every authority/payload field remain
-            // part of the comparison; only transport-attempt fields are
-            // normalized here.
             let same_replay_facts = same_replay_facts(&existing_frame, &frame)?;
             if !same_original && !same_terminal_facts && !same_replay_facts {
                 return Err(AdapterStoreError::Conflict);
@@ -190,6 +171,9 @@ impl ExecutionOutbox {
                 ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+        if let ExecutionPortMessage::RuntimeEventMessage(event) = message {
+            transaction.execute("UPDATE execution_outbox SET runtime_stream_key=?2,runtime_sequence=?3 WHERE delivery_id=?1",params![metadata.delivery_id,runtime_event_stream_key(event).as_str(),event.event.sequence.0]).map_err(|_|AdapterStoreError::Unavailable)?;
+        }
         if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message {
             if heartbeat.heartbeat_sequence.0 <= 0 {
                 return Err(AdapterStoreError::Conflict);
@@ -231,6 +215,64 @@ impl ExecutionOutbox {
         .collect()
     }
 
+    pub(crate) fn retained_interaction(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<ExecutionPortMessage>, AdapterStoreError> {
+        let saved = self
+            .store
+            .lock()?
+            .query_row(
+                "SELECT frame_digest, frame_json FROM execution_outbox WHERE delivery_id = ?1",
+                [delivery_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let Some((frame_digest, frame)) = saved else {
+            return Ok(None);
+        };
+        if digest(&frame) != frame_digest {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        let message = decode_delivery(delivery_id.to_owned(), &frame)?.message;
+        if !matches!(
+            message,
+            ExecutionPortMessage::ApprovalRequestMessage(_)
+                | ExecutionPortMessage::InputRequestMessage(_)
+        ) {
+            return Err(AdapterStoreError::Conflict);
+        }
+        Ok(Some(message))
+    }
+
+    pub(crate) fn settle_interaction_deadline(
+        &self,
+        request: &ExecutionPortMessage,
+    ) -> Result<(), AdapterStoreError> {
+        if !matches!(
+            request,
+            ExecutionPortMessage::ApprovalRequestMessage(_)
+                | ExecutionPortMessage::InputRequestMessage(_)
+        ) {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let frame = serde_json::to_vec(request).map_err(|_| AdapterStoreError::Corrupt)?;
+        let changed = self
+            .store
+            .lock()?
+            .execute(
+                "UPDATE execution_outbox SET state = ?1, acknowledgement_required = 0
+             WHERE delivery_id = ?2 AND frame_digest = ?3 AND frame_json = ?4",
+                params![SENT_ATTEMPT, message_id(&frame)?, digest(&frame), frame],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if changed != 1 {
+            return Err(AdapterStoreError::Conflict);
+        }
+        Ok(())
+    }
+
     pub(crate) fn pending_batch(
         &self,
         after_delivery: Option<&str>,
@@ -239,35 +281,32 @@ impl ExecutionOutbox {
         let connection = self.store.lock()?;
         let mut statement = connection.prepare(
             "SELECT delivery_id, frame_json FROM execution_outbox
-             WHERE (state = ?1 OR acknowledgement_required = 1)
-               AND position > COALESCE((SELECT position FROM execution_outbox WHERE delivery_id = ?2), 0)
-             ORDER BY position LIMIT ?3",
+             WHERE (state = 'pending' OR acknowledgement_required = 1)
+               AND position > COALESCE((SELECT position FROM execution_outbox WHERE delivery_id = ?1), 0)
+             ORDER BY position LIMIT ?2",
         ).map_err(|_| AdapterStoreError::Unavailable)?;
         let rows = statement
             .query_map(
                 params![
-                    PENDING,
                     after_delivery,
                     i64::try_from(limit).map_err(|_| AdapterStoreError::Conflict)?
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        rows.map(|row| {
-            let (id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
-            decode_delivery(id, &frame)
-        })
-        .collect()
+        let result = rows
+            .map(|row| {
+                let (id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+                decode_delivery(id, &frame)
+            })
+            .collect();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::pending_query(
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        result
     }
 
-    /// Returns the highest numeric Worker message id retained in the outbox.
-    ///
-    /// Transport-only frames remain durable after a successful send so their
-    /// identity can be audited, but they are intentionally omitted from
-    /// [`Self::pending`]. A replacement Worker still has to advance past
-    /// those ids before creating a new transport frame, otherwise its first
-    /// post-restart dispatch result can collide with the predecessor's frame
-    /// and be treated as a changed replay.
     pub(crate) fn highest_numeric_message_sequence(&self) -> Result<u64, AdapterStoreError> {
         let connection = self.store.lock()?;
         let mut statement = connection
@@ -294,10 +333,6 @@ impl ExecutionOutbox {
         Ok(highest)
     }
 
-    /// Returns the highest heartbeat sequence committed with its canonical
-    /// outbound frame. The cursor remains after an accepted acknowledgement
-    /// compacts that frame, allowing the same Worker instance to continue
-    /// monotonically after an operating-system process restart.
     pub(crate) fn heartbeat_sequence_highwater(
         &self,
         worker_id: &WorkerId,
@@ -327,7 +362,9 @@ impl ExecutionOutbox {
             .store
             .lock()?
             .execute(
-                "UPDATE execution_outbox SET state=?2 WHERE delivery_id=?1 AND NOT EXISTS (SELECT 1 FROM execution_delivery_disposition d WHERE d.delivery_id=?1 AND d.rejected=1)",
+                "UPDATE execution_outbox SET state=?2 WHERE delivery_id=?1
+                 AND NOT (family IN ('approval_request', 'input_request') AND acknowledgement_required=0)
+                 AND NOT EXISTS (SELECT 1 FROM execution_delivery_disposition d WHERE d.delivery_id=?1 AND d.rejected=1)",
                 params![delivery_id, PENDING],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
@@ -354,8 +391,6 @@ impl ExecutionOutbox {
             if event.event.category != winwincode_execution_port::generated::ExecutionEventCategory::Usage {
                 return Ok(None);
             }
-            // Preserve stream identity and sequence, so dropping a report does not
-            // leave a permanent runtime replay gap. No approval/verification fact is removed.
             event.event.payload = None;
             event.event.summary = "optional performance report unavailable".into();
             let projected = serde_json::to_vec(&message).map_err(|_| AdapterStoreError::Corrupt)?;
@@ -369,15 +404,8 @@ impl ExecutionOutbox {
     }
 
     pub(crate) fn record_rejected(&self, delivery_id: &str) -> Result<(), AdapterStoreError> {
-        self.store.transaction(|transaction| {
-            let bytes: Vec<u8> = transaction.query_row("SELECT frame_json FROM execution_outbox WHERE delivery_id=?1",
-                [delivery_id], |row| row.get(0)).map_err(|_| AdapterStoreError::Conflict)?;
-            transaction.execute("INSERT INTO execution_delivery_disposition(delivery_id,original_digest,original_frame,rejected) VALUES (?1,?2,?3,1) ON CONFLICT(delivery_id) DO UPDATE SET rejected=1",
-                params![delivery_id,digest(&bytes),bytes]).map_err(|_| AdapterStoreError::Unavailable)?;
-            transaction.execute("UPDATE execution_outbox SET state=?2,acknowledgement_required=0 WHERE delivery_id=?1",
-                params![delivery_id, SENT_ATTEMPT]).map_err(|_| AdapterStoreError::Unavailable)?;
-            Ok(())
-        })
+        self.store
+            .transaction(|transaction| record_rejected_in_transaction(transaction, delivery_id))
     }
 
     pub(crate) fn is_rejected(&self, delivery_id: &str) -> Result<bool, AdapterStoreError> {
@@ -424,7 +452,6 @@ impl ExecutionOutbox {
             |row| row.get(0)).map_err(|_| AdapterStoreError::Unavailable)
     }
 
-    /// Loads the exact retained open frame for one durable model exchange.
     pub(crate) fn retained_model_open(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -432,7 +459,6 @@ impl ExecutionOutbox {
         Self::read_model_open(&self.store, model_exchange_id)
     }
 
-    /// Reads original exchange authority without reopening or mutating the outbox.
     pub(crate) fn read_model_open(
         store: &crate::store::AdapterStore,
         model_exchange_id: &ModelExchangeId,
@@ -440,31 +466,55 @@ impl ExecutionOutbox {
         let connection = store.lock()?;
         let mut statement = connection
             .prepare(
-                "SELECT frame_json FROM execution_outbox
-                 WHERE family = ?1 ORDER BY position",
+                "SELECT frame_digest,frame_json FROM execution_outbox
+                 WHERE family='model_open' AND json_extract(frame_json,'$.modelExchangeId')=?1 ORDER BY position",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let rows = statement
-            .query_map(params![Family::ModelOpen.as_str()], |row| {
-                row.get::<_, Vec<u8>>(0)
+            .query_map(params![model_exchange_id.0], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let mut retained = None;
         for row in rows {
-            let frame = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            let (expected_digest, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            #[cfg(test)]
+            crate::audit_model_metrics::record_model_open_read(frame.len());
+            if digest(&frame) != expected_digest {
+                return Err(AdapterStoreError::Corrupt);
+            }
             let message: ExecutionPortMessage =
                 serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
             let ExecutionPortMessage::ModelOpenMessage(open) = message else {
                 return Err(AdapterStoreError::Corrupt);
             };
-            if open.model_exchange_id == *model_exchange_id && retained.replace(open).is_some() {
+            if open.model_exchange_id != *model_exchange_id || retained.replace(open).is_some() {
                 return Err(AdapterStoreError::Corrupt);
             }
         }
         Ok(retained)
     }
 
-    /// Applies an already domain-validated response to its exact retained request.
+    pub(crate) fn model_start_request_allowed(
+        store: &crate::store::AdapterStore,
+        open: &ModelOpenMessage,
+    ) -> Result<bool, AdapterStoreError> {
+        if Self::read_model_open(store, &open.model_exchange_id)?.as_ref() != Some(open) {
+            return Ok(false);
+        }
+        let key = correlation(&(
+            &open.model_exchange_id,
+            &open.lease,
+            &open.worker_session_id,
+            &open.session_identity,
+        ))?;
+        let cancelled: bool = store.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM execution_response_receipt WHERE family = ?1 AND correlation_key = ?2)",
+            params![Family::ModelOpen.as_str(), format!("{key}.cancelled")], |row| row.get(0))
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(!cancelled)
+    }
+
     pub(crate) fn acknowledge_response(
         &self,
         acknowledgement: &ExecutionPortMessage,
@@ -472,31 +522,48 @@ impl ExecutionOutbox {
         if let ExecutionPortMessage::RuntimeAckMessage(_) = acknowledgement {
             return Err(AdapterStoreError::Conflict);
         }
+        if retryable_heartbeat_gap(acknowledgement) {
+            let (family, key) =
+                response_target(acknowledgement)?.ok_or(AdapterStoreError::Conflict)?;
+            let known: bool = self.store.lock()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_outbox WHERE family=?1 AND correlation_key=?2)
+                 OR EXISTS(SELECT 1 FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2)",
+                params![family.as_str(), key], |row| row.get(0))
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            return if known {
+                Ok(())
+            } else {
+                Err(AdapterStoreError::Conflict)
+            };
+        }
         if !accepted_response(acknowledgement) {
             return Err(AdapterStoreError::Conflict);
         }
         let Some((family, correlation_key)) = response_target(acknowledgement)? else {
             return Err(AdapterStoreError::Conflict);
         };
-        let proof_key = response_proof_key(acknowledgement, &correlation_key);
         let response_digest = response_replay_digest(acknowledgement)?;
         self.store.transaction(|transaction| {
+            let original_key = interaction_response_source_key(transaction, acknowledgement, family, &correlation_key)?;
+            let source_key = original_key.as_deref().unwrap_or(&correlation_key);
+            let proof_key = response_proof_key(acknowledgement, source_key);
             let proof: Option<String> = transaction.query_row(
                 "SELECT response_digest FROM execution_response_receipt WHERE family = ?1 AND correlation_key = ?2",
                 params![family.as_str(), proof_key], |row| row.get(0))
                 .optional().map_err(|_| AdapterStoreError::Unavailable)?;
-            if proof.as_ref().is_some_and(|digest| digest != &response_digest) {
+            if proof.as_ref().is_some_and(|digest| digest != &response_digest)
+                || (source_key != correlation_key && proof.is_none()) {
                 return Err(AdapterStoreError::Conflict);
             }
-            let changed = if matches!(family, Family::ModelOpen) {
+            let changed = if matches!(family, Family::ModelOpen | Family::InputRequest | Family::ApprovalRequest) {
                 transaction.execute(
                     "UPDATE execution_outbox SET acknowledgement_required = 0, state = ?3
                      WHERE family = ?1 AND correlation_key = ?2 AND acknowledgement_required = 1",
-                    params![family.as_str(), correlation_key, SENT_ATTEMPT])
+                    params![family.as_str(), source_key, SENT_ATTEMPT])
             } else {
                 transaction.execute(
                     "DELETE FROM execution_outbox WHERE family = ?1 AND correlation_key = ?2
-                     AND acknowledgement_required = 1", params![family.as_str(), correlation_key])
+                     AND acknowledgement_required = 1", params![family.as_str(), source_key])
             }.map_err(|_| AdapterStoreError::Unavailable)?;
             if changed == 1 {
                 save_response_proof(transaction, family, &proof_key, &response_digest)?;
@@ -506,8 +573,6 @@ impl ExecutionOutbox {
                 return Ok(());
             }
             if matches!(acknowledgement, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack)) {
-                // A first chunk already clears acknowledgement_required, but the
-                // exact open remains authority for a later Worker cancellation.
                 let retained: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM execution_outbox WHERE family=?1 AND correlation_key=?2)",
                     params![family.as_str(), correlation_key], |row| row.get(0))
@@ -529,8 +594,6 @@ impl ExecutionOutbox {
         })
     }
 
-    /// Records proof only after the adapter has durably applied the exact domain response.
-    /// This also repairs the crash/upgrade boundary where the request was already compacted.
     pub(crate) fn record_applied_response(
         &self,
         response: &ExecutionPortMessage,
@@ -539,13 +602,30 @@ impl ExecutionOutbox {
             return Err(AdapterStoreError::Conflict);
         }
         let (family, key) = response_target(response)?.ok_or(AdapterStoreError::Conflict)?;
-        let key = response_proof_key(response, &key);
         let digest = response_replay_digest(response)?;
-        self.store
-            .transaction(|transaction| save_response_proof(transaction, family, &key, &digest))
+        self.store.transaction(|transaction| {
+            let source = interaction_response_source_key(transaction, response, family, &key)?;
+            let canonical_key = response_proof_key(response, source.as_deref().unwrap_or(&key));
+            if matches!(family, Family::InputRequest | Family::ApprovalRequest) && source.is_none() {
+                let existing: Option<String> = transaction.query_row(
+                    "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                    params![family.as_str(), canonical_key], |row| row.get(0),
+                ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+                return if existing.as_deref() == Some(digest.as_str()) { Ok(()) } else { Err(AdapterStoreError::Conflict) };
+            }
+            if source.as_ref().is_some_and(|source| source != &key) {
+                let previous_raw: Option<String> = transaction.query_row(
+                    "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                    params![family.as_str(), key], |row| row.get(0),
+                ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+                if previous_raw.is_some() {
+                    return Err(AdapterStoreError::Conflict);
+                }
+            }
+            save_response_proof(transaction, family, &canonical_key, &digest)
+        })
     }
 
-    /// Compacts accepted runtime rows or makes exact gap frames pending again.
     pub(crate) fn apply_runtime_ack(
         &self,
         acknowledgement: &winwincode_execution_port::generated::RuntimeAckMessage,
@@ -559,8 +639,8 @@ impl ExecutionOutbox {
                 let ack_sequence = u64::try_from(receipt.ack_sequence.0)
                     .map_err(|_| AdapterStoreError::Corrupt)?;
                 self.store.transaction(|transaction| {
-                    let rows = runtime_rows(transaction)?;
                     let stream = runtime_ack_stream_key(acknowledgement);
+                    let rows = runtime_rows(transaction, &stream, Some(ack_sequence))?;
                     for row in rows {
                         if runtime_event_stream_key(&row.event) == stream
                             && event_sequence(&row.event)? <= ack_sequence
@@ -583,11 +663,26 @@ impl ExecutionOutbox {
             LeaseWriteStatus::RejectedConflict
             | LeaseWriteStatus::RejectedExpiredLease
             | LeaseWriteStatus::RejectedStaleFencingToken
-            | LeaseWriteStatus::RejectedWorkerInstance => Err(AdapterStoreError::Conflict),
+            | LeaseWriteStatus::RejectedWorkerInstance => self.store.transaction(|transaction| {
+                let bytes =
+                    serde_json::to_vec(acknowledgement).map_err(|_| AdapterStoreError::Corrupt)?;
+                save_response_proof(
+                    transaction,
+                    Family::Runtime,
+                    &format!("rejected:{}", acknowledgement.message_id.0),
+                    &digest(&bytes),
+                )?;
+                let stream = runtime_ack_stream_key(acknowledgement);
+                for row in runtime_rows(transaction, &stream, None)? {
+                    if runtime_event_stream_key(&row.event) == stream {
+                        record_rejected_in_transaction(transaction, &row.delivery_id)?;
+                    }
+                }
+                Ok(Vec::new())
+            }),
         }
     }
 
-    /// Retains and returns only the requested original runtime frames.
     pub(crate) fn requeue_runtime_events(
         &self,
         events: &[RuntimeEventMessage],
@@ -715,12 +810,6 @@ fn metadata(message: &ExecutionPortMessage, frame: &[u8]) -> Result<Metadata, Ad
                 &message.session_identity,
             ))?,
         ),
-        // A normal model acknowledgement is a Worker->Provider progress
-        // frame, not a request which receives another protocol response. It
-        // still gets retained before the send, but once the transport send is
-        // recorded it must not remain forever in the response-replay set.
-        // Cancellation is the one terminal ModelAck which deliberately
-        // acknowledges the retained ModelOpen exchange.
         ExecutionPortMessage::ModelAckMessage(message)
             if !canonical_terminal_model_ack(message) =>
         {
@@ -754,12 +843,6 @@ fn metadata(message: &ExecutionPortMessage, frame: &[u8]) -> Result<Metadata, Ad
                 &message.session_identity,
             ))?,
         ),
-        // SessionBinding is a durable Worker fact, but it has no response
-        // frame of its own.  Its semantic identity must survive a Worker
-        // restart: messageId and boundAt are transport-attempt fields, while
-        // the lease/session/thread tuple identifies the exact binding.  Using
-        // that tuple here lets a replacement Worker recover the predecessor's
-        // canonical bytes instead of creating a second two-phase CP commit.
         ExecutionPortMessage::SessionBindingMessage(message) => (
             Family::SessionBinding,
             correlation(&(
@@ -896,8 +979,6 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
         ExecutionPortMessage::WorkerRegistrationResultMessage(_)
             | ExecutionPortMessage::WorkerHeartbeatAckMessage(_)
     ) {
-        // The Control Plane rebuilds these receipts with its current clock on
-        // a duplicate request. That observation is not the applied result.
         object.remove("serverTime");
     }
     if matches!(
@@ -909,9 +990,106 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
     {
         object.insert("status".into(), Value::String("accepted".into()));
     }
+    if matches!(message, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack))
+    {
+        object
+            .get_mut("error")
+            .and_then(Value::as_object_mut)
+            .ok_or(AdapterStoreError::Corrupt)?
+            .insert(
+                "message".into(),
+                Value::String("model exchange cancelled by Worker".into()),
+            );
+    }
     serde_json::to_vec(&value)
         .map(|bytes| digest(&bytes))
         .map_err(|_| AdapterStoreError::Corrupt)
+}
+
+fn interaction_response_source_key(
+    transaction: &Transaction<'_>,
+    response: &ExecutionPortMessage,
+    family: Family,
+    raw_key: &str,
+) -> Result<Option<String>, AdapterStoreError> {
+    let (id, namespace): (&str, &[u8]) = match response {
+        ExecutionPortMessage::InputResponseMessage(value) => (
+            &value.input_request_id.0,
+            b"winwincode-kernel-input-message.v1",
+        ),
+        ExecutionPortMessage::ApprovalDecisionMessage(value) => (
+            &value.approval_id.0,
+            b"winwincode-kernel-approval-message.v1",
+        ),
+        _ => return Ok(None),
+    };
+    let message_id = crate::adapter::canonical_parts_id("xmsg", namespace, &[id.as_bytes()]);
+    let canonical: Option<(String, String, String, String, Vec<u8>)> = transaction.query_row(
+        "SELECT family, delivery_id, correlation_key, frame_digest, frame_json FROM execution_outbox
+         WHERE delivery_id=?1",
+        params![message_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    if canonical
+        .as_ref()
+        .is_some_and(|row| row.0 != family.as_str())
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    let exact: Option<(String, String, String, String, Vec<u8>)> = transaction.query_row(
+        "SELECT family, delivery_id, correlation_key, frame_digest, frame_json FROM execution_outbox
+         WHERE family=?1 AND correlation_key=?2",
+        params![family.as_str(), raw_key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    if canonical
+        .as_ref()
+        .zip(exact.as_ref())
+        .is_some_and(|(first, second)| first.1 != second.1)
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    let Some((source_family, delivery_id, source_key, frame_digest, frame)) = canonical.or(exact)
+    else {
+        return Ok(None);
+    };
+    if digest(&frame) != frame_digest {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let original = decode_delivery(delivery_id.clone(), &frame)?.message;
+    let metadata = metadata(&original, &frame)?;
+    if metadata.delivery_id != delivery_id
+        || metadata.family != source_family
+        || source_family != family.as_str()
+        || metadata.correlation_key != source_key
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let bound = match (&original, response) {
+        (
+            ExecutionPortMessage::InputRequestMessage(request),
+            ExecutionPortMessage::InputResponseMessage(response),
+        ) => {
+            request.input_request_id == response.input_request_id
+                && request.worker_session_id == response.worker_session_id
+                && request.session_identity == response.session_identity
+                && retained_lease_matches_current(&request.lease, &response.lease)
+        }
+        (
+            ExecutionPortMessage::ApprovalRequestMessage(request),
+            ExecutionPortMessage::ApprovalDecisionMessage(response),
+        ) => {
+            request.approval_id == response.approval_id
+                && request.worker_session_id == response.worker_session_id
+                && request.session_identity == response.session_identity
+                && retained_lease_matches_current(&request.lease, &response.lease)
+        }
+        _ => false,
+    };
+    if !bound {
+        return Err(AdapterStoreError::Conflict);
+    }
+    Ok(Some(source_key))
 }
 
 fn response_proof_key(message: &ExecutionPortMessage, correlation_key: &str) -> String {
@@ -946,6 +1124,13 @@ fn save_response_proof(
     Ok(())
 }
 
+fn retryable_heartbeat_gap(message: &ExecutionPortMessage) -> bool {
+    matches!(message, ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)
+        if ack.status == WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+            && ack.error.as_ref().is_some_and(|error|
+                error.code == ExecutionPortErrorCode::SequenceGap && error.retryable))
+}
+
 fn accepted_response(message: &ExecutionPortMessage) -> bool {
     match message {
         ExecutionPortMessage::JobOutcomeAckMessage(message) => matches!(
@@ -957,10 +1142,14 @@ fn accepted_response(message: &ExecutionPortMessage) -> bool {
             WorkerRegistrationResultMessageStatus::Accepted
                 | WorkerRegistrationResultMessageStatus::Duplicate
         ),
-        ExecutionPortMessage::WorkerHeartbeatAckMessage(message) => matches!(
-            message.status,
-            WorkerHeartbeatAckMessageStatus::Accepted | WorkerHeartbeatAckMessageStatus::Duplicate
-        ),
+        ExecutionPortMessage::WorkerHeartbeatAckMessage(message) => {
+            message.error.is_none()
+                && matches!(
+                    message.status,
+                    WorkerHeartbeatAckMessageStatus::Accepted
+                        | WorkerHeartbeatAckMessageStatus::Duplicate
+                )
+        }
         ExecutionPortMessage::ModelChunkMessage(_)
         | ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
         | ExecutionPortMessage::ApprovalDecisionMessage(_)
@@ -987,7 +1176,11 @@ fn canonical_terminal_model_ack(message: &ModelAckMessage) -> bool {
         && message.replay_from_sequence.is_none()
         && message.error.as_ref().is_some_and(|error| {
             error.code == ExecutionPortErrorCode::Cancelled
-                && error.message == "model exchange cancelled by Worker"
+                && matches!(
+                    error.message.as_str(),
+                    "model exchange cancelled by Worker"
+                        | "Observer model exchange cancelled by Worker"
+                )
                 && !error.retryable
         })
 }
@@ -1071,10 +1264,6 @@ fn same_outcome_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreE
     Ok(normalized(first)? == normalized(second)?)
 }
 
-/// Compares one regenerated outbound frame with the durable predecessor while
-/// ignoring fields allocated for the current transport attempt.  The exact
-/// stored frame is returned by [`ExecutionOutbox::retain_in_transaction`], so
-/// this comparison only authorizes replay; it never mutates the durable bytes.
 fn same_replay_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreError> {
     fn normalized(bytes: &[u8]) -> Result<Value, AdapterStoreError> {
         let mut value: Value =
@@ -1088,6 +1277,20 @@ fn same_replay_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreEr
     Ok(normalized(first)? == normalized(second)?)
 }
 
+fn decode_terminal_outcome(
+    frame_digest: &str,
+    bytes: &[u8],
+) -> Result<JobOutcomeMessage, AdapterStoreError> {
+    if digest(bytes) != frame_digest {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let message = serde_json::from_slice(bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+    let ExecutionPortMessage::JobOutcomeMessage(original) = message else {
+        return Err(AdapterStoreError::Corrupt);
+    };
+    Ok(original)
+}
+
 fn decode_delivery(
     delivery_id: String,
     frame: &[u8],
@@ -1099,30 +1302,83 @@ fn decode_delivery(
     })
 }
 
+fn record_rejected_in_transaction(
+    transaction: &Transaction<'_>,
+    delivery_id: &str,
+) -> Result<(), AdapterStoreError> {
+    let bytes: Vec<u8> = transaction
+        .query_row(
+            "SELECT frame_json FROM execution_outbox WHERE delivery_id=?1",
+            [delivery_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterStoreError::Conflict)?;
+    transaction.execute(
+        "INSERT INTO execution_delivery_disposition(delivery_id,original_digest,original_frame,rejected) VALUES (?1,?2,?3,1) ON CONFLICT(delivery_id) DO UPDATE SET rejected=1",
+        params![delivery_id,digest(&bytes),bytes],
+    ).map_err(|_| AdapterStoreError::Unavailable)?;
+    transaction
+        .execute(
+            "UPDATE execution_outbox SET state=?2,acknowledgement_required=0 WHERE delivery_id=?1",
+            params![delivery_id, SENT_ATTEMPT],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    Ok(())
+}
+
 struct RuntimeRow {
     delivery_id: String,
     event: RuntimeEventMessage,
 }
 
-fn runtime_rows(transaction: &Transaction<'_>) -> Result<Vec<RuntimeRow>, AdapterStoreError> {
+fn runtime_rows(
+    transaction: &Transaction<'_>,
+    stream: &winwincode_execution_port::replay::ReplayStreamKey,
+    through: Option<u64>,
+) -> Result<Vec<RuntimeRow>, AdapterStoreError> {
+    let through = through
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| AdapterStoreError::Corrupt)?
+        .unwrap_or(i64::MAX);
     let mut statement = transaction
         .prepare(
-            "SELECT delivery_id, frame_json FROM execution_outbox
-             WHERE family = ?1 ORDER BY position",
+            "SELECT delivery_id,frame_digest,runtime_sequence,frame_json FROM execution_outbox
+             WHERE family = ?1 AND runtime_stream_key = ?2 AND runtime_sequence<=?3 ORDER BY runtime_sequence,position",
         )
         .map_err(|_| AdapterStoreError::Unavailable)?;
     let rows = statement
-        .query_map(params![Family::Runtime.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
+        .query_map(
+            params![Family::Runtime.as_str(), stream.as_str(), through],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
         .map_err(|_| AdapterStoreError::Unavailable)?;
     rows.map(|row| {
-        let (delivery_id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+        let (delivery_id, expected_digest, sequence, frame) =
+            row.map_err(|_| AdapterStoreError::Unavailable)?;
+        #[cfg(test)]
+        crate::storage_mechanism_regression::runtime_row(frame.len());
+        if digest(&frame) != expected_digest {
+            return Err(AdapterStoreError::Corrupt);
+        }
         let message: ExecutionPortMessage =
             serde_json::from_slice(&frame).map_err(|_| AdapterStoreError::Corrupt)?;
         let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
             return Err(AdapterStoreError::Corrupt);
         };
+        if runtime_event_stream_key(&event) != *stream
+            || event.event.sequence.0 != sequence
+            || sequence <= 0
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
         Ok(RuntimeRow { delivery_id, event })
     })
     .collect()
@@ -1295,11 +1551,6 @@ mod tests {
                     | "action.enforcement_receipt"
                     | "approval.decision"
             ) {
-                // The Kernel/input ledger, durable model-call frame ledger,
-                // action gate or approval-operation ledger has already applied
-                // this exact response. Replaying the Control Plane frame after
-                // the Worker lost its ACK must remain an idempotent no-op even
-                // though the durable request row is compacted.
                 outbox
                     .acknowledge_response(&fixture(response_kind))
                     .expect("exact terminal response replay after compaction");
@@ -1307,6 +1558,373 @@ mod tests {
             }
             drop(outbox);
             std::fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn acknowledged_input_retains_original_prompt_without_replaying_transport() {
+        let root = test_root("input-original-prompt-after-ack");
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let original = fixture("input.request");
+        let retained = outbox.retain(&original).unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        outbox.record_sent(&retained.delivery_id).unwrap();
+        let response = fixture("input.response");
+        outbox.acknowledge_response(&response).unwrap();
+        assert!(outbox.pending().unwrap().is_empty());
+        let saved = outbox
+            .retained_interaction(&retained.delivery_id)
+            .unwrap()
+            .expect("ACK must retain the exact original input permission");
+        assert_eq!(serde_json::to_vec(&saved).unwrap(), original_bytes);
+        assert_eq!(
+            outbox.requeue(&retained.delivery_id),
+            Err(AdapterStoreError::Conflict)
+        );
+        outbox.acknowledge_response(&response).unwrap();
+        assert_eq!(
+            outbox
+                .store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM execution_response_receipt WHERE family='input_request'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(outbox);
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        assert!(outbox.pending().unwrap().is_empty());
+        assert!(outbox.pending_batch(None, 10).unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_vec(
+                &outbox
+                    .retained_interaction(&retained.delivery_id)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            original_bytes
+        );
+        outbox.acknowledge_response(&response).unwrap();
+        let mut changed = response.clone();
+        let ExecutionPortMessage::InputResponseMessage(value) = &mut changed else {
+            panic!("input response fixture")
+        };
+        value.value.as_mut().unwrap().value.push_str("-changed");
+        assert_eq!(
+            outbox.acknowledge_response(&changed),
+            Err(AdapterStoreError::Conflict)
+        );
+        let mut changed_request = original;
+        let ExecutionPortMessage::InputRequestMessage(value) = &mut changed_request else {
+            panic!("input request fixture")
+        };
+        value.prompt.push_str("-changed");
+        assert_eq!(
+            outbox.retain(&changed_request),
+            Err(AdapterStoreError::Conflict)
+        );
+        assert_eq!(
+            serde_json::to_vec(
+                &outbox
+                    .retained_interaction(&retained.delivery_id)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            original_bytes
+        );
+        assert!(outbox.pending().unwrap().is_empty());
+        drop(outbox);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn renewed_interaction_pair(
+        request_kind: &str,
+        response_kind: &str,
+    ) -> (ExecutionPortMessage, ExecutionPortMessage) {
+        let mut request = serde_json::to_value(fixture(request_kind)).unwrap();
+        let (id_key, namespace): (&str, &[u8]) = if request_kind == "input.request" {
+            ("inputRequestId", b"winwincode-kernel-input-message.v1")
+        } else {
+            ("approvalId", b"winwincode-kernel-approval-message.v1")
+        };
+        request["messageId"] = serde_json::json!(crate::adapter::canonical_parts_id(
+            "xmsg",
+            namespace,
+            &[request[id_key].as_str().unwrap().as_bytes()],
+        ));
+        let mut response = serde_json::to_value(fixture(response_kind)).unwrap();
+        response["lease"]["expiresAt"] = serde_json::json!("2026-08-24T12:20:00.000Z");
+        (
+            serde_json::from_value(request).unwrap(),
+            serde_json::from_value(response).unwrap(),
+        )
+    }
+
+    fn interaction_receipt_count(outbox: &ExecutionOutbox) -> i64 {
+        outbox
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM execution_response_receipt",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn renewed_interaction_ack_requires_exact_proof_and_survives_real_reopen() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("renewed-interaction-exact-source-proof");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+            let original_bytes = serde_json::to_vec(&request).unwrap();
+            let delivery = outbox.retain(&request).unwrap();
+            let source_key: String = outbox
+                .store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT correlation_key FROM execution_outbox WHERE delivery_id=?1",
+                    [&delivery.delivery_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let (family, raw_key) = super::response_target(&response).unwrap().unwrap();
+            assert_ne!(
+                source_key, raw_key,
+                "renewed expiry remains part of full raw identity"
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(outbox.pending().unwrap(), vec![delivery.clone()]);
+            assert_eq!(interaction_receipt_count(&outbox), 0);
+            outbox.record_applied_response(&response).unwrap();
+            outbox.acknowledge_response(&response).unwrap();
+            assert_eq!(outbox.store.lock().unwrap().query_row(
+                "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                rusqlite::params![family.as_str(), source_key], |row| row.get::<_, String>(0),
+            ).unwrap(), super::response_replay_digest(&response).unwrap());
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert!(outbox.pending().unwrap().is_empty());
+            assert_eq!(
+                serde_json::to_vec(
+                    &outbox
+                        .retained_interaction(&delivery.delivery_id)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                original_bytes
+            );
+            drop(outbox);
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            assert!(outbox.pending().unwrap().is_empty());
+            assert!(outbox.pending_batch(None, 10).unwrap().is_empty());
+            assert_eq!(
+                outbox.requeue(&delivery.delivery_id),
+                Err(AdapterStoreError::Conflict)
+            );
+            outbox.record_applied_response(&response).unwrap();
+            outbox.acknowledge_response(&response).unwrap();
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert_eq!(
+                serde_json::to_vec(
+                    &outbox
+                        .retained_interaction(&delivery.delivery_id)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                original_bytes
+            );
+            let mut changed = serde_json::to_value(&response).unwrap();
+            if response_kind == "input.response" {
+                changed["value"]["value"] = serde_json::json!("changed-after-acceptance");
+            } else {
+                changed["decision"] = serde_json::json!("denied");
+            }
+            let changed: ExecutionPortMessage = serde_json::from_value(changed).unwrap();
+            assert_eq!(
+                outbox.record_applied_response(&changed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&changed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert!(outbox.pending().unwrap().is_empty());
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn renewed_interaction_source_rejects_foreign_attempt_fence_session_and_thread() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("renewed-interaction-foreign-identity");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+            let delivery = outbox.retain(&request).unwrap();
+            for field in 0..6 {
+                let mut foreign = serde_json::to_value(&response).unwrap();
+                match field {
+                    0 => foreign["lease"]["attempt"] = serde_json::json!(2),
+                    1 => foreign["lease"]["fencingToken"] = serde_json::json!("43"),
+                    2 => {
+                        foreign["workerSessionId"] =
+                            serde_json::json!(format!("wsn_{}", "Y".repeat(26)));
+                    }
+                    3 => {
+                        foreign["sessionIdentity"]["codexThreadId"] =
+                            serde_json::json!(format!("cdx_{}", "Y".repeat(26)));
+                    }
+                    4 => {
+                        foreign["lease"]["workerInstanceId"] =
+                            serde_json::json!(format!("wki_{}", "Y".repeat(26)));
+                    }
+                    _ => {
+                        foreign["lease"]["expiresAt"] =
+                            serde_json::json!("2026-08-24T12:09:00.000Z");
+                    }
+                }
+                let foreign: ExecutionPortMessage = serde_json::from_value(foreign).unwrap();
+                assert_eq!(
+                    outbox.record_applied_response(&foreign),
+                    Err(AdapterStoreError::Conflict)
+                );
+                assert_eq!(
+                    outbox.acknowledge_response(&foreign),
+                    Err(AdapterStoreError::Conflict)
+                );
+                assert_eq!(interaction_receipt_count(&outbox), 0);
+                assert_eq!(outbox.pending().unwrap(), vec![delivery.clone()]);
+            }
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn canonical_interaction_corruption_cannot_hide_behind_an_exact_legacy_source() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            for corruption in ["family", "frame_digest"] {
+                let root = test_root("interaction-canonical-corruption");
+                let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+                let (request, response) = renewed_interaction_pair(request_kind, response_kind);
+                let canonical = outbox.retain(&request).unwrap();
+                let mut legacy = serde_json::to_value(&request).unwrap();
+                legacy["messageId"] = serde_json::json!(format!("xmsg_{}", "Z".repeat(26)));
+                legacy["lease"]["expiresAt"] = serde_json::json!("2026-08-24T12:20:00.000Z");
+                let legacy: ExecutionPortMessage = serde_json::from_value(legacy).unwrap();
+                outbox.retain(&legacy).unwrap();
+                let expected = if corruption == "family" {
+                    outbox
+                        .store
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE execution_outbox SET family='model_open' WHERE delivery_id=?1",
+                            [&canonical.delivery_id],
+                        )
+                        .unwrap();
+                    AdapterStoreError::Conflict
+                } else {
+                    outbox.store.lock().unwrap().execute(
+                        "UPDATE execution_outbox SET frame_digest='sha256:corrupt' WHERE delivery_id=?1",
+                        [&canonical.delivery_id],
+                    ).unwrap();
+                    AdapterStoreError::Conflict
+                };
+                assert_eq!(outbox.record_applied_response(&response), Err(expected));
+                assert_eq!(outbox.acknowledge_response(&response), Err(expected));
+                assert_eq!(interaction_receipt_count(&outbox), 0);
+                assert_eq!(outbox.store.lock().unwrap().query_row(
+                    "SELECT COUNT(*) FROM execution_outbox WHERE acknowledgement_required=1",
+                    [], |row| row.get::<_, i64>(0),
+                ).unwrap(), 2);
+                drop(outbox);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn missing_interaction_source_can_only_reuse_an_existing_exact_receipt() {
+        for (request_kind, response_kind) in [
+            ("input.request", "input.response"),
+            ("approval.request", "approval.decision"),
+        ] {
+            let root = test_root("interaction-missing-source-exact-legacy-proof");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (request, renewed) = renewed_interaction_pair(request_kind, response_kind);
+            let original_response = fixture(response_kind);
+            assert_eq!(
+                outbox.record_applied_response(&original_response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&original_response),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 0);
+            let source = outbox.retain(&request).unwrap();
+            outbox.record_applied_response(&original_response).unwrap();
+            outbox.acknowledge_response(&original_response).unwrap();
+            outbox
+                .store
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM execution_outbox WHERE delivery_id=?1",
+                    [&source.delivery_id],
+                )
+                .unwrap();
+            drop(outbox);
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            outbox.record_applied_response(&original_response).unwrap();
+            outbox.acknowledge_response(&original_response).unwrap();
+            assert_eq!(
+                outbox.record_applied_response(&renewed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(
+                outbox.acknowledge_response(&renewed),
+                Err(AdapterStoreError::Conflict)
+            );
+            assert_eq!(interaction_receipt_count(&outbox), 1);
+            assert_eq!(
+                outbox
+                    .store
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM execution_outbox", [], |row| row
+                        .get::<_, i64>(0),)
+                    .unwrap(),
+                0,
+                "old compacted permission must not be reconstructed"
+            );
+            drop(outbox);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 
@@ -1346,6 +1964,69 @@ mod tests {
             drop(outbox);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn heartbeat_gap_is_consumed_without_acknowledging_or_losing_the_request() {
+        let root = test_root("heartbeat-gap-replay");
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let first = outbox.retain(&fixture("worker.heartbeat")).unwrap();
+        let ExecutionPortMessage::WorkerHeartbeatMessage(mut second) = fixture("worker.heartbeat")
+        else {
+            unreachable!()
+        };
+        second.heartbeat_sequence.0 = 2;
+        second.message_id = ExecutionMessageId(format!("xmsg_{}", "B".repeat(26)));
+        let second = outbox
+            .retain(&ExecutionPortMessage::WorkerHeartbeatMessage(second))
+            .unwrap();
+        let mut gap = serde_json::to_value(fixture("worker.heartbeat_ack")).unwrap();
+        gap["heartbeatSequence"] = serde_json::json!(2);
+        gap["status"] = serde_json::json!("rejected_worker_instance");
+        gap["error"] = serde_json::json!({"code":"SEQUENCE_GAP","message":"retry the original sequence","retryable":true});
+        let gap: ExecutionPortMessage = serde_json::from_value(gap).unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        assert_eq!(
+            outbox.pending().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        drop(outbox);
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        for invalid in 0..3 {
+            let mut value = serde_json::to_value(&gap).unwrap();
+            match invalid {
+                0 => value["error"]["retryable"] = serde_json::json!(false),
+                1 => {
+                    value["workerInstanceId"] =
+                        serde_json::json!(format!("wki_{}", "C".repeat(26)));
+                }
+                _ => value["heartbeatSequence"] = serde_json::json!(3),
+            }
+            assert_eq!(
+                outbox.acknowledge_response(&serde_json::from_value(value).unwrap()),
+                Err(AdapterStoreError::Conflict)
+            );
+        }
+        outbox
+            .acknowledge_response(&fixture("worker.heartbeat_ack"))
+            .unwrap();
+        let mut accepted = serde_json::to_value(fixture("worker.heartbeat_ack")).unwrap();
+        accepted["heartbeatSequence"] = serde_json::json!(2);
+        outbox
+            .acknowledge_response(&serde_json::from_value(accepted.clone()).unwrap())
+            .unwrap();
+        accepted["status"] = serde_json::json!("duplicate");
+        outbox
+            .acknowledge_response(&serde_json::from_value(accepted).unwrap())
+            .unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        assert!(
+            outbox.pending().unwrap().is_empty(),
+            "late Gap must not resurrect acknowledged requests"
+        );
+        drop(outbox);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1654,6 +2335,53 @@ mod tests {
     }
 
     #[test]
+    fn all_model_roles_share_durable_cancellation_before_dispatch() {
+        for wording in [
+            "model exchange cancelled by Worker",
+            "Observer model exchange cancelled by Worker",
+        ] {
+            let root = test_root("shared-model-cancellation");
+            let store = AdapterStore::open(&root).unwrap();
+            let outbox = ExecutionOutbox::open(store.clone()).unwrap();
+            let request = fixture("model.open");
+            let ExecutionPortMessage::ModelOpenMessage(open) = &request else {
+                panic!("open fixture")
+            };
+            outbox.retain(&request).unwrap();
+            assert!(ExecutionOutbox::model_start_request_allowed(&store, open).unwrap());
+            let mut cancelled = terminal_model_ack();
+            let ExecutionPortMessage::ModelAckMessage(ack) = &mut cancelled else {
+                panic!("ack fixture")
+            };
+            ack.error.as_mut().unwrap().message = wording.into();
+            outbox.retain(&cancelled).unwrap();
+            outbox.acknowledge_response(&cancelled).unwrap();
+            assert!(
+                !ExecutionOutbox::model_start_request_allowed(&store, open).unwrap(),
+                "reliable cancellation forbids first start before network dispatch"
+            );
+            assert!(
+                outbox
+                    .pending()
+                    .unwrap()
+                    .iter()
+                    .all(|delivery| delivery.message != request)
+            );
+            let restarted = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            assert!(!ExecutionOutbox::model_start_request_allowed(&restarted.store, open).unwrap());
+            if let ExecutionPortMessage::ModelAckMessage(ack) = &mut cancelled {
+                ack.error.as_mut().unwrap().message = "model exchange cancelled by Worker".into();
+            }
+            restarted.acknowledge_response(&cancelled).unwrap();
+            assert!(!ExecutionOutbox::model_start_request_allowed(&restarted.store, open).unwrap());
+            drop(restarted);
+            drop(outbox);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn changed_terminal_model_ack_keeps_the_exact_open_pending() {
         for (name, changed) in [
             ("exchange", 0_u8),
@@ -1755,6 +2483,58 @@ mod tests {
             .expect("accept ack two");
         assert!(outbox.pending().expect("fully compacted").is_empty());
         std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn rejected_runtime_ack_archives_only_its_stream_and_survives_restart() {
+        for status in [
+            LeaseWriteStatus::RejectedConflict,
+            LeaseWriteStatus::RejectedExpiredLease,
+            LeaseWriteStatus::RejectedStaleFencingToken,
+            LeaseWriteStatus::RejectedWorkerInstance,
+        ] {
+            let root = test_root("runtime-rejected-stream");
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            let (first, second) = runtime_pair();
+            let lease = first.lease.clone();
+            let mut other = first.clone();
+            other.lease.job_id =
+                winwincode_domain::ExecutionJobId("job_00000000000000000000000999".into());
+            other.message_id = ExecutionMessageId("xmsg_00000000000000000000000999".into());
+            let other_lease = other.lease.clone();
+            for event in [first, second, other] {
+                outbox
+                    .retain(&ExecutionPortMessage::RuntimeEventMessage(event))
+                    .unwrap();
+            }
+            let ExecutionPortMessage::RuntimeAckMessage(mut ack) = fixture("runtime.ack") else {
+                panic!("ACK");
+            };
+            ack.status = status.clone();
+            ack.ack_sequence = ExecutionAckSequence(0);
+            let receipt = RuntimeReplayAckReceipt {
+                status,
+                ack_sequence: ExecutionAckSequence(0),
+                highest_sequence: ExecutionAckSequence(2),
+                replay_from_sequence: None,
+                replay: None,
+            };
+            outbox.apply_runtime_ack(&ack, &receipt).unwrap();
+            assert!(outbox.has_rejected_job(&lease).unwrap());
+            assert!(!outbox.has_rejected_job(&other_lease).unwrap());
+            assert_eq!(outbox.pending().unwrap().len(), 1);
+            drop(outbox);
+            let reopened = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            reopened.apply_runtime_ack(&ack, &receipt).unwrap();
+            assert_eq!(reopened.pending().unwrap().len(), 1);
+            ack.ack_sequence = ExecutionAckSequence(1);
+            assert!(
+                reopened.apply_runtime_ack(&ack, &receipt).is_err(),
+                "changed replay cannot overwrite rejection proof"
+            );
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

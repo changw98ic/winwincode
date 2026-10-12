@@ -70,7 +70,6 @@ const executionJobId = 'job_00000000000000000000000001'
 const codexThreadId = 'thr_00000000000000000000000001'
 const subscriptionId = 'sub_00000000000000000000000001'
 const now = Date.parse('2026-09-04T03:00:00.000Z')
-// Secret-safe probes: none of these may reach a notification or a badge.
 const approvalSubject = 'Allow raw-tool-payload=credential-secret on private-host'
 const repositoryLocator = 'ssh://user:token@private-host/secret/repository/path'
 const candidateDigest = 'sha256:current-candidate-must-not-enter-notifications'
@@ -553,7 +552,6 @@ test('the monitor badges approval, attention, failure, and completion counts wit
   assert.equal(document.title, '(3) WinWinCode')
   assert.match(badgeTarget.textContent, /任务看板/u, 'the entry keeps its own label')
 
-  // The shell rebuilds navigation labels; the badge must survive the rebuild.
   badgeTarget.textContent = '任务看板'
   monitor.applyBadge()
   assert.equal(badgeTarget.children.length, 1)

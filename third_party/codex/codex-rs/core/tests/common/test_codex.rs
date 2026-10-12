@@ -792,6 +792,18 @@ impl TestCodexBuilder {
             }
         };
 
+        let test_env = Arc::new(test_env);
+        // Tests may retain only the thread from this temporary fixture.
+        // Its directories and executor cleanup must follow the same runtime.
+        let _ = new_conversation
+            .thread
+            .thread_extension_data()
+            .insert(TestCodexResourceGuard {
+                _home: Arc::clone(&home),
+                _cwd: Arc::clone(&cwd),
+                _test_env: Arc::clone(&test_env),
+            });
+
         Ok(TestCodex {
             home,
             cwd,
@@ -883,6 +895,13 @@ fn ensure_test_model_catalog(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+/// Retains fixture resources without retaining the thread or its manager.
+struct TestCodexResourceGuard {
+    _home: Arc<TempDir>,
+    _cwd: Arc<TempDir>,
+    _test_env: Arc<TestEnv>,
+}
+
 pub struct TestCodex {
     pub home: Arc<TempDir>,
     pub cwd: Arc<TempDir>,
@@ -891,7 +910,7 @@ pub struct TestCodex {
     pub config: Config,
     pub thread_manager: Arc<ThreadManager>,
     pub thread_store: Arc<dyn ThreadStore>,
-    _test_env: TestEnv,
+    _test_env: Arc<TestEnv>,
 }
 
 impl TestCodex {
@@ -916,7 +935,7 @@ impl TestCodex {
     }
 
     pub fn executor_environment(&self) -> &TestEnv {
-        &self._test_env
+        self._test_env.as_ref()
     }
 
     pub fn fs(&self) -> Arc<dyn ExecutorFileSystem> {

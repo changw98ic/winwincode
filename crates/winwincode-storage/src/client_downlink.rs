@@ -1,22 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server → Client downlink outbox for the `ClientControlPort`.
-//!
-//! Every Server-to-Client frame (`client.enrollment_accepted`,
-//! `client.access.challenge`, and later occupancy and worker frames) is
-//! persisted here before delivery and is delivered by the client exchange
-//! under the per-client `server_to_client_ack_sequence` cursor owned by the
-//! `ClientNode` registry (plan 9.2). A frame is retained until the Device
-//! Client acknowledges its sequence, so a Server restart or a lost exchange
-//! response never loses a downlink command.
-//!
-//! Sequence discipline is monotonic per client: the caller stamps each frame
-//! with the next free stream position — one past the acknowledgement cursor
-//! or the highest retained frame, whichever is higher — and the append
-//! validates that stamp inside its transaction, so acknowledgement and
-//! retention can never regress the stream and concurrent writers can never
-//! interleave two frames at one position.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -42,27 +25,15 @@ CREATE INDEX IF NOT EXISTS client_downlink_frames_by_created
     ON client_downlink_frames (client_node_id, created_at);
 ";
 
-/// One durable Server → Client frame awaiting or retaining delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientDownlinkFrame {
-    /// Client the frame is routed to.
     pub client_node_id: String,
-    /// Contiguous per-client downlink sequence.
     pub sequence: u64,
-    /// Envelope message identity of the frame.
     pub message_id: String,
-    /// Canonical JSON encoding of the full `ServerToClientEnvelope`.
     pub frame: String,
-    /// Instant the frame was appended.
     pub created_at: Instant,
 }
 
-/// Command that appends one downlink frame.
-///
-/// `sequence` must be the next free stream position
-/// (`max(server_to_client_ack_sequence, highest retained sequence) + 1`);
-/// the append validates it inside the same `IMMEDIATE` transaction, so
-/// concurrent writers can never interleave a second frame at one position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientDownlinkAppend {
     pub(crate) client_node_id: String,
@@ -72,12 +43,6 @@ pub struct ClientDownlinkAppend {
 }
 
 impl ClientDownlinkAppend {
-    /// Builds one validated append command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node id, an empty message id, a zero
-    /// sequence, an oversized frame, or a frame that is not canonical JSON.
     pub fn try_new(
         client_node_id: impl Into<String>,
         message_id: impl Into<String>,
@@ -139,20 +104,14 @@ impl ClientDownlinkAppend {
     }
 }
 
-/// Stable downlink outbox failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientDownlinkErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free downlink outbox error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientDownlinkError {
     kind: ClientDownlinkErrorKind,
@@ -174,17 +133,11 @@ impl fmt::Display for ClientDownlinkError {
 
 impl std::error::Error for ClientDownlinkError {}
 
-/// Durable Server → Client downlink outbox over the product-state database.
 pub struct ClientDownlinkOutbox<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable downlink outbox on this same product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn client_downlink_outbox(
         &mut self,
     ) -> Result<ClientDownlinkOutbox<'_>, ClientDownlinkError> {
@@ -204,18 +157,6 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         Ok(Self { storage })
     }
 
-    /// Appends one frame and returns the durable row.
-    ///
-    /// The command's `sequence` must be exactly
-    /// `max(server_to_client_ack_sequence, highest retained sequence) + 1`;
-    /// the check and the insert commit in one `IMMEDIATE` transaction, so
-    /// concurrent appends and acknowledgements can never collide or regress
-    /// the stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, a non-canonical command, a sequence
-    /// that is not the next stream position, or storage failure.
     pub fn append(
         &mut self,
         append: &ClientDownlinkAppend,
@@ -227,12 +168,6 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         Ok(stored)
     }
 
-    /// Returns the retained frames with a sequence above `after_sequence`,
-    /// oldest first, up to `limit` frames.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity or storage failure.
     pub fn deliverable(
         &self,
         client_node_id: &str,
@@ -267,11 +202,6 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         Ok(frames)
     }
 
-    /// Returns the highest retained sequence for one client, or zero.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity or storage failure.
     pub fn high_water(&self, client_node_id: &str) -> Result<u64, ClientDownlinkError> {
         validate_client_node_id(client_node_id)?;
         let connection = self
@@ -281,12 +211,16 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         highest_sequence(connection, client_node_id)
     }
 
-    /// Deletes every retained frame at or below `ack_sequence` and returns
-    /// the deleted count.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity or storage failure.
+    pub fn frame_by_message_id(
+        &self,
+        node: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, ClientDownlinkError> {
+        self.storage.connection().map_err(|storage| storage_error(&storage))?
+            .query_row("SELECT frame FROM client_downlink_frames WHERE client_node_id = ?1 AND message_id = ?2", params![node, message_id], |row| row.get(0))
+            .optional().map_err(|sql| sql_error(&sql))
+    }
+
     pub fn retain_through(
         &mut self,
         client_node_id: &str,
@@ -312,12 +246,6 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         })
     }
 
-    /// Deletes every retained frame of one client; a maintenance entry point
-    /// for terminal (`revoked`) identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity or storage failure.
     pub fn purge(&mut self, client_node_id: &str) -> Result<u64, ClientDownlinkError> {
         self.retain_through(client_node_id, MAX_SAFE_INTEGER)
     }
@@ -445,7 +373,6 @@ fn validate_client_node_id(value: &str) -> Result<(), ClientDownlinkError> {
     Ok(())
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant) -> Result<(), ClientDownlinkError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -535,6 +462,24 @@ fn error(kind: ClientDownlinkErrorKind, message: impl Into<String>) -> ClientDow
     }
 }
 
+pub(crate) fn next_sequence_in_transaction(
+    connection: &rusqlite::Connection,
+    client_node_id: &str,
+) -> Result<u64, ClientDownlinkError> {
+    let cursor = server_to_client_ack(connection, client_node_id)?;
+    let highest = highest_sequence(connection, client_node_id)?;
+    cursor
+        .max(highest)
+        .checked_add(1)
+        .filter(|sequence| *sequence <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| {
+            error(
+                ClientDownlinkErrorKind::InvalidInput,
+                "downlink sequence exhausted",
+            )
+        })
+}
+
 pub(crate) fn append_launch_in_transaction(
     connection: &rusqlite::Connection,
     append: &ClientDownlinkAppend,
@@ -543,9 +488,7 @@ pub(crate) fn append_launch_in_transaction(
     validate_client_node_id(&append.client_node_id)?;
     validate_instant(now)?;
     require_client_node(connection, &append.client_node_id)?;
-    let cursor = server_to_client_ack(connection, &append.client_node_id)?;
-    let highest = highest_sequence(connection, &append.client_node_id)?;
-    if append.sequence != cursor.max(highest) + 1 {
+    if append.sequence != next_sequence_in_transaction(connection, &append.client_node_id)? {
         return Err(error(
             ClientDownlinkErrorKind::InvalidInput,
             "downlink sequence is not the next stream position",

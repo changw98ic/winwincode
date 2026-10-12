@@ -1,13 +1,5 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-/**
- * winwincode-00os live Device production vertical acceptance.
- *
- * Runs the Device-only production path on an isolated temporary data directory
- * and free ports. Never touches production services on 63159/63160/18445.
- * StrongFlow is reported as a subset when the unfinished frozen verifier
- * (72t.36.1) blocks the full done/verdict chain.
- */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {

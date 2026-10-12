@@ -1,0 +1,393 @@
+diff --git a/codex-rs/core/src/tools/agent_wait_facts.rs b/codex-rs/core/src/tools/agent_wait_facts.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/agent_wait_facts.rs
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ExecutionFacts;
++use super::nested_identity;
++use super::storage_error;
++use crate::function_tool::FunctionCallError;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use crate::tools::agent_wait_graph::CompletionWaitLease;
++use crate::tools::agent_wait_graph::evidence;
++use crate::tools::agent_wait_graph::unix_ms;
++use crate::tools::context::ToolCallSource;
++use codex_state::ToolAgentWaitFact;
++use codex_state::ToolWaitEdge;
++use codex_state::ToolWaitNode;
++use codex_state::ToolWaitState;
++use std::sync::Arc;
++use tokio_util::task::task_tracker::TaskTrackerToken;
++
++impl ExecutionFacts {
++    pub(crate) async fn begin_agent_wait(
++        session: &Session,
++        _turn: &TurnContext,
++        source: &ToolCallSource,
++        targets: Vec<(codex_protocol::ThreadId, String)>,
++        timeout_ms: u64,
++    ) -> Result<Option<AgentWait>, FunctionCallError> {
++        let ToolCallSource::CodeMode {
++            cell_id,
++            runtime_tool_call_id,
++        } = source
++        else {
++            return Ok(None);
++        };
++        let facts = Self::for_session(session);
++        let writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
++        let (_, scope) = facts
++            .parent(cell_id)
++            .ok_or_else(|| storage_error("agent wait cell scope expired"))?;
++        let owner = Self::current_owner(session);
++        let store = facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("agent wait store unavailable"))?;
++        let cell = store
++            .latest_tool_cell(&session.thread_id.to_string(), cell_id)
++            .await
++            .map_err(storage_error)?
++            .ok_or_else(|| storage_error("agent wait cell unavailable"))?;
++        if cell.owner_id != owner
++            || cell.scope_id != scope
++            || cell.lifecycle != codex_state::ToolCellLifecycle::Live
++        {
++            return Err(storage_error("agent wait cell owner unverified"));
++        }
++        let logical = nested_identity(cell_id, runtime_tool_call_id, &scope);
++        let request = store
++            .tool_request_fact(&session.thread_id.to_string(), &logical)
++            .await
++            .map_err(storage_error)?
++            .ok_or_else(|| storage_error("agent wait request unavailable"))?;
++        let edge = ToolWaitEdge {
++            tree_id: session.services.agent_control.session_id().to_string(),
++            request_sequence: request.request_sequence,
++            logical_id: logical,
++            source: ToolWaitNode::Cell {
++                thread_id: session.thread_id.to_string(),
++                owner_id: owner,
++                cell_id: cell_id.clone(),
++                scope_id: scope,
++            },
++            targets: targets
++                .into_iter()
++                .map(|(thread, owner)| ToolWaitNode::Thread {
++                    thread_id: thread.to_string(),
++                    owner_id: owner,
++                })
++                .collect::<std::collections::BTreeSet<_>>()
++                .into_iter()
++                .collect(),
++            deadline_unix_ms: unix_ms().saturating_add(timeout_ms),
++        };
++        let fact = ToolAgentWaitFact {
++            schema_version: 1,
++            thread_id: session.thread_id.to_string(),
++            edge: edge.clone(),
++            state: ToolWaitState::Waiting,
++        };
++        store
++            .record_tool_agent_wait(&fact)
++            .await
++            .map_err(storage_error)?;
++        let graph_lease = session
++            .services
++            .agent_control
++            .completion_waits
++            .insert(edge, evidence(&request));
++        crate::tools::tool_diagnostics::ToolDiagnostics::refresh(session).await;
++        Ok(Some(AgentWait {
++            writer,
++            facts,
++            fact,
++            _graph_lease: graph_lease,
++            settled: false,
++        }))
++    }
++}
++
++pub(crate) struct AgentWait {
++    writer: TaskTrackerToken,
++    facts: Arc<ExecutionFacts>,
++    fact: ToolAgentWaitFact,
++    _graph_lease: CompletionWaitLease,
++    settled: bool,
++}
++impl AgentWait {
++    pub(crate) async fn settle(mut self) -> Result<(), FunctionCallError> {
++        self.fact.state = ToolWaitState::Settled;
++        self.facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("agent wait store unavailable"))?
++            .record_tool_agent_wait(&self.fact)
++            .await
++            .map_err(storage_error)?;
++        self.settled = true;
++        Ok(())
++    }
++}
++impl Drop for AgentWait {
++    fn drop(&mut self) {
++        if self.settled {
++            return;
++        }
++        let writer = self.writer.clone();
++        let facts = Arc::clone(&self.facts);
++        let mut fact = self.fact.clone();
++        fact.state = ToolWaitState::Settled;
++        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
++            runtime.spawn(async move {
++                let _writer = writer;
++                if let Some(store) = facts.store.get()
++                    && let Err(error) = store.record_tool_agent_wait(&fact).await
++                {
++                    facts.owner.fail(format!(
++                        "agent wait cancellation was not persisted: {error}"
++                    ));
++                }
++            });
++        } else {
++            self.facts
++                .owner
++                .fail("agent wait cancellation has no runtime".into());
++        }
++    }
++}
+diff --git a/codex-rs/core/src/tools/cell_facts.rs b/codex-rs/core/src/tools/cell_facts.rs
+--- a/codex-rs/core/src/tools/cell_facts.rs
++++ b/codex-rs/core/src/tools/cell_facts.rs
+@@ -90,6 +90,7 @@
+         turn: &TurnContext,
+         cell_id: &str,
+         call_id: &str,
++        timeout_ms: u64,
+     ) -> Result<Option<ToolCellWait>, FunctionCallError> {
+         let facts = Self::for_session(session);
+         let writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
+@@ -156,8 +157,34 @@
+             .await;
+             return Ok(None);
+         };
++        let request = store
++            .tool_request_fact(&session.thread_id.to_string(), &logical)
++            .await
++            .map_err(storage_error)?
++            .ok_or_else(|| storage_error("wait request missing"))?;
++        let graph_lease = session.services.agent_control.completion_waits.insert(
++            codex_state::ToolWaitEdge {
++                tree_id: session.services.agent_control.session_id().to_string(),
++                request_sequence: request.request_sequence,
++                logical_id: logical,
++                source: codex_state::ToolWaitNode::Thread {
++                    thread_id: session.thread_id.to_string(),
++                    owner_id: owner.clone(),
++                },
++                targets: vec![codex_state::ToolWaitNode::Cell {
++                    thread_id: session.thread_id.to_string(),
++                    owner_id: owner.clone(),
++                    cell_id: cell_id.into(),
++                    scope_id: scope,
++                }],
++                deadline_unix_ms: crate::tools::agent_wait_graph::unix_ms()
++                    .saturating_add(timeout_ms),
++            },
++            crate::tools::agent_wait_graph::evidence(&request),
++        );
+         crate::tools::tool_diagnostics::ToolDiagnostics::refresh(session).await;
+         Ok(Some(ToolCellWait {
++            _graph_lease: graph_lease,
+             _writer: writer,
+             facts: Arc::clone(&facts),
+             thread_id: session.thread_id.to_string(),
+@@ -168,6 +195,7 @@
+ 
+ /// Dropping an interrupted waiter preserves its unresolved durable edge.
+ pub(crate) struct ToolCellWait {
++    _graph_lease: crate::tools::agent_wait_graph::CompletionWaitLease,
+     _writer: tokio_util::task::task_tracker::TaskTrackerToken,
+     facts: Arc<ExecutionFacts>,
+     thread_id: String,
+diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+@@ -102,6 +102,11 @@
+                         &exec.turn,
+                         cell_id.as_str(),
+                         &call_id,
++                        if args.terminate {
++                            0
++                        } else {
++                            args.yield_time_ms
++                        },
+                     )
+                     .await
+                     {
+diff --git a/codex-rs/core/src/tools/execution_facts.rs b/codex-rs/core/src/tools/execution_facts.rs
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
++#[path = "agent_wait_facts.rs"]
++mod agent_wait_facts;
+ #[path = "cell_facts.rs"]
+ mod cell_facts;
+ #[path = "tool_fact_owner.rs"]
+@@ -11,6 +13,7 @@
+ use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::Mutex;
++use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ 
+@@ -38,12 +41,26 @@
+ pub(crate) struct ExecutionFacts {
+     owner: ToolFactOwner,
+     pub(super) store: OnceCell<Arc<StateRuntime>>,
+-    pub(super) owner_id: OnceCell<String>,
++    pub(super) owner_id: OnceLock<String>,
+     cells: Mutex<HashMap<String, (String, String)>>,
+     pub(super) active_requests: Mutex<HashSet<i64>>,
+ }
+ 
+ impl ExecutionFacts {
++    pub(crate) fn current_owner(session: &Session) -> String {
++        let facts = Self::for_session(session);
++        let owner = facts
++            .owner_id
++            .get_or_init(|| uuid::Uuid::new_v4().to_string())
++            .clone();
++        session
++            .services
++            .agent_control
++            .completion_waits
++            .register_owner(&session.thread_id.to_string(), &owner);
++        owner
++    }
++
+     pub(super) fn for_session(session: &Session) -> Arc<Self> {
+         session
+             .services
+@@ -133,12 +150,8 @@
+         invocation: &ToolInvocation,
+     ) -> Result<ToolFactAdmission, FunctionCallError> {
+         let service = ExecutionFacts::for_session(&invocation.session);
++        let owner_id = ExecutionFacts::current_owner(&invocation.session);
+         let writer = service.try_writer().ok_or_else(owner::closing_error)?;
+-        let owner_id = service
+-            .owner_id
+-            .get_or_init(|| async { uuid::Uuid::new_v4().to_string() })
+-            .await
+-            .clone();
+         let store = service
+             .store
+             .get_or_try_init(|| async {
+diff --git a/codex-rs/core/src/tools/execution_facts_tests.rs b/codex-rs/core/src/tools/execution_facts_tests.rs
+--- a/codex-rs/core/src/tools/execution_facts_tests.rs
++++ b/codex-rs/core/src/tools/execution_facts_tests.rs
+@@ -388,6 +388,7 @@
+         &second.turn,
+         "historical-cell",
+         &second.call_id,
++        1000,
+     )
+     .await
+     .err()
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
+@@ -58,6 +58,7 @@
+             turn,
+             payload,
+             call_id,
++            source,
+             ..
+         } = invocation;
+         let arguments = function_arguments(payload)?;
+@@ -116,7 +117,21 @@
+ 
+         let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
+         let mut initial_final_statuses = Vec::new();
++        let mut completion_targets = Vec::new();
+         for id in &receiver_thread_ids {
++            let owner = match session
++                .services
++                .agent_control
++                .completion_wait_owner(*id)
++                .await
++            {
++                Ok(owner) => owner,
++                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
++                    initial_final_statuses.push((*id, AgentStatus::NotFound));
++                    continue;
++                }
++                Err(err) => return Err(collab_agent_error(*id, err)),
++            };
+             match session.services.agent_control.subscribe_status(*id).await {
+                 Ok(rx) => {
+                     let status = rx.borrow().clone();
+@@ -124,6 +139,7 @@
+                         initial_final_statuses.push((*id, status));
+                     }
+                     status_rxs.push((*id, rx));
++                    completion_targets.push((*id, owner));
+                 }
+                 Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                     initial_final_statuses.push((*id, AgentStatus::NotFound));
+@@ -156,6 +172,14 @@
+         let statuses = if !initial_final_statuses.is_empty() {
+             initial_final_statuses
+         } else {
++            let durable_wait = crate::tools::ExecutionFacts::begin_agent_wait(
++                &session,
++                &turn,
++                &source,
++                completion_targets,
++                timeout_ms as u64,
++            )
++            .await?;
+             let mut futures = FuturesUnordered::new();
+             for (id, rx) in status_rxs.into_iter() {
+                 let session = session.clone();
+@@ -181,6 +205,9 @@
+                         Some(None) | None => break,
+                     }
+                 }
++            }
++            if let Some(wait) = durable_wait {
++                wait.settle().await?;
+             }
+             results
+         };
+diff --git a/codex-rs/core/src/tools/tool_diagnostics.rs b/codex-rs/core/src/tools/tool_diagnostics.rs
+--- a/codex-rs/core/src/tools/tool_diagnostics.rs
++++ b/codex-rs/core/src/tools/tool_diagnostics.rs
+@@ -75,6 +75,14 @@
+         for diagnostic in diagnostics {
+             store.enqueue_tool_diagnostic(&diagnostic).await?;
+         }
++        if let Some(diagnostic) = session
++            .services
++            .agent_control
++            .completion_waits
++            .diagnose(&session.thread_id.to_string(), owner_id)
++        {
++            store.enqueue_tool_diagnostic(&diagnostic).await?;
++        }
+         Ok(())
+     }
+     pub(super) async fn unavailable_wait(
+@@ -120,6 +128,7 @@
+             question: format!(
+                 "Core reports {state} for the requested cell. Which current execution or alternative action can advance the task?"
+             ),
++            wait_graph: Vec::new(),
+         };
+         if let Err(error) = store.enqueue_tool_diagnostic(&diagnostic).await {
+             tracing::warn!(%error, "wait diagnosis unavailable");

@@ -917,12 +917,16 @@ impl RequestUserInputOverlay {
                 },
             );
         }
-        self.app_event_tx.user_input_answer(
+        if !self.app_event_tx.user_input_answer(
+            &self.request.thread_id,
             self.request.turn_id.clone(),
+            self.request.item_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
             },
-        );
+        ) {
+            return;
+        }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
             history_cell::RequestUserInputResultCell {
                 questions: self.request.questions.clone(),
@@ -936,12 +940,16 @@ impl RequestUserInputOverlay {
     fn submit_empty_auto_resolution(&mut self, now: Instant) {
         self.confirm_unanswered = None;
         let answers: HashMap<String, ToolRequestUserInputAnswer> = HashMap::new();
-        self.app_event_tx.user_input_answer(
+        if !self.app_event_tx.user_input_answer(
+            &self.request.thread_id,
             self.request.turn_id.clone(),
+            self.request.item_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
             },
-        );
+        ) {
+            return;
+        }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
             history_cell::RequestUserInputResultCell {
                 questions: self.request.questions.clone(),
@@ -953,14 +961,24 @@ impl RequestUserInputOverlay {
     }
 
     fn dismiss_resolved_request(&mut self, request: &ResolvedAppServerRequest) -> bool {
-        let ResolvedAppServerRequest::UserInput { call_id } = request else {
+        let ResolvedAppServerRequest::UserInput {
+            thread_id,
+            turn_id,
+            call_id,
+        } = request
+        else {
             return false;
         };
 
+        let matches_request = |pending: &ToolRequestUserInputParams| {
+            pending.thread_id == *thread_id
+                && pending.turn_id == *turn_id
+                && pending.item_id == *call_id
+        };
         let queue_len = self.queue.len();
         self.queue
-            .retain(|queued_request| queued_request.item_id != *call_id);
-        if self.request.item_id == *call_id {
+            .retain(|queued_request| !matches_request(queued_request));
+        if matches_request(&self.request) {
             self.advance_queue_or_complete_at(Instant::now());
             return true;
         }
@@ -1721,7 +1739,7 @@ mod tests {
         questions: Vec<ToolRequestUserInputQuestion>,
     ) -> ToolRequestUserInputParams {
         ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-1".to_string(),
             turn_id: turn_id.to_string(),
             questions,
@@ -1799,7 +1817,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-2".to_string(),
             turn_id: "turn-2".to_string(),
             questions: vec![question_with_options("q2", "Second")],
@@ -1807,7 +1825,7 @@ mod tests {
             auto_resolution_ms: None,
         });
         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-3".to_string(),
             turn_id: "turn-3".to_string(),
             questions: vec![question_with_options("q3", "Third")],
@@ -1819,6 +1837,20 @@ mod tests {
 
         assert!(overlay.done, "expected overlay to be done");
         expect_interrupt_only(&mut rx);
+    }
+
+    #[test]
+    fn invalid_source_thread_preserves_the_input_prompt_and_emits_no_answer() {
+        let (tx, mut rx) = test_sender();
+        let mut request = request_event("turn-1", vec![question_with_options("q1", "First")]);
+        request.thread_id = "invalid-thread".to_owned();
+        let mut overlay = RequestUserInputOverlay::new(request, tx, true, false, false);
+        overlay.submit_answers();
+        assert!(!overlay.done);
+        assert!(rx.try_recv().is_err());
+        overlay.submit_empty_auto_resolution(Instant::now());
+        assert!(!overlay.done);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -1867,7 +1899,11 @@ mod tests {
         assert!(overlay.done);
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { id, response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer event");
         };
         assert_eq!(id, "turn-1");
@@ -1992,7 +2028,11 @@ mod tests {
         assert!(overlay.done);
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { id, response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer event");
         };
         assert_eq!(id, "turn-1");
@@ -2099,7 +2139,7 @@ mod tests {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             ToolRequestUserInputParams {
-                thread_id: "thread-1".to_string(),
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
                 item_id: "call-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 questions: vec![question_with_options("q1", "First")],
@@ -2114,6 +2154,8 @@ mod tests {
 
         assert!(
             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-1".to_string(),
                 call_id: "call-1".to_string(),
             })
         );
@@ -2125,11 +2167,66 @@ mod tests {
     }
 
     #[test]
+    fn resolved_request_preserves_same_call_id_in_other_turns_and_threads() {
+        let (tx, mut rx) = test_sender();
+        let current = ToolRequestUserInputParams {
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "same-call".to_string(),
+            questions: vec![question_with_options("q1", "First")],
+            is_blocking: true,
+            auto_resolution_ms: None,
+        };
+        let mut overlay = RequestUserInputOverlay::new(current.clone(), tx, true, false, false);
+        let mut other_turn = current.clone();
+        other_turn.turn_id = "turn-2".to_string();
+        let mut other_thread = current;
+        other_thread.thread_id = "thread-2".to_string();
+        overlay.try_consume_user_input_request(other_turn);
+        overlay.try_consume_user_input_request(other_thread);
+        assert!(
+            !overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-3".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(overlay.queue.len(), 2);
+        assert!(
+            overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-2".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(overlay.queue.len(), 1);
+        assert_eq!(overlay.request.turn_id, "turn-1");
+        assert_eq!(overlay.queue.front().unwrap().thread_id, "thread-2");
+        assert!(
+            overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(overlay.request.thread_id, "thread-2");
+        assert!(!overlay.done);
+        assert!(
+            !overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn resolved_current_request_advances_to_next_same_turn_prompt() {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             ToolRequestUserInputParams {
-                thread_id: "thread-1".to_string(),
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
                 item_id: "call-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 questions: vec![question_with_options("q1", "First")],
@@ -2142,7 +2239,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-2".to_string(),
             turn_id: "turn-1".to_string(),
             questions: vec![question_with_options("q2", "Second")],
@@ -2152,6 +2249,8 @@ mod tests {
 
         assert!(
             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-1".to_string(),
                 call_id: "call-1".to_string(),
             })
         );
@@ -2171,7 +2270,7 @@ mod tests {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             ToolRequestUserInputParams {
-                thread_id: "thread-1".to_string(),
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
                 item_id: "call-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 questions: vec![question_with_options("q1", "First")],
@@ -2184,7 +2283,7 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-2".to_string(),
             turn_id: "turn-1".to_string(),
             questions: vec![question_with_options("q2", "Second")],
@@ -2192,7 +2291,7 @@ mod tests {
             auto_resolution_ms: None,
         });
         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
             item_id: "call-3".to_string(),
             turn_id: "turn-1".to_string(),
             questions: vec![question_with_options("q3", "Third")],
@@ -2202,6 +2301,8 @@ mod tests {
 
         assert!(
             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: "turn-1".to_string(),
                 call_id: "call-2".to_string(),
             })
         );
@@ -2238,7 +2339,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { id, response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         assert_eq!(id, "turn-1");
@@ -2260,7 +2365,11 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -2296,7 +2405,11 @@ mod tests {
 
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let mut expected = HashMap::new();
@@ -2329,7 +2442,11 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -2702,7 +2819,11 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -3093,7 +3214,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -3118,7 +3243,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -3161,7 +3290,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -3197,7 +3330,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");
@@ -3311,7 +3448,11 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+        let AppEvent::SubmitThreadOp {
+            op: Op::UserInputAnswer { response, .. },
+            ..
+        } = event
+        else {
             panic!("expected UserInputAnswer");
         };
         let answer = response.answers.get("q1").expect("answer missing");

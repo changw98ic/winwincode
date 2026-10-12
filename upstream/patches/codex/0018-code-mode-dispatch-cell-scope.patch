@@ -1,0 +1,443 @@
+diff --git a/codex-rs/core/src/tools/code_mode/cell_scope.rs b/codex-rs/core/src/tools/code_mode/cell_scope.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/code_mode/cell_scope.rs
+@@ -0,0 +1,38 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use crate::session::step_context::StepContext;
++use codex_tools::ToolName;
++use std::sync::Arc;
++
++/// Verify a live cell's captured definition and connection scope before dispatch.
++/// The current step still owns execution permissions, hooks, and authorization.
++pub(super) fn validate(
++    origin: &StepContext,
++    current: &StepContext,
++    name: &ToolName,
++) -> Result<(), String> {
++    let previous = origin.tool_router.code_mode_tool_runtime(name);
++    let latest = current.tool_router.code_mode_tool_runtime(name);
++    let (Some(previous), Some(latest)) = (previous, latest) else {
++        return Err(format!(
++            "Code Mode tool `{name}` is no longer authorized in this catalog; discover tools in a new exec cell"
++        ));
++    };
++    if previous.spec() != latest.spec() {
++        return Err(format!(
++            "Code Mode tool `{name}` changed after this cell started; load its definition in a new exec cell"
++        ));
++    }
++    if (previous.uses_mcp_binding() || latest.uses_mcp_binding())
++        && !Arc::ptr_eq(&origin.mcp, &current.mcp)
++    {
++        return Err(format!(
++            "Code Mode tool `{name}` has a different MCP catalog or account session; discover tools in a new exec cell"
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "cell_scope_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/tools/code_mode/cell_scope_tests.rs b/codex-rs/core/src/tools/code_mode/cell_scope_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/code_mode/cell_scope_tests.rs
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::validate;
++use crate::session::step_context::StepContext;
++use crate::tools::context::ToolInvocation;
++use crate::tools::handlers::ToolSearchHandlerCache;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolRegistry;
++use crate::tools::router::ToolRouter;
++use codex_features::Feature;
++use codex_tools::ToolExecutor;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use pretty_assertions::assert_eq;
++use std::sync::Arc;
++
++struct CatalogTool {
++    spec: ToolSpec,
++    server: Option<String>,
++}
++
++impl ToolExecutor<ToolInvocation> for CatalogTool {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("example")
++    }
++    fn spec(&self) -> ToolSpec {
++        self.spec.clone()
++    }
++    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++        panic!("scope validation must precede execution");
++    }
++}
++impl CoreToolRuntime for CatalogTool {
++    fn mcp_server_name(&self) -> Option<&str> {
++        self.server.as_deref()
++    }
++}
++
++#[tokio::test]
++async fn cell_scope_checks_definition_eligibility_and_connection_identity() {
++    let (_, mut turn) = crate::session::tests::make_session_and_context().await;
++    Arc::make_mut(&mut turn.config)
++        .features
++        .enable(Feature::CodeModeOnly)
++        .unwrap();
++    let turn = Arc::new(turn);
++    let spec = ToolSpec::Function(codex_tools::ResponsesApiTool {
++        name: "example".to_string(),
++        description: "Original schema".to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: serde_json::from_value(
++            serde_json::json!({"type":"object","properties":{"value":{"type":"string"}}}),
++        )
++        .unwrap(),
++        output_schema: None,
++    });
++    let router = |spec: ToolSpec, server: Option<String>| {
++        Arc::new(ToolRouter::from_registry(
++            &turn,
++            ToolRegistry::from_tools([
++                Arc::new(CatalogTool { spec, server }) as Arc<dyn CoreToolRuntime>
++            ]),
++            Vec::new(),
++            &ToolSearchHandlerCache::default(),
++        ))
++    };
++    let name = ToolName::plain("example");
++    let mut origin = StepContext::for_test(Arc::clone(&turn));
++    Arc::get_mut(&mut origin).unwrap().tool_router =
++        router(spec.clone(), Some("fixture".to_string()));
++    let mut current = StepContext::for_test(Arc::clone(&turn));
++    Arc::get_mut(&mut current).unwrap().tool_router =
++        router(spec.clone(), Some("fixture".to_string()));
++    Arc::get_mut(&mut current).unwrap().mcp = Arc::clone(&origin.mcp);
++    assert_eq!(validate(&origin, &current, &name), Ok(()));
++
++    let mut changed_spec = spec.clone();
++    if let ToolSpec::Function(tool) = &mut changed_spec {
++        tool.parameters = serde_json::from_value(
++            serde_json::json!({"type":"object","properties":{"value":{"type":"integer"}}}),
++        )
++        .unwrap();
++    }
++    Arc::get_mut(&mut current).unwrap().tool_router =
++        router(changed_spec, Some("fixture".to_string()));
++    assert!(
++        validate(&origin, &current, &name)
++            .unwrap_err()
++            .contains("changed after this cell started")
++    );
++
++    Arc::get_mut(&mut current).unwrap().tool_router = Arc::new(ToolRouter::from_registry(
++        &turn,
++        ToolRegistry::empty_for_test(),
++        Vec::new(),
++        &ToolSearchHandlerCache::default(),
++    ));
++    assert!(
++        validate(&origin, &current, &name)
++            .unwrap_err()
++            .contains("no longer authorized")
++    );
++
++    Arc::get_mut(&mut current).unwrap().tool_router =
++        router(spec.clone(), Some("fixture".to_string()));
++    Arc::get_mut(&mut current).unwrap().mcp =
++        Arc::clone(&StepContext::for_test(Arc::clone(&turn)).mcp);
++    assert!(
++        validate(&origin, &current, &name)
++            .unwrap_err()
++            .contains("different MCP catalog or account session")
++    );
++
++    Arc::get_mut(&mut origin).unwrap().tool_router = router(spec.clone(), None);
++    Arc::get_mut(&mut current).unwrap().tool_router = router(spec, None);
++    assert_eq!(validate(&origin, &current, &name), Ok(()));
++}
++
++#[tokio::test]
++async fn mcp_resources_keep_the_same_connection_scope_as_mcp_tool_calls() {
++    let (_, mut turn) = crate::session::tests::make_session_and_context().await;
++    Arc::make_mut(&mut turn.config)
++        .features
++        .enable(Feature::CodeModeOnly)
++        .unwrap();
++    let turn = Arc::new(turn);
++    let router = Arc::new(ToolRouter::from_registry(
++        &turn,
++        ToolRegistry::from_tools([
++            Arc::new(crate::tools::handlers::ReadMcpResourceHandler) as Arc<dyn CoreToolRuntime>
++        ]),
++        Vec::new(),
++        &ToolSearchHandlerCache::default(),
++    ));
++    let mut origin = StepContext::for_test(Arc::clone(&turn));
++    let mut current = StepContext::for_test(turn);
++    Arc::get_mut(&mut origin).unwrap().tool_router = Arc::clone(&router);
++    Arc::get_mut(&mut current).unwrap().tool_router = router;
++    let name = ToolName::plain("read_mcp_resource");
++    assert!(
++        validate(&origin, &current, &name)
++            .unwrap_err()
++            .contains("different MCP catalog or account session")
++    );
++    Arc::get_mut(&mut current).unwrap().mcp = Arc::clone(&origin.mcp);
++    assert_eq!(validate(&origin, &current, &name), Ok(()));
++}
+diff --git a/codex-rs/core/src/tools/code_mode/delegate.rs b/codex-rs/core/src/tools/code_mode/delegate.rs
+index bb46a06e..31db1b1f 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate.rs
+@@ -21,28 +21,37 @@ use crate::session::step_context::StepContext;
+ use crate::tools::context::SharedTurnDiffTracker;
+ use crate::tools::parallel::ToolCallRuntime;
+ 
++type CellDispatchGates = Mutex<HashMap<CellId, watch::Sender<Option<Arc<StepContext>>>>>;
++
+ pub(super) struct CodeModeDispatchBroker {
+     dispatch_tx: async_channel::Sender<DispatchMessage>,
+     dispatch_rx: async_channel::Receiver<DispatchMessage>,
+-    dispatch_gates: Arc<Mutex<HashMap<CellId, watch::Sender<bool>>>>,
++    dispatch_gates: Arc<CellDispatchGates>,
++    terminal_handoffs: Arc<super::terminal::TerminalHandoffs>,
+ }
+ 
+ impl CodeModeDispatchBroker {
+-    pub(super) fn new() -> Self {
++    pub(super) fn new(terminal_handoffs: Arc<super::terminal::TerminalHandoffs>) -> Self {
+         let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
+         Self {
+             dispatch_tx,
+             dispatch_rx,
+             dispatch_gates: Arc::new(Mutex::new(HashMap::new())),
++            terminal_handoffs,
+         }
+     }
+ 
+-    pub(super) fn mark_cell_ready_for_dispatch(&self, cell_id: &CellId) {
+-        dispatch_gate(&self.dispatch_gates, cell_id).send_replace(true);
++    pub(super) fn mark_cell_ready_for_dispatch(
++        &self,
++        cell_id: &CellId,
++        step_context: Arc<StepContext>,
++    ) {
++        dispatch_gate(&self.dispatch_gates, cell_id).send_replace(Some(step_context));
+     }
+ 
+     pub(super) fn close_cell(&self, cell_id: &CellId) {
+         remove_dispatch_gate(&self.dispatch_gates, cell_id);
++        self.terminal_handoffs.close_cell(cell_id);
+     }
+ 
+     pub(super) fn active_cell_ids(&self) -> Vec<CellId> {
+@@ -60,8 +69,16 @@ impl CodeModeDispatchBroker {
+         step_context: Arc<StepContext>,
+         tracker: SharedTurnDiffTracker,
+     ) -> CodeModeDispatchWorker {
+-        let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
+-        let host = Arc::new(CoreTurnHost { exec, tool_runtime });
++        let tool_runtime = ToolCallRuntime::new(
++            Arc::clone(&exec.session),
++            Arc::clone(&step_context),
++            tracker,
++        );
++        let host = Arc::new(CoreTurnHost {
++            exec,
++            tool_runtime,
++            step_context,
++        });
+         let dispatch_rx = self.dispatch_rx.clone();
+         let dispatch_gates = Arc::clone(&self.dispatch_gates);
+         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+@@ -88,6 +105,7 @@ impl CodeModeDispatchBroker {
+                             &cancellation_token,
+                         )
+                         .await
++                        .is_some()
+                         {
+                             host.notify(call_id, cell_id, text).await
+                         } else {
+@@ -102,15 +120,23 @@ impl CodeModeDispatchBroker {
+                         response_tx,
+                     } => {
+                         let cell_id = invocation.cell_id.clone();
+-                        if !wait_until_cell_ready_for_dispatch(
++                        let Some(origin_step) = wait_until_cell_ready_for_dispatch(
+                             &dispatch_gates,
+                             &cell_id,
+                             &cancellation_token,
+                         )
+                         .await
+-                        {
++                        else {
+                             remove_dispatch_gate(&dispatch_gates, &cell_id);
+                             continue;
++                        };
++                        if let Err(error) = super::cell_scope::validate(
++                            &origin_step,
++                            &host.step_context,
++                            &invocation.tool_name,
++                        ) {
++                            let _ = response_tx.send(Err(error));
++                            continue;
+                         }
+                         let host = Arc::clone(&host);
+                         tokio::spawn(async move {
+@@ -135,23 +161,20 @@ impl CodeModeDispatchBroker {
+ }
+ 
+ fn dispatch_gate(
+-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
++    dispatch_gates: &CellDispatchGates,
+     cell_id: &CellId,
+-) -> watch::Sender<bool> {
++) -> watch::Sender<Option<Arc<StepContext>>> {
+     let mut dispatch_gates = match dispatch_gates.lock() {
+         Ok(dispatch_gates) => dispatch_gates,
+         Err(poisoned) => poisoned.into_inner(),
+     };
+     dispatch_gates
+         .entry(cell_id.clone())
+-        .or_insert_with(|| watch::channel(false).0)
++        .or_insert_with(|| watch::channel(None).0)
+         .clone()
+ }
+ 
+-fn remove_dispatch_gate(
+-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
+-    cell_id: &CellId,
+-) {
++fn remove_dispatch_gate(dispatch_gates: &CellDispatchGates, cell_id: &CellId) {
+     let mut dispatch_gates = match dispatch_gates.lock() {
+         Ok(dispatch_gates) => dispatch_gates,
+         Err(poisoned) => poisoned.into_inner(),
+@@ -160,25 +183,25 @@ fn remove_dispatch_gate(
+ }
+ 
+ async fn wait_until_cell_ready_for_dispatch(
+-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
++    dispatch_gates: &CellDispatchGates,
+     cell_id: &CellId,
+     cancellation_token: &CancellationToken,
+-) -> bool {
++) -> Option<Arc<StepContext>> {
+     if cancellation_token.is_cancelled() {
+-        return false;
++        return None;
+     }
+     let mut ready_rx = dispatch_gate(dispatch_gates, cell_id).subscribe();
+     loop {
+-        if *ready_rx.borrow_and_update() {
+-            return true;
++        if let Some(step_context) = ready_rx.borrow_and_update().clone() {
++            return Some(step_context);
+         }
+         tokio::select! {
+             changed = ready_rx.changed() => {
+                 if changed.is_err() {
+-                    return false;
++                    return None;
+                 }
+             }
+-            _ = cancellation_token.cancelled() => return false,
++            _ = cancellation_token.cancelled() => return None,
+         }
+     }
+ }
+@@ -279,6 +302,7 @@ impl Drop for CodeModeDispatchWorker {
+ struct CoreTurnHost {
+     exec: ExecContext,
+     tool_runtime: ToolCallRuntime,
++    step_context: Arc<StepContext>,
+ }
+ 
+ impl CoreTurnHost {
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+index 0ce1e66b..2be490a0 100644
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -1,8 +1,10 @@
++mod cell_scope;
+ mod delegate;
+ mod execute_handler;
+ pub(crate) mod execute_spec;
+ mod response_adapter;
+ mod telemetry;
++mod terminal;
+ mod wait_handler;
+ pub(crate) mod wait_spec;
+ 
+@@ -74,6 +76,7 @@ pub(crate) struct CodeModeService {
+     default_exec_yield_time_ms: u64,
+     shutting_down: AtomicBool,
+     unavailable_warning_emitted: AtomicBool,
++    pub(crate) terminal_handoffs: Arc<terminal::TerminalHandoffs>,
+ }
+ 
+ impl CodeModeService {
+@@ -81,7 +84,8 @@ impl CodeModeService {
+         session_provider: Arc<dyn CodeModeSessionProvider>,
+         config: &CodeModeConfig,
+     ) -> Self {
+-        let dispatch_broker = Arc::new(CodeModeDispatchBroker::new());
++        let terminal_handoffs = Arc::new(terminal::TerminalHandoffs::default());
++        let dispatch_broker = Arc::new(CodeModeDispatchBroker::new(Arc::clone(&terminal_handoffs)));
+         let availability = session_provider.availability();
+         Self {
+             session: OnceCell::new(),
+@@ -91,6 +95,7 @@ impl CodeModeService {
+             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
+             shutting_down: AtomicBool::new(false),
+             unavailable_warning_emitted: AtomicBool::new(false),
++            terminal_handoffs,
+         }
+     }
+ 
+@@ -157,12 +162,13 @@ impl CodeModeService {
+                 }),
+         )
+         .await;
++        self.terminal_handoffs.discard_all();
+     }
+ 
+     pub(crate) async fn shutdown(&self) -> Result<(), String> {
+         self.shutting_down.store(true, Ordering::Release);
+         // Join any initialization already in progress without initializing an unused service.
+-        match self
++        let result = match self
+             .session
+             .get_or_try_init(|| async {
+                 Err::<Arc<dyn CodeModeSession>, String>(
+@@ -173,11 +179,19 @@ impl CodeModeService {
+         {
+             Ok(session) => session.shutdown().await,
+             Err(_) => Ok(()),
+-        }
++        };
++        self.terminal_handoffs.discard_all();
++        result
+     }
+ 
+-    pub(crate) fn mark_cell_ready_for_dispatch(&self, cell_id: &codex_code_mode::CellId) {
+-        self.dispatch_broker.mark_cell_ready_for_dispatch(cell_id);
++    pub(crate) fn mark_cell_ready_for_dispatch(
++        &self,
++        cell_id: &codex_code_mode::CellId,
++        step_context: Arc<StepContext>,
++    ) {
++        self.terminal_handoffs.register(cell_id);
++        self.dispatch_broker
++            .mark_cell_ready_for_dispatch(cell_id, step_context);
+     }
+ 
+     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {

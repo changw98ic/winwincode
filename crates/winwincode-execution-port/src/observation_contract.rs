@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical derivation and fail-closed validation for one-shot `ChangeBatch` observation.
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path};
@@ -21,9 +19,7 @@ use crate::generated::{
     ValidationProfileName,
 };
 
-/// Maximum canonical Observer request bytes retained or sent to a provider.
 pub const MAX_OBSERVATION_REQUEST_BYTES: usize = 131_072;
-/// Maximum raw strict JSON response bytes accepted from a provider.
 pub const MAX_OBSERVATION_RESPONSE_BYTES: usize = 65_536;
 
 const OBSERVATION_ID_DOMAIN: &[u8] = b"winwincode.observation-id.v1";
@@ -32,7 +28,6 @@ const CONTENT_DIGEST_DOMAIN: &[u8] = b"winwincode.observation-content.v1";
 const INPUT_DIGEST_DOMAIN: &[u8] = b"winwincode.observation-input.v1";
 const OUTPUT_DIGEST_DOMAIN: &[u8] = b"winwincode.observation-output.v1";
 
-/// Stable Observer contract failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationContractErrorCode {
     InvalidIdentity,
@@ -47,7 +42,6 @@ pub enum ObservationContractErrorCode {
     InvalidReceipt,
 }
 
-/// Bounded Observer contract error that never includes model or source content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationContractError {
     code: ObservationContractErrorCode,
@@ -55,7 +49,6 @@ pub struct ObservationContractError {
 }
 
 impl ObservationContractError {
-    /// Returns the stable machine category.
     pub const fn code(&self) -> ObservationContractErrorCode {
         self.code
     }
@@ -69,11 +62,6 @@ impl fmt::Display for ObservationContractError {
 
 impl std::error::Error for ObservationContractError {}
 
-/// Derives the unique observation identity for one batch result and selected profile.
-///
-/// # Errors
-///
-/// Rejects malformed batch, revision, or digest values before hashing.
 pub fn derive_observation_id(
     batch_id: &ChangeBatchId,
     result_revision: &WorkspaceRevision,
@@ -93,11 +81,6 @@ pub fn derive_observation_id(
     Ok(ObservationId(format!("sha256:{:x}", digest.finalize())))
 }
 
-/// Derives the selected validation-profile digest from exact configuration and command order.
-///
-/// # Errors
-///
-/// Rejects malformed configuration digests, empty/oversized inventories, or duplicate IDs.
 pub fn derive_observation_profile_digest(
     profile: &ValidationProfileName,
     configuration_digest: &Sha256Digest,
@@ -122,11 +105,6 @@ pub fn derive_observation_profile_digest(
     Ok(Sha256Digest(format!("sha256:{:x}", digest.finalize())))
 }
 
-/// Derives the digest of the bounded untrusted payload, excluding its stored digest field.
-///
-/// # Errors
-///
-/// Rejects input that cannot be represented as canonical JSON.
 pub fn derive_observation_content_digest(
     input: &ObservationUntrustedInput,
 ) -> Result<Sha256Digest, ObservationContractError> {
@@ -155,13 +133,6 @@ pub fn derive_observation_content_digest(
     digest_serialized(CONTENT_DIGEST_DOMAIN, &material)
 }
 
-/// Derives the exact Observer input digest, excluding only the stored digest field itself.
-///
-/// The bounded untrusted payload is included through both its typed fields and content digest.
-///
-/// # Errors
-///
-/// Rejects intent that cannot be represented as canonical JSON.
 pub fn derive_observation_input_digest(
     intent: &ObservationIntent,
 ) -> Result<Sha256Digest, ObservationContractError> {
@@ -200,23 +171,12 @@ pub fn derive_observation_input_digest(
     digest_serialized(INPUT_DIGEST_DOMAIN, &material)
 }
 
-/// Derives the canonical digest of one validated Observer response.
-///
-/// # Errors
-///
-/// Rejects a response that cannot be represented as canonical JSON.
 pub fn derive_observation_output_digest(
     response: &ObservationResponse,
 ) -> Result<Sha256Digest, ObservationContractError> {
     digest_serialized(OUTPUT_DIGEST_DOMAIN, response)
 }
 
-/// Revalidates all authority, safety, derivation, size, and exactness facts in an intent.
-///
-/// # Errors
-///
-/// Rejects hard-check failures, inexact deltas, incomplete checks, rejected Secret Scan output,
-/// data egress, oversized content, or any digest/identity drift.
 pub fn validate_observation_intent(
     intent: &ObservationIntent,
 ) -> Result<(), ObservationContractError> {
@@ -255,11 +215,6 @@ pub fn validate_observation_intent(
     Ok(())
 }
 
-/// Revalidates the strict one-shot request and its serialized byte ceiling.
-///
-/// # Errors
-///
-/// Rejects version/mode drift, invalid intent, or an oversized request.
 pub fn validate_observation_request(
     request: &ObservationRequest,
 ) -> Result<(), ObservationContractError> {
@@ -277,12 +232,6 @@ pub fn validate_observation_request(
     Ok(())
 }
 
-/// Parses one canonical request with duplicate and unknown field rejection.
-///
-/// # Errors
-///
-/// Rejects oversized or malformed JSON, duplicate keys at any depth, unknown fields, wrong
-/// one-shot/version values, unsafe intent content, or any authority/digest drift.
 pub fn parse_observation_request_strict(
     bytes: &[u8],
 ) -> Result<ObservationRequest, ObservationContractError> {
@@ -299,13 +248,6 @@ pub fn parse_observation_request_strict(
     Ok(request)
 }
 
-/// Parses one provider response with duplicate and unknown field rejection.
-///
-/// # Errors
-///
-/// Rejects oversized/malformed JSON, duplicate keys at any depth, unknown fields, wrong
-/// observation identity, bounds drift, an illegal decision/reason/repair combination, or an
-/// `accept` decision for input whose prompt-injection scan is suspected.
 pub fn parse_observation_response_strict(
     bytes: &[u8],
     intent: &ObservationIntent,
@@ -338,12 +280,6 @@ pub fn parse_observation_response_strict(
     Ok(response)
 }
 
-/// Revalidates response semantics, exact observation identity, and input-risk policy.
-///
-/// # Errors
-///
-/// Rejects version, bounds, identity, decision/reason, repair-class drift, or acceptance of a
-/// prompt-injection-suspected input.
 pub fn validate_observation_response(
     response: &ObservationResponse,
     intent: &ObservationIntent,
@@ -367,11 +303,6 @@ pub fn validate_observation_response(
     Ok(())
 }
 
-/// Revalidates a durable receipt against the exact source intent.
-///
-/// # Errors
-///
-/// Rejects authority, revision, digest, response, source, or usage drift.
 pub fn validate_observation_receipt(
     receipt: &ObservationReceipt,
     intent: &ObservationIntent,
@@ -405,7 +336,6 @@ pub fn validate_observation_receipt(
     Ok(())
 }
 
-/// Returns the closed provider-safe strict JSON Schema for [`ObservationResponse`].
 #[must_use]
 pub fn observation_response_json_schema() -> Value {
     serde_json::json!({

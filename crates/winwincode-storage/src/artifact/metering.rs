@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Immutable storage-metering sources committed with Artifact completion.
-
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,7 +28,6 @@ CREATE TABLE IF NOT EXISTS artifact_metering_sources (
 );
 ";
 
-/// Complete business attribution frozen from authenticated Control Plane facts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactMeteringAttribution {
@@ -59,14 +56,12 @@ impl ArtifactMeteringAttribution {
     }
 }
 
-/// Closed storage operation represented by one immutable source receipt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStorageOperationKind {
     ArtifactFinalize,
 }
 
-/// Canonical source fact committed in the same catalog transaction as completion.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactStorageSourceFact {
@@ -80,7 +75,6 @@ pub struct ArtifactStorageSourceFact {
     pub attribution: ArtifactMeteringAttribution,
 }
 
-/// One immutable source row consumed by usage reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactStorageSourceEntry {
     pub sequence: u64,
@@ -88,7 +82,6 @@ pub struct ArtifactStorageSourceEntry {
     pub fact: ArtifactStorageSourceFact,
 }
 
-/// Stable cursor over one immutable source-sequence upper bound.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactStorageSourceCursor {
     snapshot_sequence: u64,
@@ -107,7 +100,6 @@ impl ArtifactStorageSourceCursor {
     }
 }
 
-/// One bounded page from a fixed source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactStorageSourcePage {
     pub snapshot_sequence: u64,

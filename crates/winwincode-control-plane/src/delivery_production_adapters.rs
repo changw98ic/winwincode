@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production-local Delivery authority and durable scheduler dispatch.
-//!
-//! The adapter resolves repository facts from one configured Git checkout and
-//! offers immutable jobs to the canonical `SQLite` execution queue. It never
-//! invents Worker, lease, terminal-outcome, candidate, or verdict authority;
-//! stage handoff and verdict submission remain closed until those exact
-//! durable facts are available.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -66,7 +58,6 @@ const DEFAULT_MAX_RUNTIME_SECONDS: i64 = 3_600;
 const DEFAULT_MAX_ARTIFACT_BYTES: i64 = 1_073_741_824;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-/// Exact local repository and tenant scope installed at process startup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalDeliveryAdapterConfig {
     repository_root: PathBuf,
@@ -90,7 +81,6 @@ impl LocalDeliveryAdapterConfig {
         }
     }
 
-    /// Sets the explicit runtime policy (`None` means unlimited) applied to every generated job.
     #[must_use]
     pub const fn with_execution_limits(
         mut self,
@@ -102,14 +92,12 @@ impl LocalDeliveryAdapterConfig {
         self
     }
 
-    /// Sets the repository-local rework ceiling.
     #[must_use]
     pub const fn with_max_rework_attempts(mut self, max_rework_attempts: u64) -> Self {
         self.max_rework_attempts = max_rework_attempts;
         self
     }
 
-    /// Selects the process execution strategy used to shape new immutable jobs.
     #[must_use]
     pub const fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
         self.execution_mode = execution_mode;
@@ -127,7 +115,6 @@ impl LocalDeliveryAdapterConfig {
     }
 }
 
-/// Startup failure for the production-local Delivery adapters.
 #[derive(Debug)]
 pub struct LocalDeliveryAdapterError {
     message: String,
@@ -149,8 +136,6 @@ impl fmt::Display for LocalDeliveryAdapterError {
 
 impl std::error::Error for LocalDeliveryAdapterError {}
 
-/// Repository-backed production authority. Missing scheduler/runtime facts
-/// are reported as closed authority rather than synthesized defaults.
 pub struct LocalDeliveryAuthority {
     config: LocalDeliveryAdapterConfig,
     repository_root: PathBuf,
@@ -159,7 +144,7 @@ pub struct LocalDeliveryAuthority {
     scanner: RepositoryContextScanner,
     storage: SqliteStorage,
     artifacts: ArtifactStore,
-    source_resolver: LocalGitSourceResolver,
+    source_resolver: crate::strongflow_read_snapshot::SharedGitSourceResolver,
 }
 
 struct DeviceDeliveryTarget {
@@ -206,24 +191,15 @@ impl LocalDeliveryAuthority {
         }
         let candidate_commit = match template.mode {
             ManagedAppMode::Live => None,
-            ManagedAppMode::FrozenCandidate => {
-                // Writers and remediators have no frozen output at dispatch
-                // time. Their checkout is the base/source revision, so a
-                // managed app must wait for terminal candidate authority.
-                // The verifier is the single product-owned acceptance stage
-                // for the managed app. Reviewer and adversarial-verifier
-                // still read the same candidate, but must not create a second
-                // config for the same candidate/run projection.
-                Some(
-                    frozen_candidate_commit
-                        .ok_or_else(|| {
-                            DeliveryAuthorityError::new(
-                                "frozen managed app requires an exact candidate commit",
-                            )
-                        })?
-                        .to_owned(),
-                )
-            }
+            ManagedAppMode::FrozenCandidate => Some(
+                frozen_candidate_commit
+                    .ok_or_else(|| {
+                        DeliveryAuthorityError::new(
+                            "frozen managed app requires an exact candidate commit",
+                        )
+                    })?
+                    .to_owned(),
+            ),
         };
         let config = ManagedAppRunConfig {
             schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
@@ -326,11 +302,6 @@ impl LocalDeliveryAuthority {
         }
         Ok(device)
     }
-    /// Opens one exact canonical Git checkout as the repository authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing repository, invalid limits, or a non-canonical scope.
     pub fn open(
         config: LocalDeliveryAdapterConfig,
         data_directory: impl AsRef<Path>,
@@ -381,7 +352,9 @@ impl LocalDeliveryAuthority {
             scanner: RepositoryContextScanner::default(),
             storage,
             artifacts,
-            source_resolver,
+            source_resolver: crate::strongflow_read_snapshot::SharedGitSourceResolver::new(
+                Box::new(source_resolver),
+            ),
         })
     }
 
@@ -931,18 +904,12 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
     }
 }
 
-/// Production dispatcher backed by the canonical scheduler execution queue.
 pub struct LocalExecutionJobDispatcher {
     storage: SqliteStorage,
     repository_scope: RepositoryScope,
 }
 
 impl LocalExecutionJobDispatcher {
-    /// Opens the canonical local database used by the Control Plane.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `SQLite` or the queue schema cannot be opened.
     pub fn open(
         data_directory: impl AsRef<Path>,
         repository_scope: RepositoryScope,
@@ -985,11 +952,6 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
             "req",
             [b"execution-queue:".as_slice(), job.job_id.0.as_bytes()].concat(),
         ));
-        // The WorkRun wire scope deliberately carries no Delivery transport
-        // field. Recover the owning Delivery from the immutable outbox intent
-        // committed by `workrun.start`; this keeps queue scope and public
-        // WorkRun cancellation tied to the exact Delivery rather than relying
-        // on a caller-supplied or absent value.
         let (durable, _) =
             crate::delivery_transaction::load_durable_execution_intent(&self.storage, &job.job_id)
                 .map_err(|error| dispatch_error(&error))?;
@@ -1057,12 +1019,6 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
 }
 
 impl ControlPlane {
-    /// Installs the repository authority and durable execution queue together.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an injected-storage host, invalid configuration, or replacing
-    /// either live adapter.
     pub fn install_local_delivery_adapters(
         &mut self,
         config: LocalDeliveryAdapterConfig,
@@ -1088,18 +1044,9 @@ impl ControlPlane {
             })?;
         let repository_scope = config.repository_scope.clone();
         let authority = LocalDeliveryAuthority::open(config, data_directory)?;
-        // Candidate source reconstruction and Git retention must share the
-        // resolver's one canonical parent root.  Keep the root until every
-        // adapter has opened successfully, then install both authorities as
-        // one composition step below.
         let repository_source_root = authority.repository_source_root.clone();
         let dispatcher = LocalExecutionJobDispatcher::open(data_directory, repository_scope)?;
-        let source_resolver = LocalGitSourceResolver::open_artifact_cache(&repository_source_root)
-            .map_err(|error| {
-                LocalDeliveryAdapterError::new(format!(
-                    "failed to open the local Git candidate resolver: {error}"
-                ))
-            })?;
+        let source_resolver = authority.source_resolver.clone();
         self.install_strongflow_projection_sources(
             crate::strongflow_projection::production_sources(),
         )
@@ -1111,17 +1058,11 @@ impl ControlPlane {
         self.delivery_authority = Some(Box::new(authority));
         self.delivery_dispatcher = Some(Box::new(dispatcher));
         self.git_repository_root = Some(repository_source_root);
-        self.git_source_resolver = Some(Box::new(source_resolver));
+        self.git_source_resolver = Some(Box::new(source_resolver.clone()));
+        self.git_source_read_handle = Some(source_resolver);
         Ok(())
     }
 
-    /// Starts local storage and installs the production Delivery adapters
-    /// before exposing the running host.
-    ///
-    /// # Errors
-    ///
-    /// Closes the host and returns a startup error when adapter composition
-    /// fails.
     pub fn start_local_with_delivery_adapters(
         config: ControlPlaneConfig,
         publisher: Box<dyn EventPublisher>,

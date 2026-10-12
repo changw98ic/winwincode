@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded envelope codec and frame identity for the exchange layer.
-//!
-//! One exchange frame is one serialized [`Envelope`]. The codec converts
-//! between the typed envelope and JSON bytes under a caller-configured byte
-//! bound; the contract keeps frame count and byte limits in adapter
-//! configuration, deliberately outside the message contract. The codec also
-//! derives the stable `sha256:` payload digest that the deduplication and
-//! idempotency rules compare (`重放与去重按 messageId、sequence 和 payload
-//! digest 判定`).
-//!
-//! The payload digest covers the canonical serialization of the envelope
-//! payload only, not the transport-only envelope fields. Both peers must use
-//! these helpers so the digest convention agrees on both ends.
-
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::Digest;
@@ -21,35 +7,21 @@ use sha2::Sha256;
 
 use crate::messages::Envelope;
 
-/// Adapter default for the maximum encoded frame size in bytes.
-///
-/// This is an adapter configuration default, not a message-contract constant;
-/// deployments may choose any bound through [`FrameCodec::new`].
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 256 * 1024;
 
-/// Computes the stable payload digest of canonical payload bytes.
-///
-/// The digest is the `sha256:` prefixed lowercase hexadecimal SHA-256,
-/// matching the digest convention already used by the `ExecutionPort` replay
-/// layer.
 #[must_use]
 pub fn payload_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-/// The identity fields one frame carries for replay and deduplication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameIdentity {
-    /// Sender-assigned frame identity.
     pub message_id: String,
-    /// Sender-stream monotonic contiguous position.
     pub sequence: u64,
-    /// Digest of the canonical payload bytes.
     pub payload_digest: String,
 }
 
 impl FrameIdentity {
-    /// Builds one frame identity.
     #[must_use]
     pub fn new(
         message_id: impl Into<String>,
@@ -64,25 +36,15 @@ impl FrameIdentity {
     }
 }
 
-/// One encoded frame retained for (re)delivery.
-///
-/// `frame` holds the original envelope bytes; they are returned unchanged by
-/// duplicate and resume paths instead of rebuilding a message from current
-/// state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredFrame {
-    /// Sender-assigned frame identity.
     pub message_id: String,
-    /// Sender-stream monotonic contiguous position.
     pub sequence: u64,
-    /// Digest of the canonical payload bytes.
     pub payload_digest: String,
-    /// The encoded envelope bytes.
     pub frame: Vec<u8>,
 }
 
 impl StoredFrame {
-    /// Extracts the identity fields of one stored frame.
     #[must_use]
     pub fn identity(&self) -> FrameIdentity {
         FrameIdentity {
@@ -93,50 +55,30 @@ impl StoredFrame {
     }
 }
 
-/// Codec failure modes for bounded frame encoding and decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameCodecError {
-    /// The input contained no bytes.
     EmptyFrame,
-    /// The frame exceeded the configured byte bound.
-    TooLarge {
-        /// Encoded size in bytes.
-        size: usize,
-        /// The configured maximum in bytes.
-        max_frame_bytes: usize,
-    },
-    /// The value could not be serialized.
+    TooLarge { size: usize, max_frame_bytes: usize },
     Serialization(String),
-    /// The bytes were not a valid frame value.
     Deserialization(String),
 }
 
-/// Bounded `serde_json` codec between typed envelopes and frame bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameCodec {
     max_frame_bytes: usize,
 }
 
 impl FrameCodec {
-    /// Creates a codec enforcing `max_frame_bytes` on every encode and
-    /// decode. A bound of zero rejects every frame.
     #[must_use]
     pub const fn new(max_frame_bytes: usize) -> Self {
         Self { max_frame_bytes }
     }
 
-    /// Returns the configured frame byte bound.
     #[must_use]
     pub const fn max_frame_bytes(&self) -> usize {
         self.max_frame_bytes
     }
 
-    /// Encodes one value into bounded frame bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails when serialization fails or the encoded frame exceeds the
-    /// configured byte bound.
     pub fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, FrameCodecError> {
         let frame = serde_json::to_vec(value)
             .map_err(|error| FrameCodecError::Serialization(error.to_string()))?;
@@ -144,24 +86,12 @@ impl FrameCodec {
         Ok(frame)
     }
 
-    /// Decodes one value from bounded frame bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the bytes are empty, exceed the configured byte bound, or
-    /// are not a valid value.
     pub fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, FrameCodecError> {
         self.check_bound(bytes.len())?;
         serde_json::from_slice(bytes)
             .map_err(|error| FrameCodecError::Deserialization(error.to_string()))
     }
 
-    /// Encodes one envelope into a stored frame, deriving the payload digest.
-    ///
-    /// # Errors
-    ///
-    /// Fails when serialization fails or the encoded frame exceeds the
-    /// configured byte bound.
     pub fn encode_envelope<M: Serialize>(
         &self,
         envelope: &Envelope<M>,
@@ -176,12 +106,6 @@ impl FrameCodec {
         })
     }
 
-    /// Decodes one envelope from bounded frame bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the bytes are empty, exceed the configured byte bound, or
-    /// are not a valid envelope.
     pub fn decode_envelope<M: DeserializeOwned>(
         &self,
         bytes: &[u8],
@@ -189,12 +113,6 @@ impl FrameCodec {
         self.decode(bytes)
     }
 
-    /// Derives the frame identity of one envelope: `messageId`, `sequence`,
-    /// and the digest over the canonical payload bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the payload cannot be serialized.
     pub fn envelope_identity<M: Serialize>(
         envelope: &Envelope<M>,
     ) -> Result<FrameIdentity, FrameCodecError> {

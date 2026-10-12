@@ -1,0 +1,483 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/attestation.rs b/codex-rs/app-server/tests/suite/v2/attestation.rs
+--- a/codex-rs/app-server/tests/suite/v2/attestation.rs
++++ b/codex-rs/app-server/tests/suite/v2/attestation.rs
+@@ -94,12 +94,17 @@
+         bail!("expected initialize response, got {initialized:?}");
+     };
+ 
++    let mut attestation_requests = 0;
+     let thread_request_id = mcp
+         .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+         .await?;
+     let thread_response: JSONRPCResponse = timeout(
+         DEFAULT_READ_TIMEOUT,
+-        mcp.read_stream_until_response_message(RequestId::Integer(thread_request_id)),
++        read_response_serving_attestation(
++            &mut mcp,
++            RequestId::Integer(thread_request_id),
++            &mut attestation_requests,
++        ),
+     )
+     .await??;
+     let ThreadStartResponse { thread, .. } = to_response(thread_response)?;
+@@ -117,12 +122,15 @@
+         .await?;
+     let turn_response: JSONRPCResponse = timeout(
+         DEFAULT_READ_TIMEOUT,
+-        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
++        read_response_serving_attestation(
++            &mut mcp,
++            RequestId::Integer(turn_request_id),
++            &mut attestation_requests,
++        ),
+     )
+     .await??;
+     let _: TurnStartResponse = to_response(turn_response)?;
+ 
+-    let mut attestation_requests = 0;
+     timeout(DEFAULT_READ_TIMEOUT, async {
+         loop {
+             match mcp.read_next_message().await? {
+@@ -167,6 +175,34 @@
+     Ok(())
+ }
+ 
++async fn read_response_serving_attestation(
++    mcp: &mut TestAppServer,
++    expected: RequestId,
++    attestation_requests: &mut usize,
++) -> Result<JSONRPCResponse> {
++    loop {
++        match mcp.read_next_message().await? {
++            JSONRPCMessage::Response(response) if response.id == expected => return Ok(response),
++            JSONRPCMessage::Request(request) => {
++                let ServerRequest::AttestationGenerate { request_id, .. } =
++                    ServerRequest::try_from(request)?
++                else {
++                    bail!("expected attestation request");
++                };
++                *attestation_requests += 1;
++                mcp.send_response(
++                    request_id,
++                    serde_json::to_value(AttestationGenerateResponse {
++                        token: ATTESTATION_HEADER.to_string(),
++                    })?,
++                )
++                .await?;
++            }
++            _ => {}
++        }
++    }
++}
++
+ fn create_chatgpt_websocket_config(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
+     std::fs::write(
+         codex_home.join("config.toml"),
+diff --git a/codex-rs/ext/skills/src/host_service_tests.rs b/codex-rs/ext/skills/src/host_service_tests.rs
+--- a/codex-rs/ext/skills/src/host_service_tests.rs
++++ b/codex-rs/ext/skills/src/host_service_tests.rs
+@@ -244,6 +244,7 @@
+ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
+     let codex_home = tempfile::tempdir().expect("tempdir");
+     let cwd = tempfile::tempdir().expect("tempdir");
++    let fixture_home = dunce::canonicalize(codex_home.path()).expect("fixture home");
+     write_user_skill(&codex_home, "user", "user-skill", "from the host loader");
+     let plugin_skill_path = write_plugin_skill(
+         &codex_home,
+@@ -273,6 +274,7 @@
+         .outcome()
+         .skills
+         .iter()
++        .filter(|skill| skill.path_to_skills_md.as_path().starts_with(&fixture_home))
+         .map(|skill| (skill.name.as_str(), skill.plugin_id.as_deref()))
+         .collect::<Vec<_>>();
+ 
+@@ -289,6 +291,7 @@
+ 
+     let codex_home = tempfile::tempdir().expect("tempdir");
+     let cwd = tempfile::tempdir().expect("tempdir");
++    let fixture_home = dunce::canonicalize(codex_home.path()).expect("fixture home");
+     let plugin_skill_path = write_plugin_skill(
+         &codex_home,
+         "test",
+@@ -319,7 +322,11 @@
+     .await;
+ 
+     assert_eq!(
+-        outcome.skills,
++        outcome
++            .skills
++            .into_iter()
++            .filter(|skill| skill.path_to_skills_md.as_path().starts_with(&fixture_home))
++            .collect::<Vec<_>>(),
+         vec![codex_skills::SkillMetadata {
+             name: "sample:search".to_string(),
+             description: "shared skill".to_string(),
+diff --git a/codex-rs/network-proxy/src/http_proxy.rs b/codex-rs/network-proxy/src/http_proxy.rs
+--- a/codex-rs/network-proxy/src/http_proxy.rs
++++ b/codex-rs/network-proxy/src/http_proxy.rs
+@@ -1179,7 +1179,10 @@
+     #[tokio::test]
+     async fn http_connect_accept_blocks_in_limited_mode() {
+         let policy = {
+-            let mut policy = NetworkProxyConfig::default();
++            let mut policy = NetworkProxyConfig {
++                allow_local_binding: true,
++                ..NetworkProxyConfig::default()
++            };
+             policy.set_allowed_domains(vec!["example.com".to_string()]);
+             policy
+         };
+@@ -1236,7 +1239,10 @@
+ 
+     #[tokio::test]
+     async fn http_connect_accept_passes_environment_id_to_decider() {
+-        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig::default()));
++        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
++            allow_local_binding: true,
++            ..NetworkProxyConfig::default()
++        }));
+         let seen_environment_id = Arc::new(Mutex::new(None));
+         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
+             let seen_environment_id = seen_environment_id.clone();
+@@ -1274,6 +1280,7 @@
+     #[tokio::test]
+     async fn http_connect_accept_defers_brokered_host_mitm_until_protocol_detection() {
+         let mut policy = NetworkProxyConfig {
++            allow_local_binding: true,
+             credential_broker: true,
+             mitm: true,
+             ..NetworkProxyConfig::default()
+@@ -1367,6 +1374,7 @@
+     #[tokio::test]
+     async fn http_connect_accept_blocks_hooked_host_in_full_mode_without_mitm_state() {
+         let mut policy = NetworkProxyConfig {
++            allow_local_binding: true,
+             mitm: true,
+             mitm_hooks: vec![crate::mitm_hook::MitmHookConfig {
+                 host: "api.github.com".to_string(),
+diff --git a/codex-rs/network-proxy/src/mitm_tests.rs b/codex-rs/network-proxy/src/mitm_tests.rs
+--- a/codex-rs/network-proxy/src/mitm_tests.rs
++++ b/codex-rs/network-proxy/src/mitm_tests.rs
+@@ -139,7 +139,10 @@
+ #[tokio::test]
+ async fn mitm_policy_blocks_disallowed_method_and_records_telemetry() {
+     let app_state = Arc::new(network_proxy_state_for_policy({
+-        let mut network = NetworkProxyConfig::default();
++        let mut network = NetworkProxyConfig {
++            allow_local_binding: true,
++            ..NetworkProxyConfig::default()
++        };
+         network.set_allowed_domains(vec!["example.com".to_string()]);
+         network
+     }));
+@@ -248,6 +251,7 @@
+     hook.actions.inject_request_headers[0].secret_file =
+         Some(secret_file.path().display().to_string());
+     let mut network = NetworkProxyConfig {
++        allow_local_binding: true,
+         mitm: true,
+         mitm_hooks: vec![hook],
+         mode: NetworkMode::Full,
+@@ -285,6 +289,7 @@
+     hook.matcher.path_prefixes = vec!["pattern:/openai/openai/**".to_string()];
+     hook.actions.inject_request_headers.clear();
+     let mut network = NetworkProxyConfig {
++        allow_local_binding: true,
+         mitm: true,
+         mitm_hooks: vec![hook],
+         mode: NetworkMode::Full,
+@@ -353,6 +358,7 @@
+     let mut hook = github_write_hook();
+     hook.actions.inject_request_headers.clear();
+     let mut network = NetworkProxyConfig {
++        allow_local_binding: true,
+         mitm: true,
+         mitm_hooks: vec![hook],
+         mode: NetworkMode::Limited,
+@@ -401,6 +407,7 @@
+     hook.actions.inject_request_headers[0].secret_file =
+         Some(secret_file.path().display().to_string());
+     let mut network = NetworkProxyConfig {
++        allow_local_binding: true,
+         mitm: true,
+         mitm_hooks: vec![hook],
+         mode: NetworkMode::Full,
+diff --git a/codex-rs/network-proxy/src/network_policy.rs b/codex-rs/network-proxy/src/network_policy.rs
+--- a/codex-rs/network-proxy/src/network_policy.rs
++++ b/codex-rs/network-proxy/src/network_policy.rs
+@@ -676,7 +676,10 @@
+ 
+     #[tokio::test(flavor = "current_thread")]
+     async fn policy_audit_observer_receives_domain_and_non_domain_decisions() {
+-        let mut state = network_proxy_state_for_policy(NetworkProxyConfig::default());
++        let mut state = network_proxy_state_for_policy(NetworkProxyConfig {
++            allow_local_binding: true,
++            ..NetworkProxyConfig::default()
++        });
+         let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+         state.set_policy_audit_observer(Arc::new(move |event| {
+             captured_tx
+@@ -723,7 +726,10 @@
+ 
+     #[tokio::test(flavor = "current_thread")]
+     async fn evaluate_host_policy_emits_domain_event_for_decider_allow_override() {
+-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
++        let state = network_proxy_state_for_policy(NetworkProxyConfig {
++            allow_local_binding: true,
++            ..NetworkProxyConfig::default()
++        });
+         let calls = Arc::new(AtomicUsize::new(0));
+         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
+             let calls = calls.clone();
+@@ -792,7 +798,10 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn evaluate_host_policy_emits_execution_id_for_baseline_allow() {
+         let state = network_proxy_state_for_policy({
+-            let mut network = NetworkProxyConfig::default();
++            let mut network = NetworkProxyConfig {
++                allow_local_binding: true,
++                ..NetworkProxyConfig::default()
++            };
+             network.set_allowed_domains(vec!["example.com".to_string()]);
+             network
+         });
+@@ -884,7 +893,10 @@
+ 
+     #[tokio::test(flavor = "current_thread")]
+     async fn evaluate_host_policy_emits_domain_event_for_decider_ask() {
+-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
++        let state = network_proxy_state_for_policy(NetworkProxyConfig {
++            allow_local_binding: true,
++            ..NetworkProxyConfig::default()
++        });
+         let decider: Arc<dyn NetworkPolicyDecider> =
+             Arc::new(|_req| async { NetworkDecision::ask(REASON_NOT_ALLOWED) });
+         let request = NetworkPolicyRequest::new(NetworkPolicyRequestArgs {
+diff --git a/codex-rs/network-proxy/src/runtime.rs b/codex-rs/network-proxy/src/runtime.rs
+--- a/codex-rs/network-proxy/src/runtime.rs
++++ b/codex-rs/network-proxy/src/runtime.rs
+@@ -1219,7 +1219,11 @@
+ 
+     #[tokio::test]
+     async fn host_blocked_requires_allowlist_match() {
+-        let state = network_proxy_state_for_policy(network_settings(&["example.com"], &[]));
++        let state = network_proxy_state_for_policy({
++            let mut config = network_settings(&["example.com"], &[]);
++            config.allow_local_binding = true;
++            config
++        });
+ 
+         assert_eq!(
+             state
+@@ -1262,7 +1266,11 @@
+ 
+     #[tokio::test]
+     async fn add_allowed_domain_removes_matching_deny_entry() {
+-        let state = network_proxy_state_for_policy(network_settings(&[], &["example.com"]));
++        let state = network_proxy_state_for_policy({
++            let mut config = network_settings(&[], &["example.com"]);
++            config.allow_local_binding = true;
++            config
++        });
+ 
+         state.add_allowed_domain("ExAmPlE.CoM").await.unwrap();
+ 
+@@ -1483,7 +1491,11 @@
+ 
+     #[tokio::test]
+     async fn host_blocked_subdomain_wildcards_exclude_apex() {
+-        let state = network_proxy_state_for_policy(network_settings(&["*.openai.com"], &[]));
++        let state = network_proxy_state_for_policy({
++            let mut config = network_settings(&["*.openai.com"], &[]);
++            config.allow_local_binding = true;
++            config
++        });
+ 
+         assert_eq!(
+             state
+@@ -1503,17 +1515,11 @@
+         let state = network_proxy_state_for_policy(network_settings(&["*"], &["evil.example"]));
+ 
+         assert_eq!(
+-            state
+-                .host_blocked("example.com", /*port*/ 80)
+-                .await
+-                .unwrap(),
++            state.host_blocked("8.8.8.8", /*port*/ 80).await.unwrap(),
+             HostBlockDecision::Allowed
+         );
+         assert_eq!(
+-            state
+-                .host_blocked("api.openai.com", /*port*/ 443)
+-                .await
+-                .unwrap(),
++            state.host_blocked("1.1.1.1", /*port*/ 443).await.unwrap(),
+             HostBlockDecision::Allowed
+         );
+         assert_eq!(
+diff --git a/codex-rs/network-proxy/src/socks5.rs b/codex-rs/network-proxy/src/socks5.rs
+--- a/codex-rs/network-proxy/src/socks5.rs
++++ b/codex-rs/network-proxy/src/socks5.rs
+@@ -918,6 +918,7 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn handle_socks5_tcp_uses_mitm_in_limited_mode() {
+         let mut settings = NetworkProxyConfig {
++            allow_local_binding: true,
+             enabled: true,
+             mode: NetworkMode::Limited,
+             mitm: true,
+@@ -991,6 +992,7 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn handle_socks5_tcp_detects_tls_for_brokered_nonstandard_port_in_full_mode() {
+         let mut settings = NetworkProxyConfig {
++            allow_local_binding: true,
+             enabled: true,
+             mode: NetworkMode::Full,
+             mitm: true,
+@@ -1021,6 +1023,7 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn handle_socks5_tcp_blocks_limited_mode_without_mitm_state() {
+         let mut settings = NetworkProxyConfig {
++            allow_local_binding: true,
+             enabled: true,
+             mode: NetworkMode::Limited,
+             ..NetworkProxyConfig::default()
+@@ -1049,6 +1052,7 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn handle_socks5_tcp_uses_mitm_for_hooked_host_in_full_mode() {
+         let mut settings = NetworkProxyConfig {
++            allow_local_binding: true,
+             enabled: true,
+             mode: NetworkMode::Full,
+             mitm: true,
+@@ -1084,6 +1088,7 @@
+     #[tokio::test(flavor = "current_thread")]
+     async fn handle_socks5_tcp_blocks_hooked_non_https_host_in_full_mode() {
+         let mut settings = NetworkProxyConfig {
++            allow_local_binding: true,
+             enabled: true,
+             mode: NetworkMode::Full,
+             mitm: true,
+diff --git a/codex-rs/protocol/src/permission_profile_intersection_tests.rs b/codex-rs/protocol/src/permission_profile_intersection_tests.rs
+--- a/codex-rs/protocol/src/permission_profile_intersection_tests.rs
++++ b/codex-rs/protocol/src/permission_profile_intersection_tests.rs
+@@ -95,7 +95,8 @@
+ 
+ #[test]
+ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
+-    let temp = TempDir::new().expect("workspace");
++    let temp = TempDir::new_in(std::env::current_dir().expect("checkout"))
++        .expect("workspace outside TMPDIR");
+     let root = canonical(&temp);
+     let project = root.join("project");
+     std::fs::create_dir(project.as_path()).expect("project directory");
+diff --git a/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs b/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
+--- a/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
++++ b/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
+@@ -136,6 +136,12 @@
+             .mount(&server)
+             .await;
+ 
++        Mock::given(method("GET"))
++            .and(path("/"))
++            .respond_with(ResponseTemplate::new(200))
++            .expect(1)
++            .mount(&server)
++            .await;
+         let adapter = OAuthHttpClientAdapter::new(
+             Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
+                 OutboundProxyPolicy::ReqwestDefault,
+@@ -149,6 +155,18 @@
+             )?,
+             &resource_url,
+         );
++        // Keep the redirect deadline independent of the platform's cold HTTP client setup.
++        adapter
++            .execute_request(
++                oauth2::http::Request::builder()
++                    .method("GET")
++                    .uri(server.uri())
++                    .body(Vec::new())?,
++                OAuthHttpRedirectPolicy::Follow,
++                None,
++            )
++            .await
++            .expect("warm the HTTP client before checking the redirect deadline");
+         let error = adapter
+             .execute_request(
+                 oauth2::http::Request::builder()
+diff --git a/codex-rs/sandboxing/src/seatbelt_tests.rs b/codex-rs/sandboxing/src/seatbelt_tests.rs
+--- a/codex-rs/sandboxing/src/seatbelt_tests.rs
++++ b/codex-rs/sandboxing/src/seatbelt_tests.rs
+@@ -1348,8 +1348,23 @@
+         .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_"))
+         .cloned()
+         .collect();
++    let normalize = |definitions: &[String]| {
++        let mut definitions = definitions
++            .iter()
++            .map(|definition| {
++                let (name, value) = definition.split_once('=').expect("parameter definition");
++                let name = name
++                    .split_once("_EXCLUDED_")
++                    .map_or_else(|| name.to_string(), |(root, _)| format!("{root}_EXCLUDED"));
++                (name, value.to_string())
++            })
++            .collect::<Vec<_>>();
++        definitions.sort();
++        definitions
++    };
+     assert_eq!(
+-        writable_definitions, expected_definitions,
++        normalize(&writable_definitions),
++        normalize(&expected_definitions),
+         "unexpected writable-root parameter definitions in {args:#?}"
+     );
+     let command_index = args
+@@ -1911,29 +1926,22 @@
+         args.contains(&expected_root),
+         "missing {expected_root}: {args:#?}"
+     );
+-    let expected_dot_git = format!(
+-        "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
+-        dot_git_canonical.to_string_lossy()
+-    );
+-    assert!(
+-        args.contains(&expected_dot_git),
+-        "missing {expected_dot_git}: {args:#?}"
+-    );
+-    let expected_dot_codex = format!(
+-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+-        dot_codex_canonical.to_string_lossy()
+-    );
+-    assert!(
+-        args.contains(&expected_dot_codex),
+-        "missing {expected_dot_codex}: {args:#?}"
+-    );
+-    let unexpected_dot_agents = format!(
+-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+-        dot_agents_canonical.to_string_lossy()
+-    );
+-    assert!(
+-        !args.contains(&unexpected_dot_agents),
+-        "missing .agents should be handled by regex rather than materialized as a path param: {args:#?}"
++    let excluded_metadata = args
++        .iter()
++        .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_0_EXCLUDED_"))
++        .map(|arg| {
++            arg.split_once('=')
++                .expect("metadata definition")
++                .1
++                .to_string()
++        })
++        .collect::<std::collections::BTreeSet<_>>();
++    assert_eq!(
++        excluded_metadata,
++        [dot_git_canonical, dot_agents_canonical, dot_codex_canonical]
++            .map(|path| path.to_string_lossy().into_owned())
++            .into_iter()
++            .collect()
+     );
+     let expected_slash_tmp = format!("-DWRITABLE_ROOT_1={}", slash_tmp.to_string_lossy());
+     assert!(

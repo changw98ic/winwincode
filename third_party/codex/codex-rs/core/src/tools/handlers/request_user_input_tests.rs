@@ -131,6 +131,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode() {
     session
         .notify_user_input_response(
             &request_event.turn_id,
+            &request_event.call_id,
             RequestUserInputResponse {
                 answers: HashMap::new(),
             },
@@ -202,6 +203,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
     session
         .notify_user_input_response(
             &request_event.turn_id,
+            &request_event.call_id,
             RequestUserInputResponse {
                 answers: HashMap::new(),
             },

@@ -676,7 +676,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn policy_audit_observer_receives_domain_and_non_domain_decisions() {
-        let mut state = network_proxy_state_for_policy(NetworkProxyConfig::default());
+        let mut state = network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        });
         let (captured_tx, captured_rx) = std::sync::mpsc::channel();
         state.set_policy_audit_observer(Arc::new(move |event| {
             captured_tx
@@ -723,7 +726,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_host_policy_emits_domain_event_for_decider_allow_override() {
-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        });
         let calls = Arc::new(AtomicUsize::new(0));
         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
             let calls = calls.clone();
@@ -792,7 +798,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_host_policy_emits_execution_id_for_baseline_allow() {
         let state = network_proxy_state_for_policy({
-            let mut network = NetworkProxyConfig::default();
+            let mut network = NetworkProxyConfig {
+                allow_local_binding: true,
+                ..NetworkProxyConfig::default()
+            };
             network.set_allowed_domains(vec!["example.com".to_string()]);
             network
         });
@@ -884,7 +893,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_host_policy_emits_domain_event_for_decider_ask() {
-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        });
         let decider: Arc<dyn NetworkPolicyDecider> =
             Arc::new(|_req| async { NetworkDecision::ask(REASON_NOT_ALLOWED) });
         let request = NetworkPolicyRequest::new(NetworkPolicyRequestArgs {

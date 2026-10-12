@@ -35,19 +35,12 @@ import { CommandName, QueryName } from './generated/contracts.js'
 import { publicErrorText } from './public-redaction.js'
 
 const SCHEMA_VERSION = 'winwincode/v1' as const
-/** List page size; the Control Plane accepts 1..=200 per projection read. */
 const LIST_PAGE_LIMIT = 100
-/** Exact reads seal one delivery.get cut; the sealed page uses the same bound. */
 const READ_PAGE_LIMIT = 100
-/** One Candidate diff range; the server accepts at most 256 KiB per chunk. */
 const DIFF_CHUNK_BYTES = 64 * 1024
-/** Bounded number of file-list pages one refresh may read. */
 const MAX_FILE_PAGES = 8
-/** Bounded number of execution sessions one refresh may read. */
 export const REVIEW_SESSION_LIMIT = 4
-/** The runtime projection keeps at most 100 activities per session. */
 const MAX_ACTIVITIES_PER_SESSION = 100
-/** Paths that browsers execute in page context are never previewed inline. */
 const EXECUTABLE_EXTENSIONS: readonly string[] = Object.freeze([
   '.html',
   '.htm',
@@ -66,10 +59,6 @@ export type StrongFlowReviewStatus =
   | 'error'
   | 'closed'
 
-/**
- * RUN-07 degradation classes for one Candidate file preview. `text` is the only
- * class whose bytes are rendered; every other class stays metadata-only.
- */
 export type ReviewPreviewClass =
   | 'text'
   | 'executable-document'
@@ -89,7 +78,6 @@ export interface ReviewPreviewState {
   readonly chunks: readonly ReviewPreviewDecodedChunk[]
   readonly totalBytes: number
   readonly returnedBytes: number
-  /** Null once the whole diff range has been read; set for the next range. */
   readonly nextOffset: number | null
 }
 
@@ -105,16 +93,7 @@ export interface ReviewFileEntry {
   readonly previewError: string | null
 }
 
-export interface ReviewActivity {
-  readonly callId: string
-  readonly activityType: RuntimeActivityProjection['activityType']
-  readonly command: string | null
-  readonly status: RuntimeActivityProjection['status']
-  readonly outcome: RuntimeActivityProjection['outcome']
-  readonly exitCode: number | null
-  /** Original runtime position; snippets cite this instead of copying output. */
-  readonly sourceRef: string
-}
+export type ReviewActivity = RuntimeActivityProjection
 
 export interface ReviewActivitySegment {
   readonly key: string
@@ -124,7 +103,6 @@ export interface ReviewActivitySegment {
   readonly attempt: number
   readonly role: string | null
   readonly state: string | null
-  /** The projection stops at 100 activities per session; the cut is shown. */
   readonly truncated: boolean
   readonly activities: readonly ReviewActivity[]
 }
@@ -132,9 +110,7 @@ export interface ReviewActivitySegment {
 export interface ReviewEvidenceEntry {
   readonly evidence: DeliveryEvidenceProjection
   readonly outcome: EvidenceOutcome | null
-  /** Durable page annotation source for ReviewFinding Evidence. */
   readonly pageAnnotation: EvidencePageAnnotationProjection | null
-  /** Server-owned artifact access; `unavailable` renders the fail-closed note. */
   readonly artifactState: 'available' | 'unavailable' | null
   readonly artifactReason: string | null
   readonly artifacts: readonly ReviewEvidenceArtifact[]
@@ -201,11 +177,6 @@ export interface ReviewProgress {
   readonly acceptedCriteria: ReviewAcceptedCriteriaProgress
 }
 
-/**
- * RUN-08 one redacted, traceable error citation. The projection never carries
- * copied log bodies: traceability comes from the original run identity plus the
- * runtime sourceRef.
- */
 export interface ReviewSnippet {
   readonly sourceRef: string
   readonly workRunId: string | null
@@ -247,7 +218,6 @@ export interface StrongFlowReviewViewModel {
   continueFiles(): Promise<void>
   openPreview(path: string): Promise<void>
   continuePreview(path: string): Promise<void>
-  /** Accumulated preview text for one file; null for degraded previews. */
   previewText(path: string): string | null
   openEvidenceDetail(evidenceId: string): Promise<void>
   openArtifact(evidenceId: string, artifactId: string): Promise<void>
@@ -264,7 +234,6 @@ export interface StrongFlowReviewViewModel {
 
 export type SolutionReviewAction = 'approve' | 'request_changes' | 'reject'
 
-/** Exact canonical payload sealed and rechecked by the Controller. */
 export function solutionReviewDecisionResolution(
   review: SolutionReviewProjection,
   action: SolutionReviewAction,
@@ -318,10 +287,6 @@ function emptyState(): StrongFlowReviewState {
   })
 }
 
-/**
- * Separate advisory model-plan progress from Controller-owned acceptance facts.
- * Counts stay exact; this projection never invents a percentage.
- */
 export function reviewProgress(
   detail: DeliveryDetailProjection,
   snapshots: readonly RuntimeProjectionSnapshot[],
@@ -370,7 +335,6 @@ function reviewFailure(code: string, message: string): ControlPlaneClientError {
   })
 }
 
-/** RUN-07: which previews may render, and why everything else degrades. */
 export function classifyPreview(file: {
   readonly path: string
   readonly binary: boolean
@@ -482,7 +446,6 @@ type EvidenceArtifactContentGetResponse = Extract<
 >
 type CandidateReviewGetResponse = Extract<QueryResultResponse, { query: 'candidate.review.get' }>
 
-/** StrongFlow review data and its one Controller-owned solution-review decision. */
 export function createStrongFlowReviewViewModel(
   options: StrongFlowReviewViewModelOptions,
 ): StrongFlowReviewViewModel {
@@ -781,15 +744,7 @@ export function createStrongFlowReviewViewModel(
         role: session.runtimeContext?.agentIdentity.role ?? null,
         state,
         truncated: session.activities.length >= MAX_ACTIVITIES_PER_SESSION,
-        activities: Object.freeze(session.activities.slice(0, MAX_ACTIVITIES_PER_SESSION).map(activity => Object.freeze({
-          callId: activity.callId,
-          activityType: activity.activityType,
-          command: activity.command,
-          status: activity.status,
-          outcome: activity.outcome,
-          exitCode: activity.exitCode,
-          sourceRef: activity.sourceRef,
-        }))),
+        activities: Object.freeze(session.activities.slice(-MAX_ACTIVITIES_PER_SESSION).map(activity => Object.freeze({ ...activity }))),
       })
     }))
   }
@@ -940,9 +895,6 @@ export function createStrongFlowReviewViewModel(
       if (chunk.path !== path || chunk.offset !== offset) {
         throw reviewFailure('STRONGFLOW_REVIEW_CHUNK_MISMATCH', 'The Candidate diff chunk does not match the requested range.')
       }
-      // A tab selection and its file button can both open offset 0 while the
-      // first request is in flight. Re-read state after the await and keep one
-      // chunk per offset so that duplicate responses cannot duplicate output.
       const currentFile = currentState.files.find(entry => entry.path === path)
       if (currentFile === undefined) return
       if (currentFile.preview?.chunks.some(existing => existing.offset === offset) === true) return

@@ -573,6 +573,7 @@ struct ElicitationRoundTripFixture {
     mcp: TestAppServer,
     response_mock: ResponseMock,
     _responses_server: wiremock::MockServer,
+    _codex_home: TempDir,
     scenario: ElicitationScenario,
     next_turn: bool,
     thread_id: String,
@@ -750,6 +751,7 @@ impl ElicitationRoundTripFixture {
             mcp,
             response_mock,
             _responses_server: responses_server,
+            _codex_home: codex_home,
             scenario,
             next_turn: false,
             thread_id: thread.id,
@@ -909,6 +911,10 @@ impl ElicitationRoundTripFixture {
             .get("output")
             .and_then(Value::as_str)
             .expect("function_call_output output should be a JSON string");
+        assert!(
+            output.starts_with("Wall time:"),
+            "unexpected MCP result: {output}"
+        );
         let payload = assert_regex_match(
             r#"(?s)^Wall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n(.*)$"#,
             output,

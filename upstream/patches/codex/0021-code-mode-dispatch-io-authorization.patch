@@ -1,0 +1,569 @@
+diff --git a/codex-rs/codex-mcp/src/binding.rs b/codex-rs/codex-mcp/src/binding.rs
+index 862558de..1f7eba5f 100644
+--- a/codex-rs/codex-mcp/src/binding.rs
++++ b/codex-rs/codex-mcp/src/binding.rs
+@@ -100,6 +100,12 @@ impl McpBinding {
+         self.connections.has_servers()
+     }
+ 
++    /// Ready resource clients frozen into this binding, including servers
++    /// whose tool catalog is empty.
++    pub fn resource_server_names(&self) -> Vec<String> {
++        self.clients.server_names()
++    }
++
+     pub async fn list_resources(
+         &self,
+         server: &str,
+diff --git a/codex-rs/codex-mcp/src/binding_clients.rs b/codex-rs/codex-mcp/src/binding_clients.rs
+index b2b1c174..3b8bd4fd 100644
+--- a/codex-rs/codex-mcp/src/binding_clients.rs
++++ b/codex-rs/codex-mcp/src/binding_clients.rs
+@@ -31,6 +31,12 @@ impl McpBindingClients {
+         self.clients.get(server).cloned()
+     }
+ 
++    pub(crate) fn server_names(&self) -> Vec<String> {
++        let mut names = self.clients.keys().cloned().collect::<Vec<_>>();
++        names.sort();
++        names
++    }
++
+     pub(crate) async fn list_resources(
+         &self,
+         server: &str,
+diff --git a/codex-rs/core/src/tool_call_gate.rs b/codex-rs/core/src/tool_call_gate.rs
+index c88ab25d..34790444 100644
+--- a/codex-rs/core/src/tool_call_gate.rs
++++ b/codex-rs/core/src/tool_call_gate.rs
+@@ -17,6 +17,11 @@ pub struct ToolCallGateRequest {
+ /// Exact raw or handler-parsed payload presented at the corresponding admission point.
+ #[derive(Clone, Eq, PartialEq)]
+ pub enum ToolCallGatePayload {
++    /// Orchestration certified by the registered Core runtime. Nested I/O must
++    /// obtain its own host authorization. The input retains kind and raw value.
++    CoreControl {
++        input: String,
++    },
+     Function {
+         arguments: String,
+     },
+@@ -31,6 +36,19 @@ pub enum ToolCallGatePayload {
+         args: Vec<String>,
+         working_directory: String,
+     },
++    FileRead {
++        path: String,
++    },
++    McpResource {
++        server: String,
++        method: String,
++        arguments: String,
++    },
++    ProcessInteraction {
++        process_id: i32,
++        origin_call_id: String,
++        input: String,
++    },
+     Files {
+         changes: Vec<ToolCallGateFileChange>,
+     },
+@@ -78,10 +96,14 @@ impl fmt::Debug for ToolCallGateRequest {
+ impl fmt::Debug for ToolCallGatePayload {
+     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+         formatter.write_str(match self {
++            Self::CoreControl { .. } => "CoreControl(<private>)",
+             Self::Function { .. } => "Function(<private>)",
+             Self::ToolSearch { .. } => "ToolSearch(<private>)",
+             Self::Custom { .. } => "Custom(<private>)",
+             Self::Shell { .. } => "Shell(<private>)",
++            Self::FileRead { .. } => "FileRead(<private>)",
++            Self::McpResource { .. } => "McpResource(<private>)",
++            Self::ProcessInteraction { .. } => "ProcessInteraction(<private>)",
+             Self::Files { .. } => "Files(<private>)",
+         })
+     }
+@@ -209,10 +231,11 @@ pub trait ToolCallGate: Send + Sync {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{
+-        ToolCallGateAuthorization, ToolCallGateExecutableAuthorization, ToolCallGateFileChange,
+-        ToolCallGatePayload, ToolCallGateRequest,
+-    };
++    use super::ToolCallGateAuthorization;
++    use super::ToolCallGateExecutableAuthorization;
++    use super::ToolCallGateFileChange;
++    use super::ToolCallGatePayload;
++    use super::ToolCallGateRequest;
+ 
+     #[test]
+     fn debug_output_redacts_exact_tool_payload() {
+diff --git a/codex-rs/core/src/tools/authorization.rs b/codex-rs/core/src/tools/authorization.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/authorization.rs
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++
++/// Trusted runtime admission policy. Model arguments cannot select this policy.
++#[derive(Clone, Copy)]
++pub(crate) enum AuthorizationPolicy {
++    /// The host interprets the effective raw request.
++    HostOperation,
++    /// Core orchestration. Each nested I/O operation is admitted separately.
++    CoreControl,
++    /// The handler authorizes its parsed input at the final execution boundary.
++    ParsedOperation,
++}
++
++/// Authorize the effective input after PreToolUse hooks have accepted it.
++pub(super) async fn authorize(
++    invocation: &ToolInvocation,
++    runtime: &dyn CoreToolRuntime,
++) -> Result<(), FunctionCallError> {
++    // These handlers authorize parsed commands or file changes at their final
++    // execution boundary, after their own validation and sandbox planning.
++    if matches!(
++        runtime.authorization_policy(),
++        AuthorizationPolicy::ParsedOperation
++    ) {
++        return Ok(());
++    }
++    let payload = match &invocation.payload {
++        ToolPayload::Function { arguments } => crate::ToolCallGatePayload::Function {
++            arguments: arguments.clone(),
++        },
++        ToolPayload::ToolSearch { arguments } => crate::ToolCallGatePayload::ToolSearch {
++            arguments_json: serde_json::to_string(arguments).map_err(|_| {
++                FunctionCallError::RespondToModel(
++                    "tool authorization payload is invalid".to_string(),
++                )
++            })?,
++        },
++        ToolPayload::Custom { input } => crate::ToolCallGatePayload::Custom {
++            input: input.clone(),
++        },
++    };
++    let payload = match runtime.authorization_policy() {
++        AuthorizationPolicy::CoreControl => {
++            let input = match payload {
++                crate::ToolCallGatePayload::Function { arguments } => {
++                    serde_json::json!({"kind":"function", "input":arguments})
++                }
++                crate::ToolCallGatePayload::Custom { input } => {
++                    serde_json::json!({"kind":"custom", "input":input})
++                }
++                crate::ToolCallGatePayload::ToolSearch { arguments_json } => {
++                    serde_json::json!({"kind":"tool_search", "input":arguments_json})
++                }
++                _ => {
++                    return Err(FunctionCallError::RespondToModel(
++                        "unsupported Core control payload".to_string(),
++                    ));
++                }
++            };
++            crate::ToolCallGatePayload::CoreControl {
++                input: input.to_string(),
++            }
++        }
++        AuthorizationPolicy::HostOperation => payload,
++        AuthorizationPolicy::ParsedOperation => {
++            unreachable!("parsed operations authorize in their handler")
++        }
++    };
++    authorize_payload(invocation, payload).await
++}
++
++/// Admit a handler's parsed operation using the same host boundary as raw calls.
++pub(crate) async fn authorize_payload(
++    invocation: &ToolInvocation,
++    payload: crate::ToolCallGatePayload,
++) -> Result<(), FunctionCallError> {
++    let request = crate::ToolCallGateRequest {
++        thread_id: invocation.session.thread_id.to_string(),
++        turn_id: invocation.turn.sub_id.clone(),
++        call_id: invocation.call_id.clone(),
++        namespace: invocation.tool_name.namespace.clone(),
++        tool_name: invocation.tool_name.name.clone(),
++        payload,
++    };
++    authorize_request(invocation.session.as_ref(), request).await
++}
++
++pub(crate) async fn authorize_request(
++    session: &crate::session::session::Session,
++    request: crate::ToolCallGateRequest,
++) -> Result<(), FunctionCallError> {
++    let Some(attachment) = session
++        .services
++        .thread_extension_data
++        .get::<crate::ToolCallGateAttachment>()
++    else {
++        return Ok(());
++    };
++    let authorization = attachment
++        .gate()
++        .authorize(request.clone())
++        .await
++        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
++    attachment
++        .gate()
++        .revalidate(request, authorization)
++        .await
++        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))
++}
++
++#[cfg(test)]
++#[path = "authorization_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource.rs b/codex-rs/core/src/tools/handlers/mcp_resource.rs
+index deb7491e..1b6fc457 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource.rs
+@@ -32,6 +32,7 @@ use crate::tools::context::ToolOutput;
+ use crate::tools::context::boxed_tool_output;
+ use codex_protocol::protocol::McpInvocation;
+ 
++mod authorization;
+ mod list_mcp_resource_templates;
+ mod list_mcp_resources;
+ mod read_mcp_resource;
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource/authorization.rs b/codex-rs/core/src/tools/handlers/mcp_resource/authorization.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/mcp_resource/authorization.rs
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++
++pub(super) async fn authorize(
++    invocation: &ToolInvocation,
++    server: &str,
++    method: &str,
++    arguments: &Option<serde_json::Value>,
++) -> Result<(), FunctionCallError> {
++    crate::tools::authorization::authorize_payload(
++        invocation,
++        crate::ToolCallGatePayload::McpResource {
++            server: server.to_string(),
++            method: method.to_string(),
++            arguments: serde_json::to_string(arguments).map_err(|_| {
++                FunctionCallError::RespondToModel("invalid MCP resource arguments".to_string())
++            })?,
++        },
++    )
++    .await
++}
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs b/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs
+index a988038d..5f6a72d4 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs
+@@ -40,6 +40,7 @@ impl ListMcpResourceTemplatesHandler {
+         &self,
+         invocation: ToolInvocation,
+     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
++        let resource_invocation = invocation.clone();
+         let ToolInvocation {
+             session,
+             step_context,
+@@ -62,6 +63,23 @@ impl ListMcpResourceTemplatesHandler {
+         let arguments = parse_arguments(arguments.as_str())?;
+         let args: ListResourceArgs = parse_args_with_default(arguments.clone())?;
+         let args = args.normalized();
++        let servers = match args.target(turn.as_ref())? {
++            Some((server, _)) => vec![server],
++            None => mcp
++                .resource_server_names()
++                .into_iter()
++                .filter(|server| model_can_access_mcp_server(turn.as_ref(), server))
++                .collect(),
++        };
++        for server in &servers {
++            super::authorization::authorize(
++                &resource_invocation,
++                server,
++                "resources/templates/list",
++                &arguments,
++            )
++            .await?;
++        }
+ 
+         let invocation = McpInvocation {
+             server: args.server.clone().unwrap_or_else(|| "codex".to_string()),
+@@ -96,4 +114,12 @@ impl ListMcpResourceTemplatesHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for ListMcpResourceTemplatesHandler {}
++impl CoreToolRuntime for ListMcpResourceTemplatesHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
++    fn uses_mcp_binding(&self) -> bool {
++        true
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resources.rs b/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resources.rs
+index d0d0d0f5..002f21ca 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resources.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resources.rs
+@@ -40,6 +40,7 @@ impl ListMcpResourcesHandler {
+         &self,
+         invocation: ToolInvocation,
+     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
++        let resource_invocation = invocation.clone();
+         let ToolInvocation {
+             session,
+             step_context,
+@@ -62,6 +63,23 @@ impl ListMcpResourcesHandler {
+         let arguments = parse_arguments(arguments.as_str())?;
+         let args: ListResourceArgs = parse_args_with_default(arguments.clone())?;
+         let args = args.normalized();
++        let servers = match args.target(turn.as_ref())? {
++            Some((server, _)) => vec![server],
++            None => mcp
++                .resource_server_names()
++                .into_iter()
++                .filter(|server| model_can_access_mcp_server(turn.as_ref(), server))
++                .collect(),
++        };
++        for server in &servers {
++            super::authorization::authorize(
++                &resource_invocation,
++                server,
++                "resources/list",
++                &arguments,
++            )
++            .await?;
++        }
+ 
+         let invocation = McpInvocation {
+             server: args.server.clone().unwrap_or_else(|| "codex".to_string()),
+@@ -94,4 +112,12 @@ impl ListMcpResourcesHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for ListMcpResourcesHandler {}
++impl CoreToolRuntime for ListMcpResourcesHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
++    fn uses_mcp_binding(&self) -> bool {
++        true
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource/read_mcp_resource.rs b/codex-rs/core/src/tools/handlers/mcp_resource/read_mcp_resource.rs
+index 3049f391..049d8c71 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource/read_mcp_resource.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource/read_mcp_resource.rs
+@@ -43,6 +43,7 @@ impl ReadMcpResourceHandler {
+         &self,
+         invocation: ToolInvocation,
+     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
++        let resource_invocation = invocation.clone();
+         let ToolInvocation {
+             session,
+             step_context,
+@@ -67,6 +68,14 @@ impl ReadMcpResourceHandler {
+         let ReadResourceArgs { server, uri } = args;
+         let server = normalize_required_string("server", server)?;
+         let uri = normalize_required_string("uri", uri)?;
++        ensure_model_can_access_mcp_server(turn.as_ref(), &server)?;
++        super::authorization::authorize(
++            &resource_invocation,
++            &server,
++            "resources/read",
++            &arguments,
++        )
++        .await?;
+ 
+         let invocation = McpInvocation {
+             server: server.clone(),
+@@ -93,4 +102,12 @@ impl ReadMcpResourceHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for ReadMcpResourceHandler {}
++impl CoreToolRuntime for ReadMcpResourceHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
++    fn uses_mcp_binding(&self) -> bool {
++        true
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/tool_search.rs b/codex-rs/core/src/tools/handlers/tool_search.rs
+index 15c2292c..88483009 100644
+--- a/codex-rs/core/src/tools/handlers/tool_search.rs
++++ b/codex-rs/core/src/tools/handlers/tool_search.rs
+@@ -224,7 +224,11 @@ impl ToolSearchHandler {
+     }
+ }
+ 
+-impl CoreToolRuntime for ToolSearchHandler {}
++impl CoreToolRuntime for ToolSearchHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++}
+ 
+ impl ToolSearchHandler {
+     fn search(
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+index 7f1709b0..61a00a49 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+@@ -57,6 +57,7 @@ impl WriteStdinHandler {
+             session,
+             turn,
+             payload,
++            call_id,
+             ..
+         } = invocation;
+ 
+@@ -82,6 +83,7 @@ impl WriteStdinHandler {
+                 interaction_event: Some(WriteStdinInteractionEvent {
+                     session: &session,
+                     turn: &turn,
++                    call_id: &call_id,
+                 }),
+             })
+             .await
+@@ -94,6 +96,10 @@ impl WriteStdinHandler {
+ }
+ 
+ impl CoreToolRuntime for WriteStdinHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/view_image.rs b/codex-rs/core/src/tools/handlers/view_image.rs
+index 96152b20..d633a1eb 100644
+--- a/codex-rs/core/src/tools/handlers/view_image.rs
++++ b/codex-rs/core/src/tools/handlers/view_image.rs
+@@ -102,6 +102,7 @@ impl ViewImageHandler {
+             ));
+         }
+ 
++        let read_invocation = invocation.clone();
+         let ToolInvocation {
+             session,
+             turn,
+@@ -151,6 +152,13 @@ impl ViewImageHandler {
+             ))
+         })?;
+         let model_visible_path = path_uri.inferred_native_path_string();
++        crate::tools::authorization::authorize_payload(
++            &read_invocation,
++            crate::ToolCallGatePayload::FileRead {
++                path: model_visible_path.clone(),
++            },
++        )
++        .await?;
+         let sandbox = turn
+             .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
+         let fs = turn_environment.environment.get_filesystem();
+@@ -211,6 +219,10 @@ impl ViewImageHandler {
+ }
+ 
+ impl CoreToolRuntime for ViewImageHandler {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
++    }
++
+     fn is_builtin_control_tool(&self) -> bool {
+         true
+     }
+diff --git a/codex-rs/core/src/unified_exec/action_admission.rs b/codex-rs/core/src/unified_exec/action_admission.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/unified_exec/action_admission.rs
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::UnifiedExecError;
++use super::WriteStdinRequest;
++
++/// Called while holding the exact process interaction lock. A queued permit
++/// therefore cannot redirect input into a replacement process with the same id.
++pub(super) async fn authorize_interaction(
++    request: &WriteStdinRequest<'_>,
++    origin_call_id: &str,
++) -> Result<(), UnifiedExecError> {
++    let Some(event) = &request.interaction_event else {
++        return Ok(());
++    };
++    crate::tools::authorize_request(
++        event.session.as_ref(),
++        crate::ToolCallGateRequest {
++            thread_id: event.session.thread_id.to_string(),
++            turn_id: event.turn.sub_id.clone(),
++            call_id: event.call_id.to_string(),
++            namespace: None,
++            tool_name: "write_stdin".to_string(),
++            payload: crate::ToolCallGatePayload::ProcessInteraction {
++                process_id: request.process_id,
++                origin_call_id: origin_call_id.to_string(),
++                input: request.input.to_string(),
++            },
++        },
++    )
++    .await
++    .map_err(|error| UnifiedExecError::process_failed(error.to_string()))
++}
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 77b23625..1fab4430 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -45,6 +45,7 @@ use crate::shell::ShellType;
+ use crate::tools::network_approval::DeferredNetworkApproval;
+ use codex_core_plugins::PluginMetricsSidecar;
+ 
++mod action_admission;
+ mod async_watcher;
+ mod errors;
+ mod head_tail_buffer;
+@@ -124,6 +125,7 @@ pub(crate) struct WriteStdinRequest<'a> {
+ pub(crate) struct WriteStdinInteractionEvent<'a> {
+     pub session: &'a Arc<Session>,
+     pub turn: &'a Arc<TurnContext>,
++    pub call_id: &'a str,
+ }
+ 
+ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 9fd8b08a..d5059239 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -780,6 +780,7 @@ impl UnifiedExecProcessManager {
+             .prepare_process_handles(process_id, &locked_process)
+             .await?;
+         let mut status_after_write = None;
++        super::action_admission::authorize_interaction(&request, &call_id).await?;
+ 
+         if !request.input.is_empty() {
+             if !tty {
+@@ -908,7 +909,8 @@ impl UnifiedExecProcessManager {
+ 
+         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
+         if should_emit_interaction
+-            && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
++            && let Some(WriteStdinInteractionEvent { session, turn, .. }) =
++                request.interaction_event
+         {
+             let interaction = TerminalInteractionEvent {
+                 call_id: response.event_call_id.clone(),

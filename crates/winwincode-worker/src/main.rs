@@ -1,12 +1,12 @@
+#![recursion_limit = "256"]
 // SPDX-License-Identifier: Apache-2.0
 
-#![recursion_limit = "256"]
-
-//! Standalone Execution Worker process entrypoint.
+mod shutdown_signal;
 
 use std::env;
 use std::fs;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -64,10 +64,6 @@ fn print_identity() {
     }
 }
 
-/// Identity and locality inputs the two entries differ on. Everything the
-/// execution loop needs beyond this (TLS trust root, helper release,
-/// provider model selection, action signing, execution envelope) stays on
-/// the existing process environment for both entries.
 struct WorkerBootstrap {
     exit_after_work: bool,
     worker_id: WorkerId,
@@ -112,11 +108,6 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
     Box::pin(run_worker(bootstrap)).await
 }
 
-/// Managed entry (plan §14.4): identity and locality come only from the
-/// local mode-0600 config file written by the Device Client. The execution
-/// loop below is the exact `--remote` machinery over the same
-/// `serverOrigin` `ExecutionPort` exchange; nothing is read from or decided
-/// by the Server beyond that existing protocol.
 fn await_managed_start_gate(
     mut input: impl std::io::Read,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -165,12 +156,6 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
     .await
 }
 
-/// The shared execution main loop. Both entries run the same registration,
-/// control drain, heartbeat, and Codex drive cycles over
-/// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
-/// Retries Worker registration until the lifecycle leaves the boot/register
-/// window. A silent retry loop would look like a hung process in production
-/// logs, so each failure prints its secret-safe category only.
 async fn register_until_active<Port, Codex>(
     worker: &mut WorkerMain<Port, Codex>,
     handle: &RemoteWorkerTransportHandle,
@@ -213,6 +198,7 @@ where
     reason = "the composition owns registration, control delivery, and bounded shutdown"
 )]
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
+    let mut interrupt = shutdown_signal::WorkerInterrupt::new()?;
     let WorkerBootstrap {
         exit_after_work,
         worker_id,
@@ -226,6 +212,8 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         credential_path,
         model_route,
     } = bootstrap;
+    #[cfg(feature = "test-support")]
+    winwincode_worker::mechanism_timing::configure(data_directory.join("mechanism-timing.jsonl"));
     let capabilities = worker_capabilities()?;
     let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
     let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
@@ -279,44 +267,53 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker = worker.with_observation_model(observation_model);
     }
 
-    if let Err(error) = register_until_active(&mut worker, &handle, &started_at).await {
-        let _ = Box::pin(worker.shutdown(now_instant()?)).await;
-        return Err(error);
+    let registration = tokio::select! {
+        result = Box::pin(register_until_active(&mut worker, &handle, &started_at)) => Some(result),
+        () = interrupt.wait() => None,
+    };
+    match registration {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Err(error);
+        }
+        None => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Ok(());
+        }
     }
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
+    drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            _ = heartbeat.tick() => {
-                let now = now_instant()?;
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                let _ = Box::pin(worker.heartbeat(now.clone())).await;
-                // A refused upstream frame still carries valid controls.
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-            }
+            () = interrupt.wait() => break,
             _ = drive.tick() => {
-                let now = now_instant()?;
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                // Retry pending Worker→Server evidence every drive tick so a
-                // Server restart / Connection-refused window cannot strand
-                // runtime.event / artifact.chunk / JobOutcome in the outbox.
-                if worker.lifecycle() == WorkerLifecycleState::Active
-                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now.clone())).await
-                {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
+                let step = async {
+                if worker.transport_failure().is_some() { return Ok(true); }
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_entry", &serde_json::json!({}));
+                if let Some(error) = Box::pin(worker.drive_with_controls(&handle, now_instant)).await? {
+                    if !observed_drive_failures.contains(&error.code) {
+                        observed_drive_failures.push(error.code);
+                        if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
+                            let diagnostic = if error.code == winwincode_worker::WorkerErrorCode::RuntimeTraceMismatch {
+                                error.reason.as_str()
+                            } else { "" };
+                            let _ = writeln!(log, "component=worker stage=drive code={:?} {diagnostic}", error.code);
+                        }
                     }
-                    if error.code == winwincode_worker::WorkerErrorCode::ExecutionBackpressure {
-                        // Polling Core performs another flush. Yield first so
-                        // the next turn can consume and confirm queued controls.
-                        continue;
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
                     }
                 }
-                if worker.transport_failure().is_some() { break; }
-                let _ = Box::pin(worker.poll_codex(now)).await;
-                if exit_after_work && worker.work_drained() { break; }
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_exit", &serde_json::json!({}));
+                Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                if result? { break; }
             }
         }
         if handle.terminal_error().is_some()
@@ -347,51 +344,7 @@ where
     Port: winwincode_codex::WorkerExecutionPort,
     Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
 {
-    while let Some((delivery_id, message)) = handle.next_control()? {
-        match worker.accept_control(&message, now_instant()?).await {
-            Ok(()) => handle.confirm(delivery_id)?,
-            Err(error) => {
-                if env::var_os("WWC_DEBUG_REMOTE_WORKER").is_some() {
-                    let kind = serde_json::to_value(&message)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("kind")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    eprintln!(
-                        "remote Worker control rejected: kind={kind}; category={:?}",
-                        error.code
-                    );
-                }
-                handle.retry(&delivery_id)?;
-                if matches!(
-                    error.code,
-                    winwincode_worker::WorkerErrorCode::ExecutionPort
-                        | winwincode_worker::WorkerErrorCode::ExecutionBackpressure
-                ) {
-                    return Ok(());
-                }
-                // Keep the process alive while durable Worker→Server evidence
-                // is still pending. Exiting here after a Server restart or a
-                // transient control reject strands verification frames that
-                // never reach the Control Plane verdict path.
-                if worker.has_pending_durable_evidence() {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!(
-                            "remote Worker control rejected with pending durable evidence; retrying kind category={:?}",
-                            error.code
-                        );
-                    }
-                    return Ok(());
-                }
-                return Err(Box::new(error));
-            }
-        }
-    }
-    Ok(())
+    worker.drain_controls(handle, now_instant).await
 }
 
 fn production_codex(
@@ -410,6 +363,17 @@ fn production_codex(
     let extensions = store.restore_extensions(&data_directory.join("codex-runtime/kernel-home"))?;
     let mut discovered_capabilities = Vec::new();
     for server in extensions {
+        for operation in winwincode_execution_port::mcp_resource::McpResourceOperation::ALL {
+            discovered_capabilities.push(
+                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp_resource(
+                    &server.server,
+                    operation,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                )?,
+            );
+        }
         for tool in server.tools {
             discovered_capabilities.push(
                 winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp(
@@ -451,11 +415,16 @@ fn production_codex(
         observer_mode,
     };
     let mut config = ProductionCodexConfig::try_new(options)?;
-    if let Some(value) = env::var_os("WWC_BENCHMARK_TOOL_REPEAT_GUARD") {
+    match env::var("WWC_WORKER_APPROVAL_OWNER").as_deref() {
+        Ok("execution_port") => config = config.with_host_action_approvals(),
+        Ok("core") | Err(env::VarError::NotPresent) => {}
+        _ => return Err("invalid Worker approval owner".into()),
+    }
+    if let Some(value) = env::var_os("WWC_BENCHMARK_SEALED_TOOLS") {
         if value != "1" {
-            return Err("invalid benchmark tool repeat guard".into());
+            return Err("invalid benchmark sealed tools".into());
         }
-        config = config.with_benchmark_tool_repeat_guard();
+        config = config.with_sealed_benchmark_tools();
     }
     if let Some(effort) = env::var_os("WWC_WORKER_MODEL_REASONING_EFFORT") {
         config =
@@ -551,8 +520,6 @@ fn configured_jev_context(
     Ok(Some(settings))
 }
 
-/// Canonical model route used when no managed config override exists —
-/// identical to the previous hardcoded `--remote` value.
 fn default_model_route() -> ModelGatewayRoute {
     ModelGatewayRoute {
         capability: "reasoning".to_owned(),

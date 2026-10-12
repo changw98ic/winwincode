@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Authenticated HTTPS exchange for a separated Execution Worker.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -32,7 +30,6 @@ use crate::{
 
 const MAX_PENDING_REMOTE_DELIVERIES: usize = 256;
 
-/// Stable, secret-free remote transport failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerTransportError {
     message: &'static str,
@@ -87,7 +84,6 @@ impl RemoteWorkerTransportError {
             }
         }
     }
-    /// HTTP category distinguishes permanent rejection from retryable authority failures.
     #[must_use]
     pub const fn status_code(&self) -> u16 {
         self.status
@@ -102,12 +98,7 @@ impl fmt::Display for RemoteWorkerTransportError {
 
 impl std::error::Error for RemoteWorkerTransportError {}
 
-/// HTTP boundary used by the Server route without exposing the route through
-/// the generated public API.
 pub trait RemoteWorkerExchangePort: Send + Sync {
-    /// Financial-only reconciliation under the explicit trusted Device key.
-    /// # Errors
-    /// Rejects missing authority, altered receipts, or unavailable accounting.
     fn accounting(
         &self,
         _token: &str,
@@ -117,12 +108,6 @@ pub trait RemoteWorkerExchangePort: Send + Sync {
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
         Err(RemoteWorkerTransportError::authentication())
     }
-    /// Applies one authenticated bounded exchange.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a stable category; credentials and frame contents are
-    /// never included in diagnostics.
     fn exchange(
         &self,
         credential: Vec<u8>,
@@ -131,7 +116,6 @@ pub trait RemoteWorkerExchangePort: Send + Sync {
     ) -> Result<Vec<u8>, RemoteWorkerTransportError>;
 }
 
-/// Credential authority backed by one operator-owned mode-0600 file.
 pub struct FileRemoteWorkerAuthenticator {
     credential_path: PathBuf,
     principal: RemoteWorkerPrincipal,
@@ -140,12 +124,6 @@ pub struct FileRemoteWorkerAuthenticator {
 }
 
 impl FileRemoteWorkerAuthenticator {
-    /// Loads only a SHA-256 fingerprint from a mode-0600 credential file.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, empty, oversized, broadly-readable, or expired
-    /// credential configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         credential_path: impl Into<PathBuf>,
@@ -241,7 +219,6 @@ impl RemoteWorkerAuthenticator for FileRemoteWorkerAuthenticator {
     }
 }
 
-/// Credential authority for Device Client-launched Worker sessions.
 pub struct WorkerSessionRemoteAuthenticator {
     data_directory: PathBuf,
     scope: WorkerRegistryScope,
@@ -322,14 +299,18 @@ fn device_session_pool(
         .active_lease_for_node(&grant.client_node_id)
         .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
         .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
+    let occupancy_authorized = match lease.state {
+        winwincode_control_plane::OccupancyLeaseState::Occupied
+        | winwincode_control_plane::OccupancyLeaseState::Draining => true,
+        winwincode_control_plane::OccupancyLeaseState::RecoveryPending => {
+            grant.state == winwincode_storage::WorkerLaunchGrantState::Consumed
+        }
+        _ => false,
+    };
     if !grant.state.is_non_terminal()
         || lease.occupancy_lease_id != grant.occupancy_lease_id
         || lease.fencing_token != grant.occupancy_fencing_token
-        || !matches!(
-            lease.state,
-            winwincode_control_plane::OccupancyLeaseState::Occupied
-                | winwincode_control_plane::OccupancyLeaseState::Draining
-        )
+        || !occupancy_authorized
     {
         return Err(RemoteWorkerAuthenticationError::revoked());
     }
@@ -349,8 +330,6 @@ fn device_session_pool(
     ))
 }
 
-/// Keeps the configured fleet Worker and Device-launched Workers on the one
-/// canonical Execution Port endpoint.
 pub struct CompositeRemoteWorkerAuthenticator {
     fleet: FileRemoteWorkerAuthenticator,
     sessions: WorkerSessionRemoteAuthenticator,
@@ -436,6 +415,37 @@ type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
 struct RemoteDeliveryQueue {
     pending: Mutex<Vec<RemoteDelivery>>,
     authorities: Mutex<HashMap<(WorkerId, WorkerInstanceId), RemoteWorkerPrincipal>>,
+    confirmed: Mutex<HashMap<(WorkerId, WorkerInstanceId), ConfirmedControls>>,
+}
+
+#[derive(Default)]
+struct ConfirmedControls {
+    ids: std::collections::HashSet<ExecutionMessageId>,
+    order: std::collections::VecDeque<ExecutionMessageId>,
+}
+
+const MAX_CONFIRMED_CONTROLS: usize = 4_096;
+
+impl ConfirmedControls {
+    fn insert(&mut self, id: ExecutionMessageId) {
+        if self.ids.insert(id.clone()) {
+            self.order.push_back(id);
+            while self.order.len() > MAX_CONFIRMED_CONTROLS {
+                if let Some(old) = self.order.pop_front() {
+                    self.ids.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+fn confirmed_redelivery_frame(frame: &[u8]) -> bool {
+    RemoteTransportAdapter::<NoopCore>::decode(frame)
+        .is_ok_and(|frame| suppress_confirmed_redelivery(frame.message()))
+}
+
+fn suppress_confirmed_redelivery(message: &ExecutionPortMessage) -> bool {
+    matches!(message, ExecutionPortMessage::JobCancelMessage(_))
 }
 
 impl RemoteDeliveryQueue {
@@ -444,19 +454,30 @@ impl RemoteDeliveryQueue {
         authenticator: &dyn RemoteWorkerAuthenticator,
         now: &Instant,
     ) -> Result<(), RemoteWorkerTransportError> {
-        // Only the credential authority may retire unacknowledged controls.
-        // Authority unavailability preserves them for the durable scheduler to replay.
         let mut authorities = self.authorities.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
         })?;
         let mut pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
+        let mut retired_instances = Vec::new();
         authorities.retain(|(worker, instance), principal| {
             let retired = authenticator.ensure_active(principal, now).is_err_and(|error| matches!(error.kind(), winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked | winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Rejected));
-            if retired { pending.retain(|(target, boot, _, _)| target != worker || boot != instance); }
+            if retired {
+                pending.retain(|(target, boot, _, _)| target != worker || boot != instance);
+                retired_instances.push((worker.clone(), instance.clone()));
+            }
             !retired && pending.iter().any(|(target, boot, _, _)| target == worker && boot == instance)
         });
+        drop(pending);
+        if !retired_instances.is_empty() {
+            let mut confirmed = self.confirmed.lock().map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+            })?;
+            for key in retired_instances {
+                confirmed.remove(&key);
+            }
+        }
         Ok(())
     }
 
@@ -505,6 +526,13 @@ impl RemoteDeliveryQueue {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
         pending.retain(|(target, boot, _, _)| target != worker || boot == instance);
+        drop(pending);
+        self.confirmed
+            .lock()
+            .map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+            })?
+            .retain(|(target, boot), _| target != worker || boot == instance);
         Ok(())
     }
     fn acknowledge(
@@ -516,9 +544,19 @@ impl RemoteDeliveryQueue {
         let mut pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
+        let mut confirmed = self.confirmed.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+        })?;
         for id in ids {
-            pending.retain(|(target, instance, pending_id, _)| {
-                target != worker_id || instance != instance_id || pending_id != id
+            pending.retain(|(target, instance, pending_id, frame)| {
+                let matched = target == worker_id && instance == instance_id && pending_id == id;
+                if matched && confirmed_redelivery_frame(frame) {
+                    confirmed
+                        .entry((worker_id.clone(), instance_id.clone()))
+                        .or_default()
+                        .insert(id.clone());
+                }
+                !matched
             });
         }
         Ok(())
@@ -564,9 +602,20 @@ impl RemoteDeliveryQueue {
         &self,
         worker_id: &WorkerId,
         instance_id: &WorkerInstanceId,
-        message: ExecutionPortMessage,
+        mut message: ExecutionPortMessage,
     ) -> Result<(), RuntimeSupervisorError> {
+        separate_heartbeat_receipt_identity(&mut message)?;
         let delivery_id = execution_message_id(&message).map_err(|_| remote_queue_failure())?;
+        if suppress_confirmed_redelivery(&message)
+            && self
+                .confirmed
+                .lock()
+                .map_err(|_| remote_queue_failure())?
+                .get(&(worker_id.clone(), instance_id.clone()))
+                .is_some_and(|confirmed| confirmed.ids.contains(&delivery_id))
+        {
+            return Ok(());
+        }
         let frame = TypedFrame::new(FrameDirection::ControlPlaneToWorker, message)
             .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
             .map_err(|_| remote_queue_failure())?;
@@ -592,6 +641,46 @@ impl RemoteDeliveryQueue {
         pending.push((worker_id.clone(), instance_id.clone(), delivery_id, frame));
         Ok(())
     }
+}
+
+fn separate_heartbeat_receipt_identity(
+    message: &mut ExecutionPortMessage,
+) -> Result<(), RuntimeSupervisorError> {
+    use winwincode_execution_port::generated::{
+        ExecutionPortErrorCode, WorkerHeartbeatAckMessageStatus,
+    };
+    let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) = message else {
+        return Ok(());
+    };
+    let class = match ack.status {
+        WorkerHeartbeatAckMessageStatus::Accepted | WorkerHeartbeatAckMessageStatus::Duplicate
+            if ack.error.is_none() =>
+        {
+            "accepted"
+        }
+        WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+            if ack.error.as_ref().is_some_and(|error| {
+                error.code == ExecutionPortErrorCode::SequenceGap && error.retryable
+            }) =>
+        {
+            "gap"
+        }
+        _ => return Ok(()),
+    };
+    let identity = serde_json::to_vec(&(
+        "worker-heartbeat-receipt-v1",
+        &ack.message_id,
+        &ack.worker_id,
+        &ack.worker_instance_id,
+        &ack.heartbeat_sequence,
+        class,
+    ))
+    .map_err(|_| remote_queue_failure())?;
+    ack.message_id = ExecutionMessageId(format!(
+        "xmsg_{}",
+        crate::runtime::crockford_26(&Sha256::digest(identity))
+    ));
+    Ok(())
 }
 
 struct WorkerDeliveryQueue<'queue> {
@@ -622,8 +711,6 @@ impl ExecutionPortCore for NoopCore {
     }
 }
 
-/// Production exchange over the Server's one application, scheduler, and
-/// durable storage directory.
 pub struct ProductionRemoteWorkerExchange<Core> {
     accounting_key:
         Option<winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey>,
@@ -653,7 +740,6 @@ impl<Core> ProductionRemoteWorkerExchange<Core> {
             queue: RemoteDeliveryQueue::default(),
         }
     }
-    /// Enables the separate financial-only Provider receipt consumer.
     #[must_use]
     pub fn with_accounting_key(
         mut self,
@@ -782,14 +868,6 @@ where
                 request.acknowledgements(),
             )
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler failed"))?;
-        // Registration leaves Registry health at `registered` by default.
-        // Device WorkerSessions are live Client-spawned processes that already
-        // hold a launch grant; mark them healthy on the accepting registration
-        // so the same exchange can drive the identity-bound queued Job claim
-        // (StrongFlow WorkRun executor jobs are never locally claimable).
-        // A later scheduler failure must not erase an accepted registration:
-        // the Worker already joined the Registry and will retry drive on the
-        // next heartbeat.
         let drive_result = if frame_accepted {
             let worker_queue = WorkerDeliveryQueue {
                 queue: &self.queue,
@@ -847,9 +925,6 @@ where
             }
             ExecutionPortMessage::WorkerHeartbeatMessage(message) => {
                 Some((&message.worker_id, &message.worker_instance_id))
-            }
-            ExecutionPortMessage::WorkerCapabilitiesMessage(m) => {
-                Some((&m.worker_id, &m.worker_instance_id))
             }
             ExecutionPortMessage::JobDispatchResultMessage(m) => {
                 Some((&m.lease.worker_id, &m.lease.worker_instance_id))
@@ -929,8 +1004,6 @@ where
         self.queue
             .retire_inactive(self.authenticator.as_ref(), now)?;
 
-        // The exchange gate keeps this response reservation through business commit.
-        // ACKs are accepted only after authenticating the exact Worker instance.
         let can_accept = self.queue.prepare_ingress(request, &principal)?;
         if !can_accept {
             if request.supports_acceptance_receipt() {
@@ -950,8 +1023,6 @@ where
                     .map_err(RemoteWorkerTransportError::from_pool)?,
             ])
         } else {
-            // Heartbeats must reach the shared Core's durable lease renewal.
-            // Authenticate their frame identity as well as the envelope.
             let (worker_id, instance_id) = match frame.message() {
                 ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) => {
                     (&heartbeat.worker_id, &heartbeat.worker_instance_id)
@@ -1081,6 +1152,143 @@ mod tests {
             value["error"] = serde_json::json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(padding),"retryable":true});
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn cancel_message(seed: usize) -> ExecutionPortMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut value = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["kind"] == "job.cancel")
+            .unwrap()
+            .clone();
+        value["messageId"] = serde_json::json!(format!("xmsg_{seed:026}"));
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn confirmed_cancel_is_not_redelivered_to_the_same_instance() {
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let next = WorkerInstanceId("wki_00000000000000000000000002".into());
+        queue
+            .enqueue_for(&worker, &instance, cancel_message(7))
+            .unwrap();
+        let page = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(page.len(), 1);
+        queue
+            .acknowledge(&worker, &instance, &[page[0].delivery_id.clone()])
+            .unwrap();
+        for _ in 0..3 {
+            queue
+                .enqueue_for(&worker, &instance, cancel_message(7))
+                .unwrap();
+        }
+        assert!(
+            queue.snapshot(&worker, &instance).unwrap().is_empty(),
+            "a confirmed cancel must not keep the Worker inbox busy"
+        );
+        queue
+            .enqueue_for(&worker, &instance, cancel_message(8))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 1);
+        queue
+            .enqueue_for(&worker, &next, cancel_message(7))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &next).unwrap().len(), 1);
+        queue
+            .enqueue_for(&worker, &instance, queue_message(9, &worker, &instance, 0))
+            .unwrap();
+        let ids = queue
+            .snapshot(&worker, &instance)
+            .unwrap()
+            .into_iter()
+            .map(|delivery| delivery.delivery_id)
+            .collect::<Vec<_>>();
+        queue.acknowledge(&worker, &instance, &ids).unwrap();
+        queue
+            .enqueue_for(&worker, &instance, queue_message(9, &worker, &instance, 0))
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn heartbeat_negative_and_positive_receipts_have_separate_delivery_lifetimes() {
+        use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let ExecutionPortMessage::WorkerHeartbeatAckMessage(mut gap) =
+            queue_message(1, &worker, &instance, 0)
+        else {
+            unreachable!()
+        };
+        gap.status = WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance;
+        gap.error = Some(ExecutionPortError {
+            code: ExecutionPortErrorCode::SequenceGap,
+            message: "retry original sequence".into(),
+            retryable: true,
+        });
+        let mut accepted = gap.clone();
+        accepted.error = None;
+        accepted.status = WorkerHeartbeatAckMessageStatus::Accepted;
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(gap.clone()),
+            )
+            .unwrap();
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(accepted.clone()),
+            )
+            .unwrap();
+        let page = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(
+            page.len(),
+            2,
+            "a retryable negative reply cannot hide later acceptance"
+        );
+        assert_ne!(page[0].delivery_id, page[1].delivery_id);
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(gap),
+            )
+            .unwrap();
+        accepted.status = WorkerHeartbeatAckMessageStatus::Duplicate;
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(accepted),
+            )
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 2);
+        queue
+            .pending
+            .lock()
+            .unwrap()
+            .retain(|(_, _, id, _)| id != &page[0].delivery_id);
+        let remaining = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].delivery_id, page[1].delivery_id);
+        for delivery in remaining {
+            let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame).unwrap();
+            assert_eq!(
+                execution_message_id(frame.message()).unwrap(),
+                delivery.delivery_id
+            );
+        }
     }
 
     #[test]

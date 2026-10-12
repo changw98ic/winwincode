@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic React-versus-DelegatedBatch performance evidence reduction.
-//!
-//! The reducer consumes secret-safe, read-only projections of the existing
-//! performance and model-call ledgers. It produces measurements only; rollout
-//! policy and Go/No-Go decisions remain outside this module.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -16,12 +10,6 @@ use crate::runtime_trace_outbox::{ExecutionMode, ObserverMode};
 
 const MAX_SAFE_METRIC: i64 = 9_007_199_254_740_991;
 
-/// One terminal projection from a single comparison run.
-///
-/// `run_id` must be a SHA-256 digest of the private run key. Exact repeats are
-/// counted as replayed writes and do not contribute to measured totals twice.
-/// Only cross-mode metrics with authoritative durable facts are retained;
-/// workspace Patch and Validation counters are excluded from V0 evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceV0RunEvidence {
@@ -40,7 +28,6 @@ pub struct PerformanceV0RunEvidence {
     pub total_runtime_ms: i64,
 }
 
-/// Model operation category retained by the existing performance ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PerformanceV0ModelKind {
@@ -48,13 +35,6 @@ pub enum PerformanceV0ModelKind {
     Observer,
 }
 
-/// One primary/strong-model or Observer operation projected from the durable
-/// performance ledger.
-///
-/// Both identities are digests so the comparison artifact contains no raw run
-/// or Provider request identifiers. `actual_cost_microunits` is the settled
-/// charge retained on the unique performance operation, when the Provider
-/// supplied one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceV0ModelCallEvidence {
@@ -73,15 +53,6 @@ pub struct PerformanceV0ModelCallEvidence {
     pub actual_cost_microunits: Option<i64>,
 }
 
-/// Aggregate for one side of the V0 comparison.
-///
-/// A strong-model call is the existing `primary_model` ledger operation.
-/// Observer calls remain separate, while Token and settled-cost totals include
-/// both primary and Observer operations. Token totals preserve the current
-/// ledger convention: input, cached, and output counters are added exactly as
-/// retained. Workspace Patch and Validation counters are intentionally absent
-/// until their delegated execution path has an authoritative durable
-/// settlement.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceV0ArmSummary {
@@ -92,7 +63,6 @@ pub struct PerformanceV0ArmSummary {
     pub incomplete_strong_model_call_count: i64,
     pub completed_observer_model_call_count: i64,
     pub incomplete_observer_model_call_count: i64,
-    /// Known lower bound when `unknown_usage_call_count` is nonzero.
     pub total_tokens: i64,
     pub unknown_usage_call_count: i64,
     pub total_strong_model_wait_ms: i64,
@@ -106,7 +76,6 @@ pub struct PerformanceV0ArmSummary {
     pub duplicate_settled_charge_microunits: i64,
 }
 
-/// React and Structured/DelegatedBatch V0 evidence kept side by side.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceV0Comparison {
@@ -114,7 +83,6 @@ pub struct PerformanceV0Comparison {
     pub structured: PerformanceV0ArmSummary,
 }
 
-/// Invalid or internally inconsistent comparison evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceV0ComparisonError {
     InvalidIdentity,
@@ -170,20 +138,6 @@ struct ModelCallTotals {
     elapsed_millis: i64,
 }
 
-/// Reduces exact ledger projections into a comparison without double-counting
-/// replayed report, model-call, or settled-charge writes.
-///
-/// Delegated patch is the Structured arm. Delegated patch shadow retains its
-/// cohort label in the projection but executes the React role-session strategy,
-/// so it enters the React arm. Every unique run must include the complete
-/// primary-model and Observer call projections so the operation ledger can be
-/// reconciled with its terminal usage report.
-///
-/// # Errors
-///
-/// Returns an error for malformed values, an execution mode outside the
-/// React-versus-DelegatedBatch comparison, unknown identities, conflicting
-/// replays, overflow, or a report that disagrees with its model-call rows.
 pub fn summarize_performance_v0(
     runs: &[PerformanceV0RunEvidence],
     model_calls: &[PerformanceV0ModelCallEvidence],

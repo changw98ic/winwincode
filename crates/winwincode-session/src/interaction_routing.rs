@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact, replay-safe routing for human decisions and session cancellation.
-//!
-//! The router owns no HTTP DTOs, scheduler store, Worker transport, or model
-//! runtime. It accepts already-authenticated actors and sealed execution facts,
-//! then returns explicit commands for those injected boundaries.
-
 use std::collections::HashMap;
 use std::fmt;
 
@@ -21,7 +15,6 @@ const MAX_ACTION_ID_LENGTH: usize = 200;
 const MAX_DECISION_LENGTH: usize = 200;
 const MAX_REASON_LENGTH: usize = 2_000;
 
-/// Authenticated decision maker supplied by the Control Plane command adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthenticatedActor {
     User(UserId),
@@ -29,7 +22,6 @@ pub enum AuthenticatedActor {
     System(SystemActorId),
 }
 
-/// Stable identity of the pending user-facing interaction.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum InteractionSubject {
     UserInput(InputRequestId),
@@ -37,7 +29,6 @@ pub enum InteractionSubject {
     Attention(AttentionItemId),
 }
 
-/// Exact active lease and Worker process authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRouteAuthority {
     pub lease_id: LeaseId,
@@ -48,7 +39,6 @@ pub struct RuntimeRouteAuthority {
     pub fencing_token: FencingToken,
 }
 
-/// Exact execution identity for one active or queued Job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRoute {
     pub product_session_id: ProductSessionId,
@@ -64,7 +54,6 @@ pub struct ExecutionRoute {
     pub model_exchange_id: Option<ModelExchangeId>,
 }
 
-/// Complete authority for a pending input, approval, or Attention decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecisionRouteBinding {
     pub execution: ExecutionRoute,
@@ -72,18 +61,15 @@ pub struct DecisionRouteBinding {
     pub decision_revision: u64,
 }
 
-/// Registration of one pending decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionRegistration {
     pub subject: InteractionSubject,
     pub binding: DecisionRouteBinding,
     pub authorized_actor: AuthenticatedActor,
     pub expires_at: Instant,
-    /// Empty except for Attention; these are the only accepted exact choices.
     pub attention_decisions: Vec<String>,
 }
 
-/// A typed human response. Each variant is accepted only for its matching subject.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionDecision {
     UserInput {
@@ -101,7 +87,6 @@ pub enum InteractionDecision {
     },
 }
 
-/// One authenticated response command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionResponse {
     pub request_id: RequestId,
@@ -112,7 +97,6 @@ pub struct InteractionResponse {
     pub responded_at: Instant,
 }
 
-/// Final state selected for the pending interaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InteractionOutcome {
     InputReceived,
@@ -122,14 +106,12 @@ pub enum InteractionOutcome {
     Expired,
 }
 
-/// Whether the router created a new route result or returned an exact replay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteWriteStatus {
     Applied,
     Duplicate,
 }
 
-/// Frozen output handed to the input/approval/Attention execution adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionRouteReceipt {
     pub status: RouteWriteStatus,
@@ -141,7 +123,6 @@ pub struct InteractionRouteReceipt {
     pub outcome: InteractionOutcome,
 }
 
-/// A trusted Control Plane expiry command for an unresolved interaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionExpiry {
     pub request_id: RequestId,
@@ -150,7 +131,6 @@ pub struct InteractionExpiry {
     pub expired_at: Instant,
 }
 
-/// Current cancellation scope and its active execution routes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionCancellationSnapshot {
     pub product_session_id: ProductSessionId,
@@ -159,7 +139,6 @@ pub struct SessionCancellationSnapshot {
     pub active_executions: Vec<ExecutionRoute>,
 }
 
-/// Authenticated request to cancel exactly one `ProductSession` revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionCancellationRequest {
     pub request_id: RequestId,
@@ -170,7 +149,6 @@ pub struct SessionCancellationRequest {
     pub requested_at: Instant,
 }
 
-/// Durable Job mutation the scheduler/queue adapter must apply.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobCancellationRoute {
     pub product_session_id: ProductSessionId,
@@ -183,7 +161,6 @@ pub struct JobCancellationRoute {
     pub expected_revision: u64,
 }
 
-/// Worker-slot cancellation bound to the current process, lease, and fencing token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerCancellationRoute {
     pub product_session_id: ProductSessionId,
@@ -197,7 +174,6 @@ pub struct WorkerCancellationRoute {
     pub expected_revision: u64,
 }
 
-/// Model-stream cancellation bound to the same exact active runtime authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStreamCancellationRoute {
     pub product_session_id: ProductSessionId,
@@ -211,7 +187,6 @@ pub struct ModelStreamCancellationRoute {
     pub model_exchange_id: ModelExchangeId,
 }
 
-/// All cancellation messages for one execution, with no scope-wide wildcard.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionCancellationRoutes {
     pub job: JobCancellationRoute,
@@ -219,7 +194,6 @@ pub struct ExecutionCancellationRoutes {
     pub model_stream: Option<ModelStreamCancellationRoute>,
 }
 
-/// Frozen cancellation output handed to queue, Worker, and model-stream adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionCancellationReceipt {
     pub status: RouteWriteStatus,
@@ -230,7 +204,6 @@ pub struct SessionCancellationReceipt {
     pub routes: Vec<ExecutionCancellationRoutes>,
 }
 
-/// Stable rejection returned before any route is emitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionRoutingError {
     InvalidField(&'static str),
@@ -312,8 +285,6 @@ struct SessionCancellationRecord {
     cancelled: Option<CancelledSession>,
 }
 
-/// In-memory aggregate used behind a durable adapter. All outputs are complete,
-/// deterministic route facts and can be persisted atomically by that adapter.
 #[derive(Default)]
 pub struct InteractionRouter {
     interactions: HashMap<InteractionSubject, InteractionRecord>,
@@ -322,7 +293,6 @@ pub struct InteractionRouter {
 
 #[allow(clippy::missing_errors_doc)]
 impl InteractionRouter {
-    /// Registers one immutable pending interaction.
     pub fn register_interaction(
         &mut self,
         mut registration: InteractionRegistration,
@@ -343,8 +313,6 @@ impl InteractionRouter {
         Ok(())
     }
 
-    /// Routes a response only when actor, subject, execution, lease, action,
-    /// and revision all match the sealed registration.
     pub fn respond(
         &mut self,
         response: &InteractionResponse,
@@ -380,8 +348,6 @@ impl InteractionRouter {
         ))
     }
 
-    /// Expires one exact unresolved interaction. Replaying the same expiry is
-    /// a duplicate; a different command cannot replace the final outcome.
     pub fn expire(
         &mut self,
         expiry: &InteractionExpiry,
@@ -422,8 +388,6 @@ impl InteractionRouter {
         ))
     }
 
-    /// Registers one `ProductSession` cancellation snapshot. Every execution in
-    /// the snapshot must name this exact `ProductSession`.
     pub fn register_cancellation_scope(
         &mut self,
         mut snapshot: SessionCancellationSnapshot,
@@ -460,8 +424,6 @@ impl InteractionRouter {
         Ok(())
     }
 
-    /// Produces exact, independently applicable Job, Worker, and model-stream
-    /// cancellation routes for one `ProductSession` only.
     pub fn cancel_session(
         &mut self,
         request: &SessionCancellationRequest,

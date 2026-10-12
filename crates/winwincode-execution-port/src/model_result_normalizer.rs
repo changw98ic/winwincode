@@ -1,40 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Selects a single model-produced JSON object without changing its bytes.
-//! Wire messages still use their strict parsers. Callers must validate JSON,
-//! duplicate fields, schema, identities and evidence after this selection.
-
-/// Representation of a selected model result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelResultRepresentation {
-    /// A plain JSON object, possibly with surrounding whitespace or a BOM.
     Object,
-    /// A single JSON object surrounded by explanatory text.
     ProseObject,
-    /// A single JSON object in a Markdown JSON code fence.
     JsonFence,
 }
 
-/// Original object bytes and their representation; no values are repaired.
 #[derive(Clone, Copy, Debug)]
 pub struct NormalizedModelObject<'a> {
     pub json: &'a str,
     pub representation: ModelResultRepresentation,
 }
 
-/// Selection failed because the input was oversized, incomplete or ambiguous.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelResultNormalizationError;
 
-/// Selects the unique complete object within the caller's raw byte limit.
-///
-/// Accepts a BOM, LF/CRLF, ordinary prose reference brackets and Markdown
-/// backtick/tilde fences of at least three characters. Fences may be indented
-/// by at most three spaces and carry an empty or case-insensitive JSON label.
-///
-/// # Errors
-/// Rejects arrays containing the result, multiple objects or code fences,
-/// malformed delimiters, nesting deeper than 64, and incomplete fences.
 pub fn normalize_model_object(
     raw: &str,
     max_bytes: usize,

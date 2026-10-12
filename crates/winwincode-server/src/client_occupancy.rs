@@ -1,66 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! User-facing Client occupancy flow over the durable occupancy ledger (plan
-//! §12, contract `client-control-state-machines.md` 4, contract
-//! `client-control-port-v1.md` occupancy frames).
-//!
-//! `POST /api/v1/clients/occupancy` applies the five-condition claim gate
-//! through `ClientOccupancyService::atomic_claim`, enqueues the
-//! `client.occupancy.offer` downlink frame into the durable outbox, and waits
-//! a bounded, configurable interval for the Device Client's
-//! `client.occupancy.ack` to be settled by the client exchange
-//! (`record_acknowledgement`). Only the ACK promotes the lease to `occupied`;
-//! a device rejection (`client.occupancy.rejected`), an applicant withdrawal
-//! (release while still `reserving`), or the elapsed ACK window each
-//! terminate the lease as `released` so `reserving` never becomes stable.
-//!
-//! `DELETE /api/v1/clients/occupancy` maps the three release modes of plan
-//! §12.4 onto `request_release`: no active worker session releases
-//! immediately, active sessions move the lease to `draining` while the
-//! matching `client.occupancy.release` frame tells the device whether to let
-//! tasks finish (`drain`) or cancel them (`cancel_and_release`, which
-//! requires an explicit confirmation flag). A `draining` lease releases
-//! automatically once the device reports zero running sessions through its
-//! heartbeat.
-//!
-//! `POST /api/v1/clients/occupancy/force-release` is the Owner-only safe
-//! cleanup of plan §12.5: it releases a `recovery_pending` lease whose
-//! recovery window has passed and mints a strictly higher fencing token that
-//! goes downlink as `client.occupancy.force_fence` so the device rejects
-//! every command stamped with any older token.
-//!
-//! `GET /api/v1/clients/{clientId}/occupancy` projects the occupancy state.
-//! The holder receives the full view (lease identity, fencing token,
-//! capacity, recovery deadline); every other user receives only
-//! `{occupancy: "occupied-by-other"}` — the holder identity is never
-//! disclosed to a non-holder (plan §16.4).
-//!
-//! The offline sweep integration keeps the lease state machine aligned with
-//! presence: whenever the heartbeat sweep projects unreachable devices to
-//! `offline`, every `occupied` or `draining` lease of those devices is
-//! projected to `recovery_pending` with a configurable recovery deadline.
-//! Past the deadline nothing happens automatically — the occupancy is never
-//! handed to a new user; the Owner force-release is the explicit resolution
-//! path.
-//!
-//! Every occupancy downlink command (offer, release, force fence) stamps its
-//! `expectedRevision` with the Server's current view of the Device Client's
-//! durable occupancy mirror revision (contract `client-control-port-v1.md`:
-//! Server → Client commands are computed against "Server 计算命令所依据的
-//! Client 已确认镜像 revision"). The device refuses any stamp whose revision
-//! is not exactly its local mirror revision, so the view is tracked durably
-//! per client node in a small sidecar database: the client exchange settles
-//! the device's reported facts (`client.occupancy.ack` mirror revision,
-//! `client.occupancy.rejected` current revision, and the
-//! `client.command_ack` effective revision of release and force-fence
-//! commands) into it, and the flows here read it back when they construct a
-//! stamp. A device rejection therefore re-syncs the view, and the next claim
-//! recomputes against the revision the device actually reported.
-
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::application::StandaloneApplicationClock;
+use crate::application::SystemStandaloneApplicationClock;
 use crate::client_exchange::is_canonical_client_node_id;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -94,31 +40,16 @@ use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::connect_attempt_window_anchor;
 
-/// Schema version of the public browser-facing occupancy surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// Bounded-wait, recovery, sweep, and throttling policy of the occupancy
-/// flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientOccupancyConfig {
-    /// How long one claim waits for the Device Client occupancy
-    /// acknowledgement before the offer is rolled back (plan 12.2).
     pub offer_wait: std::time::Duration,
-    /// How often the durable lease state is polled while waiting.
     pub poll_interval: std::time::Duration,
-    /// Recovery window granted to a dropped device before the lease becomes
-    /// eligible for the explicit safe cleanup (plan 12.5). The deadline never
-    /// triggers an automatic release.
     pub recovery_window: std::time::Duration,
-    /// How long a device must have been silent (last heartbeat) before the
-    /// offline sweep projects it to `offline`.
     pub heartbeat_stale_after: std::time::Duration,
-    /// How often the server-level sweep task runs.
     pub sweep_interval: std::time::Duration,
-    /// Length of the fixed failed-claim window in seconds.
     pub rate_window_seconds: u64,
-    /// Failed claim attempts per window and dimension that block further
-    /// claims.
     pub rate_max_attempts: u64,
 }
 
@@ -136,50 +67,27 @@ impl Default for ClientOccupancyConfig {
     }
 }
 
-/// Stable failure categories of the occupancy flow boundary. Each occupancy
-/// category maps to exactly one wire error code of the central occupancy
-/// error-code table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientOccupancyErrorKind {
-    /// The request body violated the occupancy contract.
     InvalidRequest,
-    /// `cancel_and_release` was requested without the explicit confirmation.
     ConfirmationRequired,
-    /// The public Client ID does not name an occupancy-capable Client.
     ClientNotFound,
-    /// The Client is not reachable (offline, degraded, or did not answer the
-    /// offer within the bounded wait).
     ClientOffline,
-    /// The Client is locked by a local operator.
     ClientLocked,
-    /// The Client no longer accepts new occupancy.
     ClientConnectionsForbidden,
-    /// The user holds no active `use` grant on the Client.
     AccessDenied,
-    /// An active lease of another user occupies the Client.
     OccupiedByOther,
-    /// The Client has no free worker-session slot.
     CapacityExhausted,
-    /// The Device Client rejected the occupancy offer.
     OccupancyRejected,
-    /// The Device Client did not confirm the offer within the bounded wait;
-    /// the lease was rolled back to `released`.
     OccupancyAckTimeout,
-    /// The lease is `recovery_pending` and its recovery window is still open.
     OccupancyRecoveryPending,
-    /// The acting user may not perform the requested occupancy change.
     PermissionDenied,
-    /// No active lease matches the request.
     ResourceNotFound,
-    /// The active lease is in a state that refuses the requested change.
     WrongState,
-    /// One of the throttle dimensions is blocking further claims.
     RateLimited,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Secret-free occupancy flow failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientOccupancyError {
     kind: ClientOccupancyErrorKind,
@@ -222,54 +130,56 @@ impl fmt::Display for ClientOccupancyError {
 
 impl std::error::Error for ClientOccupancyError {}
 
-/// What one offline sweep observed, for diagnostics and tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflineSweepOutcome {
-    /// Client nodes the presence sweep projected to `offline`.
     pub swept_nodes: Vec<String>,
-    /// Occupancy leases projected to `recovery_pending` by this sweep.
     pub leases_pending_recovery: Vec<String>,
 }
 
-/// The signed-in user's occupancy surface over the Server's one product-state
-/// database directory. Like the connect flow, every operation opens and
-/// closes its own storage connection so concurrent flows never share state in
-/// memory and the bounded wait holds no database lock.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientOccupancyApplication {
     data_directory: PathBuf,
     config: ClientOccupancyConfig,
+    clock: Arc<dyn StandaloneApplicationClock>,
 }
 
-/// What one validated claim prepared before the bounded wait.
+impl fmt::Debug for ClientOccupancyApplication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientOccupancyApplication")
+            .field("data_directory", &self.data_directory)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 enum PreparedClaim {
-    /// The user already occupies the Client: an idempotent retry that returns
-    /// the current holder view without a second lease.
     Completed(Value),
-    /// A fresh `reserving` lease was created (or an own `reserving` lease
-    /// reused) and the flow must wait for its acknowledgement.
     AwaitAck { occupancy_lease_id: String },
 }
 
-/// The outcome of one poll of a pending occupancy offer.
 enum PollOutcome {
-    /// The offer is still unanswered; keep waiting.
     Pending,
-    /// The lease reached `occupied`; the flow returns the holder view.
     Completed,
-    /// The flow failed with the mapped domain error.
     Failed(ClientOccupancyError),
 }
 
 impl ClientOccupancyApplication {
-    /// Composes the occupancy application over one product-state directory.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the configuration violates its bounds.
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientOccupancyConfig,
+    ) -> Result<Self, ClientOccupancyError> {
+        Self::open_with_clock(
+            data_directory,
+            config,
+            Arc::new(SystemStandaloneApplicationClock),
+        )
+    }
+
+    pub fn open_with_clock(
+        data_directory: impl Into<PathBuf>,
+        config: &ClientOccupancyConfig,
+        clock: Arc<dyn StandaloneApplicationClock>,
     ) -> Result<Self, ClientOccupancyError> {
         if config.offer_wait.is_zero()
             || config.poll_interval.is_zero()
@@ -287,19 +197,10 @@ impl ClientOccupancyApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config: config.clone(),
+            clock,
         })
     }
 
-    /// Runs the full claim flow (plan 12.2) and resolves to the holder view
-    /// body of the `201` response (fresh occupation and idempotent replay
-    /// alike, mirroring the connect flow's retry semantics).
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable occupancy failure categories; `OccupancyAckTimeout`
-    /// also rolls the unanswered offer back to `released`, and
-    /// `OccupancyRejected` covers a Device Client that answered with
-    /// `client.occupancy.rejected`.
     pub async fn claim(
         &self,
         user_id: &str,
@@ -330,16 +231,6 @@ impl ClientOccupancyApplication {
         }
     }
 
-    /// Applies the holder's release request (plan 12.4). `release` releases
-    /// immediately when no worker session is active and moves the lease to
-    /// `draining` otherwise; `drain` and `cancel_and_release` carry the mode
-    /// downlink so the device finishes or cancels the active tasks;
-    /// `cancel_and_release` requires the explicit confirmation flag. A
-    /// release while the lease is still `reserving` withdraws the claim.
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable occupancy failure categories.
     pub fn release(&self, user_id: &str, request: &Value) -> Result<Value, ClientOccupancyError> {
         let Some(fields) = request.as_object() else {
             return Err(ClientOccupancyError::invalid_request());
@@ -367,7 +258,7 @@ impl ClientOccupancyApplication {
 
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released_lease, state_text) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -386,10 +277,6 @@ impl ClientOccupancyApplication {
                 ));
             }
             if lease.state == OccupancyLeaseState::Reserving {
-                // The offer never completed: this is the applicant withdrawal
-                // of contract 4, not a device release. No downlink frame is
-                // required; a late device ACK of the withdrawn offer fails its
-                // fencing judgement and changes nothing.
                 occupancy
                     .reject_offer(
                         &lease.occupancy_lease_id,
@@ -405,16 +292,8 @@ impl ClientOccupancyApplication {
                     "the occupancy is pending recovery; use force-release after the recovery deadline",
                 ));
             } else if lease.state == OccupancyLeaseState::Draining {
-                // Already draining: the first release request owns the mode,
-                // and only the device-reported drain completion ends the
-                // lease.
                 (lease, OccupancyLeaseState::Draining.as_str())
             } else {
-                // `occupied`: no active worker session releases immediately,
-                // any active session moves the lease to `draining` (plan
-                // 12.4). The device-reported running count is the skeleton
-                // input until the execution FLOW epic lands the durable task
-                // ledger.
                 let released = occupancy
                     .request_release(
                         &lease.occupancy_lease_id,
@@ -427,9 +306,6 @@ impl ClientOccupancyApplication {
             }
         };
         if released_lease.state == OccupancyLeaseState::Occupied {
-            // The holder release command always goes downlink stamped with
-            // the lease, its fencing token, and the mirror revision the
-            // device last confirmed (contract 4, plan 12.4).
             let mirror_revision_view =
                 client_mirror_revision_view(&self.data_directory, &node.client_node_id)
                     .map_err(|_| ClientOccupancyError::unavailable())?;
@@ -456,18 +332,6 @@ impl ClientOccupancyApplication {
         ))
     }
 
-    /// Applies the Owner-only safe cleanup of a `recovery_pending` lease
-    /// whose recovery window has passed (plan 12.5): the lease releases and a
-    /// strictly higher fencing token goes downlink as
-    /// `client.occupancy.force_fence` so the device rejects every command
-    /// stamped with any older token. The occupancy is never handed to a new
-    /// user automatically.
-    ///
-    /// # Errors
-    ///
-    /// Returns `WrongState` for a lease that is not `recovery_pending`,
-    /// `OccupancyRecoveryPending` while the recovery window is still open,
-    /// and `ResourceNotFound` when no active lease matches.
     pub fn force_release(&self, request: &Value) -> Result<Value, ClientOccupancyError> {
         let Some(fields) = request.as_object() else {
             return Err(ClientOccupancyError::invalid_request());
@@ -478,7 +342,7 @@ impl ClientOccupancyApplication {
         let public_client_id = required_client_id(fields.get("clientId"))?;
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released, new_token) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -508,17 +372,11 @@ impl ClientOccupancyApplication {
             let released = occupancy
                 .force_release(&lease.occupancy_lease_id, &now)
                 .map_err(|_| ClientOccupancyError::unavailable())?;
-            // The node is offline while its lease is recovery pending, so no
-            // claim can interleave here: the freshly minted token is strictly
-            // higher than every token the device could still hold.
             let new_token = occupancy
                 .mint_fencing_token()
                 .map_err(|_| ClientOccupancyError::unavailable())?;
             (released, new_token)
         };
-        // The device mirror revision the fence is computed against: the
-        // device refuses any other stamp and would keep honouring the old
-        // token.
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id)
                 .map_err(|_| ClientOccupancyError::unavailable())?;
@@ -546,14 +404,6 @@ impl ClientOccupancyApplication {
         }))
     }
 
-    /// Projects the occupancy state of one Client for the acting user
-    /// (plan §16.4): the holder receives the full view, every other user only
-    /// the privacy projection that never discloses the holder identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ClientNotFound` for an unknown or unenrolled Client and
-    /// `Unavailable` for storage failure.
     pub fn status(
         &self,
         user_id: &str,
@@ -577,9 +427,6 @@ impl ClientOccupancyApplication {
             }));
         };
         if lease.holder_user_id != user_id {
-            // Privacy projection: a non-holder learns that the Client is in
-            // use and nothing else — never the holder identity, never lease
-            // or task details (plan §16.4).
             return Ok(json!({
                 "schemaVersion": SUPPORTED_SCHEMA_VERSION,
                 "clientId": node.public_client_id,
@@ -589,17 +436,6 @@ impl ClientOccupancyApplication {
         Ok(holder_view_json(&node, &lease))
     }
 
-    /// Runs one offline sweep integration step: projects devices whose last
-    /// accepted heartbeat is at or before `cutoff` to `offline`, then
-    /// projects every `occupied` or `draining` lease of those devices to
-    /// `recovery_pending` with a `now + recovery_window` deadline (plan
-    /// 12.5). Past the deadline nothing is released automatically.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the presence sweep hits a storage failure; an individual
-    /// lease that cannot be marked (for example one released concurrently) is
-    /// skipped, never fails the sweep.
     pub fn run_offline_sweep(
         &self,
         cutoff: &Instant,
@@ -627,7 +463,7 @@ impl ClientOccupancyApplication {
                 continue;
             }
             if occupancy
-                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline)
+                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline, now)
                 .is_ok()
             {
                 leases_pending_recovery.push(lease.occupancy_lease_id);
@@ -639,28 +475,13 @@ impl ClientOccupancyApplication {
         })
     }
 
-    /// Runs one production sweep step for the server-level background task:
-    /// the cutoff and now derive from the application clock and the
-    /// configured heartbeat staleness window.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the [`Self::run_offline_sweep`] failures.
     pub fn run_server_sweep(&self) -> Result<OfflineSweepOutcome, ClientOccupancyError> {
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let cutoff = offset_instant(&now, -duration_millis(self.config.heartbeat_stale_after))
             .ok_or_else(ClientOccupancyError::unavailable)?;
         self.run_offline_sweep(&cutoff, &now)
     }
 
-    /// Reports the recovery-overdue projection of one Client: whether its
-    /// active `recovery_pending` lease has passed its recovery deadline and
-    /// is therefore eligible for the explicit Owner safe cleanup. Nothing is
-    /// released automatically.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the storage lookup fails.
     pub fn recovery_overdue(&self, public_client_id: &str) -> Result<bool, ClientOccupancyError> {
         if !is_public_client_id(public_client_id) {
             return Err(ClientOccupancyError::invalid_request());
@@ -677,16 +498,13 @@ impl ClientOccupancyApplication {
         if lease.state != OccupancyLeaseState::RecoveryPending {
             return Ok(false);
         }
-        let now = now_instant();
+        let now = self.clock.now_instant();
         Ok(lease
             .recovery_deadline_at
             .as_ref()
             .is_some_and(|deadline| now.0.as_str() >= deadline.0.as_str()))
     }
 
-    /// Validates the claim request and durable preconditions, creates the
-    /// `reserving` lease through the atomic five-condition gate, and
-    /// enqueues the `client.occupancy.offer` downlink frame.
     #[allow(clippy::too_many_lines)]
     fn prepare_claim(
         &self,
@@ -704,13 +522,13 @@ impl ClientOccupancyApplication {
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
 
-        // Claim throttling: per user and per target Client, against the same
-        // fixed window shape as the connect flow.
         {
             let mut connect = ConnectCodeService::new(&mut storage);
-            let anchor =
-                connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-                    .map_err(|_| ClientOccupancyError::unavailable())?;
+            let anchor = connect_attempt_window_anchor(
+                &self.clock.now_instant(),
+                self.config.rate_window_seconds,
+            )
+            .map_err(|_| ClientOccupancyError::unavailable())?;
             for (dimension, subject) in [
                 (AttemptDimension::User, user_id),
                 (AttemptDimension::Client, node.client_node_id.as_str()),
@@ -732,8 +550,6 @@ impl ClientOccupancyApplication {
             }
         }
 
-        // An own active lease is an idempotent replay or a waitable offer;
-        // any other active lease is the occupancy conflict of the gate.
         {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             if let Some(lease) = occupancy
@@ -774,7 +590,7 @@ impl ClientOccupancyApplication {
             }
         }
 
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let claim = OccupancyClaim::try_new(
             generate_prefixed_id("ocl_").map_err(|_| ClientOccupancyError::unavailable())?,
             node.client_node_id.clone(),
@@ -794,8 +610,6 @@ impl ClientOccupancyApplication {
                 }
             }
         };
-        // The offer is computed against the mirror revision the device last
-        // confirmed: the device refuses any other stamp.
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id)
                 .map_err(|_| ClientOccupancyError::unavailable())?;
@@ -824,8 +638,6 @@ impl ClientOccupancyApplication {
         })
     }
 
-    /// Reads the durable lease state once and drives the claim to its next
-    /// transition (plan 12.2, contract 9.3).
     fn poll_claim(
         &self,
         user_id: &str,
@@ -858,9 +670,6 @@ impl ClientOccupancyApplication {
         }
     }
 
-    /// Terminates the unanswered offer as `released` with the `ack_timeout`
-    /// reason (contract 4: `reserving` is never stable) and feeds the fixed
-    /// claim throttle.
     fn roll_back_unanswered_offer(
         &self,
         user_id: &str,
@@ -881,7 +690,7 @@ impl ClientOccupancyApplication {
                         occupancy_lease_id,
                         lease.fencing_token,
                         OccupancyReleaseReason::AckTimeout,
-                        &now_instant(),
+                        &self.clock.now_instant(),
                     )
                     .map_err(|_| ClientOccupancyError::unavailable())?;
             }
@@ -890,7 +699,6 @@ impl ClientOccupancyApplication {
         self.record_claim_failures(user_id, &client_node_id)
     }
 
-    /// Builds the full holder view of one lease (plan §16.4 holder side).
     fn holder_view(
         &self,
         user_id: &str,
@@ -920,15 +728,16 @@ impl ClientOccupancyApplication {
         Ok(holder_view_json(&node, &lease))
     }
 
-    /// Records one failed claim attempt in both throttle dimensions (user and
-    /// target Client), mirroring the connect flow's fixed-window throttle.
     fn record_claim_failures(
         &self,
         user_id: &str,
         client_node_id: &str,
     ) -> Result<(), ClientOccupancyError> {
-        let anchor = connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-            .map_err(|_| ClientOccupancyError::unavailable())?;
+        let anchor = connect_attempt_window_anchor(
+            &self.clock.now_instant(),
+            self.config.rate_window_seconds,
+        )
+        .map_err(|_| ClientOccupancyError::unavailable())?;
         let mut storage = self.open_storage()?;
         let mut connect = ConnectCodeService::new(&mut storage);
         for (dimension, subject) in [
@@ -969,9 +778,6 @@ impl ClientOccupancyApplication {
     }
 }
 
-/// Whether a claim gate failure feeds the fixed-window claim throttle.
-/// Storage-level undecided failures and unknown-client lookups do not count
-/// as failed claims.
 const fn claim_gate_failure_is_throttled(kind: ClientOccupancyServiceErrorKind) -> bool {
     !matches!(
         kind,
@@ -985,8 +791,6 @@ const fn claim_gate_failure_is_throttled(kind: ClientOccupancyServiceErrorKind) 
     )
 }
 
-/// Maps one atomic claim gate failure onto the central occupancy error-code
-/// taxonomy.
 fn claim_gate_error(kind: ClientOccupancyServiceErrorKind) -> ClientOccupancyError {
     match kind {
         ClientOccupancyServiceErrorKind::UnknownClientNode => ClientOccupancyError::new(
@@ -1021,8 +825,6 @@ fn claim_gate_error(kind: ClientOccupancyServiceErrorKind) -> ClientOccupancyErr
     }
 }
 
-/// Builds the holder view body of one active lease: lease identity, fencing
-/// token, capacity, and the recovery deadline while it is pending.
 fn holder_view_json(node: &ClientNodeRecord, lease: &OccupancyLeaseRecord) -> Value {
     json!({
         "schemaVersion": SUPPORTED_SCHEMA_VERSION,
@@ -1040,7 +842,6 @@ fn holder_view_json(node: &ClientNodeRecord, lease: &OccupancyLeaseRecord) -> Va
     })
 }
 
-/// Builds the release response body.
 fn release_body(
     node: &ClientNodeRecord,
     occupancy: &str,
@@ -1056,7 +857,6 @@ fn release_body(
     })
 }
 
-/// Maps the wire release mode onto its display text.
 const fn mode_text(mode: ClientOccupancyReleaseMode) -> &'static str {
     match mode {
         ClientOccupancyReleaseMode::Immediate => "release",
@@ -1065,11 +865,6 @@ const fn mode_text(mode: ClientOccupancyReleaseMode) -> &'static str {
     }
 }
 
-/// Builds the occupancy fencing stamp every occupancy downlink command
-/// carries (contract `client-control-port-v1.md`, `C + L`). The stamp's
-/// `expectedRevision` is the Server's current view of the Device Client's
-/// durable occupancy mirror revision — the device refuses any stamp whose
-/// revision is not exactly its local mirror revision.
 fn occupancy_stamp(
     expected_revision: u64,
     occupancy_lease_id: &str,
@@ -1086,13 +881,6 @@ fn occupancy_stamp(
     }
 }
 
-// ── Server-side view of the Device Client occupancy mirror revision ──────
-
-/// Sidecar database that tracks, per client node, the Server's view of the
-/// Device Client's durable occupancy mirror revision (the same per-concern
-/// sidecar pattern as the auth-session store and the event hub). The client
-/// exchange observation writes every revision fact the device reports; the
-/// occupancy flows read the view when they stamp a downlink command.
 const MIRROR_VIEW_DATABASE_FILE: &str = "client-occupancy-mirror.sqlite3";
 
 const MIRROR_VIEW_SCHEMA: &str = r"
@@ -1104,17 +892,12 @@ CREATE TABLE IF NOT EXISTS client_occupancy_mirror_revisions (
 );
 ";
 
-/// Failure of the mirror-revision view store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MirrorRevisionViewError {
-    /// The client node id is not canonical.
     InvalidNode,
-    /// The sidecar database failed.
     Storage,
 }
 
-/// Reads the Server's current view of one device's occupancy mirror
-/// revision; zero before the device reported any mirror fact.
 pub(crate) fn client_mirror_revision_view(
     data_directory: &Path,
     client_node_id: &str,
@@ -1139,10 +922,6 @@ pub(crate) fn client_mirror_revision_view(
         .map(Option::unwrap_or_default)
 }
 
-/// Records one mirror-revision fact the device reported (the ack's
-/// `mirrorRevision`, a rejection's current revision, or a command ack's
-/// effective revision). The view only advances: the device mirror never
-/// rolls back, so a late lower report never regresses the stamp source.
 pub(crate) fn observe_client_mirror_revision(
     data_directory: &Path,
     client_node_id: &str,
@@ -1169,25 +948,104 @@ pub(crate) fn observe_client_mirror_revision(
     Ok(())
 }
 
-/// Opens the sidecar database and ensures its schema (per-call connection,
-/// like every other occupancy flow storage access).
 fn open_mirror_view_connection(
     data_directory: &Path,
 ) -> Result<rusqlite::Connection, MirrorRevisionViewError> {
     std::fs::create_dir_all(data_directory).map_err(|_| MirrorRevisionViewError::Storage)?;
-    let connection = rusqlite::Connection::open(data_directory.join(MIRROR_VIEW_DATABASE_FILE))
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    connection
-        .execute_batch(MIRROR_VIEW_SCHEMA)
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    Ok(connection)
+    let database = data_directory.join(MIRROR_VIEW_DATABASE_FILE);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(MirrorRevisionViewError::Storage);
+        }
+        let initialized = SqliteStorage::open_sidecar_until(&database, deadline, |connection| {
+            initialize_mirror_view_connection(connection, deadline)
+        });
+        match initialized {
+            Ok(connection) => {
+                return Ok(connection);
+            }
+            Err(MirrorInitializationError::Storage) => {
+                return Err(MirrorRevisionViewError::Storage);
+            }
+            Err(MirrorInitializationError::Busy) => {
+                #[cfg(test)]
+                observe_mirror_init_retry_for_test();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(MirrorRevisionViewError::Storage);
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+            }
+        }
+    }
 }
 
-/// Enqueues one `client.occupancy.*` downlink frame into the durable outbox
-/// at the next free stream position.
+#[cfg(test)]
+type MirrorInitRetryObserver = Box<dyn FnMut()>;
+
+#[cfg(test)]
+thread_local! {
+    static MIRROR_INIT_RETRY_OBSERVER: std::cell::RefCell<Option<MirrorInitRetryObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_mirror_init_retry_for_test() {
+    MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer();
+        }
+    });
+}
+
+enum MirrorInitializationError {
+    Busy,
+    Storage,
+}
+
+impl From<winwincode_storage::StorageError> for MirrorInitializationError {
+    fn from(_: winwincode_storage::StorageError) -> Self {
+        Self::Storage
+    }
+}
+
+fn initialize_mirror_view_connection(
+    connection: &rusqlite::Connection,
+    deadline: std::time::Instant,
+) -> Result<(), MirrorInitializationError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if mode != "wal" {
+        return Err(MirrorInitializationError::Storage);
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
+    connection
+        .execute_batch(MIRROR_VIEW_SCHEMA)
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if std::time::Instant::now() >= deadline {
+        return Err(MirrorInitializationError::Storage);
+    }
+    Ok(())
+}
+
+fn mirror_initialization_error(error: &rusqlite::Error) -> MirrorInitializationError {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+        MirrorInitializationError::Busy
+    } else {
+        MirrorInitializationError::Storage
+    }
+}
+
 fn enqueue_occupancy_frame(
     storage: &mut SqliteStorage,
     node: &ClientNodeRecord,
@@ -1248,7 +1106,6 @@ fn enqueue_occupancy_frame(
     Ok(())
 }
 
-/// Reads one required public Client ID: 9-12 ASCII digits.
 fn required_client_id(value: Option<&Value>) -> Result<String, ClientOccupancyError> {
     let text = value
         .and_then(Value::as_str)
@@ -1259,12 +1116,10 @@ fn required_client_id(value: Option<&Value>) -> Result<String, ClientOccupancyEr
     Ok(text.to_owned())
 }
 
-/// Whether `value` carries the 9-12 digit public Client ID shape.
 fn is_public_client_id(value: &str) -> bool {
     (9..=12).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Maps the registry presence onto the three-value display presence (§12.1).
 const fn presence_text(record: &ClientNodeRecord) -> &'static str {
     match record.presence_state {
         ClientPresenceState::Online | ClientPresenceState::Degraded => "online",
@@ -1275,20 +1130,10 @@ const fn presence_text(record: &ClientNodeRecord) -> &'static str {
     }
 }
 
-/// The canonical application instant the boundary shares across one flow.
-fn now_instant() -> Instant {
-    use crate::application::StandaloneApplicationClock as _;
-    crate::application::SystemStandaloneApplicationClock.now_instant()
-}
-
-/// Signed millisecond amount of one duration, clamped to the `i64` range.
 fn duration_millis(duration: std::time::Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Offsets one canonical millisecond application instant by a signed
-/// millisecond amount, preserving the fixed `YYYY-MM-DDTHH:MM:SS.mmmZ` shape
-/// the durable lexicographic comparisons rely on.
 pub(crate) fn offset_instant(instant: &Instant, offset_millis: i64) -> Option<Instant> {
     let bytes = instant.0.as_bytes();
     if bytes.len() != 24
@@ -1339,7 +1184,6 @@ pub(crate) fn offset_instant(instant: &Instant, offset_millis: i64) -> Option<In
     )))
 }
 
-/// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
 const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -1350,7 +1194,6 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// Civil date for days since the Unix epoch (Howard Hinnant's algorithm).
 const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
@@ -1373,10 +1216,8 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, ClientOccupancyError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| ClientOccupancyError::unavailable())?;
@@ -1420,6 +1261,119 @@ mod tests {
         format!("cnd_{suffix_digit}{}", "A".repeat(25))
     }
 
+    fn mirror_writer_fixture(label: &str) -> (PathBuf, rusqlite::Connection) {
+        let directory = view_directory(label);
+        std::fs::create_dir_all(&directory).expect("isolated mirror directory");
+        let writer = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))
+            .expect("real SQLite writer");
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("initial rollback journal mode");
+        assert_eq!(
+            mode, "delete",
+            "the mirror WAL/schema must not be preheated"
+        );
+        writer
+            .execute_batch(
+                "CREATE TABLE adxi_mirror_busy_fixture(value INTEGER NOT NULL);
+                 BEGIN IMMEDIATE;
+                 INSERT INTO adxi_mirror_busy_fixture VALUES(1);",
+            )
+            .expect("hold a real RESERVED writer lock");
+        assert!(!writer.is_autocommit());
+        (directory, writer)
+    }
+
+    #[test]
+    fn the_mirror_revision_view_recovers_after_real_init_busy() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-recovery");
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_directory = directory.clone();
+        let worker = std::thread::spawn(move || {
+            let mut gate = Some((arrived_tx, resume_rx));
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    if let Some((arrived, resume)) = gate.take() {
+                        arrived
+                            .send(())
+                            .expect("actual Busy reached after connection drop");
+                        resume
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .expect("bounded test release after writer commit");
+                    }
+                }));
+            });
+            client_mirror_revision_view(&worker_directory, &canonical_node('B'))
+        });
+        let arrived = arrived_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let committed = writer.execute_batch("COMMIT");
+        let resumed = resume_tx.send(());
+        let joined = worker.join();
+        drop(writer);
+        let persisted = (|| {
+            let connection = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))?;
+            let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM adxi_mirror_busy_fixture WHERE value=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            Ok::<_, rusqlite::Error>((mode, count, integrity))
+        })();
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            arrived.is_ok(),
+            "the native initialization must actually observe Busy"
+        );
+        committed.expect("no failed initializer connection blocks writer commit");
+        resumed.expect("resume the fresh native initialization attempt");
+        assert_eq!(joined.expect("native initializer thread"), Ok(0));
+        assert_eq!(
+            persisted.expect("reopen real database"),
+            ("wal".to_owned(), 1, "ok".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_mirror_revision_view_stops_init_busy_at_its_deadline() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-deadline");
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_retries = retries.clone();
+        let worker_directory = directory.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    observed_retries.fetch_add(1, Ordering::Relaxed);
+                }));
+            });
+            let result = client_mirror_revision_view(&worker_directory, &canonical_node('B'));
+            done_tx.send(()).expect("native initialization returned");
+            result
+        });
+        let returned_while_locked = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let released = writer.execute_batch("ROLLBACK");
+        let joined = worker.join();
+        drop(writer);
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            returned_while_locked.is_ok(),
+            "initialization must stop while the writer remains held"
+        );
+        released.expect("release held native writer");
+        assert!(
+            retries.load(Ordering::Relaxed) > 1,
+            "multiple real Busy attempts must precede exhaustion"
+        );
+        assert_eq!(
+            joined.expect("native initializer thread"),
+            Err(MirrorRevisionViewError::Storage)
+        );
+    }
+
     #[test]
     fn the_mirror_revision_view_starts_at_zero_and_only_advances() {
         let directory = view_directory("advance");
@@ -1435,14 +1389,11 @@ mod tests {
             client_mirror_revision_view(&directory, &node).expect("view read"),
             1
         );
-        // A later report names the advanced revision.
         observe_client_mirror_revision(&directory, &node, 3, &now).expect("observe");
         assert_eq!(
             client_mirror_revision_view(&directory, &node).expect("view read"),
             3
         );
-        // The device mirror never rolls back, so a late lower report (an
-        // interleaved older frame) must not regress the stamp source.
         observe_client_mirror_revision(&directory, &node, 2, &now).expect("observe");
         assert_eq!(
             client_mirror_revision_view(&directory, &node).expect("view read"),
@@ -1501,13 +1452,11 @@ mod tests {
             offset_instant(&instant, -1_000).expect("negative offset"),
             Instant("2026-09-04T11:59:59.000Z".to_owned())
         );
-        // A year boundary rolls over correctly.
         let eve = Instant("2026-12-31T23:59:59.999Z".to_owned());
         assert_eq!(
             offset_instant(&eve, 1).expect("rollover"),
             Instant("2027-01-01T00:00:00.000Z".to_owned())
         );
-        // An offset that reaches before the epoch fails closed.
         assert_eq!(offset_instant(&instant, -2_000_000_000_000_000), None);
         assert_eq!(
             offset_instant(&Instant("not-an-instant".to_owned()), 1),

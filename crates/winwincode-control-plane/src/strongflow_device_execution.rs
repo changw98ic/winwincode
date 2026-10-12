@@ -1,43 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `StrongFlow` role-to-Device `WorkerSession` routing (`FLOW-100.5`).
-//!
-//! Planner, Executor, Reviewer, and Verifier keep their independent roles
-//! and read/write permissions, yet every role's `WorkRun` execution follows the
-//! same Device scheduling base as Quick Chat: when the Delivery `WorkRun`
-//! that a `workrun.start` just committed carries a durable launch anchor —
-//! a `WorkerLaunchGrant` minted for exactly that `WorkRun` — the `WorkRun`'s
-//! queued `ExecutionJob` executes on the Device `WorkerSession` that grant
-//! launched instead of the supervised local worker. A `WorkRun` without an
-//! anchor keeps the local execution path unchanged.
-//!
-//! The per-WorkRun anchor is what preserves the role boundaries on one shared
-//! Device: each role (and each new attempt, which always opens a new `WorkRun`
-//! run) is launched as its own `WorkerSession`, one launch grant per
-//! session, so distinct roles can never reuse another role's ``CodexThread``.
-//! The role travels with the dispatch: the facts attachment stamps the
-//! job's `executionProfile` onto the durable reservation facts, so every
-//! device-owned job row names the exact role, worker session, and grant it
-//! executes against.
-//!
-//! The routing steps mirror the Quick Chat device dispatch path exactly:
-//!
-//! 1. the anchor grant's `WorkerSession` is bound once in the
-//!    `DeviceExecutionBinding` ledger (identity join from launch material to
-//!    durable `ExecutionPort` identity);
-//! 2. the acting user is judged by the FLOW-100.3 permission gate against
-//!    the anchor's occupancy and repository visibility — a denial routes
-//!    nothing;
-//! 3. the `WorkRun` job is reserved under the anchor holder's admission identity
-//!    and receives its device facts through the same ledger, so the local
-//!    queue exclusion (the repository scheduler and the local driver never
-//!    claim a job carrying device facts) applies unchanged.
-//!
-//! Every step is idempotent: replaying the same `workrun.start` finds the
-//! durable receipts and changes nothing. The anchor stays a permission fact
-//! only: a revoked or expired grant refuses new dispatches instead of
-//! routing work to a dead worker session.
-
 use std::fmt;
 
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkRunId};
@@ -45,10 +7,9 @@ use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWrite
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
     DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionAdmissionBoundary,
-    ExecutionAdmissionErrorCode, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
-    ExecutionJobRecord, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationState, ProductStateStorage, SqliteStorage,
-    WorkerPoolId,
+    ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionQueueScope,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationState,
+    ProductStateStorage, SqliteStorage, WorkerPoolId,
 };
 
 use crate::client_launch_grant::{
@@ -60,34 +21,8 @@ use crate::device_session_gate::{
 };
 use crate::quick_device_execution::derived_id;
 
-/// Worker pool boundary of `StrongFlow` device-dispatched execution. Distinct
-/// from the Quick device pool and the supervised local pool so reservation
-/// accounting of every execution surface stays separable.
 pub const STRONGFLOW_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000F7";
 
-/// Admission bounds of the `StrongFlow` device dispatch reservation. The
-/// boundaries shared with the supervised local driver and the Quick device
-/// dispatch (organization, project, repository, product session, delivery)
-/// must repeat those paths' policy values exactly — admission policies are
-/// first-writer-wins and refuse a different reconfiguration. The concurrency
-/// headroom for concurrently dispatched roles lives on the `StrongFlow` worker
-/// pool boundary alone, which no other path configures.
-const STRONGFLOW_DEVICE_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
-    max_concurrent: 1,
-    max_queued: 10_000,
-    token_budget: None,
-    cost_budget_microunits: None,
-    max_runtime_millis: Some(604_800_000),
-};
-
-/// The concurrency capacity of the `StrongFlow` device worker pool itself:
-/// the flow's roles may hold reservations at the same time, each on its own
-/// `WorkerSession`, within the Client's worker-session capacity.
-const STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT: u64 = 4;
-
-/// The canonical Delivery execution roles a `WorkRun` job can dispatch as. A job
-/// whose profile is not in this set is not a `StrongFlow` role execution and
-/// keeps the local path.
 const STRONGFLOW_DEVICE_ROLES: [&str; 8] = [
     "requirements",
     "solution",
@@ -99,32 +34,18 @@ const STRONGFLOW_DEVICE_ROLES: [&str; 8] = [
     "remediator",
 ];
 
-/// Stable `StrongFlow` device routing failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StrongflowDeviceDispatchErrorKind {
-    /// A command input violated the canonical identity bounds.
     InvalidInput,
-    /// The `WorkRun`'s anchor launch grant is revoked or expired: the device
-    /// worker session it launched can no longer execute work.
     AnchorNotLive,
-    /// The anchor's worker session already released its execution binding.
     WorkerSessionEnded,
-    /// The FLOW-100.3 permission gate denied the acting user; nothing was
-    /// routed. The denial carries the central wire code and HTTP status.
     GateDenied,
-    /// The `WorkRun` job is already dispatched to a different launch or role, or
-    /// its admission state contradicts the dispatch.
     DispatchConflict,
-    /// Execution admission rejected the reservation for an ordinary,
-    /// temporary capacity reason; a retry may succeed.
     AdmissionUnavailable,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free `StrongFlow` device routing failure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrongflowDeviceDispatchError {
     kind: StrongflowDeviceDispatchErrorKind,
@@ -138,8 +59,6 @@ impl StrongflowDeviceDispatchError {
         self.kind
     }
 
-    /// The permission gate denial behind a [`Self::kind`] of
-    /// [`StrongflowDeviceDispatchErrorKind::GateDenied`].
     #[must_use]
     pub const fn gate_denial(&self) -> Option<&DeviceSessionGateDenial> {
         self.gate_denial.as_ref()
@@ -185,33 +104,12 @@ impl fmt::Display for StrongflowDeviceDispatchError {
 
 impl std::error::Error for StrongflowDeviceDispatchError {}
 
-/// The durable dispatch decision of one device-anchored `StrongFlow` `WorkRun`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrongflowDeviceDispatch {
-    /// The `WorkerSession` binding the `WorkRun`'s launch material produced.
     pub binding: DeviceExecutionBindingRecord,
-    /// The `WorkRun` job's device facts: the identity match that routes the role
-    /// to the launched device worker and excludes it from local claims. The
-    /// `role` field names the execution profile the facts were stamped with.
     pub facts: DeviceExecutionReservationFacts,
 }
 
-/// Routes the committed Codex job of one Delivery `WorkRun` to its Device
-/// `WorkerSession` when the `WorkRun` carries a durable launch anchor.
-///
-/// `actor_user_id` is the authenticated browser actor of the delivery
-/// command; service and system actors (`None`) never route to a device.
-///
-/// Returns `Ok(None)` when the `WorkRun` has no active job, no routable role, or
-/// no anchor: the `WorkRun` keeps the supervised local execution path and
-/// nothing durable changes. Any error leaves the queued `WorkRun` job untouched
-/// (its device dispatch simply did not happen yet), so an exact command
-/// replay can complete it later.
-///
-/// # Errors
-///
-/// Returns the stable routing failure categories; nothing is decided on a
-/// storage failure.
 pub fn dispatch_work_run_to_device_worker(
     storage: &mut SqliteStorage,
     actor_user_id: Option<&str>,
@@ -219,24 +117,18 @@ pub fn dispatch_work_run_to_device_worker(
     now: &Instant,
 ) -> Result<Option<StrongflowDeviceDispatch>, StrongflowDeviceDispatchError> {
     let Some(actor_user_id) = actor_user_id else {
-        // Service and system actors stay on the supervised local path.
         return Ok(None);
     };
     let Some(record) = load_active_work_run_job(storage, work_run_id)? else {
-        // No active WorkRun job (human-only work, or the WorkRun already settled):
-        // nothing is routable.
         return Ok(None);
     };
     let job = decode_execution_job(&record)?;
     let role = job.execution_profile.as_str();
     if !STRONGFLOW_DEVICE_ROLES.contains(&role) {
-        // Not a StrongFlow role execution: keep the local path unchanged.
         return Ok(None);
     }
     let Some(anchor) = resolve_work_run_anchor(storage, actor_user_id, &record, work_run_id)?
     else {
-        // No device anchor: the WorkRun is not a device WorkRun and keeps the
-        // supervised local execution path unchanged.
         return Ok(None);
     };
     if let Some(target) = job
@@ -256,9 +148,6 @@ pub fn dispatch_work_run_to_device_worker(
     Ok(Some(StrongflowDeviceDispatch { binding, facts }))
 }
 
-/// Loads the one active job of the `WorkRun` and checks its identity.
-///
-/// Returns `Ok(None)` when the `WorkRun` has no active job.
 fn load_active_work_run_job(
     storage: &mut SqliteStorage,
     work_run_id: &WorkRunId,
@@ -277,19 +166,12 @@ fn load_active_work_run_job(
     Ok(Some(record))
 }
 
-/// Resolves one `WorkRun`'s device anchor behind the permission gate: the
-/// anchor's product session must match the job's scope, the grant must still
-/// be live, and the acting user must pass the FLOW-100.3 gate. Returns
-/// `Ok(None)` when the `WorkRun` carries no launch anchor.
 fn resolve_work_run_anchor(
     storage: &mut SqliteStorage,
     actor_user_id: &str,
     record: &ExecutionJobRecord,
     work_run_id: &WorkRunId,
 ) -> Result<Option<WorkerLaunchGrantRecord>, StrongflowDeviceDispatchError> {
-    // The WorkRun's device anchor is its own launch grant, whatever its
-    // lifecycle state: the anchor proves the role was bound to device
-    // execution and stays the permission anchor after the grant ends.
     let existing = DeviceExecutionBindingService::new(storage)
         .facts(&record.job_id.0)
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
@@ -325,9 +207,6 @@ fn resolve_work_run_anchor(
             "the WorkRun's launch anchor grant can no longer execute work",
         ));
     }
-    // The FLOW-100.3 gate decides before anything is routed: only the
-    // current occupancy holder of the anchor's client, with the anchor's
-    // repository binding still visible, may dispatch to this device.
     authorize_device_session(
         storage,
         &DeviceSessionGateInput {
@@ -340,9 +219,6 @@ fn resolve_work_run_anchor(
     Ok(Some(anchor))
 }
 
-/// Binds the anchor's worker session once (idempotent) and returns the
-/// binding: the launch material becomes the device session's durable
-/// `ExecutionPort` identity.
 fn ensure_work_run_binding(
     storage: &mut SqliteStorage,
     anchor: &WorkerLaunchGrantRecord,
@@ -368,8 +244,6 @@ fn ensure_work_run_binding(
         .binding)
 }
 
-/// Reserves the `WorkRun` job's admission and attaches its device facts once
-/// (idempotent), with the `WorkRun`'s role stamped on them.
 fn ensure_work_run_facts(
     storage: &mut SqliteStorage,
     record: &ExecutionJobRecord,
@@ -377,9 +251,6 @@ fn ensure_work_run_facts(
     role: &str,
     now: &Instant,
 ) -> Result<DeviceExecutionReservationFacts, StrongflowDeviceDispatchError> {
-    // An already attached job is either this exact dispatch (idempotent
-    // repeat) or a routing conflict this lane refuses instead of silently
-    // re-anchoring committed work.
     if let Some(existing) = DeviceExecutionBindingService::new(storage)
         .facts(record.job_id.0.as_str())
         .map_err(|_| StrongflowDeviceDispatchError::storage())?
@@ -403,9 +274,6 @@ fn ensure_work_run_facts(
             )
         });
     }
-    // The dispatch reservation runs under the anchor holder's admission
-    // identity, so the durable device facts join the reservation user to the
-    // grant holder exactly.
     let job = decode_execution_job(record)?;
     ensure_device_admission_reservation(storage, record, &job, anchor)?;
     let attachment = DeviceExecutionFactsAttachment::try_new_with_role(
@@ -421,9 +289,6 @@ fn ensure_work_run_facts(
         .facts)
 }
 
-/// Echoes every anchor grant field into the validated bind command with
-/// stable derived identities, so a repeated dispatch replays the original
-/// receipt instead of conflicting.
 fn bind_command(
     anchor: &WorkerLaunchGrantRecord,
 ) -> Result<DeviceExecutionBindingIssuance, StrongflowDeviceDispatchError> {
@@ -450,9 +315,6 @@ fn bind_command(
     .map_err(|error| StrongflowDeviceDispatchError::invalid_input(error.to_string()))
 }
 
-/// Reserves the `WorkRun` job's execution admission under the `StrongFlow` device
-/// worker pool and the anchor holder's identity when no reservation exists
-/// yet.
 fn ensure_device_admission_reservation(
     storage: &mut SqliteStorage,
     record: &ExecutionJobRecord,
@@ -463,6 +325,11 @@ fn ensure_device_admission_reservation(
     let mut admission = storage
         .execution_admission()
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
+    for boundary in admission_boundaries(&record.scope) {
+        admission
+            .configure_runtime_policy(boundary, runtime_limit_millis.is_some())
+            .map_err(|error| admission_error(&error))?;
+    }
     if let Some(existing) = admission
         .load_reservation_by_job(&record.job_id)
         .map_err(|_| StrongflowDeviceDispatchError::storage())?
@@ -476,22 +343,6 @@ fn ensure_device_admission_reservation(
                 ))
             }
         };
-    }
-    for boundary in admission_boundaries(&record.scope) {
-        // The pool boundary carries the multi-role concurrency headroom; the
-        // shared boundaries repeat the exact policy every path configures.
-        let mut limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
-            ExecutionAdmissionLimits {
-                max_concurrent: STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT,
-                ..STRONGFLOW_DEVICE_ADMISSION_LIMITS
-            }
-        } else {
-            STRONGFLOW_DEVICE_ADMISSION_LIMITS
-        };
-        limits.max_runtime_millis = runtime_limit_millis.and(limits.max_runtime_millis);
-        admission
-            .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
-            .map_err(|error| admission_error(&error))?;
     }
     let request = ExecutionReservationRequest {
         scope: record.scope.clone(),
@@ -558,9 +409,6 @@ fn job_runtime_limit_millis(
 
 fn repository_access(job: &ExecutionJob, job_id: &ExecutionJobId) -> ExecutionRepositoryAccess {
     match job.workspace.write_mode {
-        // A read-only role (planner, reviewer, verifier) stays read-only on
-        // the device; only writer roles receive an isolated candidate
-        // worktree, so Reviewer/Verifier can never write the Candidate.
         ExecutionWorkspaceWriteMode::ReadOnly => ExecutionRepositoryAccess::ReadOnly,
         ExecutionWorkspaceWriteMode::Candidate => ExecutionRepositoryAccess::IsolatedWrite {
             worktree_key: format!("job-{}", job_id.0),
@@ -602,9 +450,6 @@ fn admission_boundaries(scope: &ExecutionQueueScope) -> Vec<ExecutionAdmissionBo
     boundaries
 }
 
-/// Ordinary admission backpressure defers the dispatch instead of failing
-/// the boundary: the `WorkRun` job stays queued and an exact retry re-runs the
-/// routing.
 fn admission_error(
     error: &winwincode_storage::ExecutionAdmissionError,
 ) -> StrongflowDeviceDispatchError {
@@ -644,8 +489,6 @@ mod tests {
         assert_eq!(binding.len(), 4 + 26);
         assert!(binding.starts_with("deb_"));
         assert_eq!(binding, derived_id("deb_", BINDING_ID_NAMESPACE, "wlg_A"));
-        // A distinct namespace never collides with the Quick dispatch
-        // identities for the same anchor material.
         let quick_binding = derived_id("deb_", b"winwincode.quick-device-binding.v1", "wlg_A");
         assert_ne!(binding, quick_binding);
         let facts = derived_id("req_", FACTS_REQUEST_NAMESPACE, "job_A");

@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::WireCellId;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::types::DeferredWait;
 use super::types::DriverEvent;
@@ -26,6 +28,7 @@ pub(super) struct RequestTracker {
     unclaimed_executes: HashMap<RequestId, UnclaimedExecute>,
     initial_responses: HashMap<RequestId, InitialResponse>,
     deferred_waits: VecDeque<DeferredWait>,
+    deadlines: HashMap<RequestId, CancellationToken>,
     next_request_id: i64,
 }
 
@@ -36,6 +39,7 @@ impl RequestTracker {
             unclaimed_executes: HashMap::new(),
             initial_responses: HashMap::new(),
             deferred_waits: VecDeque::new(),
+            deadlines: HashMap::new(),
             next_request_id: 1,
         }
     }
@@ -76,6 +80,19 @@ impl RequestTracker {
         pending: PendingRequest,
         event_tx: &mpsc::Sender<DriverEvent>,
     ) {
+        if matches!(
+            pending,
+            PendingRequest::OpenSession { .. }
+                | PendingRequest::Execute { .. }
+                | PendingRequest::Terminate { .. }
+                | PendingRequest::ShutdownSession { .. }
+        ) {
+            self.start_deadline(
+                id,
+                super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT,
+                event_tx,
+            );
+        }
         self.pending.insert(id, pending);
         if let Some(cancellation) = self
             .pending
@@ -87,15 +104,50 @@ impl RequestTracker {
     }
 
     pub(super) fn remove_pending(&mut self, id: RequestId) -> Option<PendingRequest> {
+        if let Some(stop) = self.deadlines.remove(&id) {
+            stop.cancel();
+        }
         self.pending.remove(&id)
     }
 
-    pub(super) fn insert_initial_response(&mut self, id: RequestId, response: InitialResponse) {
+    pub(super) fn insert_initial_response(
+        &mut self,
+        id: RequestId,
+        response: InitialResponse,
+        timeout: Duration,
+        event_tx: &mpsc::Sender<DriverEvent>,
+    ) {
+        self.start_deadline(id, timeout, event_tx);
         self.initial_responses.insert(id, response);
     }
 
     pub(super) fn remove_initial_response(&mut self, id: RequestId) -> Option<InitialResponse> {
+        if let Some(stop) = self.deadlines.remove(&id) {
+            stop.cancel();
+        }
         self.initial_responses.remove(&id)
+    }
+
+    fn start_deadline(
+        &mut self,
+        id: RequestId,
+        timeout: Duration,
+        event_tx: &mpsc::Sender<DriverEvent>,
+    ) {
+        let stop = CancellationToken::new();
+        self.deadlines.insert(id, stop.clone());
+        let event_tx = event_tx.clone();
+        let deadline = tokio::time::Instant::now() + timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    let _ = event_tx.send(DriverEvent::Failed(format!(
+                        "code-mode host exceeded transport deadline for request {id:?}"
+                    ))).await;
+                }
+            }
+        });
     }
 
     pub(super) fn insert_unclaimed_execute(&mut self, id: RequestId, execute: UnclaimedExecute) {
@@ -181,6 +233,9 @@ impl RequestTracker {
     }
 
     pub(super) fn fail_all(&mut self, reason: &str) {
+        for (_, stop) in self.deadlines.drain() {
+            stop.cancel();
+        }
         for (_, pending) in self.pending.drain() {
             pending.fail(reason.to_string());
         }

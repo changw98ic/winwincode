@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receipt-first transaction for one generated Worker `job.outcome`.
-
 use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
@@ -55,7 +53,6 @@ const TERMINAL_EVENT_NAMESPACE: &[u8] = b"winwincode.work-run-terminal.v1";
 const TERMINAL_RUNTIME_NAMESPACE: &[u8] = b"winwincode.work-run-terminal-runtime-invalidation.v1";
 const TERMINAL_AUTHORITY_STREAM_PREFIX: &str = "delivery-terminal-authority:";
 
-/// Durable receipt for one accepted Worker terminal outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryTerminalOutcomeCommitReceipt {
     receipt: CommitReceipt,
@@ -73,7 +70,6 @@ impl DeliveryTerminalOutcomeCommitReceipt {
     }
 }
 
-/// Failure of a terminal-outcome transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryTerminalOutcomeCommitError {
     Storage(StorageError),
@@ -224,15 +220,9 @@ fn validate_trusted_lease_time(
 ) -> Result<(), StorageError> {
     let now = instant_millis(server_time)?;
     let issued_at = instant_millis(facts.authority().issued_at())?;
-    let expires_at = instant_millis(facts.authority().expires_at())?;
     if now < issued_at {
         return Err(StorageError::invalid_input(
             "terminal ingress precedes the scheduler-owned lease",
-        ));
-    }
-    if now >= expires_at {
-        return Err(StorageError::invalid_input(
-            "terminal ingress observed an expired scheduler-owned lease",
         ));
     }
     Ok(())
@@ -370,8 +360,6 @@ struct TerminalAcceptedEvent {
     work_run_id: WorkRunId,
 }
 
-/// Secret-safe terminal facts kept with the accepted message digest. Worker
-/// prose, diagnostics, and raw lease authority never enter the durable event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AcceptedTerminalOutcome {
@@ -535,12 +523,7 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     let expires_at = instant_millis(&message.lease.expires_at)?;
     let finished_at = instant_millis(&message.outcome.finished_at)?;
     let sent_at = instant_millis(&message.sent_at)?;
-    if issued_at >= expires_at
-        || finished_at < issued_at
-        || finished_at >= expires_at
-        || sent_at < finished_at
-        || sent_at > expires_at
-    {
+    if issued_at >= expires_at || finished_at < issued_at || sent_at < finished_at {
         return Err(StorageError::invalid_input(
             "job.outcome time is outside its active lease",
         ));
@@ -847,8 +830,6 @@ fn commit_terminal(
     Ok(receipt)
 }
 
-/// Reads a successful report by exact job and accepted binding without
-/// marking the `WorkItem` complete or consuming a global stage handoff.
 pub(crate) fn load_successful_terminal_authority(
     storage: &dyn ProductStateStorage,
     delivery: &Delivery,

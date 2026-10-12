@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable, host-admitted scheduling for one bounded `DebugProbe` round.
-//!
-//! This module deliberately stops at the round boundary. It has no Codex
-//! adapter and exposes no per-probe feedback callback, so an individual probe
-//! completion cannot schedule a model turn. The future D9 composition may
-//! submit the single terminal [`ProbeRoundReceipt`] returned by
-//! [`ProbeScheduler::run_round`].
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
@@ -81,25 +73,21 @@ CREATE INDEX IF NOT EXISTS probe_execution_round
     ON probe_execution (round_id, ordinal);
 ";
 
-/// Opaque cancellation capability passed only to an already-admitted runner.
 #[derive(Clone, Debug, Default)]
 pub struct ProbeRunCancellation(Arc<AtomicU8>);
 
 impl ProbeRunCancellation {
-    /// Returns a fresh, independent cancellation capability.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Requests cooperative termination and cleanup.
     pub fn cancel(&self) {
         let _ = self
             .0
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
     }
 
-    /// Reports whether termination has been requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire) != 0
@@ -116,17 +104,10 @@ impl ProbeRunCancellation {
     }
 }
 
-/// Host clock used to make every durable time fact explicit and testable.
 pub trait ProbeClock: fmt::Debug + Send + Sync + 'static {
-    /// Returns a canonical UTC instant.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded scheduler error when the host clock is unavailable.
     fn now(&self) -> Result<Instant, ProbeSchedulerError>;
 }
 
-/// System UTC clock used by the released scheduler constructor.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemProbeClock;
 
@@ -136,7 +117,6 @@ impl ProbeClock for SystemProbeClock {
     }
 }
 
-/// Stable failure returned before any untrusted command can start.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeSchedulerError {
     code: DebugProbeErrorCode,
@@ -148,19 +128,16 @@ impl ProbeSchedulerError {
         Self { code, message }
     }
 
-    /// Creates a bounded failure reported by an injected host runner or clock.
     #[must_use]
     pub const fn host_failure(code: DebugProbeErrorCode, message: &'static str) -> Self {
         Self::new(code, message)
     }
 
-    /// Returns the canonical `DebugProbe` failure category.
     #[must_use]
     pub const fn code(&self) -> &DebugProbeErrorCode {
         &self.code
     }
 
-    /// Returns a bounded message which never contains command output.
     #[must_use]
     pub const fn message(&self) -> &'static str {
         self.message
@@ -175,11 +152,6 @@ impl fmt::Display for ProbeSchedulerError {
 
 impl std::error::Error for ProbeSchedulerError {}
 
-/// One host-owned exact command template.
-///
-/// Matching uses the full executable, argv, working directory, kind, resource
-/// claim and per-probe limits. Registering `cargo`, `git`, or an interpreter
-/// therefore does not authorize any other arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrustedPureReadTemplate {
     kind: DebugProbeKind,
@@ -192,13 +164,6 @@ pub struct TrustedPureReadTemplate {
 }
 
 impl TrustedPureReadTemplate {
-    /// Seals one exact host template. Network, database, service and mutable
-    /// workspace capabilities have no released D2 template form.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-PureRead claim, an unbounded command, non-canonical
-    /// resources, or a capability whose containment is deferred to D6/D9.
     pub fn try_new(
         kind: DebugProbeKind,
         mut command: ProbeCommandSpec,
@@ -255,17 +220,11 @@ impl TrustedPureReadTemplate {
     }
 }
 
-/// Opaque exact predecessor selected by durable host round context.
-///
-/// Only evidence returned by [`ProbeScheduler::evidence_for_round`] can create
-/// this value. A model cannot submit an Artifact reference as a baseline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbePriorEvidence {
     reference: ProbePriorEvidenceReference,
 }
 
-/// Durable normalized evidence exposed at the round boundary without raw
-/// process output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbeEvidenceRecord {
     bundle_artifact_ref: ArtifactReference,
@@ -286,38 +245,32 @@ impl ProbeEvidenceRecord {
         }
     }
 
-    /// Canonical bundle Artifact reference, separate from raw receipt refs.
     #[must_use]
     pub const fn bundle_artifact_ref(&self) -> &ArtifactReference {
         &self.bundle_artifact_ref
     }
 
-    /// Fully revalidated canonical bundle for deterministic host composition.
     #[must_use]
     pub const fn bundle(&self) -> &ValidatedProbeEvidenceBundle {
         &self.bundle
     }
 
-    /// Bounded summary containing no raw process bytes.
     #[must_use]
     pub const fn summary(&self) -> &ProbeEvidenceSummary {
         self.projection.summary()
     }
 
-    /// Unpolarized hypothesis candidates containing no confidence assignment.
     #[must_use]
     pub fn candidates(&self) -> &[HypothesisEvidenceCandidate] {
         self.projection.candidates()
     }
 
-    /// Exact predecessor capability that a host may bind to a later template.
     #[must_use]
     pub fn prior_evidence(&self) -> ProbePriorEvidence {
         self.prior.clone()
     }
 }
 
-/// Host-admitted input given to the narrow process adapter.
 #[derive(Clone, Debug)]
 pub struct AdmittedProbe {
     intent: ValidatedProbeExecutionIntent,
@@ -328,32 +281,27 @@ pub struct AdmittedProbe {
 }
 
 impl AdmittedProbe {
-    /// Exact durable intent retained before this value reaches a runner.
     #[must_use]
     pub const fn intent(&self) -> &ProbeExecutionIntent {
         self.intent.intent()
     }
 
-    /// Canonical resource claim recomputed from the exact host template.
     #[must_use]
     pub const fn host_resources(&self) -> &ProbeResourceClaim {
         &self.host_resources
     }
 
-    /// Canonical read-only checkout root supplied by the Worker workspace owner.
     #[must_use]
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
 
-    /// Canonical host-verified working directory within that checkout.
     #[must_use]
     pub fn working_directory(&self) -> &Path {
         &self.working_directory
     }
 }
 
-/// Process facts supplied while raw bytes are still inside the runner seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeRunFacts {
     termination: ProbeRunTermination,
@@ -363,8 +311,6 @@ pub struct ProbeRunFacts {
 }
 
 impl ProbeRunFacts {
-    /// Creates exact terminal process facts. Raw bytes are submitted separately
-    /// to [`ProbeExecutionCompletion::retain`].
     #[must_use]
     pub const fn new(
         termination: ProbeRunTermination,
@@ -381,15 +327,12 @@ impl ProbeRunFacts {
     }
 }
 
-/// Opaque durable process result consumed by the scheduler. It contains only
-/// the exact receipt and private Artifact metadata, never raw output bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbeRunResult {
     receipt: ProbeExecutionReceipt,
     manifest: ProbeRawArtifactManifest,
 }
 
-/// Closed process result understood by the scheduler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeRunTermination {
     Exited,
@@ -401,18 +344,12 @@ pub enum ProbeRunTermination {
 }
 
 impl ProbeRunResult {
-    /// Exact durable receipt whose Artifact refs address only raw streams.
     #[must_use]
     pub const fn receipt(&self) -> &ProbeExecutionReceipt {
         &self.receipt
     }
 }
 
-/// One-shot durable completion authority passed to an admitted runner.
-///
-/// The runner must call [`Self::retain`] before raw stdout or stderr leaves its
-/// private seam. Capture, exact terminal receipt, host-selected profile, and
-/// baseline selection are committed together.
 #[derive(Clone)]
 pub struct ProbeExecutionCompletion {
     journal: Arc<Mutex<ProbeJournal>>,
@@ -437,13 +374,6 @@ impl fmt::Debug for ProbeExecutionCompletion {
 }
 
 impl ProbeExecutionCompletion {
-    /// Atomically retains raw Artifacts, the exact terminal receipt, and the
-    /// normalization binding before returning an opaque result.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, changed bytes, invalid process facts, an
-    /// unavailable clock, or unavailable durable storage.
     pub fn retain(
         &self,
         facts: ProbeRunFacts,
@@ -529,21 +459,12 @@ impl ProbeExecutionCompletion {
     }
 }
 
-/// Boxed runner future used by production and deterministic fixture adapters.
 pub type ProbeRunnerFuture<'runner> =
     Pin<Box<dyn Future<Output = Result<ProbeRunResult, ProbeSchedulerError>> + Send + 'runner>>;
 
-/// Narrow execution seam below host admission and durable intent retention.
 pub trait ProbeRunner: fmt::Debug + Send + Sync + 'static {
-    /// Performs adapter-specific sealing without starting a process.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a command when the platform cannot prove its requested limits.
     fn validate(&self, probe: &AdmittedProbe) -> Result<(), ProbeSchedulerError>;
 
-    /// Executes one already-admitted probe. The Scheduler calls this only after
-    /// the transaction containing every round intent has committed.
     fn execute(
         &self,
         probe: AdmittedProbe,
@@ -552,7 +473,6 @@ pub trait ProbeRunner: fmt::Debug + Send + Sync + 'static {
     ) -> ProbeRunnerFuture<'_>;
 }
 
-/// Trusted authority and workspace supplied by the Worker for one model plan.
 #[derive(Clone, Debug)]
 pub struct ProbeRoundRequest {
     expected_authority: DebugProbeRoundAuthority,
@@ -561,8 +481,6 @@ pub struct ProbeRoundRequest {
 }
 
 impl ProbeRoundRequest {
-    /// Creates a request whose expected authority is host-owned rather than
-    /// copied from the model plan.
     #[must_use]
     pub fn new(
         expected_authority: DebugProbeRoundAuthority,
@@ -589,7 +507,6 @@ struct ActiveRound {
     wall_limit_millis: i64,
 }
 
-/// Deep Worker-owned facade for one complete `DebugProbe` scheduling round.
 pub struct ProbeScheduler<Runner, Clock = SystemProbeClock> {
     journal: Arc<Mutex<ProbeJournal>>,
     evidence: Arc<DurableProbeEvidenceStore>,
@@ -612,11 +529,6 @@ impl<Runner> ProbeScheduler<Runner, SystemProbeClock>
 where
     Runner: ProbeRunner,
 {
-    /// Opens the private journal and installs the complete trusted command catalog.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable journal or duplicate exact command templates.
     pub fn open(
         root: impl AsRef<Path>,
         runner: Runner,
@@ -631,11 +543,6 @@ where
     Runner: ProbeRunner,
     Clock: ProbeClock,
 {
-    /// Opens the private journal with an explicit host clock.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable journal or duplicate exact command templates.
     pub fn open_with_clock(
         root: impl AsRef<Path>,
         runner: Runner,
@@ -668,16 +575,6 @@ where
         })
     }
 
-    /// Validates, durably claims and executes one complete round.
-    ///
-    /// Every intent is committed in one transaction before the first runner
-    /// call. Exact terminal replay returns the original receipt. An incomplete
-    /// prior claim fails closed and is never executed again automatically.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, changed replay bytes, unsafe host claims,
-    /// unresolved restart state, or unavailable durable state.
     pub async fn run_round(
         &self,
         request: ProbeRoundRequest,
@@ -862,17 +759,6 @@ where
         Ok(Some(receipt))
     }
 
-    /// Reads the exact normalized evidence for one terminal round.
-    ///
-    /// Returned records contain canonical bundles, bounded summaries, and
-    /// unpolarized candidates. Raw Artifact bodies remain private. A record's
-    /// opaque predecessor capability may be explicitly attached to a later
-    /// trusted command template.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-terminal round, changed plan bytes, missing evidence,
-    /// or any durable authority/digest mismatch.
     pub fn evidence_for_round(
         &self,
         request: &ProbeRoundRequest,
@@ -949,11 +835,6 @@ where
         Ok(())
     }
 
-    /// Cancels only the exact currently active round authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or stale authority without touching another round.
     pub fn cancel_round(
         &self,
         authority: &DebugProbeRoundAuthority,
@@ -1116,9 +997,6 @@ where
                 .ok_or_else(|| invalid_probe("probe command or resources are not host-admitted"))?;
             let mut requested_resources = spec.resources.clone();
             canonicalize_claim_lists(&mut requested_resources)?;
-            // This comparison is intentionally explicit: `template.resources`
-            // is the host recomputation, while `requested_resources` is the
-            // normalized model declaration.
             if requested_resources != template.resources {
                 return Err(ProbeSchedulerError::new(
                     DebugProbeErrorCode::UndeclaredResource,

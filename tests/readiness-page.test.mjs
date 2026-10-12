@@ -28,7 +28,7 @@ assert.equal(
 
 const pageModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/readiness-tests/readiness-page.js',
+  'apps/client/node_modules/.cache/readiness-tests/readiness-page.js',
 )).href}`)
 const { mountReadinessPage } = pageModule
 
@@ -56,7 +56,6 @@ class FakeElement {
   value = ''
   #ownText = ''
 
-  // Real DOM textContent aggregates descendants; the fake mirrors that contract.
   get textContent() {
     return this.#ownText + this.children.map(child => child.textContent).join('')
   }

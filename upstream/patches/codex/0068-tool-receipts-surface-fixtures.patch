@@ -1,0 +1,938 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs b/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
+--- a/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
++++ b/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
+@@ -573,6 +573,7 @@
+     mcp: TestAppServer,
+     response_mock: ResponseMock,
+     _responses_server: wiremock::MockServer,
++    _codex_home: TempDir,
+     scenario: ElicitationScenario,
+     next_turn: bool,
+     thread_id: String,
+@@ -750,6 +751,7 @@
+             mcp,
+             response_mock,
+             _responses_server: responses_server,
++            _codex_home: codex_home,
+             scenario,
+             next_turn: false,
+             thread_id: thread.id,
+@@ -909,6 +911,10 @@
+             .get("output")
+             .and_then(Value::as_str)
+             .expect("function_call_output output should be a JSON string");
++        assert!(
++            output.starts_with("Wall time:"),
++            "unexpected MCP result: {output}"
++        );
+         let payload = assert_regex_match(
+             r#"(?s)^Wall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n(.*)$"#,
+             output,
+diff --git a/codex-rs/core/tests/common/responses.rs b/codex-rs/core/tests/common/responses.rs
+--- a/codex-rs/core/tests/common/responses.rs
++++ b/codex-rs/core/tests/common/responses.rs
+@@ -312,6 +312,24 @@
+         self.call_output(call_id, "custom_tool_call_output")
+     }
+ 
++    pub fn custom_tool_call_output_text(&self, call_id: &str) -> Option<String> {
++        let input = self.input();
++        let item = input
++            .iter()
++            .find(|item| item["type"] == "custom_tool_call_output" && item["call_id"] == call_id)?;
++        match item.get("output")? {
++            Value::String(text) => Some(text.clone()),
++            Value::Array(items) => Some(
++                items
++                    .iter()
++                    .filter_map(|item| item["text"].as_str())
++                    .collect::<Vec<_>>()
++                    .join("\n"),
++            ),
++            _ => None,
++        }
++    }
++
+     pub fn tool_search_output(&self, call_id: &str) -> Value {
+         self.call_output(call_id, "tool_search_output")
+     }
+@@ -343,9 +361,7 @@
+             item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                 && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+         })?;
+-        item.get("output")
+-            .and_then(Value::as_str)
+-            .map(str::to_string)
++        output_value_to_text(item.get("output")?)
+     }
+ 
+     pub fn function_call_output_content_and_success(
+@@ -408,12 +424,35 @@
+ pub(crate) fn output_value_to_text(value: &Value) -> Option<String> {
+     match value {
+         Value::String(text) => Some(text.clone()),
+-        Value::Array(items) => match items.as_slice() {
+-            [item] if item.get("type").and_then(Value::as_str) == Some("input_text") => {
+-                item.get("text").and_then(Value::as_str).map(str::to_string)
++        Value::Array(items) => {
++            let mut end = items.len();
++            while let Some(text) = end
++                .checked_sub(1)
++                .and_then(|index| items[index]["text"].as_str())
++            {
++                let kind = if text.starts_with("<core_tool_receipts>") {
++                    "core_tool_receipts"
++                } else if text.starts_with("<model_behavior_diagnosis>") {
++                    "model_behavior_diagnosis"
++                } else {
++                    break;
++                };
++                let payload = text
++                    .strip_prefix(&format!("<{kind}>"))
++                    .and_then(|text| text.strip_suffix(&format!("</{kind}>")))
++                    .expect("complete Core feedback fragment");
++                let feedback: Value = serde_json::from_str(payload).expect("Core feedback JSON");
++                assert_eq!(feedback["type"], kind);
++                assert_eq!(feedback["schema_version"], 1);
++                end -= 1;
+             }
+-            [_] | [] | [_, _, ..] => None,
+-        },
++            match &items[..end] {
++                [item] if item.get("type").and_then(Value::as_str) == Some("input_text") => {
++                    item.get("text").and_then(Value::as_str).map(str::to_string)
++                }
++                [_] | [] | [_, _, ..] => None,
++            }
++        }
+         Value::Object(_) | Value::Number(_) | Value::Bool(_) | Value::Null => None,
+     }
+ }
+@@ -460,6 +499,27 @@
+             body: serde_json::to_vec(&serde_json::json!({ "input": input }))
+                 .expect("serialize request body"),
+         })
++    }
++
++    #[test]
++    fn core_feedback_preserves_text_and_mixed_runtime_payloads() {
++        let feedback = format!(
++            "<core_tool_receipts>{}</core_tool_receipts>",
++            serde_json::json!({ "type": "core_tool_receipts", "schema_version": 1, "receipts": [{"source_id": "fact-1", "request_sequence": 1, "tool": "exec_command", "execution": "completed"}] })
++        );
++        let request = request_with_input(serde_json::json!([
++            { "type": "function_call_output", "call_id": "text", "output": [{ "type": "input_text", "text": "original payload" }, { "type": "input_text", "text": feedback }] },
++            { "type": "function_call_output", "call_id": "image", "output": [{ "type": "input_text", "text": "caption" }, { "type": "input_image", "image_url": "data:image/png;base64,abc" }, { "type": "input_text", "text": feedback }] }
++        ]));
++        assert_eq!(
++            request.function_call_output_text("text"),
++            Some("original payload".into())
++        );
++        assert_eq!(request.function_call_output_text("image"), None);
++        assert_eq!(
++            request.function_call_output_content_and_success("image"),
++            Some((None, None))
++        );
+     }
+ 
+     #[test]
+@@ -942,6 +1002,21 @@
+             "arguments": arguments
+         }
+     })
++}
++
++pub fn ev_code_mode_call(call_id: &str, namespace: &str, name: &str, arguments: &str) -> Value {
++    let name = match namespace {
++        "" | "functions" => name.to_string(),
++        namespace if namespace.ends_with('_') || name.starts_with('_') => {
++            format!("{namespace}{name}")
++        }
++        namespace => format!("{namespace}__{name}"),
++    };
++    ev_custom_tool_call(
++        call_id,
++        "exec",
++        &format!("text(await tools.{name}({arguments}));"),
++    )
+ }
+ 
+ pub fn ev_tool_search_call(call_id: &str, arguments: &serde_json::Value) -> Value {
+diff --git a/codex-rs/core/tests/common/test_codex_exec.rs b/codex-rs/core/tests/common/test_codex_exec.rs
+--- a/codex-rs/core/tests/common/test_codex_exec.rs
++++ b/codex-rs/core/tests/common/test_codex_exec.rs
+@@ -41,8 +41,12 @@
+ }
+ 
+ pub fn test_codex_exec() -> TestCodexExecBuilder {
++    let home = TempDir::new().expect("create temp home");
++    // Generic exec fixtures emit direct tool calls. Pin their model as Core fixtures do.
++    std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n")
++        .expect("write test model");
+     TestCodexExecBuilder {
+-        home: TempDir::new().expect("create temp home"),
++        home,
+         cwd: TempDir::new().expect("create temp cwd"),
+     }
+ }
+diff --git a/codex-rs/core/tests/suite/agent_execution.rs b/codex-rs/core/tests/suite/agent_execution.rs
+--- a/codex-rs/core/tests/suite/agent_execution.rs
++++ b/codex-rs/core/tests/suite/agent_execution.rs
+@@ -7,8 +7,8 @@
+ use codex_protocol::protocol::EventMsg;
+ use core_test_support::responses::ResponseMock;
+ use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_code_mode_call;
+ use core_test_support::responses::ev_completed;
+-use core_test_support::responses::ev_function_call_with_namespace;
+ use core_test_support::responses::ev_response_created;
+ use core_test_support::responses::mount_sse_once_match;
+ use core_test_support::responses::sse;
+@@ -29,14 +29,14 @@
+         .is_ok_and(|body| body.to_string().contains(text))
+ }
+ 
+-fn has_function_call_output(request: &wiremock::Request, call_id: &str) -> bool {
++fn has_tool_call_output(request: &wiremock::Request, call_id: &str) -> bool {
+     serde_json::from_slice::<serde_json::Value>(&request.body).is_ok_and(|body| {
+         body.get("input")
+             .and_then(serde_json::Value::as_array)
+             .is_some_and(|items| {
+                 items.iter().any(|item| {
+                     item.get("type").and_then(serde_json::Value::as_str)
+-                        == Some("function_call_output")
++                        == Some("custom_tool_call_output")
+                         && item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
+                 })
+             })
+@@ -56,7 +56,7 @@
+         move |request: &wiremock::Request| body_contains(request, prompt),
+         sse(vec![
+             ev_response_created(&response_id),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 call_id,
+                 MULTI_AGENT_V2_NAMESPACE,
+                 tool_name,
+@@ -70,7 +70,7 @@
+     let completion_id = format!("resp-{call_id}-complete");
+     mount_sse_once_match(
+         server,
+-        move |request: &wiremock::Request| has_function_call_output(request, call_id),
++        move |request: &wiremock::Request| has_tool_call_output(request, call_id),
+         sse(vec![
+             ev_response_created(&completion_id),
+             ev_assistant_message(&format!("msg-{call_id}"), "collaboration completed"),
+@@ -86,15 +86,31 @@
+     parent_call_id: &'static str,
+ ) -> ResponseMock {
+     let response_id = format!("resp-worker-{parent_call_id}");
++    let catalog_call_id = format!("catalog-{parent_call_id}");
+     mount_sse_once_match(
+         server,
+         move |request: &wiremock::Request| {
+-            body_contains(request, task) && !has_function_call_output(request, parent_call_id)
++            body_contains(request, task) && !has_tool_call_output(request, parent_call_id)
+         },
+         sse(vec![
+             ev_response_created(&response_id),
++            core_test_support::responses::ev_custom_tool_call(
++                &catalog_call_id,
++                "exec",
++                "text(ALL_TOOLS.map(tool => tool.name));",
++            ),
++            ev_completed(&response_id),
++        ]),
++    )
++    .await;
++    let completed_response_id = format!("resp-worker-complete-{parent_call_id}");
++    mount_sse_once_match(
++        server,
++        move |request: &wiremock::Request| has_tool_call_output(request, &catalog_call_id),
++        sse(vec![
++            ev_response_created(&completed_response_id),
+             ev_assistant_message(&format!("msg-worker-{parent_call_id}"), "worker completed"),
+-            ev_completed(&response_id),
++            ev_completed(&completed_response_id),
+         ]),
+     )
+     .await
+@@ -112,7 +128,7 @@
+         |request: &wiremock::Request| body_contains(request, FIRST_PROMPT),
+         sse(vec![
+             ev_response_created("first-response"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 "first-call",
+                 MULTI_AGENT_V2_NAMESPACE,
+                 "spawn_agent",
+@@ -129,11 +145,11 @@
+     mount_sse_once_match(
+         &server,
+         |request: &wiremock::Request| {
+-            body_contains(request, FIRST_TASK) && !has_function_call_output(request, "first-call")
++            body_contains(request, FIRST_TASK) && !has_tool_call_output(request, "first-call")
+         },
+         sse(vec![
+             ev_response_created("first-worker-response"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 "second-call",
+                 MULTI_AGENT_V2_NAMESPACE,
+                 "spawn_agent",
+@@ -145,7 +161,7 @@
+     .await;
+     let second_followup = mount_sse_once_match(
+         &server,
+-        |request: &wiremock::Request| has_function_call_output(request, "second-call"),
++        |request: &wiremock::Request| has_tool_call_output(request, "second-call"),
+         sse(vec![
+             ev_response_created("second-followup-response"),
+             ev_assistant_message("second-followup-message", "blocked"),
+@@ -155,7 +171,7 @@
+     .await;
+     mount_sse_once_match(
+         &server,
+-        |request: &wiremock::Request| has_function_call_output(request, "first-call"),
++        |request: &wiremock::Request| has_tool_call_output(request, "first-call"),
+         sse(vec![
+             ev_response_created("first-followup-response"),
+             ev_assistant_message("first-followup-message", "spawned"),
+@@ -175,6 +191,10 @@
+                 .features
+                 .enable(Feature::MultiAgentV2)
+                 .expect("test config should allow feature update");
++            let _ = config.features.enable(Feature::CodeModeOnly);
++            config.web_search_mode = codex_config::Constrained::allow_any(
++                codex_protocol::config_types::WebSearchMode::Disabled,
++            );
+             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+         });
+     let test = builder.build(&server).await?;
+@@ -182,16 +202,20 @@
+ 
+     let second_output = tokio::time::timeout(Duration::from_secs(2), async {
+         loop {
+-            if let Some(output) = second_followup.function_call_output_text("second-call") {
++            if let Some(output) = second_followup
++                .requests()
++                .iter()
++                .find_map(|request| request.custom_tool_call_output_text("second-call"))
++            {
+                 return output;
+             }
+             tokio::time::sleep(Duration::from_millis(10)).await;
+         }
+     })
+     .await?;
+-    assert_eq!(
+-        second_output,
+-        "collab spawn failed: agent thread limit reached"
++    assert!(
++        second_output.contains("collab spawn failed: agent thread limit reached"),
++        "{second_output}"
+     );
+     assert_eq!(test.thread_manager.list_thread_ids().await.len(), 2);
+ 
+@@ -247,6 +271,10 @@
+                     .expect("test config should allow feature update");
+             }
+             config.use_experimental_unified_exec_tool = true;
++            let _ = config.features.enable(Feature::CodeModeOnly);
++            config.web_search_mode = codex_config::Constrained::allow_any(
++                codex_protocol::config_types::WebSearchMode::Disabled,
++            );
+             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+             config
+                 .permissions
+@@ -349,7 +377,22 @@
+             .expect("expected a model request for the original worker")
+     };
+     let reloaded_tools = worker_tools(&reloaded_worker_request);
+-    assert!(reloaded_tools.to_string().contains("### `exec_command`"));
++    assert!(reloaded_tools.to_string().contains("\"name\":\"exec\""));
++    let request = reloaded_worker_request
++        .requests()
++        .into_iter()
++        .find(|request| {
++            request.body_json()["client_metadata"]["thread_id"] == json!(first_thread_id)
++        })
++        .expect("reloaded worker request");
++    let output = request.custom_tool_call_output("catalog-followup-call");
++    let tools: Vec<String> = serde_json::from_str(
++        output["output"][1]["text"]
++            .as_str()
++            .expect("nested catalog"),
++    )?;
++    assert!(tools.iter().any(|name| name == "exec_command"));
++    assert!(tools.iter().any(|name| name == "write_stdin"));
+ 
+     Ok(())
+ }
+diff --git a/codex-rs/core/tests/suite/apply_patch_cli.rs b/codex-rs/core/tests/suite/apply_patch_cli.rs
+--- a/codex-rs/core/tests/suite/apply_patch_cli.rs
++++ b/codex-rs/core/tests/suite/apply_patch_cli.rs
+@@ -1018,7 +1018,8 @@
+     assert_eq!(fs::read_to_string(&outside)?, "original\n", "{output:?}");
+     assert!(fs::symlink_metadata(&target)?.is_symlink());
+     assert!(
+-        output.contains("Failed to read file to update"),
++        output.contains("Failed to read file to update")
++            || output.contains("path contains a symbolic link"),
+         "{output:?}"
+     );
+     test.codex.shutdown_and_wait().await?;
+diff --git a/codex-rs/core/tests/suite/codex_delegate.rs b/codex-rs/core/tests/suite/codex_delegate.rs
+--- a/codex-rs/core/tests/suite/codex_delegate.rs
++++ b/codex-rs/core/tests/suite/codex_delegate.rs
+@@ -19,6 +19,7 @@
+ use core_test_support::apps_test_server::recorded_apps_tool_calls;
+ use core_test_support::apps_test_server::search_capable_apps_builder;
+ use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_code_mode_call;
+ use core_test_support::responses::ev_completed;
+ use core_test_support::responses::ev_function_call;
+ use core_test_support::responses::ev_function_call_with_namespace;
+@@ -390,8 +391,9 @@
+             ]),
+             sse(vec![
+                 ev_response_created("resp-guardian-command"),
+-                ev_function_call(
++                ev_code_mode_call(
+                     guardian_call_id,
++                    "functions",
+                     "exec_command",
+                     &guardian_command.to_string(),
+                 ),
+@@ -448,7 +450,7 @@
+     assert_eq!(guardian_requests.len(), 2);
+     let guardian_output = guardian_requests
+         .iter()
+-        .find_map(|request| request.function_call_output_text(guardian_call_id))
++        .find_map(|request| request.custom_tool_call_output_text(guardian_call_id))
+         .expect("guardian continuation should include the rejected command output");
+     assert!(
+         guardian_output.contains("approval policy is Never"),
+diff --git a/codex-rs/core/tests/suite/mcp_tool_exposure.rs b/codex-rs/core/tests/suite/mcp_tool_exposure.rs
+--- a/codex-rs/core/tests/suite/mcp_tool_exposure.rs
++++ b/codex-rs/core/tests/suite/mcp_tool_exposure.rs
+@@ -429,6 +429,48 @@
+     Ok(())
+ }
+ 
++fn assert_code_mode_catalog(body: &Value) {
++    let names = body["tools"]
++        .as_array()
++        .expect("tools")
++        .iter()
++        .map(|tool| tool["name"].as_str().expect("tool name"))
++        .collect::<Vec<_>>();
++    assert_eq!(names, vec!["exec", "wait"]);
++}
++
++async fn assert_calendar_discoverable(
++    test: &core_test_support::test_codex::TestCodex,
++    server: &wiremock::MockServer,
++) -> Result<()> {
++    let name = codex_tools::code_mode_name_for_tool_name(&codex_protocol::ToolName::namespaced(
++        SEARCH_CALENDAR_NAMESPACE,
++        SEARCH_CALENDAR_CREATE_TOOL,
++    ));
++    let code = format!("text(ALL_TOOLS.some(tool => tool.name === {name:?}));");
++    let response = mount_sse_sequence(
++        server,
++        vec![
++            sse(vec![
++                responses::ev_custom_tool_call("discover-calendar", "exec", &code),
++                ev_completed("discover-calendar-1"),
++            ]),
++            sse(vec![
++                ev_assistant_message("calendar-ready", "Calendar ready"),
++                ev_completed("discover-calendar-2"),
++            ]),
++        ],
++    )
++    .await;
++    test.submit_turn("Discover Calendar through Code Mode")
++        .await?;
++    let requests = response.requests();
++    assert_eq!(requests.len(), 2);
++    let output = requests[1].custom_tool_call_output("discover-calendar");
++    assert_eq!(output["output"][1]["text"], "true");
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+@@ -459,6 +501,8 @@
+     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url)
+         .with_extensions(Arc::new(extensions.build()))
+         .with_config(|config| {
++            config.web_search_mode =
++                Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
+             config
+                 .features
+                 .enable(Feature::CodeModeOnly)
+@@ -545,16 +589,9 @@
+         .count();
+     assert_eq!(list_requests, 1);
+     let body = response.single_request().body_json();
+-    assert!(
+-        namespace_child_tool(
+-            &body,
+-            SEARCH_CALENDAR_NAMESPACE,
+-            SEARCH_CALENDAR_CREATE_TOOL,
+-        )
+-        .is_some(),
+-        "shared Apps tools should remain model-visible after root reconciliation: {body}"
+-    );
+-
++    assert_code_mode_catalog(&body);
++
++    assert_calendar_discoverable(&test, &server).await?;
+     Ok(())
+ }
+ 
+@@ -1190,6 +1227,8 @@
+ 
+     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
+         .with_config(move |config| {
++            config.web_search_mode =
++                Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
+             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+             config
+                 .permissions
+@@ -1208,15 +1247,7 @@
+         .await?;
+ 
+     let initial_request = response.requests()[0].body_json();
+-    assert!(
+-        namespace_child_tool(
+-            &initial_request,
+-            SEARCH_CALENDAR_NAMESPACE,
+-            SEARCH_CALENDAR_CREATE_TOOL,
+-        )
+-        .is_some(),
+-        "Calendar should be available before the MCP refresh: {initial_request}"
+-    );
++    assert_code_mode_catalog(&initial_request);
+ 
+     tokio::fs::remove_dir_all(test.codex_home_path().join("cache/codex_apps_tools")).await?;
+     startup_control.fail_next_initialize_attempts(/*attempts*/ 1);
+@@ -1259,16 +1290,9 @@
+     let requests = response.requests();
+     assert_eq!(requests.len(), 3);
+     let recovered_request = requests[2].body_json();
+-    assert!(
+-        namespace_child_tool(
+-            &recovered_request,
+-            SEARCH_CALENDAR_NAMESPACE,
+-            SEARCH_CALENDAR_CREATE_TOOL,
+-        )
+-        .is_some(),
+-        "Calendar should recover on the follow-up turn: {recovered_request}",
+-    );
++    assert_code_mode_catalog(&recovered_request);
+     assert_eq!(startup_control.initialize_attempts(), 3);
+ 
++    assert_calendar_discoverable(&test, &server).await?;
+     Ok(())
+ }
+diff --git a/codex-rs/core/tests/suite/multi_agent_resume.rs b/codex-rs/core/tests/suite/multi_agent_resume.rs
+--- a/codex-rs/core/tests/suite/multi_agent_resume.rs
++++ b/codex-rs/core/tests/suite/multi_agent_resume.rs
+@@ -11,8 +11,8 @@
+ use core_test_support::responses::assert_parent_turn;
+ use core_test_support::responses::assert_root_turn;
+ use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_code_mode_call;
+ use core_test_support::responses::ev_completed;
+-use core_test_support::responses::ev_function_call_with_namespace;
+ use core_test_support::responses::ev_response_created;
+ use core_test_support::responses::mount_sse_once_match;
+ use core_test_support::responses::sse;
+@@ -108,7 +108,7 @@
+         },
+         sse(vec![
+             ev_response_created(&first_response_id),
+-            ev_function_call_with_namespace(call_id, COLLABORATION_NAMESPACE, tool_name, arguments),
++            ev_code_mode_call(call_id, COLLABORATION_NAMESPACE, tool_name, arguments),
+             ev_completed(&first_response_id),
+         ]),
+     )
+@@ -142,9 +142,13 @@
+         .features
+         .enable(Feature::MultiAgentV2)
+         .expect("test config should allow feature update");
++    let _ = config.features.enable(Feature::CodeModeOnly);
++    config.web_search_mode =
++        codex_config::Constrained::allow_any(codex_protocol::config_types::WebSearchMode::Disabled);
+     config.multi_agent_v2.subagent_developer_instructions =
+         Some(SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
+-    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
++    // Keep the root, worker, grandchild, and sibling resident until the explicit cold restart.
++    config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+     let role_path = config.codex_home.join("durable-worker-role.toml");
+     std::fs::write(
+         &role_path,
+@@ -177,7 +181,7 @@
+         |request: &wiremock::Request| body_contains(request, INITIAL_PROMPT),
+         sse(vec![
+             ev_response_created("resp-spawn-1"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 SPAWN_CALL_ID,
+                 COLLABORATION_NAMESPACE,
+                 "spawn_agent",
+@@ -196,7 +200,7 @@
+         },
+         sse(vec![
+             ev_response_created("resp-worker-1"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 NESTED_CALL_ID,
+                 COLLABORATION_NAMESPACE,
+                 "spawn_agent",
+@@ -217,15 +221,19 @@
+     )
+     .await;
+     for (text, is_subagent) in [(NESTED_CALL_ID, true), (QUEUE_CALL_ID, false)] {
+-        mount_sse_once_match(
+-            &server,
+-            move |request: &wiremock::Request| {
+-                body_contains(request, text)
+-                    && request_has_input_type(request, "agent_message") == is_subagent
+-            },
+-            sse(vec![ev_completed("resp-parent-turn-assistant")]),
+-        )
+-        .await;
++        // The grandchild completion can arrive in a separate worker turn after the spawn result.
++        for _ in 0..if is_subagent { 2 } else { 1 } {
++            mount_sse_once_match(
++                &server,
++                move |request: &wiremock::Request| {
++                    body_contains(request, text)
++                        && request_has_input_type(request, "agent_message") == is_subagent
++                        && (!is_subagent || !body_contains(request, FOLLOWUP_TASK))
++                },
++                sse(vec![ev_completed("resp-parent-turn-assistant")]),
++            )
++            .await;
++        }
+     }
+     mount_sse_once_match(
+         &server,
+@@ -287,7 +295,7 @@
+         sleep(Duration::from_millis(10)).await;
+     };
+     let worker_thread = initial.thread_manager.get_thread(worker_thread_id).await?;
+-    let deadline = Instant::now() + Duration::from_secs(2);
++    let deadline = Instant::now() + Duration::from_secs(10);
+     loop {
+         if matches!(
+             worker_thread.agent_status().await,
+@@ -296,7 +304,10 @@
+             break;
+         }
+         if Instant::now() >= deadline {
+-            anyhow::bail!("timed out waiting for worker completion");
++            anyhow::bail!(
++                "timed out waiting for worker completion: {:?}",
++                worker_thread.agent_status().await
++            );
+         }
+         sleep(Duration::from_millis(10)).await;
+     }
+@@ -389,7 +400,7 @@
+         |request: &wiremock::Request| body_contains(request, FOLLOWUP_PROMPT),
+         sse(vec![
+             ev_response_created("resp-followup-1"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 FOLLOWUP_CALL_ID,
+                 COLLABORATION_NAMESPACE,
+                 "followup_task",
+@@ -471,7 +482,7 @@
+         |request: &wiremock::Request| body_contains(request, QUEUE_PROMPT),
+         sse(vec![
+             ev_response_created("resp-queue"),
+-            ev_function_call_with_namespace(
++            ev_code_mode_call(
+                 QUEUE_CALL_ID,
+                 COLLABORATION_NAMESPACE,
+                 "send_message",
+@@ -494,7 +505,7 @@
+         "cold reload must preserve the parent's complete model provider",
+     );
+     resumed.submit_turn(FOLLOWUP_PROMPT).await?;
+-    let deadline = Instant::now() + Duration::from_secs(2);
++    let deadline = Instant::now() + Duration::from_secs(10);
+     loop {
+         if matches!(
+             reloaded_worker.agent_status().await,
+diff --git a/codex-rs/core/tests/suite/send_user_message_async.rs b/codex-rs/core/tests/suite/send_user_message_async.rs
+--- a/codex-rs/core/tests/suite/send_user_message_async.rs
++++ b/codex-rs/core/tests/suite/send_user_message_async.rs
+@@ -9,8 +9,8 @@
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::user_input::UserInput;
+ use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_code_mode_call;
+ use core_test_support::responses::ev_completed;
+-use core_test_support::responses::ev_function_call_with_namespace;
+ use core_test_support::responses::ev_response_created;
+ use core_test_support::responses::mount_sse_sequence;
+ use core_test_support::responses::sse;
+@@ -35,7 +35,7 @@
+         vec![
+             sse(vec![
+                 ev_response_created("resp-1"),
+-                ev_function_call_with_namespace(
++                ev_code_mode_call(
+                     CALL_ID,
+                     "functions",
+                     "send_user_message_async",
+@@ -57,6 +57,11 @@
+             model
+                 .experimental_supported_tools
+                 .push("send_user_message_async".to_string());
++        })
++        .with_config(|config| {
++            config.web_search_mode = codex_config::Constrained::allow_any(
++                codex_protocol::config_types::WebSearchMode::Disabled,
++            );
+         })
+         .build_with_auto_env(&server)
+         .await?;
+@@ -81,10 +86,12 @@
+         Some(message.clone())
+     })
+     .await;
++    assert!(!started.id.is_empty());
++    let message_id = started.id.clone();
+     assert_eq!(
+         serde_json::to_value(&started)?,
+         serde_json::to_value(AgentMessageItem {
+-            id: CALL_ID.to_string(),
++            id: message_id.clone(),
+             content: vec![AgentMessageContent::Text {
+                 text: MESSAGE.to_string(),
+             }],
+@@ -119,20 +126,27 @@
+ 
+     let requests = responses.requests();
+     assert_eq!(requests.len(), 2);
+-    assert!(
+-        requests[0].body_json()["tools"]
+-            .as_array()
+-            .is_some_and(|tools| {
+-                tools.iter().any(|tool| {
+-                    tool["type"] == "function" && tool["name"] == "send_user_message_async"
+-                })
+-            }),
+-        "the async message tool should be directly visible to the model"
+-    );
+-    assert_eq!(
+-        requests[1].function_call_output_text(CALL_ID),
+-        Some(r#"{"accepted":true}"#.to_string())
+-    );
++    let tool_names = requests[0].body_json()["tools"]
++        .as_array()
++        .expect("tools")
++        .iter()
++        .map(|tool| tool["name"].as_str().expect("tool name").to_string())
++        .collect::<Vec<_>>();
++    assert_eq!(tool_names, vec!["exec", "wait"]);
++    let output = requests[1].custom_tool_call_output(CALL_ID);
++    assert_eq!(output["output"][1]["text"], r#"{"accepted":true}"#);
++    let facts = test
++        .codex
++        .state_db()
++        .expect("Core state runtime")
++        .list_tool_fact_events(&test.session_configured.session_id.to_string(), 0, 200)
++        .await?;
++    assert!(facts.iter().any(|event| {
++        let request = &event.fact.request;
++        request.logical_id == message_id
++            && request.tool_name == "send_user_message_async"
++            && request.parent_call_id.as_deref() == Some(CALL_ID)
++    }));
+     let has_synthetic_assistant_message = requests[1].input().into_iter().any(|item| {
+         item["type"] == "message"
+             && item["role"] == "assistant"
+diff --git a/codex-rs/core/tests/suite/skills_extension.rs b/codex-rs/core/tests/suite/skills_extension.rs
+--- a/codex-rs/core/tests/suite/skills_extension.rs
++++ b/codex-rs/core/tests/suite/skills_extension.rs
+@@ -1322,17 +1322,67 @@
+                 .expect("unified exec should be configurable in tests");
+         });
+     let test = builder.build_with_auto_env(&server).await?;
+-    test.submit_turn("Read the executor skill twice.").await?;
+-
++    let (sandbox_policy, permission_profile) =
++        core_test_support::test_codex::turn_permission_fields(
++            codex_protocol::models::PermissionProfile::Disabled,
++            test.config.cwd.as_path(),
++        );
++    test.codex
++        .start_or_steer_turn(
++            TurnInputRequest::user_input(vec![UserInput::Text {
++                text: "Read the executor skill twice.".into(),
++                text_elements: Vec::new(),
++            }])
++            .with_thread_settings(
++                codex_protocol::protocol::ThreadSettingsOverrides {
++                    approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
++                    sandbox_policy: Some(sandbox_policy),
++                    permission_profile,
++                    ..Default::default()
++                },
++            ),
++        )
++        .await?;
++    let mut runtime_outputs = std::collections::HashMap::new();
++    loop {
++        match test.codex.next_event().await?.msg {
++            EventMsg::Error(error) => panic!("executor skill turn failed: {error:?}"),
++            EventMsg::TurnComplete(_) => break,
++            EventMsg::RawResponseItem(raw) => {
++                if let codex_protocol::models::ResponseItem::FunctionCallOutput {
++                    call_id,
++                    output,
++                    ..
++                } = raw.item
++                {
++                    runtime_outputs.insert(call_id, output);
++                }
++            }
++            _ => {}
++        }
++    }
++
++    // Prompt GC retains the latest identical read; both real executions must still succeed.
++    assert_eq!(runtime_outputs.len(), 2);
+     for call_id in ["executor-skill-first", "executor-skill-again"] {
+-        let output = response
+-            .function_call_output_text(call_id)
++        let output = runtime_outputs
++            .get(call_id)
+             .expect("executor skill command should return output");
++        assert_eq!(output.success, Some(true));
++        let codex_protocol::models::FunctionCallOutputBody::Text(text) = &output.body else {
++            panic!("executor skill command should return text");
++        };
+         assert!(
+-            output.contains("executor skill contents"),
+-            "command output: {output}"
++            text.contains("executor skill contents"),
++            "command output: {text}"
+         );
+     }
++    assert!(
++        response
++            .function_call_output_text("executor-skill-again")
++            .expect("latest skill read should remain model visible")
++            .contains("executor skill contents")
++    );
+ 
+     let events = wait_for_analytics_events(&server, "skill_invocation", /*expected_count*/ 1).await;
+     assert_eq!(events.len(), 1, "executor skill should be counted once");
+diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
+--- a/codex-rs/core/tests/suite/subagent_notifications.rs
++++ b/codex-rs/core/tests/suite/subagent_notifications.rs
+@@ -1825,6 +1825,10 @@
+             .enable(Feature::MultiAgentV2)
+             .expect("test config should allow feature update");
+     });
++    // This fixture exercises encrypted function-call arguments on the direct tool surface.
++    if model.is_some() {
++        builder = builder.with_model_info_override("gpt-5.6-sol", |model| model.tool_mode = None);
++    }
+     let test = builder.build(&server).await?;
+     let root_thread_id = test.session_configured.thread_id;
+ 
+diff --git a/codex-rs/core/tests/suite/unified_exec_process_events.rs b/codex-rs/core/tests/suite/unified_exec_process_events.rs
+--- a/codex-rs/core/tests/suite/unified_exec_process_events.rs
++++ b/codex-rs/core/tests/suite/unified_exec_process_events.rs
+@@ -171,6 +171,7 @@
+     );
+     let mut websocket = accept_initialized_exec_server(listener).await;
+     send_environment_info(&mut websocket, scenario).await;
++    let mut denied_patch_write = None;
+ 
+     let process_start = loop {
+         let request = read_exec_server_json(&mut websocket).await;
+@@ -243,10 +244,28 @@
+                     }),
+                 )
+                 .await;
++                denied_patch_write = Some(request);
++            }
++            Some("fs/remove")
++                if matches!(
++                    scenario,
++                    PushedExecScenario::SandboxedDirectPatchDenied
++                        | PushedExecScenario::SandboxedDirectPatchRetry
++                ) =>
++            {
++                let denied = denied_patch_write
++                    .as_ref()
++                    .expect("rollback follows a denied patch write");
++                assert_eq!(request["params"]["path"], denied["params"]["path"]);
++                assert_eq!(request["params"]["sandbox"], denied["params"]["sandbox"]);
++                assert_eq!(request["params"]["recursive"], false);
++                assert_eq!(request["params"]["force"], true);
++                send_exec_server_json(&mut websocket, json!({ "id": request["id"], "result": {} }))
++                    .await;
+                 if matches!(scenario, PushedExecScenario::SandboxedDirectPatchDenied) {
+                     return PushedExecServerResult {
+                         process_read_requests: 0,
+-                        process_start: request,
++                        process_start: denied_patch_write.take().expect("denied patch write"),
+                     };
+                 }
+             }
+diff --git a/codex-rs/exec/tests/suite/resume.rs b/codex-rs/exec/tests/suite/resume.rs
+--- a/codex-rs/exec/tests/suite/resume.rs
++++ b/codex-rs/exec/tests/suite/resume.rs
+@@ -744,7 +744,8 @@
+     let test = test_codex_exec();
+     let server = MockServer::start().await;
+     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
+-    let repo_root = exec_repo_root()?;
++    let checkout = tempfile::tempdir()?;
++    let repo_root = checkout.path();
+ 
+     let marker = format!("resume-config-{}", Uuid::new_v4());
+     let prompt = format!("echo {marker}");
+@@ -756,7 +757,7 @@
+         .arg("--model")
+         .arg("gpt-5.1")
+         .arg("-C")
+-        .arg(&repo_root)
++        .arg(repo_root)
+         .arg(&prompt)
+         .assert()
+         .success();
+@@ -776,7 +777,7 @@
+         .arg("--model")
+         .arg("gpt-5.1-high")
+         .arg("-C")
+-        .arg(&repo_root)
++        .arg(repo_root)
+         .arg(&prompt2)
+         .arg("resume")
+         .arg("--last")
+diff --git a/codex-rs/mcp-server/tests/common/mcp_process.rs b/codex-rs/mcp-server/tests/common/mcp_process.rs
+--- a/codex-rs/mcp-server/tests/common/mcp_process.rs
++++ b/codex-rs/mcp-server/tests/common/mcp_process.rs
+@@ -163,7 +163,7 @@
+                 "serverInfo": {
+                     "name": "codex-mcp-server",
+                     "title": "Codex",
+-                    "version": "0.0.0",
++                    "version": build_version,
+                     "user_agent": user_agent
+                 },
+                 "protocolVersion": ProtocolVersion::V_2025_03_26

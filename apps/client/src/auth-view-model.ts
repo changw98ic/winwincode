@@ -59,7 +59,6 @@ function safeError(error: unknown, signal: AbortSignal): ControlPlaneClientError
   })
 }
 
-/** Keep browser-session status while leaving bootstrap proof material on the call stack only. */
 export function createAuthSessionViewModel(client: ControlPlaneClient): AuthSessionViewModel {
   const listeners = new Set<AuthSessionViewModelListener>()
   let current = state('signed-out')

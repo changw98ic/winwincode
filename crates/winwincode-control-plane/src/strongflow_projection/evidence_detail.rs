@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact Evidence detail reads with closed Artifact availability.
-
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
@@ -456,11 +454,18 @@ fn resolve_artifacts(
             "Evidence runtime ledger is missing".to_owned(),
         ));
     };
-    let ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
+    let mut ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "Evidence runtime ledger is not canonical".to_owned(),
         )
     })?;
+    crate::runtime_event_transaction::hydrate_runtime_ledger(storage, &mut ledger).map_err(
+        |_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "Evidence runtime history is not canonical".to_owned(),
+            )
+        },
+    )?;
     let terminal = load_successful_terminal_authority(storage, delivery, &binding.execution_job_id)
         .map_err(|_| {
             StrongFlowProjectionError::TrustedFactsUnavailable(
@@ -1271,8 +1276,6 @@ mod tests {
         bytes: Vec<u8>,
     }
 
-    // Write the persisted Command/Test stage source directly to exercise the
-    // binding seam.
     #[allow(clippy::too_many_lines)]
     fn fixture(corruption: Corruption) -> Fixture {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -1432,6 +1435,7 @@ mod tests {
         ));
         let ledger = crate::runtime_event_transaction::RuntimeLedgerState {
             schema_version: 1,
+            event_chain_digest: String::new(),
             delivery_id: Some(delivery.id().clone()),
             work_item_id: None,
             work_run_id: Some(binding.work_run_id.clone()),

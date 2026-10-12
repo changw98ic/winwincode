@@ -1,5 +1,3 @@
-/** Product-neutral browser identities and Control Plane envelopes. */
-
 type Identifier<Name extends string> = string & { readonly __brand: Name }
 
 export type OrganizationId = Identifier<'OrganizationId'>
@@ -245,7 +243,6 @@ export interface BrowserControlSubscription {
   close(): void
 }
 
-/** The product-neutral client surface wrapped by the shared browser query cache. */
 export interface QueryCacheClientPort<
   ProductSession extends ControlPlaneAuthSession = ControlPlaneAuthSession,
   ProductCommandRequest extends ControlPlaneCommandRequest = ControlPlaneCommandRequest,

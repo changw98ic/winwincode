@@ -1,0 +1,168 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2830,10 +2830,13 @@
+     } else {
+         Some(turn_context.turn_timing_state.begin_tool_blocking())
+     };
+-    let handoff = if response_completed {
++    let handoff = if response_completed || !turn_context.submit_change_batch {
++        // Ordinary tools already started when their call item arrived. Preserve
++        // their actual output even when the surrounding stream closes early.
++        // ToolCallRuntime still owns cancellation and handler teardown.
+         drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?
+     } else {
+-        // A cancelled or incomplete stream never commits a terminal handoff.
++        // An incomplete delegated batch never starts or commits a handoff.
+         in_flight.clear();
+         None
+     };
+diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
+--- a/codex-rs/core/tests/suite/stream_no_completed.rs
++++ b/codex-rs/core/tests/suite/stream_no_completed.rs
+@@ -21,6 +21,145 @@
+     responses::sse(vec![serde_json::json!({
+         "type": "response.output_item.done",
+     })])
++}
++
++#[test_case::test_case(false, false; "legacy_completed")]
++#[test_case::test_case(true, false; "code_mode_completed")]
++#[test_case::test_case(false, true; "legacy_running")]
++#[test_case::test_case(true, true; "code_mode_running")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn early_close_retains_started_tool_output(
++    code_mode: bool,
++    running: bool,
++) -> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    let directory = tempfile::tempdir()?;
++    let marker = directory.path().join("effects");
++    let release = directory.path().join("release");
++    let command = format!(
++        "{}printf ran >> '{}'; printf retained-%s result",
++        if running {
++            format!(
++                "while [ ! -f '{}' ]; do sleep 0.01; done; ",
++                release.display()
++            )
++        } else {
++            String::new()
++        },
++        marker.display()
++    );
++    let call = if code_mode {
++        responses::ev_code_mode_call(
++            "call-retained",
++            "functions",
++            "exec_command",
++            &serde_json::json!({"cmd":command,"login":false}).to_string(),
++        )
++    } else {
++        responses::ev_shell_command_call_with_args(
++            "call-retained",
++            &serde_json::json!({"command":command,"login":false}),
++        )
++    };
++    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
++    let (server, _) = start_streaming_sse_server(vec![
++        vec![
++            StreamingSseChunk {
++                gate: None,
++                body: responses::sse(vec![responses::ev_response_created("resp-cut"), call]),
++            },
++            StreamingSseChunk {
++                gate: Some(close_rx),
++                body: String::new(),
++            },
++        ],
++        vec![StreamingSseChunk {
++            gate: None,
++            body: responses::sse_completed("resp-retry"),
++        }],
++    ])
++    .await;
++    let test = test_codex()
++        .with_model("gpt-5.4")
++        .with_config(move |config| {
++            config.model_provider.stream_max_retries = Some(1);
++            config.model_provider.supports_websockets = false;
++            if code_mode {
++                let _ = config
++                    .features
++                    .enable(codex_features::Feature::CodeModeOnly);
++                config.web_search_mode = codex_config::Constrained::allow_any(
++                    codex_protocol::config_types::WebSearchMode::Disabled,
++                );
++            }
++        })
++        .build_with_streaming_server(&server)
++        .await?;
++    let codex = &test.codex;
++    let (sandbox_policy, permission_profile) =
++        core_test_support::test_codex::turn_permission_fields(
++            codex_protocol::models::PermissionProfile::Disabled,
++            test.cwd.path(),
++        );
++    codex
++        .start_or_steer_turn(
++            TurnInputRequest::user_input(vec![UserInput::Text {
++                text: "run the tool then recover the stream".into(),
++                text_elements: Vec::new(),
++            }])
++            .with_thread_settings(
++                codex_protocol::protocol::ThreadSettingsOverrides {
++                    environments: Some(core_test_support::test_codex::local_selections(
++                        test.config.cwd.clone(),
++                    )),
++                    approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
++                    sandbox_policy: Some(sandbox_policy),
++                    permission_profile,
++                    ..Default::default()
++                },
++            ),
++        )
++        .await?;
++    let mut observed = Vec::new();
++    loop {
++        let event = tokio::time::timeout(std::time::Duration::from_secs(10), codex.next_event())
++            .await
++            .unwrap_or_else(|_| panic!("waiting for tool completion: {observed:?}"))?;
++        if (running && matches!(event.msg, EventMsg::ExecCommandBegin(_)))
++            || (!running && matches!(event.msg, EventMsg::ExecCommandEnd(_)))
++        {
++            break;
++        }
++        observed.push(event.msg);
++    }
++    let _ = close_tx.send(());
++    if running {
++        std::fs::write(release, b"release")?;
++    }
++    wait_for_event(codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
++    let requests = server.requests().await;
++    assert_eq!(requests.len(), 2);
++    let retry: serde_json::Value = serde_json::from_slice(&requests[1])?;
++    let outputs: Vec<_> = retry["input"]
++        .as_array()
++        .expect("retry input must be an array")
++        .iter()
++        .filter(|item| {
++            matches!(
++                item["type"].as_str(),
++                Some("function_call_output" | "custom_tool_call_output")
++            )
++        })
++        .collect();
++    assert!(
++        outputs
++            .iter()
++            .any(|item| item.to_string().contains("retained-result")),
++        "retry must contain the actual completed output: {outputs:?}"
++    );
++    assert_eq!(std::fs::read_to_string(marker)?, "ran");
++    server.shutdown().await;
++    Ok(())
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

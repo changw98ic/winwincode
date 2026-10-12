@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable Candidate ref acceptance: recorded before cleanup, idempotent under
-//! repeated freezes, and fail closed when the ref cannot be created.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

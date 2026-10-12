@@ -22,13 +22,6 @@ import {
   parseWorkerLaunchGrant,
 } from '../packages/contracts/dist/index.js'
 
-// Schema-alignment contract for the ClientControlPort TypeScript projection.
-// Authoritative source: schema/winwincode/v1/client-control.schema.json (with
-// its domain.schema.json sibling). Messages are flat: the schema inlines the
-// envelope and command fields into every message, so expectedRevision,
-// idempotencyKey, occupancyLeaseId, and occupancyFencingToken are siblings of
-// `kind`, never members of a payload sub-object.
-
 const T0 = '2026-09-01T09:30:15.000Z'
 const T1 = '2026-09-01T09:41:18.000Z'
 const DIGEST = `sha256:${'a'.repeat(64)}`
@@ -126,8 +119,6 @@ function workerLaunchGrant() {
   }
 }
 
-// Minimal schema-valid extra fields for every kind; the command base and the
-// fencing pair are added by the builders below according to the schema.
 const KIND_EXTRA_FIELDS = Object.freeze({
   'client.repository.register': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-repository-register', expectedRevision: 4, publicKey: 'A'.repeat(88), nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(24) } }),
   'client.repository.registered': () => ({ receipt: { requestId: 'repository-test', outcome: 'registered', repositoryBindingId: crockfordId('rbd') } }),
@@ -155,11 +146,6 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     connectCodeId: crockfordId('cct'),
     codeDigest: DIGEST,
     expiresAt: T1,
-  }),
-  'client.access.challenge_ack': () => ({
-    challengeId: crockfordId('cac'),
-    connectCodeId: crockfordId('cct'),
-    status: 'confirmed',
   }),
   'client.occupancy.ack': () => ({}),
   'client.occupancy.rejected': () => ({ reason: 'stale_fencing_token' }),
@@ -206,18 +192,6 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     commandKind: 'client.enroll',
     status: 'accepted',
   }),
-  'client.enrollment_accepted': () => ({
-    publicClientId: '927351842',
-    serverTime: T0,
-    heartbeatIntervalMs: 30_000,
-  }),
-  'client.access.challenge': () => ({
-    challengeId: crockfordId('cac'),
-    connectCodeId: crockfordId('cct'),
-    codeDigest: DIGEST,
-    requesterUserId: crockfordId('usr'),
-    expiresAt: T1,
-  }),
   'client.occupancy.offer': () => ({
     holderUserId: crockfordId('usr'),
     claimRequestId: crockfordId('ocq'),
@@ -248,15 +222,12 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     requesterUserId: crockfordId('usr'),
   }),
   'client.client_lock': () => ({ lockState: 'locked' }),
-  'client.credential_rotate': () => ({ reason: 'scheduled' }),
   'client.extension.report': () => ({ snapshot: { clientNodeId: crockfordId('cnd'), revision: 4, encryptionPublicKey: 'BA==', skills: [], mcpServers: [] }, receipt: null }),
   'client.extension.apply': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-extension-apply', expectedRevision: 4, publicKey: 'BA==', nonce: 'AA==', ciphertext: 'AA==' } }),
   'client.provider.report': () => ({ snapshot: { clientNodeId: crockfordId('cnd'), revision: 4, encryptionPublicKey: 'BA==', providers: [] }, receipt: null }),
   'client.provider.apply': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-provider-apply', expectedRevision: 4, publicKey: 'BA==', nonce: 'AA==', ciphertext: 'AA==' } }),
 })
 
-// The 8 non-command messages (reports, ack, response, request) and the 8
-// unfenced commands; the 11 fenced commands get their pair from the builders.
 const NON_COMMAND_KINDS = Object.freeze([
   'client.provider.report',
   'client.extension.report',
@@ -267,8 +238,6 @@ const NON_COMMAND_KINDS = Object.freeze([
   'client.worker.reconcile',
   'client.repository.status',
   'client.command_ack',
-  'client.enrollment_accepted',
-  'client.access.challenge',
 ])
 
 function validMessage(kind, overrides = {}) {
@@ -303,15 +272,44 @@ function errorCodeOf(block) {
   return null
 }
 
+function providerReport(protocol, responsesStructuredOutput) {
+  const message = validMessage('client.provider.report')
+  message.snapshot.providers = [{ config: {
+    providerId: 'responses-test', displayName: 'Responses Test', endpoint: 'https://models.example/v1/responses',
+    protocol, modelIds: ['test-model'], enabled: true,
+    ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }),
+  }, credentialConfigured: true }]
+  return message
+}
+
+for (const mode of [undefined, 'json_schema', 'json_object', 'text']) {
+  test(`Provider reports preserve Responses structured output ${mode ?? 'default'}`, () => {
+    const message = providerReport('openai_responses', mode)
+    const parsed = parseClientToServerMessage(message)
+    assert.deepEqual(parsed.snapshot.providers[0].config, message.snapshot.providers[0].config)
+  })
+}
+
+test('Provider reports reject structured output modes on other protocols and unknown modes', () => {
+  for (const protocol of ['anthropic_messages', 'openai_chat_completions', 'canonical', 'codex_chatgpt', 'chatgpt_plan']) {
+    for (const mode of ['json_schema', 'json_object', 'text']) {
+      assert.equal(errorCodeOf(() => parseClientToServerMessage(providerReport(protocol, mode))), 'INVALID_VALUE')
+    }
+  }
+  for (const mode of ['json', '', null, 1]) {
+    assert.equal(errorCodeOf(() => parseClientToServerMessage(providerReport('openai_responses', mode))), 'INVALID_VALUE')
+  }
+})
+
 test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(CLIENT_CONTROL_SCHEMA_VERSION, 'winwincode/v1')
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries match the schema verbatim: 19 + 14 = 33', () => {
-  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 19)
-  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 14)
-  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 33)
+test('kind registries share command_ack in both directions: 18 + 12 - 1 = 29', () => {
+  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 18)
+  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 12)
+  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 29)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS), true)
@@ -319,11 +317,11 @@ test('kind registries match the schema verbatim: 19 + 14 = 33', () => {
   const overlap = CLIENT_TO_SERVER_MESSAGE_KINDS.filter(kind => (
     SERVER_TO_CLIENT_MESSAGE_KINDS.includes(kind)
   ))
-  assert.deepEqual(overlap, [])
+  assert.deepEqual(overlap, ['client.command_ack'])
 })
 
-test('exactly 22 command kinds and 11 fenced kinds per the schema', () => {
-  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 22)
+test('exactly 20 command kinds and 11 fenced kinds per the schema', () => {
+  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 20)
   assert.equal(CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS.length, 11)
   assert.deepEqual(
     [...CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS],
@@ -674,4 +672,16 @@ test('domain helpers round-trip the schema scalars', () => {
     })),
     'INVALID_VALUE',
   )
+})
+
+test('server command rejection is parsed in both directions', () => {
+  const receipt = {
+    ...envelopeFields('client.command_ack'),
+    commandMessageId: crockfordId('cmsg', 900),
+    commandKind: 'client.repository.upsert',
+    status: 'rejected_revision_conflict',
+    currentRevision: 4,
+    error: { code: 'REVISION_CONFLICT', message: 'Refresh repository revision', retryable: false },
+  }
+  assert.deepEqual(parseServerToClientMessage(receipt), parseClientToServerMessage(receipt))
 })

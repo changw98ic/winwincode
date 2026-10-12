@@ -1,32 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Two-phase device scheduler over the durable occupancy, repository ACL,
-//! capacity, and launch-grant ledgers (plan FLOW-100.2).
-//!
-//! `select_and_request_worker` is the service core the `Quick` and
-//! `StrongFlow` execution paths call after a user picked a Client and a
-//! repository binding. Phase one atomically validates the scheduling
-//! preconditions and
-//! durably reserves one free worker-session slot of the Client: the caller
-//! must hold the node's device-confirmed occupancy (`occupied` or `draining`,
-//! per the occupancy service semantics), the binding must be visible through
-//! the dual authorization (an active `use` client grant plus an active
-//! repository access grant), and the durable capacity ledger — pending
-//! reservations plus non-terminal launch grants, reconciled with the
-//! device-reported running count — must still have a free slot. The
-//! reservation commits behind a compare-and-swap gate inside one immediate
-//! transaction, so concurrent `WorkerSession` launches of the same user on
-//! the same device can never oversell the capacity.
-//!
-//! Phase two issues the Worker request itself by reusing the frozen
-//! `WorkerLaunchGrantService::issue` gate, which re-validates every phase-one
-//! fact atomically and stamps the `issued` grant that takes the slot
-//! accounting over; the reservation settles to `granted`. Every failure path
-//! releases the reservation durably: a refused launch release-frees the slot
-//! immediately, `rollback_launch` rolls a timed-out or cancelled attempt
-//! back by revoking the grant, and `expire_stale_reservations` reclaims
-//! reservations a crashed scheduler never settled.
-
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -47,49 +20,26 @@ use crate::WorkerLaunchGrantService;
 use crate::WorkerLaunchGrantServiceError;
 use crate::WorkerLaunchGrantServiceErrorKind;
 
-/// Stable device scheduler failure categories. Each category is secret-free
-/// and maps onto exactly one boundary presentation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceSchedulerServiceErrorKind {
-    /// A scheduling request violated the frozen schema bounds.
     InvalidInput,
-    /// The public Client ID does not name a registered, enrolled Client.
     UnknownClientNode,
-    /// The Client is not reachable (`offline` or `degraded`).
     PresenceNotOnline,
-    /// The Client is locked by a local operator.
     ClientLocked,
-    /// The Client has no usable occupancy (none, or not device-confirmed).
     OccupancyRequired,
-    /// The occupancy lease belongs to another user.
     NotLeaseHolder,
-    /// The occupancy is neither `occupied` nor `draining` (including a stale
-    /// fencing stamp the launch gate refused).
     OccupancyNotConfirmed,
-    /// The repository binding is unknown, foreign, or invisible to the
-    /// holder (uniform dual-authorization rejection).
     BindingNotVisible,
-    /// The Client has no free worker-session slot to reserve.
     CapacityExhausted,
-    /// The request identity was reused with a different body.
     RequestConflict,
-    /// The scheduling request already terminated; retry needs a new request
-    /// identity.
     ReservationNotOpen,
-    /// No scheduling request matches the requested identity.
     UnknownReservation,
-    /// The authoritative launch gate refused the Worker request for a
-    /// reason the scheduler does not model separately.
     LaunchRefused,
-    /// A compare-and-swap guard lost a race.
     RevisionConflict,
-    /// A durable row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free device scheduler service error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSchedulerServiceError {
     kind: DeviceSchedulerServiceErrorKind,
@@ -146,9 +96,6 @@ impl From<DeviceSchedulerStoreError> for DeviceSchedulerServiceError {
     }
 }
 
-/// Validated two-phase scheduling request (plan FLOW-100.2). The boundary
-/// mints the worker identities and the short-lived credential digest; the
-/// scheduler owns the reservation and launch grant identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceWorkerSchedulingRequest {
     request_id: String,
@@ -165,13 +112,6 @@ pub struct DeviceWorkerSchedulingRequest {
 }
 
 impl DeviceWorkerSchedulingRequest {
-    /// Builds one validated scheduling request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical request identity, a non-canonical user,
-    /// binding, worker, or session identity, a malformed credential digest,
-    /// or a non-canonical expiry.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         request_id: impl Into<String>,
@@ -235,7 +175,6 @@ impl DeviceWorkerSchedulingRequest {
     }
 }
 
-/// The durable outcome of one two-phase scheduling attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceWorkerSchedulingReceipt {
     pub request_id: String,
@@ -253,47 +192,24 @@ pub struct DeviceWorkerSchedulingReceipt {
     pub product_session_id: Option<String>,
     pub work_run_id: Option<String>,
     pub expires_at: Instant,
-    /// True when the attempt replayed an earlier durable outcome instead of
-    /// issuing a second slot.
     pub replayed: bool,
 }
 
-/// Device scheduling application service over one storage connection.
 pub struct DeviceSchedulerService<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
-/// What phase one produced for one scheduling attempt.
 enum ReservedSlot {
-    /// A fresh or resumable `reserved` slot awaiting phase two.
     FreshOrResumed(DeviceSchedulerReservationRecord),
-    /// The request already completed durably; its receipt is replayed.
     Completed(DeviceWorkerSchedulingReceipt),
 }
 
 impl<'storage> DeviceSchedulerService<'storage> {
-    /// Builds one service over the sole product-state storage authority.
     #[must_use]
     pub fn new(storage: &'storage mut SqliteStorage) -> Self {
         Self { storage }
     }
 
-    /// Runs the two-phase schedule for one user-picked Client and repository
-    /// binding (plan FLOW-100.2).
-    ///
-    /// Phase one validates the occupancy holder, the device-confirmed
-    /// occupancy state, the dual-authorization binding visibility, and the
-    /// durable free capacity, then reserves exactly one free slot behind the
-    /// compare-and-swap gate. Phase two issues the Worker request through the
-    /// frozen launch grant gate and settles the reservation to `granted`.
-    /// Every refusal on the way leaves the durable capacity unchanged: a
-    /// failed phase two releases the reservation before the error surfaces.
-    ///
-    /// # Errors
-    ///
-    /// Returns the stable scheduling failure categories; a replayed request
-    /// identity returns the original receipt idempotently instead of issuing
-    /// a second slot.
     pub fn select_and_request_worker(
         &mut self,
         request: &DeviceWorkerSchedulingRequest,
@@ -307,14 +223,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         }
     }
 
-    /// Rolls one scheduling attempt back (plan FLOW-100.2: launch timeout,
-    /// cancel): a still-`reserved` slot is released, a `granted` slot is
-    /// freed by revoking its `issued` launch grant. Rolling an already
-    /// released attempt back is an idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown request identity or storage failure.
     pub fn rollback_launch(
         &mut self,
         request_id: &str,
@@ -346,8 +254,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
                     )
                 })?;
                 let mut grants = WorkerLaunchGrantService::new(self.storage);
-                // A rollback of an already rolled back attempt is an
-                // idempotent no-op: only a still-`issued` grant revokes.
                 let grant = grants
                     .snapshot(&grant_id)
                     .map_err(|_| unavailable())?
@@ -367,13 +273,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         }
     }
 
-    /// Reclaims every `reserved` slot whose reservation was created before
-    /// `cutoff` (crash safety): the boundary sweeps on a timer so a scheduler
-    /// that died between the phases cannot hold the slot forever.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire_stale_reservations(
         &mut self,
         cutoff: &Instant,
@@ -381,18 +280,12 @@ impl<'storage> DeviceSchedulerService<'storage> {
         Ok(self.reservation_ledger()?.expire_stale(cutoff)?)
     }
 
-    /// Phase one: validate and durably reserve one free slot. A replayed
-    /// request identity resumes a `reserved` slot, returns the receipt of a
-    /// `granted` slot idempotently, or refuses a terminated attempt.
     #[allow(clippy::too_many_lines)]
     fn reserve_slot(
         &mut self,
         request: &DeviceWorkerSchedulingRequest,
         now: &Instant,
     ) -> Result<ReservedSlot, DeviceSchedulerServiceError> {
-        // Touch the launch grant ledger first so the durable capacity view
-        // the reservation CAS judges against exists on a fresh database
-        // (the same order production flows open their ledgers in).
         self.storage
             .worker_launch_grant_ledger()
             .map_err(|storage_error| {
@@ -401,8 +294,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
                     storage_error.to_string(),
                 )
             })?;
-        // Occupancy: the caller must hold the node's one active lease and it
-        // must be device-confirmed (`occupied` or `draining`).
         let (node, lease) = self.validate_holder_and_occupancy(request)?;
         self.validate_binding_visibility(request, &node.client_node_id)?;
 
@@ -423,13 +314,9 @@ impl<'storage> DeviceSchedulerService<'storage> {
             }
             DeviceSchedulerReserveOutcome::Replayed(record) => match record.state {
                 winwincode_storage::DeviceSchedulerReservationState::Reserved => {
-                    // A previous attempt reserved the slot and died before
-                    // the Worker request; resume phase two on this slot.
                     Ok(ReservedSlot::FreshOrResumed(*record))
                 }
                 winwincode_storage::DeviceSchedulerReservationState::Granted => {
-                    // The request completed durably: replay its receipt
-                    // instead of issuing a second slot.
                     let grant_id = record.launch_grant_id.clone().ok_or_else(|| {
                         error(
                             DeviceSchedulerServiceErrorKind::CorruptState,
@@ -461,9 +348,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         }
     }
 
-    /// Phase two: issue the Worker request through the frozen launch grant
-    /// gate and settle the reservation to `granted`. Any refusal releases the
-    /// reservation before the error surfaces.
     #[allow(clippy::too_many_lines)]
     fn request_worker(
         &mut self,
@@ -483,9 +367,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
                     )
                 })?
         };
-        // Crash recovery: when this exact request already produced a live
-        // grant (the attempt died between the grant and the settlement),
-        // adopt it instead of issuing a second one.
         if let Some(grant) = self.adoptable_grant(request, reservation)? {
             self.settle_granted(reservation, &grant, now)?;
             return Ok(receipt(
@@ -526,9 +407,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         let issued = match WorkerLaunchGrantService::new(self.storage).issue(&issuance, now) {
             Ok(grant) => grant,
             Err(issue_error) => {
-                // The durable slot must not leak: adopt an orphan grant of a
-                // crashed earlier attempt, otherwise release the reservation
-                // and surface the original refusal.
                 return match self.recover_or_release(request, reservation, &issue_error, now)? {
                     Some(recovered) => Ok(recovered),
                     None => Err(map_launch_refusal(&issue_error)),
@@ -545,9 +423,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         ))
     }
 
-    /// Returns the live grant of this exact request identity, if one exists:
-    /// the at-most-once adoption handle for an attempt that died between the
-    /// grant and the settlement.
     fn adoptable_grant(
         &mut self,
         request: &DeviceWorkerSchedulingRequest,
@@ -570,7 +445,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         }))
     }
 
-    /// Settles the reservation to `granted` after the grant committed.
     fn settle_granted(
         &mut self,
         reservation: &DeviceSchedulerReservationRecord,
@@ -584,9 +458,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         )
         .map_err(DeviceSchedulerServiceError::from)?;
         if let Err(settle_error) = self.reservation_ledger()?.settle_granted(&settlement, now) {
-            // The grant is live but the reservation could not follow; revoke
-            // the grant so the slot accounting stays consistent, then surface
-            // the settlement failure.
             let mut grants = WorkerLaunchGrantService::new(self.storage);
             let _ = grants.revoke(
                 &grant.worker_launch_grant_id,
@@ -599,12 +470,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         Ok(())
     }
 
-    /// Crash-recovery gate for a refused phase two: when the worker session
-    /// already carries a live grant that matches this exact request (a
-    /// previous attempt died between the grant and the settlement), the
-    /// reservation settles onto it; otherwise the reservation is released so
-    /// the slot is free again, and `None` tells the caller to surface the
-    /// original issue error.
     fn recover_or_release(
         &mut self,
         request: &DeviceWorkerSchedulingRequest,
@@ -645,8 +510,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
         )))
     }
 
-    /// Releases a `reserved` slot; a release failure must not hide the
-    /// original error, so it surfaces as the storage category.
     fn release_reservation(
         &mut self,
         reservation: &DeviceSchedulerReservationRecord,
@@ -775,7 +638,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
     }
 }
 
-/// Assembles the durable receipt of one scheduled Worker request.
 fn receipt(
     request: &DeviceWorkerSchedulingRequest,
     reservation: &DeviceSchedulerReservationRecord,
@@ -803,7 +665,6 @@ fn receipt(
     }
 }
 
-/// Maps one launch-gate refusal onto the stable scheduling taxonomy.
 fn map_launch_refusal(source: &WorkerLaunchGrantServiceError) -> DeviceSchedulerServiceError {
     let kind = match source.kind() {
         WorkerLaunchGrantServiceErrorKind::InvalidInput => {
@@ -923,12 +784,8 @@ const fn is_crockford_base32(byte: u8) -> bool {
     )
 }
 
-/// Crockford Base32 alphabet shared with the canonical identity encodings.
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Derives the reservation identity deterministically from the request
-/// identity: a replayed request computes the byte-identical reservation
-/// command, so the durable replay gate recognizes it.
 #[must_use]
 fn derive_reservation_id(request_id: &str) -> String {
     let digest = Sha256::digest(request_id.as_bytes());
@@ -942,7 +799,6 @@ fn derive_reservation_id(request_id: &str) -> String {
     identity
 }
 
-/// Generates one canonical `prefix` + 26 character Crockford identifier.
 fn generate_prefixed_id(prefix: &str) -> Result<String, DeviceSchedulerServiceError> {
     let mut random = [0_u8; 13];
     getrandom::fill(&mut random).map_err(|_| unavailable())?;

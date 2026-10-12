@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Route-isolated model request admission and bounded stream backpressure.
-//!
-//! Each Provider/model/Credential/organization/project route owns independent
-//! concurrency slots and a FIFO waiting queue. The pool keeps only bounded,
-//! opaque stream frames in memory and releases an active slot only when its
-//! stream reaches a terminal outcome or is explicitly cancelled.
-
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -29,8 +22,6 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const DURABLE_POOL_SCHEMA: &str = "winwincode.model-request-pool-exchange.v1";
 const DURABLE_POOL_AUTHORITY_SCHEMA: &str = "winwincode.model-request-pool-authority.v2";
 
-/// Immutable partition key derived from the trusted Provider Gateway identity
-/// and its resolved route.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ModelRequestRouteKey {
     provider: String,
@@ -43,11 +34,6 @@ pub struct ModelRequestRouteKey {
 }
 
 impl ModelRequestRouteKey {
-    /// Builds the canonical pool partition from a trusted Gateway identity and route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-ProductSession identities and malformed route fields.
     pub fn from_gateway(
         identity: &ProviderGatewayIdentity,
         route: &ModelRoute,
@@ -188,7 +174,6 @@ impl PartialOrd for ModelRequestRouteKey {
     }
 }
 
-/// One pool admission constructed from a successful Provider Gateway open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequestAdmission {
     pub route: ModelRequestRouteKey,
@@ -197,11 +182,6 @@ pub struct ModelRequestAdmission {
 }
 
 impl ModelRequestAdmission {
-    /// Joins trusted Gateway identity and route facts to one exchange request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an identity/route mismatch or malformed exchange identifiers.
     pub fn from_gateway_route(
         identity: &ProviderGatewayIdentity,
         route: &ModelRoute,
@@ -217,11 +197,6 @@ impl ModelRequestAdmission {
         })
     }
 
-    /// Copies only secret-free route and exchange identities from the Gateway result.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an identity/route mismatch or malformed exchange identifiers.
     pub fn from_gateway_open(
         identity: &ProviderGatewayIdentity,
         receipt: &ProviderGatewayOpenReceipt,
@@ -234,12 +209,6 @@ impl ModelRequestAdmission {
         )
     }
 
-    /// Rebuilds one pool admission from an already validated durable route
-    /// authority without consulting current Settings or Catalog revisions.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a corrupt frozen authority or malformed request identities.
     pub fn from_frozen_authority(
         authority: &FrozenModelRouteAuthority,
         model_exchange_id: ModelExchangeId,
@@ -261,7 +230,6 @@ impl ModelRequestAdmission {
     }
 }
 
-/// Fixed memory and concurrency bounds applied independently to every route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelRequestPoolConfig {
     pub max_routes: usize,
@@ -294,7 +262,6 @@ impl ModelRequestPoolConfig {
     }
 }
 
-/// Current lifecycle state for one exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestState {
     Queued,
@@ -310,7 +277,6 @@ impl ModelRequestState {
     }
 }
 
-/// Provider-neutral terminal outcome used to release one active slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestTerminalOutcome {
     Succeeded,
@@ -328,7 +294,6 @@ impl ModelRequestTerminalOutcome {
     }
 }
 
-/// Result category from a pool admission attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestAdmissionStatus {
     Started,
@@ -336,7 +301,6 @@ pub enum ModelRequestAdmissionStatus {
     Duplicate,
 }
 
-/// Admission result including the stable FIFO position when queued.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequestAdmissionReceipt {
     pub model_exchange_id: ModelExchangeId,
@@ -345,7 +309,6 @@ pub struct ModelRequestAdmissionReceipt {
     pub queue_position: Option<usize>,
 }
 
-/// Opaque, bounded stream frame retained until acknowledged.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ModelStreamFrame {
     sequence: u64,
@@ -399,7 +362,6 @@ impl fmt::Debug for ModelStreamFrame {
     }
 }
 
-/// Result of attempting to append one model stream frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelFrameWriteStatus {
     Accepted,
@@ -407,7 +369,6 @@ pub enum ModelFrameWriteStatus {
     Backpressured,
 }
 
-/// Provider read decision derived only from this stream's bounded buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelStreamReadControl {
     Read,
@@ -415,7 +376,6 @@ pub enum ModelStreamReadControl {
     Closed,
 }
 
-/// Stream-frame result with bounded-buffer and newly granted exchange facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelFrameWriteReceipt {
     pub status: ModelFrameWriteStatus,
@@ -427,7 +387,6 @@ pub struct ModelFrameWriteReceipt {
     pub granted_exchange_id: Option<ModelExchangeId>,
 }
 
-/// Result of acknowledging buffered stream frames.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelFrameAckReceipt {
     pub model_exchange_id: ModelExchangeId,
@@ -438,7 +397,6 @@ pub struct ModelFrameAckReceipt {
     pub replayed: bool,
 }
 
-/// Idempotent terminal result and the FIFO request which acquired its slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequestTerminalReceipt {
     pub model_exchange_id: ModelExchangeId,
@@ -447,7 +405,6 @@ pub struct ModelRequestTerminalReceipt {
     pub granted_exchange_id: Option<ModelExchangeId>,
 }
 
-/// Read-only reconnect projection. Reading it performs no lifecycle transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequestSnapshot {
     pub route: ModelRequestRouteKey,
@@ -463,7 +420,6 @@ pub struct ModelRequestSnapshot {
     pub terminal_outcome: Option<ModelRequestTerminalOutcome>,
 }
 
-/// Read-only capacity projection for one isolated route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRoutePoolSnapshot {
     pub route: ModelRequestRouteKey,
@@ -473,7 +429,6 @@ pub struct ModelRoutePoolSnapshot {
     pub records: usize,
 }
 
-/// Stable pool failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestPoolErrorCode {
     InvalidConfig,
@@ -490,7 +445,6 @@ pub enum ModelRequestPoolErrorCode {
     TerminalConflict,
 }
 
-/// Bounded model request pool failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequestPoolError {
     code: ModelRequestPoolErrorCode,
@@ -669,8 +623,6 @@ impl RoutePartition {
     }
 }
 
-/// In-memory, deterministic request pool. Durable Gateway settlement and
-/// Provider streaming remain owned by their existing modules.
 #[derive(Clone)]
 pub struct ModelRequestPool {
     config: ModelRequestPoolConfig,
@@ -688,7 +640,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Starts immediately within the route limit or joins that route's FIFO queue.
     pub fn submit(
         &mut self,
         admission: &ModelRequestAdmission,
@@ -767,7 +718,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Retains one contiguous frame or pauses Provider reading at the hard watermark.
     pub fn push_frame(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -776,9 +726,6 @@ impl ModelRequestPool {
         self.push_frames(model_exchange_id, std::slice::from_ref(frame))
     }
 
-    /// Atomically retains one Provider event's contiguous canonical frame batch.
-    /// A rejected batch leaves every frame uncommitted and flips only the read
-    /// control to paused, so the caller can retry the exact batch after an ack.
     pub fn push_frames(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -855,8 +802,6 @@ impl ModelRequestPool {
         ))
     }
 
-    /// Validates that one canonical Provider event batch can fit into an empty
-    /// stream buffer. Current occupancy is intentionally ignored.
     pub fn validate_frame_batch(
         &self,
         frames: &[ModelStreamFrame],
@@ -878,7 +823,6 @@ impl ModelRequestPool {
         Ok(())
     }
 
-    /// Drops acknowledged frames and frees their bounded buffer space.
     pub fn acknowledge(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -920,8 +864,6 @@ impl ModelRequestPool {
         Ok(ack_receipt(record, false))
     }
 
-    /// Cancels an active or queued request. Active cancellation grants exactly
-    /// one FIFO waiter on the same route.
     pub fn cancel(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -929,7 +871,6 @@ impl ModelRequestPool {
         self.terminate(model_exchange_id, ModelRequestTerminalOutcome::Cancelled)
     }
 
-    /// Applies one terminal outcome exactly once and releases an active slot.
     pub fn terminate(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -993,7 +934,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Returns buffered frames after a cursor without exceeding caller limits.
     pub fn read_buffered(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1021,7 +961,6 @@ impl ModelRequestPool {
         Ok(frames)
     }
 
-    /// Rebuilds the exact current exchange projection without reapplying terminal state.
     pub fn reconnect(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1047,11 +986,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Encodes one bounded exchange buffer for the restricted durable authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown/corrupt exchange state or serialization failure.
     pub fn export_exchange(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1062,12 +996,6 @@ impl ModelRequestPool {
         serde_json::to_vec(&durable).map_err(|_| pool_corrupt())
     }
 
-    /// Restores one exact bounded exchange buffer after Control Plane restart.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical bytes, changed route/request identity, invalid
-    /// sequence/fingerprint state, or exhausted route capacity.
     pub fn restore_exchange(
         &mut self,
         admission: &ModelRequestAdmission,
@@ -1107,11 +1035,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Encodes the complete bounded route/queue authority for process restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable error for corrupt in-memory state or serialization failure.
     pub fn export_authority(&self) -> Result<Vec<u8>, ModelRequestPoolError> {
         let routes = self
             .routes
@@ -1145,12 +1068,6 @@ impl ModelRequestPool {
         .map_err(|_| pool_corrupt())
     }
 
-    /// Replaces an empty in-memory pool with the exact durable authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical/corrupt bytes, changed configuration, duplicate
-    /// routes/exchanges, or inconsistent FIFO state.
     pub fn restore_authority(&mut self, bytes: &[u8]) -> Result<(), ModelRequestPoolError> {
         if !self.routes.is_empty() || !self.exchange_routes.is_empty() {
             return Err(pool_error(
@@ -1172,14 +1089,11 @@ impl ModelRequestPool {
         Ok(())
     }
 
-    /// Reports whether this process has loaded any route authority.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty() && self.exchange_routes.is_empty()
     }
 
-    /// Reports whether one trusted route can start or enter its bounded queue.
-    /// Internal pool limits and occupancy remain private to the runtime.
     #[must_use]
     pub(crate) fn is_route_ready(&self, route: &ModelRequestRouteKey) -> bool {
         let Some(partition) = self.routes.get(route) else {
@@ -1201,8 +1115,6 @@ impl ModelRequestPool {
             .count()
     }
 
-    /// Returns the stable identities of exchanges that still own unacknowledged
-    /// frames. Payloads remain inside the bounded pool authority.
     #[must_use]
     pub(crate) fn buffered_exchange_ids(&self) -> Vec<ModelExchangeId> {
         let mut exchange_ids = self
@@ -1224,7 +1136,6 @@ impl ModelRequestPool {
             .map(ModelRequestRouteKey::project_scope)
     }
 
-    /// Returns capacity use for one route without exposing buffered payloads.
     #[must_use]
     pub fn route_snapshot(&self, route: &ModelRequestRouteKey) -> Option<ModelRoutePoolSnapshot> {
         let partition = self.routes.get(route)?;
@@ -1237,8 +1148,6 @@ impl ModelRequestPool {
         })
     }
 
-    /// Forgets an acknowledged terminal record after its durable owner has
-    /// retained the terminal receipt.
     pub fn forget_terminal(
         &mut self,
         model_exchange_id: &ModelExchangeId,

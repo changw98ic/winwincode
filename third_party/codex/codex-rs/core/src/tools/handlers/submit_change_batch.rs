@@ -1,6 +1,10 @@
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
+use crate::tools::parallel::ChangeBatchHandoff;
+use crate::tools::parallel::ToolContinuation;
+use crate::tools::registry::CoreToolOutput;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::FreeformTool;
@@ -12,8 +16,8 @@ pub(crate) const SUBMIT_CHANGE_BATCH_TOOL_NAME: &str = "submit_change_batch";
 const SUBMIT_CHANGE_BATCH_GRAMMAR: &str = include_str!("submit_change_batch.lark");
 
 /// The terminal delegated tool is advertised only on turns explicitly opted
-/// into host handoff. Its runtime is intercepted by Core before dispatch; a
-/// direct handler is deliberately fail-closed so it cannot mutate a workspace.
+/// into host handoff. The common dispatch boundary authorizes its proposal and
+/// runs hooks before accepting the terminal continuation.
 pub(crate) struct SubmitChangeBatchHandler;
 
 impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
@@ -34,16 +38,49 @@ impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
         })
     }
 
-    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(async {
-            Err(FunctionCallError::Fatal(
-                "submit_change_batch must be handled by the host handoff boundary".to_string(),
-            ))
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            self.handle_core(invocation)
+                .await
+                .map(|result| result.output)
         })
     }
 }
 
 impl CoreToolRuntime for SubmitChangeBatchHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
+    fn handle_core(
+        &self,
+        invocation: ToolInvocation,
+    ) -> futures::future::BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
+        Box::pin(async move {
+            let ToolPayload::Custom { input } = invocation.payload else {
+                return Err(FunctionCallError::RespondToModel(
+                    "submit_change_batch expects a ChangeBatch proposal".to_string(),
+                ));
+            };
+            if !invocation.turn.submit_change_batch {
+                return Err(FunctionCallError::RespondToModel(
+                    "this turn does not allow host handoff".to_string(),
+                ));
+            }
+            Ok(CoreToolOutput {
+                output: Box::new(FunctionToolOutput::from_text(
+                    "ChangeBatch proposal handed to host for application and validation."
+                        .to_string(),
+                    Some(true),
+                )),
+                continuation: Some(ToolContinuation::YieldToHost(ChangeBatchHandoff {
+                    call_id: invocation.call_id,
+                    proposal: input,
+                })),
+            })
+        })
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Custom { .. })
     }

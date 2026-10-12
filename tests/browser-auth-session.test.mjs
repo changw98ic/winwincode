@@ -174,9 +174,6 @@ async function waitForServer(controlUrl, child, errors) {
 }
 
 async function expectStartupFailure(child, errors, expectedMessage) {
-  // The rejected process must exit on its own; poll instead of racing a fixed
-  // window because the first exec of a freshly linked binary can stall in
-  // dyld for many seconds on external volumes.
   const deadline = Date.now() + 30_000
   while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))

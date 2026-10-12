@@ -1,7 +1,3 @@
-/* DSH theme, Copyright (c) 2026 DeepSeek, MIT. See THIRD_PARTY_NOTICES.md. */
-/* Figma font-weight 510 (an SF Pro variable-font weight) always renders as
-   font-weight: 500 in this UI — non-variable webfonts snap intermediate
-   weights unpredictably across platforms. */
 :root {
   --dsw-static-amber-100: rgb(254, 245, 231);
   --dsw-static-amber-400: rgb(247, 173, 49);

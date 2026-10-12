@@ -918,6 +918,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_uses_mitm_in_limited_mode() {
         let mut settings = NetworkProxyConfig {
+            allow_local_binding: true,
             enabled: true,
             mode: NetworkMode::Limited,
             mitm: true,
@@ -991,6 +992,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_detects_tls_for_brokered_nonstandard_port_in_full_mode() {
         let mut settings = NetworkProxyConfig {
+            allow_local_binding: true,
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,
@@ -1021,6 +1023,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_blocks_limited_mode_without_mitm_state() {
         let mut settings = NetworkProxyConfig {
+            allow_local_binding: true,
             enabled: true,
             mode: NetworkMode::Limited,
             ..NetworkProxyConfig::default()
@@ -1049,6 +1052,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_uses_mitm_for_hooked_host_in_full_mode() {
         let mut settings = NetworkProxyConfig {
+            allow_local_binding: true,
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,
@@ -1084,6 +1088,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_blocks_hooked_non_https_host_in_full_mode() {
         let mut settings = NetworkProxyConfig {
+            allow_local_binding: true,
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,

@@ -1,0 +1,894 @@
+{
+  "schemaVersion": 2,
+  "kind": "mechanism_repair",
+  "status": "accepted_for_original47_recorded_finite_criteria",
+  "implementationBaselineCommit": "fc06e3c716332566eff7412a2d4b374ecb6cf001",
+  "integratedRemoteCommit": "6ee1715615a28309192de222f325460432c380cc",
+  "historicalAuditReport": "mechanism-audit-20261010.json",
+  "artifactCollection": "mechanism-repair-20261010",
+  "issuePrefix": "winwincode-community.7.5.29.16",
+  "issueNumbers": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "mechanisms": [
+    {
+      "issue": "winwincode-community.7.5.29.16.1",
+      "originalMechanism": "长验证占用 Worker 驱动",
+      "behavior": "所属验证任务运行时继续服务心跳、续租和取消；权限及清理失败保留阻塞",
+      "acceptanceGoal": "长命令、合法续租、远程取消、进程回收、跨写锁截止、重开"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.2",
+      "originalMechanism": "新帧与空轮询反复处理全部历史",
+      "behavior": "完整响应统一校验后按游标读取后缀；封条绑定同一事务和快照",
+      "acceptanceGoal": "100/200/400/2527 帧、其他会话历史、重复终态、并发撤销和发布"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.3",
+      "originalMechanism": "每个事件和 ACK 全量重写历史",
+      "behavior": "固定头与追加事件共同提交；精确重复及完整证据读取保留",
+      "acceptanceGoal": "实际 CP 和 RuntimeReplay 规模回归、缺口、冲突、迁移"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.4",
+      "originalMechanism": "原 InputResponse 拒绝同一租约的合法续期",
+      "behavior": "接受已证明的精确续期，保留原输入截止及调用身份",
+      "acceptanceGoal": "原等待者一次消费、ACK 丢失、续租、过期及异主拒绝"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.5",
+      "originalMechanism": "产品只接受一题",
+      "behavior": "合法多题分别投影，完整答案交付原 turn 和 call",
+      "acceptanceGoal": "Default 两题、Plan 三题、部分答案、跨进程恢复、大答案读取"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.6",
+      "originalMechanism": "延期被当作预算耗尽",
+      "behavior": "明确保留立即重试、持久延期和停止；新物理请求使用新 decoder",
+      "acceptanceGoal": "首次 301 秒 Retry-After、释放请求槽、恢复正文绑定及物理请求账本"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.7",
+      "originalMechanism": "停派状态发布延迟，迟到终态无法精确收尾",
+      "behavior": "即时发布排空和未决；查询原 launch 的精确终态",
+      "acceptanceGoal": "原身份不变、原记录保留、迟到终态、证据写入失败和零新调用"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.8",
+      "originalMechanism": "空待发查询扫描已完成历史",
+      "behavior": "用精确索引读取所属待发页和回执",
+      "acceptanceGoal": "真实方法 VM 步数、查询计划、损坏拒绝、身份隔离"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.9",
+      "originalMechanism": "每个长 timer 留下独立睡眠线程",
+      "behavior": "单个所属调度器在 clear、close 和 terminate 时及时回收",
+      "acceptanceGoal": "实际 V8 host 的线程及回调观察"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.10",
+      "originalMechanism": "Pending 分支先深拷贝所有待保存值",
+      "behavior": "确认完成后才收集交付值",
+      "acceptanceGoal": "大 store 和多次小回包的实际分配计数及最终内容"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.11",
+      "originalMechanism": "诊断、续期、Device 和 Fusion 的条件性历史成本",
+      "behavior": "所属索引、固定头和一次 Git 批量读取",
+      "acceptanceGoal": "相同活跃数、递增历史及 blob 数的真实成本和权威检查"
+    },
+    {
+      "issue": "winwincode-community.7.5.29.16.12",
+      "originalMechanism": "终态后等待 EOF、超限诊断遗漏、stdio 清理不足",
+      "behavior": "完整协议终态及时返回，保存实际接收诊断，执行所属截止及取消收尾",
+      "acceptanceGoal": "真实 TLS、半事件、错误终态、容量、usage、取消及 stdio 清理"
+    }
+  ],
+  "scopeInterpretation": [
+    "回归数量与正式35配置的完成数量分别记录。",
+    "独立只读审查与实际命令执行分别记录。",
+    "原审计结果和历史非零回执保留。"
+  ],
+  "boundaries": [
+    "消息预算在消息之间让步，不能抢占单次接受操作、同步I/O或fsync。",
+    "进程崩溃后的输入恢复不重建原JavaScript执行现场。",
+    "数据库回滚需要恢复同一检查点的产物与一致数据库备份。",
+    "正式批次的修复后重跑需另行绑定新产物和启动决策。",
+    "封条快路径正文访问为固定成本，BEGIN IMMEDIATE写锁等待没有新增硬时延保证。",
+    "诊断Job索引预算只证明其他Job历史隔离；同Job选中已ACK记录仍逐条完整核验。",
+    "HTTP缓存私有record有界；既有streams总历史条数的全局回收不属于本轮范围。",
+    "HTTP缓存发布错误保留原公开契约，不声明所有open失败已获得产品端计费结算。",
+    "无限合法控制流下 Core 持续推进、整次 close/future-drop 截止及全部进程后代回收尚未证明。"
+  ],
+  "originalMiMoCausality": {
+    "providerCompleteAtUtc": "2026-10-09T23:07:11.935Z",
+    "completeFrameCount": 2527,
+    "workerVecReceiptTimeRecorded": false,
+    "oldSyntheticDebugRust": {
+      "historicalBodiesRead": 3191601,
+      "logicalJsonBytesRead": 3287510147,
+      "durationSeconds": 673.588
+    },
+    "serverLeaseSeconds": 900,
+    "renewalWindowUtc": {
+      "start": "2026-10-09T23:15:56.935Z",
+      "endExclusive": "2026-10-09T23:17:56.935Z"
+    },
+    "workerHeartbeatsInWindow": 0,
+    "renewalReceiptsInWindow": 0,
+    "fourthPhysicalPaidRequests": 0,
+    "interpretation": "现场、冻结源码及实际 Rust 对照支持历史帧重复处理导致 Worker 驱动不让步，缺续租窗口内心跳，租约过期后调用发送前拒绝。正式现场无逐帧计时，不能将整个21分钟空档归给一个函数。"
+  },
+  "completeUpstreamExecution": {
+    "name": "vendor-complete-default-current-v1",
+    "actualExitCode": 100,
+    "durationSeconds": 4596.558376125002,
+    "reportedRun": 15542,
+    "reportedPassed": 15427,
+    "reportedFailed": 112,
+    "reportedTimedOut": 3,
+    "reportedSkipped": 45,
+    "receipt": "receipts/vendor-complete-default-current-v1/result.json",
+    "receiptSha256": "f423f67258f47090d209769f29c77ed632b5ffcbdadf22d4b7256f42db6e1b63"
+  },
+  "completeUpstreamSerialFailedSelection": {
+    "actualExitCode": 100,
+    "reportedRun": 113,
+    "reportedPassed": 40,
+    "reportedFailed": 72,
+    "reportedTimedOut": 1
+  },
+  "remainingUpstream": {
+    "sourceEvidence": {
+      "path": "upstream-remaining-unresolved-exact-names-v1.json",
+      "sha256": "8053a8fa96424b3b522ed199be10f058951cb1ba1a499f2d771b5d5a415d4e4b"
+    },
+    "issue": "winwincode-community.7.5.29.19",
+    "status": "open",
+    "count": 50,
+    "serialNonzeroCount": 48,
+    "notSelectedInSerialCount": 2,
+    "classification": "原完整失败尚缺完整等价基线和因果补证；部分已有聚焦正向回执，按各自源码阶段记录，不回改原完整或串行结果。",
+    "exactNames": [
+      {
+        "binaryId": "codex-code-mode-host::grpc",
+        "testName": "tcp_session_persists_values_and_forwards_tools_notifications_and_closure",
+        "fullOutcome": "FAIL",
+        "serialOutcome": null,
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-app-server::all",
+        "testName": "suite::v2::hooks_list::plugin_upgrade_refreshes_hook_runtime_for_loaded_session",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core",
+        "testName": "session::tests::guardian_tests::guardian_allows_shell_command_additional_permissions_requests_past_policy_validation",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core",
+        "testName": "session::tests::guardian_tests::strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_skip",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core",
+        "testName": "session::tests::shell_tool_cancellation_waits_for_runtime_cleanup",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core",
+        "testName": "tools::control_input_recovery::tests::control_input_recovery_sqlite_writer_wait_crosses_deadline_retains_history_and_denies_delivery",
+        "fullOutcome": "FAIL",
+        "serialOutcome": null,
+        "currentEvidenceStatus": "qualified_focused_pass_original_full_causality_open",
+        "currentFocusedEvidence": {
+          "name": "vendor-core-input-current-postcompact-v1",
+          "actualExitCode": 0,
+          "primaryPassedCount": 11,
+          "exactNameIncluded": true,
+          "receipt": {
+            "path": "receipts/vendor-core-input-current-postcompact-v1/result.json",
+            "sha256": "d33e0708c244c14c05c0ca83e9d1bc67b5613a3c6a576cef509731e3fdff5a58"
+          },
+          "independentReview": {
+            "path": "readonly-spec-core-input-postcompact-complete-eleven-current-writer-positive-v1.json",
+            "sha256": "6b054bddbbd8bcd2fc4bfd04f073c8db1b92d8bce097919babbb7e7f0152f792"
+          },
+          "sourceEvidenceClass": "postexecution_owned_closure_qualification",
+          "limits": [
+            "原回执产物清单为空。",
+            "1622所属输入有逐命令前后捕获；100仅原冻结和当前捕获。",
+            "一个生成输入只有执行后捕获。",
+            "该聚焦通过不证明原完整失败的等价基线或完整因果。"
+          ]
+        }
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::approvals::approval_matrix_covers_group::unified_exec",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::approvals::approving_fallback_rule_for_compound_command_works",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::approvals::spawned_subagent_execpolicy_amendment_propagates_to_parent_session",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-app-server::all",
+        "testName": "suite::v2::session_end::app_server_shutdown_runs_session_end_for_all_loaded_threads",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::exec::truncates_output_bytes",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::guardian_review::guardian_session_is_reused_for_consecutive_tool_reviews_without_prewarm",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::hooks::session_end_flushes_transcript_and_ignores_control_output",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::partial_request_permissions_grants_do_not_preapprove_new_permissions",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::request_permissions_grants_apply_to_later_shell_command_calls",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::request_permissions_grants_apply_to_later_shell_command_calls_without_inline_permission_feature",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::request_permissions_grants_apply_to_later_exec_command_calls",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::request_permissions_preapprove_explicit_exec_permissions_outside_on_request",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::request_permissions_session_grants_carry_across_turns",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::with_additional_permissions_requires_approval_under_on_request",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions::workspace_write_with_additional_permissions_can_write_outside_cwd",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::request_permissions_tool::approved_folder_write_request_permissions_unblocks_later_exec_without_sandbox_args",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::retry_after::connection_failures_increment_retry_telemetry_without_consuming_retry_budget",
+        "fullOutcome": "TIMEOUT",
+        "serialOutcome": "TIMEOUT",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_serialization::shell_command_output_is_freeform",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_serialization::shell_command_output_is_not_truncated_over_10k_bytes",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_serialization::shell_command_output_is_not_truncated_under_10k_bytes",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_serialization::shell_output_preserves_fixture_json_as_freeform",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_snapshot::linux_shell_command_uses_shell_snapshot",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_snapshot::shell_command_snapshot_still_intercepts_apply_patch",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_snapshot::shell_snapshot_deleted_after_shutdown_with_skills",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::shell_snapshot::shell_command_snapshot_preserves_shell_environment_policy_set",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::stream_no_completed::connection_failure_pauses_retry_budget_until_provider_is_reachable",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::subagent_notifications::subagent_stop_replaces_stop_and_skips_internal_subagents",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tool_parallelism::mixed_parallel_tools_run_in_parallel",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tool_parallelism::shell_tools_run_in_parallel",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tool_parallelism::shell_tools_start_before_response_completed_when_stream_delayed::code_mode",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tool_parallelism::shell_tools_start_before_response_completed_when_stream_delayed::legacy",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tools::shell_command_enforces_glob_deny_read_policy",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tools::shell_command_escalated_permissions_rejected_then_ok",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::tools::shell_command_timeout_includes_timeout_prefix_and_metadata",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::exec_command_reports_chunk_and_exit_metadata",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::unified_exec_emits_end_event_when_session_dies_via_stdin",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::unified_exec_emits_output_delta_for_exec_command",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::unified_exec_respects_early_exit_notifications",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::unified_exec_runs_under_sandbox",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::write_stdin_ctrl_c_default_interrupt_reports_130_for_non_tty_session",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::write_stdin_clamps_model_requested_max_output_tokens_to_policy",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-core::all",
+        "testName": "suite::unified_exec::write_stdin_ctrl_c_interrupts_non_tty_session",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-rmcp-client",
+        "testName": "http_headers::tests::connection_headers_are_cached_and_origin_bound",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      },
+      {
+        "binaryId": "codex-rmcp-client::streamable_http_oauth_startup",
+        "testName": "refreshes_oauth_with_gateway_headers_helper",
+        "fullOutcome": "FAIL",
+        "serialOutcome": "FAIL",
+        "currentEvidenceStatus": "original_full_nonpositive_causality_followup_open"
+      }
+    ]
+  },
+  "formal35Interpretation": "本轮只验收机制。原正式35配置及其未决保持；没有重放或补写终态。",
+  "validationCountInterpretation": "实际命令、逻辑范围、具名测试与正式配置分别计数。默认与全特性相同测试、重复输出和重叠专项不叠加。",
+  "finalAcceptance": {
+    "status": "accepted_for_original47_recorded_finite_criteria",
+    "originalIssueCount": 12,
+    "originalCriterionRowCount": 47,
+    "acceptedCurrentCriterionRowCount": 47,
+    "rowIdentitySha256": "524a507f206e1afdf7ef4c6ef992695777e7a19baa5cd72ab834d5a81f08eb6b",
+    "original47CurrentMap": {
+      "path": "compact-twelve-original47-final-current-acceptance-v2.json",
+      "sha256": "bb91bc298357a603f8545dd67eb2549b231832b257504dc4dd1ba45cafd33a64"
+    },
+    "storageSevenFieldMaterials": {
+      "path": "storage-issue16-3-8-seven-field-final-materials-v2.json",
+      "sha256": "83a007b5e7f9d5c7d066c7a46e2925fc0350bfdcdb8b5c7f7a961b9703cd5f2d"
+    },
+    "currentGlobalSourceFreeze": {
+      "path": "thread-manager-sample-compact-config-default-postfmt-all-source-freeze-v1.json",
+      "sha256": "97d577c46246b5b7252288c227ed68256b378837fcdd69ea0dd457e6ccb3b633"
+    },
+    "sourceFreezeRecordedFileCount": 8255,
+    "evidenceBindings": {
+      "effectiveCurrentPrerequisites": {
+        "path": "postsample-effective37-and-qualified-seven-final-acceptance-v3.json",
+        "sha256": "66d34bb78fe83931bf82023eca76cc6749dd3930a9b1500082018af0a8a773cb"
+      },
+      "independentRootSevenQualification": {
+        "path": "postsample-qualified-seven-actual-compiled-source-newfreeze-reuse-v1.json",
+        "sha256": "2d318dca27aea91037df268e554d6d046ae0030e83384f4ca6e7adaf808e933c"
+      },
+      "currentGlobalFreeze": {
+        "path": "thread-manager-sample-compact-config-default-postfmt-all-source-freeze-v1.json",
+        "sha256": "97d577c46246b5b7252288c227ed68256b378837fcdd69ea0dd457e6ccb3b633"
+      },
+      "productionArtifactsAndCompiledClosure": {
+        "path": "postcompact-release-products-artifact-and-compiled-closure-v1.json",
+        "sha256": "ec760282d38d81ce77f35e6841d64cb1b7dce6ab86992f651fc20f181b8ef15e"
+      },
+      "productionSourceSeal": {
+        "path": "postcompact-release-products-source-seal-v1.json",
+        "sha256": "7f788678190f2ec248a44f316e56621ccc141721fdfa5f73bdd0261b7e87596e"
+      },
+      "ordered103PatchReplay": {
+        "path": "upstream-replay-postcompact-v1/replay-comparison.json",
+        "sha256": "f3338217a04d3842502e3e822c9583b46c560baa1e4afd0bf1506cc8b1e0dcef"
+      },
+      "currentStandards": {
+        "path": "standards-review-thread-manager-sample-compact-config-default-postfmt-incremental-v72.json",
+        "sha256": "a5285efbe38b4e0456e7eedf952fc568a3dbfc2f6894be8574e010427536f571"
+      },
+      "helper41143ExactQualification": {
+        "path": "readonly-standards-thread-manager-sample-compact-config-default-postfmt-helper41143-provenance-reuse-v73.json",
+        "sha256": "58f8dbf4a73ead36ca227d7c50e841e677f52092d8a718ec92520b284500c369"
+      },
+      "rootStrictActualReceipt": {
+        "path": "receipts/root-postsample-final-strict-clippy-v12/result.json",
+        "sha256": "3114a5e835d478d7ba0f6a6711e7842f0750f777ac45e3bb88224db4ced5f620"
+      },
+      "vendorStrictActualReceipt": {
+        "path": "receipts/vendor-postsample-final-strict-clippy-v3/result.json",
+        "sha256": "9157e9c8bce762ea0c6ca789b5a80cef240263b2b4aff17f89a701f89482e8d2"
+      },
+      "nativeTwoActual": {
+        "path": "final-native-two-audit-postsample-actual-acceptance-v1.json",
+        "sha256": "3cbade0ccdcd31caa5b11007d96d9b0d01945830335155e63c55556f0eb45359"
+      },
+      "nativeIndependentReviews": [
+        {
+          "path": "readonly-spec-native-two-postexecution-exact-final-v1.json",
+          "sha256": "b29d9603eaa7fb6a35133d524432d25ae90e94656a5474b07ec306c88e70e7eb"
+        },
+        {
+          "path": "readonly-spec-two-audit-native-worker-fairness-lease-slots-v1.json",
+          "sha256": "8062ecd28bef39507c94bda0f93016c0d823e659ff1915409f719e79c092e31b"
+        }
+      ],
+      "selectedNodeCurrentQualification": {
+        "path": "readonly-spec-benchmark-node83-wrapper1-final-freeze-exact-reuse-v2.json",
+        "sha256": "e84e8d29f61a43c4823f0d60b4623ff1b37ec4cead96703c8c8980853646bbd7"
+      },
+      "codeModeCurrentQualification": {
+        "path": "codemode-final-eleven-actual-final-freeze-compiled-closure-v1.json",
+        "sha256": "072bac1ff65428e2b5ceb9f59af1aa791cb146443a092bd61e69874eb8b92729"
+      },
+      "codeModeActualReceipt": {
+        "path": "receipts/vendor-codemode-focused-final-freeze-gap-eleven-v1/result.json",
+        "sha256": "dde7010eb07ff53105712f1b7857301fc1f8f11f876393a514e442719b3a9d88"
+      },
+      "runnerFinalHandoff": {
+        "path": "runner-final-audit-native-handoff-v1.json",
+        "sha256": "1381da6b24a669711f064277c1140ff7340b6c2d52af23719aaeaed16755b21e"
+      },
+      "ownerFinalMaterials": {
+        "modelIssues2And6": {
+          "path": "model-two-issues-seven-field-owner-final-postnative-v1.json",
+          "sha256": "7e683241cf712ded7b230f9df490dca772c0e30917e781a91f0d7751e1cfb010"
+        },
+        "workerIssues1And7And11FiniteScope": {
+          "path": "worker-issue16-1-7-11-seven-fields-final-owner-scope-v3.json",
+          "sha256": "b6a5de7fbf01fec534ce332c6877865173cbe6f44b6cd7b8d6ea585e97a55c70"
+        },
+        "inputIssues4And5": {
+          "path": "input-final-seven-field-beads-materials-postcompact-v7.json",
+          "sha256": "fd7c0b1ba0006126c1a3c764dac1cd2ce545377985488ed32640114a89e08265"
+        },
+        "codeModeIssues9And10And12FiniteScope": {
+          "path": "codemode-three-issues-seven-field-owner-final-postnative-v7.json",
+          "sha256": "66779efe25a3d0fb38e0d44ec5a35b9d6410f5534e7903a8071bba85ef3561af"
+        },
+        "storageIssue11EightRows": {
+          "path": "storage-issue16-11-eight-current-row-supplement-final-v1.json",
+          "sha256": "8341f1b97cebbd8d8f7fe30a8034751ee072a0c6a24a86a841a0df4ebd9df6e8"
+        }
+      },
+      "codeModeNewActualIndependentLimitedReview": {
+        "path": "readonly-spec-codemode-final-eleven-new-actual-limited-binding-v1.json",
+        "sha256": "e11ec54695820fa674ae6bddf1797f4c1723d9563d5fab2d1fe764f4867d14f8"
+      }
+    },
+    "counting": {
+      "originalIssueCount": 12,
+      "originalCriterionRowCount": 47,
+      "effectivePrerequisiteStages": {
+        "newActual": 8,
+        "retainedQualifiedActual": 29,
+        "effectiveActual": 37
+      },
+      "independentlyQualifiedRetainedRootScopes": 7,
+      "effectiveCurrentPrerequisiteCount": 44,
+      "rootConsumerScopes": {
+        "freshCurrentActual": 19,
+        "retainedExactCompilerQualified": 7,
+        "effective": 26
+      },
+      "vendorSameScopeActualCommands": 6,
+      "noneHistoryHelperActualCommands": 1,
+      "nativeActualBehaviorCommands": 2,
+      "codeModeAndSelectedNodeSupplementalScopeCount": 3,
+      "globalTestTotalComputed": false,
+      "rule": "Scopes, prerequisites, wrappers, tests and formal benchmark cells are different units. Codex306 plus separateignored6 yields312 unique names. Provider default/all-features shared names are not added. Input11 remains11; nested tests and reader11pages/63411bytes are witnesses. CodeMode11 includesstdio7. Node7 belongs to historical83; selected wrapper1 belongs to historical32 and is shared withM21. Original duplicate rows remain separate identities but do not add executions."
+    },
+    "selectedCodeModeCurrentQualification": {
+      "path": "codemode-final-eleven-actual-final-freeze-compiled-closure-v1.json",
+      "sha256": "072bac1ff65428e2b5ceb9f59af1aa791cb146443a092bd61e69874eb8b92729"
+    },
+    "currentCodeModeSupplement": {
+      "actualReceipt": {
+        "path": "receipts/vendor-codemode-focused-final-freeze-gap-eleven-v1/result.json",
+        "sha256": "dde7010eb07ff53105712f1b7857301fc1f8f11f876393a514e442719b3a9d88"
+      },
+      "actualExitCode": 0,
+      "actualDurationSeconds": 101.81560620799428,
+      "actualPassedOriginalNames": 11,
+      "actualSkippedCases": 137,
+      "newActualCommandCount": 1,
+      "actualCompilerQualification": {
+        "path": "codemode-final-eleven-actual-final-freeze-compiled-closure-v1.json",
+        "sha256": "072bac1ff65428e2b5ceb9f59af1aa791cb146443a092bd61e69874eb8b92729"
+      },
+      "compilerFingerprintUnits": 693,
+      "conservativeMultiCandidateEdges": 19,
+      "compilerDepInfoCount": 592,
+      "compiledOwnedInputCount": 209,
+      "actualNarrowBeforeAfterOwnedInputCount": 206,
+      "fullPreCommandFreezeAndCurrentQualifiedOwnedInputCountWithNullNarrowHashes": 3,
+      "generatedCurrentOnlyRetainedInputCount": 12,
+      "newRetainedTestBinaryCount": 2,
+      "unresolvedOrMissingDependencyCounts": 0,
+      "historicalOriginalLocal58Binding": {
+        "path": "readonly-review-codemode-current-actual-binding-v4.json",
+        "sha256": "84e49fe69475f5d15291b61462e04f950acc3df343d034b0ab343677e5ad984f"
+      },
+      "coverageLimits": [
+        "This packet qualifies the new exact11 command, not the original v3 complete compiled closure. Original local58 remains historical and local.",
+        "Dependency fingerprint multiplicity is traversed and retained as a conservative union. Missing external registry dep-info is listed; no unavailable exact variant is invented.",
+        "The actual pre-command preservation gate checked the full frozen 8255-source snapshot. Narrow actual before/after hashes omitted by the receipt stay null.",
+        "Fresh test artifacts are selected by unique test-lib fingerprint/executable compiler mtime during the exact package/lib command and PASS suite names. No process exec trace is claimed.",
+        "Generated target Rust inputs are current retained outputs only; historical before hashes are not invented.",
+        "11 pass cases and 137 skipped cases are this command only. They are not 37-stage totals, Native product-task success, or formal Python35 results."
+      ],
+      "countingScope": "Successor exact11 command is separate from37 prerequisites and26 Root consumers. It containsM16/M17 four cases andstdio seven cases.",
+      "independentLimitedNewActualReview": {
+        "path": "readonly-spec-codemode-final-eleven-new-actual-limited-binding-v1.json",
+        "sha256": "e11ec54695820fa674ae6bddf1797f4c1723d9563d5fab2d1fe764f4867d14f8"
+      }
+    },
+    "selectedNodeCurrentQualification": {
+      "path": "readonly-spec-benchmark-node83-wrapper1-final-freeze-exact-reuse-v2.json",
+      "sha256": "e84e8d29f61a43c4823f0d60b4623ff1b37ec4cead96703c8c8980853646bbd7"
+    },
+    "coverageLimits": [
+      "Whole close_session absolute deadline and future-drop completion are not established.",
+      "Single synchronous I/O or single frame acceptance preemption and a universal25ms path bound are not established.",
+      "Core progress under an infinite legal control stream is not established.",
+      "Cleanup of all descendants including processes that leave the original process group is not established.",
+      "The original MiMo complete unique historical cause and the full21-minute silent interval breakdown remain unverified.",
+      "Formal Python35 rerun, external scores and the old unexpired human CP response reaching its original live waiter remain outside this acceptance.",
+      "Complete equivalent upstream baseline and the cause of every historical failed selection remain follow-up. Some of the original50 names already have focused positive receipts."
+    ],
+    "formalPython35Changes": 0,
+    "paidRequestsByEvidenceWriter": 0,
+    "repositoryReportShaReferenced": false,
+    "sourceFreezeInterpretation": "测试、编译和Native绑定此冻结；最终两份报告的编辑由独立文档门和非编译差量资格另行绑定，最终哈希保存在交付索引。"
+  },
+  "currentNative": {
+    "acceptanceScope": "Native complete response intake, control service, exact lease renewal and same-exchange three-OS-slot wait admission.",
+    "actualAcceptance": {
+      "path": "final-native-two-audit-postsample-actual-acceptance-v1.json",
+      "sha256": "3cbade0ccdcd31caa5b11007d96d9b0d01945830335155e63c55556f0eb45359"
+    },
+    "independentReadOnlyReviews": [
+      {
+        "path": "readonly-spec-native-two-postexecution-exact-final-v1.json",
+        "sha256": "b29d9603eaa7fb6a35133d524432d25ae90e94656a5474b07ec306c88e70e7eb"
+      },
+      {
+        "path": "readonly-spec-two-audit-native-worker-fairness-lease-slots-v1.json",
+        "sha256": "8062ecd28bef39507c94bda0f93016c0d823e659ff1915409f719e79c092e31b"
+      }
+    ],
+    "standardProducts": {
+      "path": "postcompact-release-products-artifact-and-compiled-closure-v1.json",
+      "sha256": "ec760282d38d81ce77f35e6841d64cb1b7dce6ab86992f651fc20f181b8ef15e"
+    },
+    "standardSourceSeal": {
+      "path": "postcompact-release-products-source-seal-v1.json",
+      "sha256": "7f788678190f2ec248a44f316e56621ccc141721fdfa5f73bdd0261b7e87596e"
+    },
+    "auditWorkerArtifact": {
+      "path": "audit-native-worker-test-support-artifact-and-compiled-source-v1.json",
+      "sha256": "3eb65e3b75da0822a6debb2f6e8cf39eee126c732311f83dc96d5dee63ee4a6d"
+    },
+    "auditWorkerSealAndCapability": {
+      "path": "audit-native-worker-source-seal-and-capability-v1.json",
+      "sha256": "42b89b13b5cd766161d7d7cf0444cc90b9d56cfc7d623cea25fe8948a4fb8e19"
+    },
+    "auditWorkerFeatures": [
+      "test-support"
+    ],
+    "standardProductionCompiledOwnedInputCount": 1915,
+    "auditWorkerCompiledOwnedInputCount": 1681,
+    "auditNarrowReceiptBeforeAfterInputCount": 1583,
+    "auditQualifiedEarlierFreezeInputCount": 98,
+    "fullbody": {
+      "actualReceipt": {
+        "path": "receipts/native-audit-postsample-fullbody-2527-v1/result.json",
+        "sha256": "9bdd9700e43d4c7a3d932306e50d7897c536a22077ae061f1dc9532850ff71d4"
+      },
+      "actualExitCode": 0,
+      "durationSeconds": 135.47596016695024,
+      "normalizedFrames": 2527,
+      "adapterFrames": 2527,
+      "confirmedCursor": 2527,
+      "providerFinalCount": 1,
+      "coreCommittedCount": 1,
+      "driverReturnedAfterFinal": true,
+      "maxObservedHeartbeatGapMillis": 5139.309458,
+      "heartbeatBoundMillis": 6500,
+      "expiredWhileUnterminal": false,
+      "allSixLeaseAuthorityFieldsAndExpiryEqual": true,
+      "bothCheckpointClocksBeforeSameCurrentExpiry": true,
+      "modelIntakeTermination": "completed",
+      "naturalProductJob": {
+        "state": "failed",
+        "stage": "candidate_prepare",
+        "code": "CANDIDATE_PREPARATION_FAILED",
+        "reason": "WORKSPACE_UNCHANGED_CANDIDATE"
+      },
+      "productDeliveryPassClaimed": false
+    },
+    "osThreeSlots": {
+      "actualReceipt": {
+        "path": "receipts/native-audit-postsample-os-three-slots-v1/result.json",
+        "sha256": "b35f118491d1c69a9d13a1178e42a08e412bbf2a3c94203653658b7d10a2899c"
+      },
+      "actualExitCode": 0,
+      "durationSeconds": 100.86311245796969,
+      "heldPhysicalRequests": 3,
+      "fourthOriginalLogicalPendingOpenCount": 1,
+      "fourthPhysicalRequestsBeforeRelease": 0,
+      "fourthPhysicalRequestsAfterOneRelease": 1,
+      "fourthSameExchangeFirstAttemptCount": 1,
+      "exactSessionThreadRequestBindingsEqual": true,
+      "exactAcceptedAndConsumedLeaseExpiryEqual": true,
+      "maxObservedHeartbeatGapMillis": 5130.739958
+    },
+    "wrapperActualReceipt": {
+      "path": "receipts/final-native-two-audit-postsample-wrapper-v1/result.json",
+      "sha256": "df4720fa3147dfd1abb7e0dec8f19ca1479dbad06f017f545b873e278e6f0a3d"
+    },
+    "wrapperActualExitCode": 0,
+    "exactRenewalAggregateActualReceipt": {
+      "path": "receipts/native-two-audit-final-exact-renewal-aggregate-v1/result.json",
+      "sha256": "f07c89a889cad362836c40ec27cfc4949dcbd1ff855903cfa40d2e7a30366241"
+    },
+    "leaseSeconds": 30,
+    "productionHeartbeatMillis": 5000,
+    "observationBudgetMillis": 1500000,
+    "coverageLimits": [
+      "Audit Worker uses test-support; timing synchronous file I/O and Provider counters have costs. Strict production performance equivalence is not established.",
+      "Synthetic offline responses and a 30-second lease are not the historical 900-second MiMo execution.",
+      "Single Device three OS slots do not establish the cross-Device hard-link topology.",
+      "The historical MiMo complete causal chain, all upstream failures and unexpired original CP waiter consumption remain outside this acceptance.",
+      "No held-time lsof snapshot was captured. Slot acceptance relies on three live held HTTP requests, exact original pending exchange with zero attempts, the three File.try_lock slots and first HTTP admission after release."
+    ]
+  },
+  "historicalFailures": {
+    "receiptInventory": {
+      "path": "runner-final-receipt-index-v18.json",
+      "sha256": "79fc3c1497b5eea6280483e27ec51e770d68ab5f7a428e071e8d67f63a3e8cab"
+    },
+    "receiptInventoryCountAtV18Capture": 474,
+    "sanitizedNonzeroInventory": {
+      "path": "historical-nonzero-receipt-index-sanitized-v2.json",
+      "sha256": "d631b3d2ff012ddac0c73067dfc8bd96f33888cc80e70368a2684dbea4993550"
+    },
+    "historicalNonzeroReceiptCount": 123,
+    "unterminatedReceiptCountAtInventory": 0,
+    "receiptCountScope": "V18 snapshot captured before the successor CodeMode gap command and later document gates. Successor actual receipts are referenced independently; no global test or formal benchmark sum is inferred.",
+    "successorCodeModeActualReceipt": {
+      "path": "receipts/vendor-codemode-focused-final-freeze-gap-eleven-v1/result.json",
+      "sha256": "dde7010eb07ff53105712f1b7857301fc1f8f11f876393a514e442719b3a9d88"
+    },
+    "originalNativeFailure": {
+      "path": "native-fullbody-held-renewal-actual-failure-private-archive-v1.json",
+      "sha256": "72baa34ca105a25cd9411ed6dae10b80b53d9b72f79414f4336d78a0ac1cd938"
+    },
+    "retainedHistoricalNarrative": {
+      "path": "root-historical-receipts-final-prose-v4.txt",
+      "sha256": "5caa679b36253d9de3ac4df2debf85a528431afe5366f024e2c6d9ae34ad604b"
+    },
+    "retainedDiskGateNarrative": {
+      "path": "root-historical-disk-precondition-prose-v1.txt",
+      "sha256": "9bf79a600a8969b4dfea03386fa5009cd91520df1fe44561f17047fee24876f4"
+    },
+    "retainedNativeObservationNarrative": {
+      "path": "root-historical-native-observation-prose-v1.txt",
+      "sha256": "919cae5a7bb3c9d42485246d2ec2988974cbd999169deb0af04922843687a642"
+    },
+    "disposition": "Actual nonzero commands, wrapper errors, original false audits and original private archives remain unchanged. Later current evidence never rewrites their exit codes or missing observations.",
+    "upstreamOriginalSelection": {
+      "historicalUniqueNames": 50,
+      "namesFromSerialNonzeroSelection": 48,
+      "namesNotSelectedBySerialCommand": 2,
+      "someNamesAlreadyHaveFocusedPositiveReceipts": true,
+      "completeEquivalentBaselineAndCausalityAccepted": false,
+      "followUpIssue": "winwincode-community.7.5.29.19"
+    }
+  },
+  "finalReview": {
+    "axes": [
+      "Standards",
+      "Spec"
+    ],
+    "bindingLocation": "root-final-git-delivery-and-receipt-index-v1.json",
+    "scope": "最终格式化两份报告的完整内容；精确文档摘要与独立审查回执在外部交付索引绑定。"
+  }
+}

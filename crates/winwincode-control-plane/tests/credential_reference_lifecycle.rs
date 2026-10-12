@@ -207,8 +207,6 @@ fn list_query(
 }
 
 #[test]
-// One ordered scenario proves that replay returns the original body even after
-// later lifecycle changes and that revocation precedes SecretStore access.
 #[allow(clippy::too_many_lines)]
 fn lifecycle_is_scope_bound_replayable_and_revocation_stops_new_resolution() {
     let root = temporary_directory("lifecycle");
@@ -725,8 +723,6 @@ fn concurrent_exact_create_returns_the_one_durable_original_response() {
     let root = temporary_directory("concurrent-create");
     let command = Arc::new(create_command(30));
     let barrier = Arc::new(Barrier::new(CALLERS));
-    // Open and migrate each connection in order. The concurrency exercised by
-    // this test starts at the service call, not at SQLite schema setup.
     let storages = (0..CALLERS)
         .map(|_| SqliteStorage::open(&root).expect("open concurrent Credential storage"))
         .collect::<Vec<_>>();

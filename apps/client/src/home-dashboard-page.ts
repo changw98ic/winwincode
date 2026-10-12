@@ -32,7 +32,6 @@ export type HomeSectionId =
   | 'completed'
   | 'visited'
 
-/** One card as the dashboard renders it: a decision or a Delivery. */
 export type HomeCard = HomeDecisionCard | HomeDeliveryCard | HomeVisitedCard
 
 export interface HomeDashboardPresentation {
@@ -50,7 +49,6 @@ export interface HomeDashboardPresentation {
   readonly sourceLabel: Readonly<Record<HomeDashboardSource, string>>
   readonly sectionHeading: Readonly<Record<HomeSectionId, string>>
   readonly sectionEmpty: Readonly<Record<HomeSectionId, string>>
-  /** The collapsed history rows of design page 04 (failing/completed). */
   readonly collapsibleSections: readonly HomeSectionId[]
   readonly expandLabel: string
   readonly collapseLabel: string
@@ -119,7 +117,6 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
     completed: '还没有已完成的交付。',
     visited: '此浏览器还没有打开过交付。',
   }),
-  // 设计稿 04:两列实时卡(正在运行/待我处理),其余区块是折叠的单行历史。
   collapsibleSections: Object.freeze([
     'backlog',
     'ready',
@@ -171,7 +168,6 @@ export function homeDashboardPresentation(): HomeDashboardPresentation {
   return PRESENTATION
 }
 
-/** The one polite announcement for the whole dashboard: counts first, then gaps. */
 export function homeDashboardAnnouncement(state: HomeDashboardState): string {
   if (state.status === 'error') {
     return `${PRESENTATION.statusLabel.error} · ${PRESENTATION.errorNote}`
@@ -202,9 +198,6 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
     : `${PRESENTATION.statusLabel.ready} · ${summary}`
 }
 
-/**
- * The exact Chat session one decision came from.
- */
 export function homeChatHash(
   productSessionId: ProductSessionId,
   scopeSelection: ScopeRouteSelection,
@@ -212,10 +205,6 @@ export function homeChatHash(
   return scopeHash(`#/chat?session=${encodeURIComponent(productSessionId)}`, scopeSelection)
 }
 
-/**
- * The authoritative target of one decision card: an input or approval opens
- * its Chat session; Delivery Attention opens the existing StrongFlow review.
- */
 export function homeDecisionHash(
   card: HomeDecisionCard,
   scopeSelection: ScopeRouteSelection,
@@ -229,7 +218,6 @@ export function homeDecisionHash(
   return homeChatHash(card.productSessionId, scopeSelection)
 }
 
-/** Native capability notice; the station inbox remains usable without Push or PWA. */
 export function mobileWebCapabilityText(view: Window | null): string {
   const navigator = view?.navigator as (Navigator & { readonly standalone?: boolean }) | undefined
   const installed = navigator?.standalone === true
@@ -252,7 +240,6 @@ export function mobileWebCapabilityText(view: Window | null): string {
   return `${pwa} ${notification}`
 }
 
-/** The one status line of a pending-decision card, from its real kind/urgency. */
 export function homeDecisionStatusText(card: HomeDecisionCard): string {
   if (card.actionDisabled) {
     return PRESENTATION.decisionUrgencyText[card.urgency === 'expired' ? 'expired' : 'binding-invalid']
@@ -263,7 +250,6 @@ export function homeDecisionStatusText(card: HomeDecisionCard): string {
     : PRESENTATION.planReviewPendingLabel
 }
 
-/** Decision-class entries open the plan review, Delivery-bound ones the hand-over. */
 export function homeDecisionActionLabel(card: HomeDecisionCard): string {
   return card.kind === 'attention'
     ? PRESENTATION.acceptDeliveryLabel
@@ -273,13 +259,7 @@ export function homeDecisionActionLabel(card: HomeDecisionCard): string {
 export interface HomeDashboardPageOptions {
   readonly root: HTMLElement
   readonly model: HomeDashboardViewModel
-  /** The exact Scope path prefixed onto every deep link on the dashboard. */
   readonly scopeSelection: ScopeRouteSelection
-  /**
-   * Lifecycle ownership: `true` (the default composition) lets the page close
-   * the model it mounted; a host that shares this model passes `false` and
-   * closes it itself.
-   */
   readonly ownsModel?: boolean
 }
 
@@ -327,7 +307,6 @@ interface CardParts {
   readonly action: HTMLAnchorElement
 }
 
-/** Mount the design-04 task board: two live columns over collapsed history rows. */
 export function mountHomeDashboardPage(
   options: HomeDashboardPageOptions,
 ): HomeDashboardPage {
@@ -337,8 +316,6 @@ export function mountHomeDashboardPage(
   const layout = element(document, 'section', 'wwc-home')
   layout.dataset.wwcPage = 'home'
 
-  // Design page 04: the big title shares one row with the display-only Scope
-  // select and the new-task entry.
   const pageHeader = mountPageHeader({
     document,
     props: {
@@ -359,7 +336,6 @@ export function mountHomeDashboardPage(
   const newTask = element(document, 'a', 'wwc-home-new-task')
   newTask.href = surfaceHash('/home/new-task', options.scopeSelection)
   newTask.textContent = presentation.newTaskLabel
-  // 任务看板是待处理事项的统一入口，筛选开关只保留需要用户操作的卡片。
   const attentionOnly = element(document, 'button', 'wwc-home-attention-only')
   attentionOnly.type = 'button'
   attentionOnly.textContent = presentation.attentionOnlyLabel
@@ -369,8 +345,6 @@ export function mountHomeDashboardPage(
   const topbar = element(document, 'div', 'wwc-home-topbar')
   topbar.append(pageHeader.root, topActions)
 
-  // Design page 04: the status line is the one polite live region; it stays in
-  // the DOM for announcements while the stylesheet keeps it off the canvas.
   const statusBadge = mountStatusBadge({
     document,
     props: {
@@ -427,8 +401,6 @@ export function mountHomeDashboardPage(
     parts.status.textContent = card.kind === 'attention' && !card.actionDisabled
       ? attentionTitle(card.title)
       : homeDecisionStatusText(card)
-    // Design page 04: the pending card face carries the name and the status
-    // line only; the Chat session stays reachable through the quiet link.
     updateContextList(parts.context, decisionContextEntries(card))
     parts.chat.hidden = card.actionDisabled || card.productSessionId === null
     if (card.productSessionId !== null && !card.actionDisabled) {
@@ -461,7 +433,6 @@ export function mountHomeDashboardPage(
 
   function fillVisitedCard(parts: CardParts, card: HomeVisitedCard): void {
     fillDeliveryCard(parts, card)
-    // 设计稿 04 之外:最近访问行的附加时间标注。
     parts.context.querySelectorAll('li').forEach((li, idx, all) => {
       if (idx === all.length - 1) li.textContent = `访问于 ${card.visitedAt}`
     })
@@ -483,7 +454,6 @@ export function mountHomeDashboardPage(
     parts.chat.removeAttribute('href')
     parts.chat.textContent = ''
     updateContextList(parts.context, deliveryContextEntries(card))
-    // Design page 04: the running card's action opens the run page (查看进度).
     setAction(
       parts,
       scopeHash(`#/home/review?delivery=${encodeURIComponent(card.deliveryId)}`, options.scopeSelection),
@@ -542,8 +512,6 @@ export function mountHomeDashboardPage(
         : presentation.countLabel(count)
   }
 
-  // The canonical WWC-ER-1001 board order: the two live columns first, then
-  // the collapsed history rows of design page 04.
   const SECTION_ORDER: readonly HomeSectionId[] = Object.freeze([
     'running',
     'decisions',
@@ -567,7 +535,6 @@ export function mountHomeDashboardPage(
     const cards = element(document, 'ul', 'wwc-home-cards')
     const root = element(document, 'section', 'wwc-home-section')
     root.dataset.section = id
-    // Design 04: history groups are a single collapsed row — no second heading.
     const collapsible = presentation.collapsibleSections.includes(id)
     let toggle: HTMLButtonElement | null = null
     if (collapsible) {
@@ -637,7 +604,6 @@ export function mountHomeDashboardPage(
   options.root.replaceChildren(layout)
 
   let closed = false
-  // 通知打开看板时携带筛选参数，直接展示需要用户操作的卡片。
   let attentionOnlyEnabled = globalThis.location?.hash?.includes('filter=attention') === true
 
   attentionOnly.setAttribute('aria-pressed', String(attentionOnlyEnabled))
@@ -710,14 +676,11 @@ export function mountHomeDashboardPage(
                     : id === 'completed' ? state.counts.completed
                       : state.counts.visited
       section.count.textContent = sectionCountLabel(id, total, state)
-      // Design 04: the collapsed hairline is a count row driven by the home
-      // projection — never a silent empty strip.
       if (section.toggle !== null) {
         const expandedNow = section.toggle.getAttribute('aria-expanded') === 'true'
         section.toggle.textContent = expandedNow
           ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
           : `${presentation.sectionHeading[id]} · ${sectionCountLabel(id, total, state)}`
-        // Hide empty history rows; a zero count is noise, not a queue.
         if (total === 0 && !expandedNow) {
           section.root.hidden = true
           continue
@@ -728,8 +691,6 @@ export function mountHomeDashboardPage(
         continue
       }
       section.root.hidden = false
-      // A collapsed row keeps its empty note hidden with its cards; an open
-      // column shows the honest empty state.
       const expanded = section.toggle === null
         || section.toggle.getAttribute('aria-expanded') === 'true'
       section.empty.hidden = expanded ? !renderedEmpty(id) : true

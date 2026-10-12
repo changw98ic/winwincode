@@ -5,12 +5,6 @@ import { createServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { normalize, resolve } from 'node:path'
 
-// Every real-browser test rebuilds the client into the shared
-// `apps/client/dist` tree, and a rebuild empties that tree before writing it
-// again.  A test that serves that tree while another test rebuilds it can
-// therefore observe a missing file for the length of one build.  Waiting a
-// bounded time for the file to come back reads the completed artifact instead
-// of failing inside the request; an asset that never returns still throws.
 const SHARED_CLIENT_READ_TIMEOUT_MILLIS = 60_000
 const SHARED_CLIENT_READ_POLL_MILLIS = 25
 const DEVTOOLS_COMMAND_TIMEOUT_MILLIS = 270_000
@@ -194,6 +188,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
   const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
   const contractsRoot = resolve(root, 'packages/contracts/dist')
   const controlPlaneClientRoot = resolve(root, 'packages/control-plane-client/dist')
+  const networkRequestRoot = resolve(root, 'packages/network-request/src')
   const publicRoot = resolve(root, 'apps/client/dist/public')
   const fixture = resolve(root, fixturePath)
   const productionIndex = readSharedClientFile(resolve(publicRoot, 'index.html'))
@@ -235,6 +230,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
     const browserUiRequest = path.startsWith('/browser-ui/')
     const contractsRequest = path.startsWith('/contracts/')
     const controlPlaneClientRequest = path.startsWith('/control-plane-client/')
+    const networkRequest = path.startsWith('/network-request/')
     const publicRequest = path.startsWith('/assets/')
     const source = sharedLoginBootstrapRequest
       ? resolve(root, 'tests/fixtures/login-bootstrap.mjs')
@@ -253,6 +249,8 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
                   controlPlaneClientRoot,
                   path.replace(/^\/control-plane-client\//u, ''),
                 ))
+              : networkRequest
+                ? normalize(resolve(networkRequestRoot, path.replace(/^\/network-request\//u, '')))
           : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
@@ -260,6 +258,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       || (browserUiRequest && source.startsWith(`${browserUiRoot}/`))
       || (contractsRequest && source.startsWith(`${contractsRoot}/`))
       || (controlPlaneClientRequest && source.startsWith(`${controlPlaneClientRoot}/`))
+      || (networkRequest && source.startsWith(`${networkRequestRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
       || fixtureRequest
       || sharedLoginBootstrapRequest
@@ -268,9 +267,6 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
         'Content-Type': publicRequest && path.endsWith('.css')
           ? 'text/css; charset=utf-8'
           : 'text/javascript; charset=utf-8',
-        // A fixture may be served several times in one browser profile with a
-        // different route each time, so Chrome must never reuse a module it
-        // already evaluated.
         'Cache-Control': 'no-store',
       })
       const bytes = readSharedClientFile(source)
@@ -288,6 +284,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
           /from ['"]@winwincode\/control-plane-client['"]/gu,
           "from '/control-plane-client/index.js'",
         )
+        .replace(/from ['"]@winwincode\/network-request['"]/gu, "from '/network-request/index.mjs'")
         .replace(
           /from ['"]@winwincode\/contracts\/browser-control['"]/gu,
           "from '/contracts/browser-control.js'",

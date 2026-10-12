@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Specialized atomic transaction for one computed Delivery verdict.
-
 use std::collections::HashSet;
 
 use serde_json::Value;

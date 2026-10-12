@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production embedded Codex Core composition for the Execution Worker.
-//!
-//! The adapter links [`winwincode_kernel::Kernel`] in process. Model traffic is
-//! reduced to generated `model.open`, `model.chunk`, and `model.ack` messages by
-//! [`model_port_client::WorkerModelPortClient`].
-//! `WorkerMain` remains the only owner of the outbound `ExecutionPort`.
-
 mod action_bridge;
 mod adapter;
+mod authority_clock;
 pub mod candidate_artifact_outbox;
 mod contract;
 pub mod diagnostic_artifact_outbox;
+mod failure_diagnostic;
+pub use failure_diagnostic::CodexFailureDiagnostic;
 mod durable_fusion;
 pub use durable_fusion::FusionPanelFuture;
 pub mod fusion_provider;
@@ -30,10 +26,13 @@ pub use parallel_model_runner::{
 };
 mod performance;
 pub mod performance_evidence;
+mod public_smoke_adapter;
 pub mod stage_product;
 mod store;
 mod structured_result;
-mod tool_repeat;
+mod task_handoff;
+mod tool_dependencies;
+mod tool_input_source;
 pub mod workrun_runtime_projection;
 
 pub use adapter::{
@@ -61,3 +60,9 @@ pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
 pub use model_bridge::set_model_intake_log_path;
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
 pub use winwincode_kernel::RoleExecutionMode;
+
+#[cfg(test)]
+mod audit_model_metrics;
+
+#[cfg(test)]
+mod storage_mechanism_regression;

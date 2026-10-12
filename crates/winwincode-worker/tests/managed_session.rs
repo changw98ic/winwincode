@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process-level checks for the `--managed-session` entry: argument
-//! handling, config gating, and parity isolation against the `--remote`
-//! entry. The parse and credential matrices live in
-//! `src/managed_session.rs` unit tests; here the binary boundary proves
-//! which identity source each entry consults.
-
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -47,9 +41,6 @@ fn valid_config_json() -> String {
     .to_string()
 }
 
-/// Runs the Worker binary with a deliberately empty environment so any
-/// success-or-failure decision is attributable to the entry's declared
-/// inputs only.
 fn run_entry(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
         .args(args)
@@ -135,11 +126,6 @@ fn managed_session_names_missing_config_fields() {
 
 #[test]
 fn managed_session_never_consults_remote_identity_environment() {
-    // A fully valid config plus a valid private credential: the managed
-    // entry must proceed past identity entirely and fail only on the
-    // shared operational environment — even with hostile `--remote`
-    // identity variables present. This pins that the two entries cannot
-    // interfere with each other's identity source.
     let root = temp_root("isolation");
     let config_path = root.join("session.json");
     let mut value: serde_json::Value =
@@ -161,8 +147,6 @@ fn managed_session_never_consults_remote_identity_environment() {
         .arg(config_path.to_str().expect("utf-8 path"))
         .env_clear()
         .env("PATH", "")
-        // Poison every `--remote` identity variable: managed must ignore
-        // them all.
         .env("WWC_WORKER_ID", "wrk_POISON")
         .env("WWC_WORKER_INSTANCE_ID", "wri_POISON")
         .env("WWC_WORKER_DATA_DIRECTORY", "/poison/data")
@@ -183,8 +167,6 @@ fn managed_session_never_consults_remote_identity_environment() {
 
 #[test]
 fn remote_entry_still_requires_its_own_identity_environment() {
-    // Parity guard: `--remote` behaviour is unchanged — with no environment
-    // it fails on its first identity variable, exactly as before this lane.
     let output = run_entry(&["--remote"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);

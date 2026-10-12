@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::PathBuf;
@@ -1489,9 +1488,6 @@ fn metadata_and_attachments_survive_restart_and_preserve_execution() {
     );
 }
 
-/// y2es: inject a process exit after the `ProductSession` cancel catalog commit
-/// but before the `RepositoryScheduler` cancel commit. Recovery must cancel the
-/// job and release admission without user retry, without rewriting identity.
 #[test]
 fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
     let directory = TestDirectory::new("cancel-reconcile");
@@ -1560,7 +1556,6 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         winwincode_storage::ExecutionJobState::Cancelling
     );
 
-    // Inject the crash window: session cancel is durable, queue cancel is not.
     {
         let connection = Connection::open(directory.0.join("control-plane.sqlite3"))
             .expect("open SQLite for crash fixture");
@@ -1593,7 +1588,6 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
     }
     drop(storage);
 
-    // Restart: recovery auto-aligns the queue without user retry.
     let mut reopened = SqliteStorage::open(&directory.0).expect("restart after crash window");
     let public_scope_for_recovery = public_scope.clone();
     let applied = ProductSessionService::new(&mut reopened)
@@ -1636,8 +1630,6 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         );
     }
 
-    // Identity-stable replay: a second recovery does not invent a new request
-    // or rewrite Worker identity.
     let again = ProductSessionService::new(&mut reopened)
         .reconcile_cancelled_session_routes(&public_scope_for_recovery)
         .expect("second reconcile");

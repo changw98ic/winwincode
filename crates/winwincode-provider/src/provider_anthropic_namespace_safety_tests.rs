@@ -169,7 +169,7 @@ fn request_error(history: Vec<Value>) -> AnthropicCodecError {
 }
 
 #[test]
-fn history_kind_cannot_rebind_an_exact_name_and_namespace() {
+fn history_kind_preserves_function_feedback_without_rebinding_name_or_namespace() {
     let wrong_custom = request_error(vec![json!({
         "type": "custom_tool_call",
         "name": "b__c",
@@ -180,16 +180,29 @@ fn history_kind_cannot_rebind_an_exact_name_and_namespace() {
     assert_eq!(wrong_custom.kind(), AnthropicCodecErrorKind::InvalidRequest);
     assert!(!format!("{wrong_custom:?}").contains("safety-marker-custom"));
 
-    let wrong_function = request_error(vec![json!({
+    let function_history = json!({
         "type": "function_call",
         "name": "c",
         "namespace": "a__b",
         "arguments": "{\"path\":\"safety-marker-function\"}",
         "call_id": "call-wrong-function"
-    })]);
-    assert_eq!(
-        wrong_function.kind(),
-        AnthropicCodecErrorKind::InvalidRequest
-    );
-    assert!(!format!("{wrong_function:?}").contains("safety-marker-function"));
+    });
+    let prepared = prepare_anthropic_request(
+        &canonical_request(colliding_tools(), vec![function_history.clone()]),
+        "glm-5.2",
+        options(),
+    )
+    .expect("retain exact custom binding's original function history for feedback");
+    let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+    let call = &body["messages"][1]["content"][0];
+    assert_eq!(call["type"], "tool_use");
+    assert_eq!(call["id"], function_history["call_id"]);
+    assert_eq!(call["name"], "a__b__c_2");
+    assert_eq!(call["input"], json!({"path":"safety-marker-function"}));
+
+    let mut wrong_namespace = function_history;
+    wrong_namespace["namespace"] = json!("a");
+    let error = request_error(vec![wrong_namespace]);
+    assert_eq!(error.kind(), AnthropicCodecErrorKind::InvalidRequest);
+    assert!(!format!("{error:?}").contains("safety-marker-function"));
 }

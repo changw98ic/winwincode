@@ -1,26 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `ProductSession` create/continue permission gate (FLOW-100.3).
-//!
-//! Every local execution session on a Device Client is bound to the caller's
-//! *current* occupancy and to a repository that is authorized under the plan
-//! 13.4 dual-authorization visibility (an `active` `ClientAccessGrant`
-//! carrying `use` on the client node AND an `active` `RepositoryAccessGrant`
-//! on the binding). The gate is the single precondition authority both
-//! surfaces share:
-//!
-//! - the Worker launch surface (`POST /api/v1/sessions`) already carries the
-//!   explicit `clientId` + `repositoryBindingId` pair and must pass the gate
-//!   before a device session is created or continued;
-//! - the generated `chat.submit` continue path resolves the same facts from
-//!   the durable launch anchor of the session (its newest `WorkerLaunchGrant`)
-//!   and enforces the gate whenever the session is device-anchored. Sessions
-//!   without a device anchor (pure supervised local execution) pass through
-//!   unchanged.
-//!
-//! Denials never confirm the existence of hidden resources: an unknown
-//! binding and a binding of another client read identically.
-
 use std::fmt;
 
 use winwincode_storage::{OccupancyLeaseState, SqliteStorage};
@@ -29,19 +8,13 @@ use crate::client_launch_grant::{WorkerLaunchGrantService, WorkerLaunchGrantServ
 use crate::client_occupancy::ClientOccupancyService;
 use crate::repository_binding::RepositoryBindingService;
 
-/// The explicit facts one gated create/continue request must carry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSessionGateInput<'a> {
-    /// Acting user id (the authenticated browser actor).
     pub user_id: &'a str,
-    /// Canonical client node identity the session targets.
     pub client_node_id: &'a str,
-    /// Repository binding the session executes against.
     pub repository_binding_id: &'a str,
 }
 
-/// The occupancy and binding facts one approved request may stamp on the
-/// downstream device execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSessionGateApproval {
     pub client_node_id: String,
@@ -51,23 +24,15 @@ pub struct DeviceSessionGateApproval {
     pub repository_name: String,
 }
 
-/// Stable gate failure categories. Each category maps to exactly one wire
-/// error code of the central gate table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceSessionGateDenialKind {
-    /// The request carried missing or empty identities.
     InvalidRequest,
-    /// The client has no usable occupancy (none, or not device-confirmed).
     OccupancyRequired,
-    /// The caller is not the current occupancy holder.
     AccessDenied,
-    /// The binding is unknown, foreign, or invisible to the holder.
     BindingNotVisible,
-    /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
 
-/// Secret-free gate denial.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSessionGateDenial {
     kind: DeviceSessionGateDenialKind,
@@ -101,7 +66,6 @@ impl DeviceSessionGateDenial {
         )
     }
 
-    /// The central wire error code the surface must report.
     #[must_use]
     pub fn wire_code(&self) -> &'static str {
         match self.kind {
@@ -113,7 +77,6 @@ impl DeviceSessionGateDenial {
         }
     }
 
-    /// The HTTP status the surface must report for this denial.
     #[must_use]
     pub fn http_status(&self) -> u16 {
         match self.kind {
@@ -134,13 +97,6 @@ impl fmt::Display for DeviceSessionGateDenial {
 
 impl std::error::Error for DeviceSessionGateDenial {}
 
-/// Judges one explicit create/continue request against the caller's current
-/// occupancy and the plan 13.4 dual-authorization visibility.
-///
-/// # Errors
-///
-/// Returns the stable gate denials; storage failures deny with
-/// [`DeviceSessionGateDenialKind::Unavailable`] and decide nothing.
 pub fn authorize_device_session(
     storage: &mut SqliteStorage,
     input: &DeviceSessionGateInput<'_>,
@@ -152,8 +108,6 @@ pub fn authorize_device_session(
         return Err(DeviceSessionGateDenial::invalid_request());
     }
 
-    // Occupancy: the caller must hold the client's one active lease and it
-    // must be device-confirmed (`occupied` or `draining`).
     let lease = ClientOccupancyService::new(storage)
         .active_lease_for_node(input.client_node_id)
         .map_err(|_| DeviceSessionGateDenial::unavailable())?;
@@ -179,8 +133,6 @@ pub fn authorize_device_session(
         ));
     }
 
-    // Binding: it must exist, belong to the requested client, and be visible
-    // to the holder under the dual-authorization projection.
     let binding = RepositoryBindingService::new(storage)
         .snapshot(input.repository_binding_id)
         .map_err(|_| DeviceSessionGateDenial::unavailable())?;
@@ -218,17 +170,6 @@ pub fn authorize_device_session(
     })
 }
 
-/// Judges one `ProductSession` continue (a new Chat turn) against the gate.
-///
-/// The session's device anchor is its newest durable launch grant, whatever
-/// its lifecycle state: the anchor proves the session was bound to device
-/// execution and stays the permission anchor after the grant ends. A session
-/// without any device anchor is not a device session and passes through with
-/// [`None`], so pure supervised local execution is unchanged.
-///
-/// # Errors
-///
-/// Returns the stable gate denials for a device-anchored session.
 pub fn authorize_product_session_turn(
     storage: &mut SqliteStorage,
     user_id: &str,
@@ -237,8 +178,6 @@ pub fn authorize_product_session_turn(
     if user_id.is_empty() || product_session_id.is_empty() {
         return Err(DeviceSessionGateDenial::invalid_request());
     }
-    // A non-canonical session identity can never carry a launch anchor; it
-    // passes through and the session service rejects it as before.
     let anchor = match WorkerLaunchGrantService::new(storage)
         .newest_grant_for_product_session(product_session_id)
     {
@@ -313,7 +252,6 @@ mod tests {
         SqliteStorage::open(&directory).expect("storage")
     }
 
-    /// Registers one online client node and returns its identity.
     fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
         let node = format!("cnd_{}", suffix(seed));
         let registration = ClientNodeRegistration::try_new(
@@ -338,7 +276,6 @@ mod tests {
         node
     }
 
-    /// Stages one active client `use` grant for the user.
     fn stage_client_grant(storage: &mut SqliteStorage, seed: u64, node: &str, user: &str) {
         let issuance = AccessGrantIssuance::try_new(
             format!("cag_{}", suffix(seed)),
@@ -361,8 +298,6 @@ mod tests {
             .expect("grant");
     }
 
-    /// Stages one visible repository binding on the node: an `active`
-    /// repository access grant pairs with the client grant (plan 13.4).
     fn stage_visible_binding(storage: &mut SqliteStorage, seed: u64, node: &str, user: &str) {
         let binding = format!("rbd_{}", suffix(seed));
         let mut ledger = storage.repository_binding_ledger().expect("ledger");
@@ -396,8 +331,6 @@ mod tests {
             .expect("repo grant");
     }
 
-    /// Stages one repository binding without any repository access grant: it
-    /// exists on the client but is invisible to every user.
     fn stage_invisible_binding(storage: &mut SqliteStorage, seed: u64, node: &str) -> String {
         let binding = format!("rbd_{}", suffix(seed));
         let mut ledger = storage.repository_binding_ledger().expect("ledger");
@@ -418,8 +351,6 @@ mod tests {
         binding
     }
 
-    /// Claims occupancy and walks the lease to `occupied` (or `draining`
-    /// when `active_sessions` is positive).
     fn stage_occupied_lease(
         storage: &mut SqliteStorage,
         seed: u64,
@@ -461,7 +392,6 @@ mod tests {
         (occupied.occupancy_lease_id, occupied.fencing_token)
     }
 
-    /// Anchors one launch grant carrying the product session identity.
     #[allow(clippy::too_many_arguments)]
     fn stage_anchor(
         storage: &mut SqliteStorage,
@@ -582,7 +512,6 @@ mod tests {
         let user = format!("usr_{}", suffix(32));
         stage_client_grant(&mut storage, 33, &node, &user);
         stage_visible_binding(&mut storage, 34, &node, &user);
-        // The lease stays `reserving`: the device never confirmed it.
         let claim = OccupancyClaim::try_new(
             format!("ocl_{}", suffix(35)),
             &node,
@@ -651,7 +580,6 @@ mod tests {
         stage_client_grant(&mut storage, 63, &node, &user);
         stage_visible_binding(&mut storage, 64, &node, &user);
         stage_occupied_lease(&mut storage, 65, &node, &user, 0);
-        // The binding exists and is visible, but on the other client.
         stage_visible_binding(&mut storage, 74, &other_node, &user);
         let foreign_binding = format!("rbd_{}", suffix(74));
 
@@ -747,8 +675,6 @@ mod tests {
         let approved = approved.expect("device-anchored session");
         assert_eq!(approval_facts(&approved), (node.clone(), binding.clone()));
 
-        // The holder releases the client: the next turn is refused even
-        // though the anchor grant is still durable.
         storage
             .client_occupancy_ledger()
             .expect("ledger")

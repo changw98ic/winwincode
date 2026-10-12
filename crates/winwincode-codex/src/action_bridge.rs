@@ -31,24 +31,34 @@ use winwincode_kernel::{
 
 use crate::{
     ActionRequestTransport,
+    authority_clock::{AuthorityClock, AuthorityClockError, canonical_instant},
     model_bridge::{ModelRunBinding, extend_binding_lineage},
 };
+
+#[path = "result_read.rs"]
+mod result_read;
 
 #[derive(Clone)]
 pub(crate) struct ExecutionPortActionGate {
     state: Arc<ActionGateState>,
 }
 
-struct ActionGateState {
-    catalog: RwLock<WorkerCapabilityCatalog>,
+pub(super) struct ActionGateState {
+    pub(super) catalog: RwLock<WorkerCapabilityCatalog>,
+    pub(super) tool_dependencies: RwLock<
+        HashMap<
+            String,
+            std::collections::BTreeMap<String, crate::public_smoke_adapter::PublicSmokeAdapter>,
+        >,
+    >,
     envelope: ExecutionEnvelopeToken,
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
     bindings: RwLock<HashMap<String, ModelRunBinding>>,
-    read_only_runs: RwLock<HashMap<String, PathBuf>>,
+    pub(super) read_only_runs: RwLock<HashMap<String, PathBuf>>,
     trusted_read_programs: HashMap<String, TrustedReadProgram>,
     session_generations: Mutex<HashMap<String, u64>>,
-    trusted_now: Mutex<Option<Instant>>,
+    authority_clock: AuthorityClock,
     pending: Mutex<HashMap<String, PendingAction>>,
     completed: Mutex<HashMap<String, CompletedAction>>,
     messages: Mutex<VecDeque<ExecutionPortMessage>>,
@@ -115,6 +125,7 @@ impl ExecutionPortActionGate {
         Ok(Self {
             state: Arc::new(ActionGateState {
                 catalog: RwLock::new(catalog),
+                tool_dependencies: RwLock::new(HashMap::new()),
                 envelope,
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
@@ -122,13 +133,28 @@ impl ExecutionPortActionGate {
                 read_only_runs: RwLock::new(HashMap::new()),
                 trusted_read_programs: resolve_trusted_read_programs(),
                 session_generations: Mutex::new(HashMap::new()),
-                trusted_now: Mutex::new(None),
+                authority_clock: AuthorityClock::default(),
                 pending: Mutex::new(HashMap::new()),
                 completed: Mutex::new(HashMap::new()),
                 messages: Mutex::new(VecDeque::new()),
                 request_transport: Mutex::new(None),
             }),
         })
+    }
+
+    pub(crate) fn install_tool_dependencies(
+        &self,
+        binding: &ModelRunBinding,
+        home: &Path,
+        workspace: &Path,
+    ) -> Result<(), ActionBridgeError> {
+        let adapters = crate::public_smoke_adapter::PublicSmokeAdapter::load(home, workspace);
+        self.state
+            .tool_dependencies
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .insert(binding.run_key.clone(), adapters);
+        Ok(())
     }
 
     pub(crate) fn replace_catalog(
@@ -171,10 +197,6 @@ impl ExecutionPortActionGate {
         Ok(())
     }
 
-    /// Installs a descendant binding without allowing it to overwrite an
-    /// existing session alias. Root lease replacement uses
-    /// [`Self::install_binding`] and is the only operation allowed to fence a
-    /// previous run's aliases.
     pub(crate) fn install_child_binding(
         &self,
         binding: ModelRunBinding,
@@ -198,10 +220,6 @@ impl ExecutionPortActionGate {
             if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
                 return Ok(());
             }
-            // Re-installing the exact root authority is an idempotent
-            // recovery operation, not a new fencing event.  Preserve its
-            // already-discovered child aliases; only a changed root may
-            // invalidate the complete run lineage.
             let fence_lineage = replace_fenced_run
                 && !bindings
                     .get(&thread_id)
@@ -233,10 +251,6 @@ impl ExecutionPortActionGate {
                 })
                 .collect::<HashSet<_>>();
             if fence_lineage {
-                // A replacement root fences the complete run lineage.  Do not
-                // preserve descendants merely because they share the run key:
-                // their old lease must not resolve a tool request after the
-                // replacement is installed.
                 bindings.retain(|_, existing| {
                     existing.authority.lease.job_id != binding.authority.lease.job_id
                         || same_binding(existing, &binding)
@@ -249,10 +263,6 @@ impl ExecutionPortActionGate {
                         || same_binding(existing, &binding)
                 });
             }
-            // Core tool-gate requests identify the live Core thread, while
-            // model and runtime envelopes may use the registered session key.
-            // Keep both aliases bound to the same immutable authority,
-            // especially for spawned child threads.
             bindings.insert(binding.kernel_session_id.clone(), binding.clone());
             bindings.insert(binding.canonical_thread_id.0.clone(), binding);
             stale_session_ids
@@ -302,25 +312,16 @@ impl ExecutionPortActionGate {
             .write()
             .map_err(|_| ActionBridgeError::Unavailable)?
             .remove(&binding.run_key);
+        self.state
+            .tool_dependencies
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .remove(&binding.run_key);
         Ok(())
     }
 
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), ActionBridgeError> {
-        let mut trusted_now = self
-            .state
-            .trusted_now
-            .lock()
-            .map_err(|_| ActionBridgeError::Unavailable)?;
-        // Control-plane responses can arrive out of order.  Treat the clock
-        // as a high-water mark so an older receipt cannot move trusted time
-        // backwards and reopen an expired lease or permit.
-        if trusted_now
-            .as_ref()
-            .is_none_or(|current| current.0.as_str() < now.0.as_str())
-        {
-            *trusted_now = Some(now.clone());
-        }
-        Ok(())
+        self.state.authority_clock.observe(now).map_err(clock_error)
     }
 
     pub(crate) fn accept_receipt(
@@ -410,14 +411,10 @@ impl ExecutionPortActionGate {
             .get(session_id)
             .cloned();
         let stale = current_binding.as_ref().is_none_or(|binding| {
-            // This request is retained in the pending map and its signature
-            // remains bound to the original stamp. Only the current deadline
-            // may have advanced while the exact request was in flight.
-            let mut expected = action.authority.lease.clone();
-            expected.expires_at = binding.authority.lease.expires_at.clone();
-            binding.authority.lease != expected
-                || binding.authority.lease.expires_at.0 < action.authority.lease.expires_at.0
-                || binding.authority.worker_session_id != action.authority.worker_session_id
+            !winwincode_execution_port::execution_identity::retained_lease_matches_current(
+                &action.authority.lease,
+                &binding.authority.lease,
+            ) || binding.authority.worker_session_id != action.authority.worker_session_id
                 || binding.authority.session_identity != action.authority.session_identity
                 || !canonical_instant(received_at)
                 || !canonical_instant(&binding.authority.lease.issued_at)
@@ -433,7 +430,13 @@ impl ExecutionPortActionGate {
             );
             return Err(ActionBridgeError::StaleAuthority);
         }
-        if self.state.verifier.verify_outcome(action, receipt).is_err() {
+        let current_binding = current_binding.ok_or(ActionBridgeError::StaleAuthority)?;
+        if self
+            .state
+            .verifier
+            .verify_outcome_with_current_lease(action, receipt, &current_binding.authority.lease)
+            .is_err()
+        {
             reject_pending(
                 &self.state,
                 &receipt.request_id.0,
@@ -451,10 +454,6 @@ impl ExecutionPortActionGate {
         pending_generation: u64,
         received_at: &Instant,
     ) -> Result<(PendingAction, u64), ActionBridgeError> {
-        // Keep the generation lock while taking the pending request.  The
-        // cancellation path acquires these same locks in this order, so a
-        // cancel racing with a receipt cannot observe the old generation and
-        // then lose the race after the permit has been accepted.
         let mut generations = self
             .state
             .session_generations
@@ -504,6 +503,26 @@ impl ExecutionPortActionGate {
         if !messages.iter().any(|existing| existing == &message) {
             messages.push_back(message);
         }
+        Ok(())
+    }
+
+    pub(crate) fn discard_interaction_message(
+        &self,
+        delivery_id: &str,
+    ) -> Result<(), ActionBridgeError> {
+        self.state
+            .messages
+            .lock()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .retain(|message| match message {
+                ExecutionPortMessage::ApprovalRequestMessage(request) => {
+                    request.message_id.0 != delivery_id
+                }
+                ExecutionPortMessage::InputRequestMessage(request) => {
+                    request.message_id.0 != delivery_id
+                }
+                _ => true,
+            });
         Ok(())
     }
 
@@ -575,6 +594,58 @@ fn reject_pending(state: &ActionGateState, request_id: &str, error: ActionBridge
 }
 
 impl KernelActionGate for ExecutionPortActionGate {
+    fn freeze_tool_input(
+        &self,
+        context: winwincode_kernel::ToolInputContext,
+    ) -> BoxFuture<'static, Option<winwincode_kernel::ToolDependencySnapshot>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::tool_dependencies::freeze(&state, &context))
+                .await
+                .ok()
+                .flatten()
+        })
+    }
+    fn verify_tool_input(
+        &self,
+        request: winwincode_kernel::ToolInputProofRequest,
+    ) -> BoxFuture<'static, Option<winwincode_kernel::ToolInputProof>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::tool_dependencies::verify(&state, &request))
+                .await
+                .ok()
+                .flatten()
+        })
+    }
+
+    fn authorize_result_read(
+        &self,
+        request: winwincode_kernel::KernelToolResultReadRequest,
+    ) -> BoxFuture<'static, winwincode_kernel::KernelResult<KernelActionAuthorization>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            result_read::authorize(&state, &request)
+                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())
+        })
+    }
+
+    fn revalidate_result_read(
+        &self,
+        request: winwincode_kernel::KernelToolResultReadRequest,
+        authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, winwincode_kernel::KernelResult<()>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            let current = result_read::authorize(&state, &request)
+                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())?;
+            if current != authorization {
+                return Err(winwincode_kernel::KernelFailure::action_rejected());
+            }
+            Ok(())
+        })
+    }
+
     fn authorize(
         &self,
         request: KernelActionRequest,
@@ -812,7 +883,10 @@ async fn await_action_receivers(
     Ok(())
 }
 
-fn current_generation(state: &ActionGateState, session_id: &str) -> Result<u64, ActionBridgeError> {
+pub(super) fn current_generation(
+    state: &ActionGateState,
+    session_id: &str,
+) -> Result<u64, ActionBridgeError> {
     Ok(*state
         .session_generations
         .lock()
@@ -844,7 +918,7 @@ fn insert_pending(
         .is_some())
 }
 
-fn current_binding_and_time(
+pub(super) fn current_binding_and_time(
     state: &ActionGateState,
     session_id: &str,
 ) -> Result<(ModelRunBinding, Instant), ActionBridgeError> {
@@ -856,10 +930,9 @@ fn current_binding_and_time(
         .cloned()
         .ok_or(ActionBridgeError::StaleAuthority)?;
     let now = state
-        .trusted_now
-        .lock()
-        .map_err(|_| ActionBridgeError::Unavailable)?
-        .clone()
+        .authority_clock
+        .now()
+        .map_err(clock_error)?
         .ok_or(ActionBridgeError::StaleAuthority)?;
     if !canonical_instant(&now)
         || !canonical_instant(&binding.authority.lease.issued_at)
@@ -936,45 +1009,13 @@ fn delegated_read_only_authorization(
 }
 
 fn is_core_control_tool(request: &KernelActionRequest) -> bool {
-    matches!(
-        request.tool_name.as_str(),
-        "request_user_input" | "update_plan"
-    ) && request
-        .namespace
-        .as_deref()
-        .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
-        && matches!(request.payload, KernelActionPayload::Function { .. })
+    matches!(request.payload, KernelActionPayload::CoreControl { .. })
 }
 
-// Core keeps the process manager per session. Reading its output is not a new
-// command; non-empty stdin still requires an explicit action authority.
 fn is_process_output_poll(request: &KernelActionRequest) -> bool {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Poll {
-        session_id: i32,
-        #[serde(default)]
-        chars: String,
-        yield_time_ms: Option<u64>,
-        max_output_tokens: Option<usize>,
-    }
-    if request.tool_name != "write_stdin"
-        || request
-            .namespace
-            .as_deref()
-            .is_some_and(|name| !name.is_empty() && name != "functions")
-    {
-        return false;
-    }
-    let KernelActionPayload::Function { arguments } = &request.payload else {
-        return false;
-    };
-    serde_json::from_str::<Poll>(arguments).is_ok_and(|poll| {
-        poll.session_id > 0
-            && poll.chars.is_empty()
-            && poll.yield_time_ms.is_none_or(|value| value <= 300_000)
-            && poll.max_output_tokens.is_none_or(|value| value <= 100_000)
-    })
+    matches!(&request.payload, KernelActionPayload::ProcessInteraction {
+        process_id, origin_call_id, input,
+    } if *process_id > 0 && !origin_call_id.trim().is_empty() && input.is_empty())
 }
 
 fn explicit_read_only_shell_authorization(
@@ -1248,9 +1289,22 @@ fn authorize_capability(
     binding: &ModelRunBinding,
     tool_request: &ToolRequest,
 ) -> Result<(), ActionBridgeError> {
-    if let ToolRequest::Mcp(mcp) = tool_request {
-        let capability_id = canonical_mcp_capability_id(&mcp.server, &mcp.tool)
-            .map_err(|_| ActionBridgeError::UnknownCapability)?;
+    let capability_id = match tool_request {
+        ToolRequest::Mcp(mcp) => Some(canonical_mcp_capability_id(&mcp.server, &mcp.tool)),
+        ToolRequest::McpResource(resource) => Some(
+            winwincode_execution_port::mcp_resource::canonical_resource_capability_id(
+                &resource.server,
+                resource.operation,
+            ),
+        ),
+        ToolRequest::File(_)
+        | ToolRequest::Git(_)
+        | ToolRequest::Shell(_)
+        | ToolRequest::Network(_)
+        | ToolRequest::ProcessInput(_) => None,
+    };
+    if let Some(capability_id) = capability_id {
+        let capability_id = capability_id.map_err(|_| ActionBridgeError::UnknownCapability)?;
         state
             .catalog
             .read()
@@ -1303,48 +1357,49 @@ fn canonical_tool_requests(
     request: &KernelActionRequest,
 ) -> Result<Vec<ToolRequest>, ActionBridgeError> {
     const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
-    if is_process_output_poll(request) {
+    if is_core_control_tool(request) || is_process_output_poll(request) {
         return Ok(Vec::new());
-    }
-    // Core handles these control tools internally; host identity and time checks still apply.
-    if matches!(
-        request.tool_name.as_str(),
-        "request_user_input" | "update_plan"
-    ) && request
-        .namespace
-        .as_deref()
-        .is_none_or(|namespace| namespace.is_empty() || namespace == DEFAULT_FUNCTION_NAMESPACE)
-    {
-        return match request.payload {
-            KernelActionPayload::Function { .. } => Ok(Vec::new()),
-            _ => Err(ActionBridgeError::InvalidAction),
-        };
     }
     if let Some(namespace) = request
         .namespace
         .as_deref()
         .filter(|namespace| !namespace.is_empty() && *namespace != DEFAULT_FUNCTION_NAMESPACE)
     {
-        let arguments = match &request.payload {
-            KernelActionPayload::Function { arguments } => arguments,
-            KernelActionPayload::ToolSearch { arguments_json } => arguments_json,
-            KernelActionPayload::Custom { input } => input,
-            KernelActionPayload::Shell { .. } | KernelActionPayload::Files { .. } => {
-                return Err(ActionBridgeError::InvalidAction);
-            }
-        };
-        let value = serde_json::from_str(arguments)
-            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-        return Ok(vec![ToolRequest::Mcp(McpRequest {
-            server: namespace
-                .strip_prefix("mcp__")
-                .unwrap_or(namespace)
-                .to_owned(),
-            tool: request.tool_name.clone(),
-            arguments: value,
-        })]);
+        return Ok(vec![canonical_namespaced_tool_request(namespace, request)?]);
     }
     match &request.payload {
+        KernelActionPayload::ProcessInteraction {
+            process_id,
+            origin_call_id,
+            input,
+        } => Ok(vec![ToolRequest::ProcessInput(
+            winwincode_execution_port::process_input::ProcessInputRequest {
+                process_id: *process_id,
+                origin_call_id: origin_call_id.clone(),
+                input: input.clone(),
+            },
+        )]),
+        KernelActionPayload::McpResource {
+            server,
+            method,
+            arguments,
+        } => Ok(vec![ToolRequest::McpResource(
+            winwincode_execution_port::mcp_resource::McpResourceRequest {
+                server: server.clone(),
+                operation:
+                    winwincode_execution_port::mcp_resource::McpResourceOperation::from_method(
+                        method,
+                    )
+                    .ok_or(ActionBridgeError::InvalidAction)?,
+                arguments: serde_json::from_str(arguments)
+                    .map_err(|_| ActionBridgeError::InvalidAction)?,
+            },
+        )]),
+        KernelActionPayload::FileRead { path } => Ok(vec![ToolRequest::File(FileRequest {
+            operation: FileOperation::Read,
+            paths: vec![path.clone()],
+            analysis: FileAnalysis::default(),
+        })]),
         KernelActionPayload::Shell {
             program,
             args,
@@ -1392,6 +1447,35 @@ fn canonical_tool_requests(
     }
 }
 
+fn canonical_namespaced_tool_request(
+    namespace: &str,
+    request: &KernelActionRequest,
+) -> Result<ToolRequest, ActionBridgeError> {
+    let arguments = match &request.payload {
+        KernelActionPayload::Function { arguments } => arguments,
+        KernelActionPayload::ToolSearch { arguments_json } => arguments_json,
+        KernelActionPayload::Custom { input } => input,
+        KernelActionPayload::CoreControl { .. }
+        | KernelActionPayload::Shell { .. }
+        | KernelActionPayload::FileRead { .. }
+        | KernelActionPayload::McpResource { .. }
+        | KernelActionPayload::ProcessInteraction { .. }
+        | KernelActionPayload::Files { .. } => {
+            return Err(ActionBridgeError::InvalidAction);
+        }
+    };
+    let value = serde_json::from_str(arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+    Ok(ToolRequest::Mcp(McpRequest {
+        server: namespace
+            .strip_prefix("mcp__")
+            .unwrap_or(namespace)
+            .to_owned(),
+        tool: request.tool_name.clone(),
+        arguments: value,
+    }))
+}
+
 fn kernel_request_digest(request: &KernelActionRequest) -> Vec<u8> {
     let mut digest = Sha256::new();
     digest.update(b"winwincode-kernel-action-input.v1\0");
@@ -1406,6 +1490,10 @@ fn kernel_request_digest(request: &KernelActionRequest) -> Vec<u8> {
         digest.update(part.as_bytes());
     }
     match &request.payload {
+        KernelActionPayload::CoreControl { input } => {
+            digest.update(b"core_control\0");
+            digest.update(input.as_bytes());
+        }
         KernelActionPayload::Function { arguments } => {
             digest.update(b"function\0");
             digest.update(arguments.as_bytes());
@@ -1447,6 +1535,30 @@ fn kernel_request_digest(request: &KernelActionRequest) -> Vec<u8> {
                 );
             }
         }
+        KernelActionPayload::FileRead { path } => {
+            digest.update(b"file_read\0");
+            update_digest_part(&mut digest, path.as_bytes());
+        }
+        KernelActionPayload::McpResource {
+            server,
+            method,
+            arguments,
+        } => {
+            digest.update(b"mcp_resource\0");
+            for part in [server, method, arguments] {
+                update_digest_part(&mut digest, part.as_bytes());
+            }
+        }
+        KernelActionPayload::ProcessInteraction {
+            process_id,
+            origin_call_id,
+            input,
+        } => {
+            digest.update(b"process_interaction\0");
+            digest.update(process_id.to_be_bytes());
+            update_digest_part(&mut digest, origin_call_id.as_bytes());
+            update_digest_part(&mut digest, input.as_bytes());
+        }
     }
     digest.finalize().to_vec()
 }
@@ -1456,33 +1568,11 @@ fn update_digest_part(digest: &mut Sha256, part: &[u8]) {
     digest.update(part);
 }
 
-fn canonical_instant(instant: &Instant) -> bool {
-    let value = instant.0.as_bytes();
-    value.len() == 24
-        && value[4] == b'-'
-        && value[7] == b'-'
-        && value[10] == b'T'
-        && value[13] == b':'
-        && value[16] == b':'
-        && value[19] == b'.'
-        && value[23] == b'Z'
-        && value.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
-        })
-        && number(value, 5, 7).is_some_and(|month| (1..=12).contains(&month))
-        && number(value, 8, 10).is_some_and(|day| (1..=31).contains(&day))
-        && number(value, 11, 13).is_some_and(|hour| hour <= 23)
-        && number(value, 14, 16).is_some_and(|minute| minute <= 59)
-        && number(value, 17, 19).is_some_and(|second| second <= 59)
-}
-
-fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
-    value
-        .get(start..end)?
-        .iter()
-        .try_fold(0_u8, |number, byte| {
-            number.checked_mul(10)?.checked_add(byte - b'0')
-        })
+fn clock_error(error: AuthorityClockError) -> ActionBridgeError {
+    match error {
+        AuthorityClockError::Unavailable => ActionBridgeError::Unavailable,
+        AuthorityClockError::InvalidTime => ActionBridgeError::StaleAuthority,
+    }
 }
 
 fn canonical_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
@@ -1553,11 +1643,11 @@ mod tests {
         format!("{prefix}_{}", value.to_string().repeat(26))
     }
 
-    fn signing_key() -> ActionEnforcementSigningKey {
+    pub(super) fn signing_key() -> ActionEnforcementSigningKey {
         ActionEnforcementSigningKey::from_bytes([41_u8; 32]).expect("signing key")
     }
 
-    fn catalog() -> WorkerCapabilityCatalog {
+    pub(super) fn catalog() -> WorkerCapabilityCatalog {
         WorkerCapabilityCatalog::discover(
             &WorkerCapabilitySet {
                 capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
@@ -1570,7 +1660,7 @@ mod tests {
         .expect("capability catalog")
     }
 
-    fn binding() -> ModelRunBinding {
+    pub(super) fn binding() -> ModelRunBinding {
         let worker_session_id = WorkerSessionId(id("wsn", 'A'));
         let canonical_thread_id = CodexThreadId(id("cdx", 'A'));
         ModelRunBinding {
@@ -1760,13 +1850,15 @@ mod tests {
         );
         gate.update_now(now)
             .expect("ignore an out-of-order older trusted time");
-        assert_eq!(
+        assert!(
             gate.state
-                .trusted_now
-                .lock()
+                .authority_clock
+                .now()
                 .expect("trusted action time")
-                .as_ref(),
-            Some(&Instant("2030-01-01T01:00:00.000Z".to_owned()))
+                .expect("observed time")
+                .0
+                .as_str()
+                >= "2030-01-01T01:00:00.000Z"
         );
         gate.remove_binding(&binding())
             .expect("cancel exact binding");
@@ -1869,9 +1961,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_io_operations_require_exact_signed_action_receipts() {
+        use winwincode_execution_port::capability_adapter::{
+            CapabilityDescriptor, CapabilityHealth, CapabilityOrigin,
+        };
+        use winwincode_execution_port::mcp_resource::McpResourceOperation;
+        let root = std::env::temp_dir().join(format!("wwc-io-receipts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let catalog = WorkerCapabilityCatalog::discover(
+            &WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Mcp],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            vec![
+                CapabilityDescriptor::mcp_resource(
+                    "fixture",
+                    McpResourceOperation::Read,
+                    "1",
+                    CapabilityHealth::Healthy,
+                    CapabilityOrigin::CodexCoreMcp,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog,
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+        )
+        .unwrap();
+        gate.install_binding(binding(), None).unwrap();
+        let now = Instant("2030-01-01T00:00:02.000Z".into());
+        gate.update_now(&now).unwrap();
+        for (index, (name, payload)) in [
+            (
+                "view_image",
+                KernelActionPayload::FileRead {
+                    path: "/workspace/image.png".into(),
+                },
+            ),
+            (
+                "write_stdin",
+                KernelActionPayload::ProcessInteraction {
+                    process_id: 123,
+                    origin_call_id: "original-exec".into(),
+                    input: "printf exact-input\n".into(),
+                },
+            ),
+            (
+                "read_mcp_resource",
+                KernelActionPayload::McpResource {
+                    server: "fixture".into(),
+                    method: "resources/read".into(),
+                    arguments: r#"{"uri":"fixture://readme"}"#.into(),
+                },
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let exact = KernelActionRequest {
+                session_id: "kernel-session-action".into(),
+                turn_id: "turn-io".into(),
+                operation_id: format!("io-{index}"),
+                namespace: None,
+                tool_name: name.into(),
+                payload,
+            };
+            let task = tokio::spawn(gate.authorize(exact.clone()));
+            tokio::task::yield_now().await;
+            let mut messages = gate.take_messages().unwrap();
+            let ExecutionPortMessage::ActionEnforcementRequestMessage(message) = messages
+                .pop()
+                .expect("real operation must enter action queue")
+            else {
+                panic!("action request expected")
+            };
+            assert!(messages.is_empty());
+            let receipt = signed_permit(message, &now);
+            gate.accept_receipt(&receipt, &now).unwrap();
+            let authorization = task.await.unwrap().unwrap();
+            gate.revalidate(exact.clone(), authorization.clone())
+                .await
+                .unwrap();
+            let mut changed = exact;
+            match &mut changed.payload {
+                KernelActionPayload::FileRead { path } => path.push_str(".changed"),
+                KernelActionPayload::ProcessInteraction { input, .. } => input.push('x'),
+                KernelActionPayload::McpResource { arguments, .. } => arguments.push(' '),
+                _ => unreachable!(),
+            }
+            assert!(gate.revalidate(changed, authorization).await.is_err());
+        }
+        drop(gate);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn kernel_action_round_trips_through_signed_execution_port_receipt() {
         action_receipt_round_trip(false).await;
         action_receipt_round_trip(true).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_reads_and_core_controls_expire_without_owner_clock_refresh() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-codex-action-elapsed-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "unchanged").unwrap();
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+        )
+        .unwrap();
+        let mut authority = binding();
+        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.150Z".into());
+        gate.install_binding(authority.clone(), Some(&root))
+            .unwrap();
+        let initial = Instant("2030-01-01T00:00:02.000Z".into());
+        gate.update_now(&initial).unwrap();
+        let read = shell_request("elapsed-read", "cat", &["marker.txt"], &root);
+        let control = KernelActionRequest {
+            session_id: "kernel-session-action".into(),
+            turn_id: "elapsed-control".into(),
+            operation_id: "elapsed-plan".into(),
+            namespace: Some("functions".into()),
+            tool_name: "update_plan".into(),
+            payload: KernelActionPayload::CoreControl { input: "{}".into() },
+        };
+        let poll = KernelActionRequest {
+            tool_name: "write_stdin".into(),
+            operation_id: "elapsed-poll".into(),
+            payload: KernelActionPayload::ProcessInteraction {
+                process_id: 123,
+                origin_call_id: "elapsed-read".into(),
+                input: String::new(),
+            },
+            ..control.clone()
+        };
+        let mut permitted = Vec::new();
+        for request in [read, control, poll] {
+            let authorization = gate.authorize(request.clone()).await.unwrap();
+            gate.revalidate(request.clone(), authorization.clone())
+                .await
+                .unwrap();
+            permitted.push((request, authorization));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        gate.update_now(&initial).unwrap();
+        for (request, authorization) in &permitted {
+            assert!(gate.authorize(request.clone()).await.is_err());
+            assert!(
+                gate.revalidate(request.clone(), authorization.clone())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(gate.take_messages().unwrap().is_empty());
+        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:03.000Z".into());
+        gate.install_binding(authority.clone(), Some(&root))
+            .unwrap();
+        for (request, authorization) in permitted {
+            gate.revalidate(request, authorization).await.unwrap();
+        }
+        gate.cancel_session("kernel-session-action").unwrap();
+        gate.remove_binding(&authority).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     async fn action_receipt_round_trip(renew: bool) {
@@ -1916,7 +2185,6 @@ mod tests {
         };
         assert!(messages.is_empty());
         assert_pending_shell_request(&gate, &request);
-        let receipt = signed_permit(request, &now);
         if renew {
             let mut renewed = binding();
             renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
@@ -1924,6 +2192,7 @@ mod tests {
                 .expect("renew pending action");
             now = Instant("2030-01-01T01:30:00.000Z".to_owned());
         }
+        let receipt = signed_permit(request, &now);
         gate.accept_receipt(&receipt, &now)
             .expect("accept signed permit");
         let authorization = task
@@ -1993,14 +2262,59 @@ mod tests {
             operation_id: "call-poll".into(),
             namespace: Some("functions".into()),
             tool_name: "write_stdin".into(),
-            payload: KernelActionPayload::Function {
-                arguments: r#"{"session_id":123,"chars":"","yield_time_ms":30000}"#.into(),
+            payload: KernelActionPayload::ProcessInteraction {
+                process_id: 123,
+                origin_call_id: "original-exec".into(),
+                input: String::new(),
             },
         };
         let mut plan = poll.clone();
+        for (name, payload) in [
+            (
+                "exec",
+                KernelActionPayload::CoreControl {
+                    input: serde_json::json!({"kind":"custom", "input":"await tools.exec_command({cmd:'touch marker.txt'})"}).to_string(),
+                },
+            ),
+            (
+                "wait",
+                KernelActionPayload::CoreControl {
+                    input: serde_json::json!({"kind":"function", "input":r#"{"cell_id":"1","yield_time_ms":1000}"#}).to_string(),
+                },
+            ),
+        ] {
+            let mut control = poll.clone();
+            control.tool_name = name.into();
+            control.payload = payload;
+            let authorization = gate
+                .authorize(control.clone())
+                .await
+                .expect("Code Mode control");
+            gate.revalidate(control.clone(), authorization.clone())
+                .await
+                .expect("control retains active authority");
+            let mut changed = control.clone();
+            changed.operation_id = "different-call".into();
+            assert!(gate.revalidate(changed, authorization).await.is_err());
+            let mut raw = control.clone();
+            raw.payload = KernelActionPayload::Custom { input:"unclassified control input".into() };
+            assert!(gate.authorize(raw).await.is_err(), "a control name does not grant control authority");
+            control.session_id = "foreign-thread".into();
+            assert!(gate.authorize(control).await.is_err());
+        }
+        assert!(
+            gate.authorize(shell_request(
+                "nested-write",
+                "touch",
+                &["marker.txt"],
+                &root
+            ))
+            .await
+            .is_err()
+        );
         plan.tool_name = "update_plan".into();
-        plan.payload = KernelActionPayload::Function {
-            arguments: r#"{"plan":[{"step":"Inspect","status":"in_progress"}]}"#.into(),
+        plan.payload = KernelActionPayload::CoreControl {
+            input: serde_json::json!({"kind":"function", "input":r#"{"plan":[{"step":"Inspect","status":"in_progress"}]}"#}).to_string(),
         };
         let permission = gate.authorize(plan.clone()).await.expect("Core plan tool");
         gate.revalidate(plan.clone(), permission)
@@ -2015,6 +2329,19 @@ mod tests {
         gate.revalidate(poll.clone(), permission)
             .await
             .expect("poll stays bound to active session");
+        let mut input = poll.clone();
+        input.payload = KernelActionPayload::ProcessInteraction {
+            process_id: 123,
+            origin_call_id: "original-exec".into(),
+            input: "touch marker.txt\n".into(),
+        };
+        assert!(gate.authorize(input).await.is_err());
+        let mut file_read = poll.clone();
+        file_read.tool_name = "view_image".into();
+        file_read.payload = KernelActionPayload::FileRead {
+            path: marker.to_string_lossy().into_owned(),
+        };
+        assert!(gate.authorize(file_read).await.is_err());
         for arguments in [
             r#"{"session_id":123,"chars":"rm -rf .\n"}"#,
             r#"{"session_id":-1}"#,
@@ -2364,6 +2691,49 @@ mod tests {
             winwincode_execution_port::action_enforcement::ActionReceiptClaim::Fresh
         );
         std::fs::remove_dir_all(root).expect("remove action fixture");
+    }
+
+    #[test]
+    fn typed_file_reads_preserve_the_operation_and_exact_target() {
+        let request = KernelActionRequest {
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            operation_id: "image-read".into(),
+            namespace: Some("functions".into()),
+            tool_name: "view_image".into(),
+            payload: KernelActionPayload::FileRead {
+                path: "/workspace/image.png".into(),
+            },
+        };
+        let normalized = super::canonical_tool_requests(&request).unwrap();
+        assert_eq!(
+            normalized,
+            vec![ToolRequest::File(
+                winwincode_execution_port::action_normalizer::FileRequest {
+                    operation: winwincode_execution_port::action_normalizer::FileOperation::Read,
+                    paths: vec!["/workspace/image.png".into()],
+                    analysis: winwincode_execution_port::action_normalizer::FileAnalysis::default(),
+                }
+            )]
+        );
+        let observed = observe_action(&normalized[0]).unwrap();
+        assert!(
+            observed
+                .facts
+                .contains(&winwincode_execution_port::action_normalizer::ObservedFact::FileRead)
+        );
+        let mut changed = request.clone();
+        changed.payload = KernelActionPayload::FileRead {
+            path: "/workspace/other.png".into(),
+        };
+        assert_ne!(
+            super::request_binding(&request),
+            super::request_binding(&changed)
+        );
+        changed.payload = KernelActionPayload::Function {
+            arguments: serde_json::json!({"path":"/workspace/image.png"}).to_string(),
+        };
+        assert!(super::canonical_tool_requests(&changed).is_err());
     }
 
     #[test]

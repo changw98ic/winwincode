@@ -279,6 +279,15 @@ impl CodexThread {
         }
     }
 
+    /// Reads bounded, payload-free Core execution facts after a durable cursor.
+    pub async fn tool_runtime_events(
+        &self,
+        after: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<codex_state::ToolRuntimeEvent>> {
+        crate::tools::ExecutionFacts::read_events(&self.session, after, limit).await
+    }
+
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         self.io.submit(op).await
     }
@@ -294,7 +303,8 @@ impl CodexThread {
     }
 
     pub async fn shutdown_and_wait(&self) -> CodexResult<()> {
-        self.io.shutdown_and_wait().await
+        self.io.shutdown_and_wait().await?;
+        crate::tools::ExecutionFacts::shutdown_result(&self.session)
     }
 
     /// Wait until the underlying session loop has terminated.
@@ -448,11 +458,11 @@ impl CodexThread {
             turn_id,
             thread_settings,
             trace,
-            submit_change_batch,
+            start,
         } = request;
         match self
             .io
-            .submit_recover_turn(thread_settings, trace, turn_id, submit_change_batch)
+            .submit_recover_turn(thread_settings, trace, turn_id, start)
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {

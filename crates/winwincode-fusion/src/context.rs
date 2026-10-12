@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//!
-//! ADR-0038 Phase 1 instrumentation + JEV rebuild integrity gate.
-//!
-//! Three-layer context (Canonical / Active / Archive), rebuild checks that are
-//! deterministic (no LLM), and joint Fusion×JEV metrics types.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-/// P3 claim lifecycle (ADR-0037). `Refuted` requires verified counter-evidence.
-/// `UnverifiedAbsence` = unanimous "not present" without direct safety proof
-/// (false-consensus blind spot; still needs verification).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClaimState {
@@ -26,7 +17,6 @@ pub enum ClaimState {
     UnverifiedAbsence,
 }
 
-/// Evidence strength is categorical — never a fake-precise score.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvidenceStrength {
@@ -36,7 +26,6 @@ pub enum EvidenceStrength {
     Speculation,
 }
 
-/// P2: one evidence object (models explain evidence; they do not invent facts).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FusionEvidenceRecord {
@@ -60,11 +49,6 @@ pub enum EvidenceDirection {
     Counter,
 }
 
-// ---------------------------------------------------------------------------
-// L1 Canonical State (JEV must not change semantics)
-// ---------------------------------------------------------------------------
-
-/// L1: facts Fusion/Verifier own. JEV rebuild may re-present but not alter.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanonicalState {
@@ -93,7 +77,6 @@ pub enum ClaimBasis {
     Verifier,
 }
 
-/// L2: what the agent sees after JEV build.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveContext {
@@ -106,7 +89,6 @@ pub struct ActiveContext {
     pub recent_observations: Vec<String>,
 }
 
-/// L3 archive entry (never silently mutated).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveEntry {
@@ -114,10 +96,6 @@ pub struct ArchiveEntry {
     pub kind: String,
     pub body: String,
 }
-
-// ---------------------------------------------------------------------------
-// Context snapshot + integrity check + rebuild gate
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,7 +110,6 @@ pub struct ContextSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrityReport {
     pub pass: bool,
-    /// JEV may re-present canonical truth, but only Fusion/Verifier may update it.
     pub canonical_changed: bool,
     pub active_goal_changed: bool,
     pub changed_active_evidence: Vec<String>,
@@ -151,7 +128,6 @@ pub struct IntegrityReport {
     pub invalid_evidence_ids: Vec<String>,
 }
 
-/// Deterministic rebuild integrity check (ADR-0038 §Rebuild Gate).
 #[must_use]
 pub fn check_rebuild_integrity(before: &CanonicalState, after: &CanonicalState) -> IntegrityReport {
     let mut report = IntegrityReport {
@@ -201,7 +177,6 @@ pub fn check_rebuild_integrity(before: &CanonicalState, after: &CanonicalState) 
                 }
             }
             Some(after_claim) => {
-                // Confirmed must not regress unless new verified counter-evidence.
                 if before_claim.state == ClaimState::Confirmed
                     && after_claim.state != ClaimState::Confirmed
                 {
@@ -231,11 +206,9 @@ pub fn check_rebuild_integrity(before: &CanonicalState, after: &CanonicalState) 
     for record in &after.evidence {
         if !before.evidence.iter().any(|prior| prior.id == record.id)
             && record.id.starts_with("ev_")
+            && record.source_refs.is_empty()
         {
-            // New tool evidence is allowed; fabricated ids without provenance are not.
-            if record.source_refs.is_empty() {
-                report.hallucinated_evidence.push(record.id.clone());
-            }
+            report.hallucinated_evidence.push(record.id.clone());
         }
     }
 
@@ -262,30 +235,22 @@ fn invalid_context_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<String> {
 }
 
 impl CanonicalClaimFact {
-    /// Kept for hosts that classify basis; integrity uses evidence direction instead.
     #[must_use]
     pub fn basis(&self) -> ClaimBasis {
         self.basis
     }
 }
 
-/// Rebuild gate: activate only on PASS; else keep previous context.
 #[must_use]
 pub fn rebuild_gate(
     previous: &ContextSnapshot,
     candidate: &ContextSnapshot,
 ) -> (ContextSnapshot, IntegrityReport) {
     let mut report = check_rebuild_integrity(&previous.canonical, &candidate.canonical);
-    // Apply authoritative Fusion/Verifier changes before taking `previous`.
-    // Context rebuilding cannot introduce even an apparently justified update.
     report.canonical_changed = previous.canonical != candidate.canonical;
     report.stale_refuted_in_active =
         stale_refuted_in_active(&candidate.canonical, &candidate.active);
-    // Stage goal changes in the authoritative snapshot before rebuilding, just
-    // like canonical changes. JEV only selects a representation of that state.
     report.active_goal_changed = previous.active.current_goal != candidate.active.current_goal;
-    // Evidence facts are authoritative projections, not compressible raw logs.
-    // Apply new facts to `previous` before allowing JEV to rebuild its context.
     report.changed_active_evidence = previous
         .active
         .evidence_facts
@@ -365,11 +330,6 @@ pub fn rebuild_gate(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stale / hallucination helpers
-// ---------------------------------------------------------------------------
-
-/// Refuted claims must not re-enter active priority lists.
 #[must_use]
 pub fn stale_refuted_in_active(canonical: &CanonicalState, active: &ActiveContext) -> Vec<String> {
     let mut stale = Vec::new();
@@ -385,10 +345,6 @@ pub fn stale_refuted_in_active(canonical: &CanonicalState, active: &ActiveContex
     }
     stale
 }
-
-// ---------------------------------------------------------------------------
-// Joint metrics (Fusion × JEV)
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -407,8 +363,6 @@ pub struct FusionQualityMetrics {
 }
 
 impl FusionQualityMetrics {
-    /// Ratio for report display only; sub-ULP precision on `usize` counts is
-    /// irrelevant here, so the `usize`→`f64` narrowing is deliberate.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn oracle_capture_rate(&self) -> Option<f64> {
@@ -419,7 +373,6 @@ impl FusionQualityMetrics {
         }
     }
 
-    /// Ratio for report display only; see [`Self::oracle_capture_rate`].
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn minority_truth_recovery_rate(&self) -> Option<f64> {
@@ -474,25 +427,15 @@ impl CostMetrics {
     }
 }
 
-/// Four-arm baseline (ADR-0038 §四组基线).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum BenchArm {
-    /// Single agent, no JEV.
     A,
-    /// Single agent + JEV.
     B,
-    /// Fusion, no JEV.
     C,
-    /// Fusion + JEV (product).
     D,
 }
 
-// ---------------------------------------------------------------------------
-// Pinned vs compressible (JEV policy)
-// ---------------------------------------------------------------------------
-
-/// Pinned content that rebuild must retain (ADR-0038 §压缩边界).
 #[must_use]
 pub fn pinned_payload(state: &CanonicalState) -> Vec<String> {
     let mut pinned = vec![state.task_objective.clone()];
@@ -517,7 +460,6 @@ pub fn pinned_payload(state: &CanonicalState) -> Vec<String> {
     pinned
 }
 
-/// High-risk claims stay in Active until resolved.
 #[must_use]
 pub fn is_pinned_claim(display_key: &str) -> bool {
     let hay = display_key.to_ascii_lowercase();

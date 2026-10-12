@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Safe public projection of one validated solution review.
-
 use serde::Serialize;
 use winwincode_domain::{AttentionItemId, DeliveryId, WorkItemId, WorkRunId};
 
@@ -305,7 +303,6 @@ impl WorkItemProposalProjection {
     }
 }
 
-/// One current pending or settled solution-review view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SolutionReviewProjection {

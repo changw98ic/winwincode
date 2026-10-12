@@ -1,8 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* Design pages 03a/03b: the chat page is a single column; the session list
-   lives in the shell sidebar, not on the page. */
-/* 设计稿 03a/03b:对话页固定为视口内高度,composer 任何状态常驻贴底。 */
 .wwc-chat {
   display: flex;
   flex-direction: column;
@@ -25,7 +22,6 @@
   align-items: center;
   justify-content: flex-end;
   gap: var(--wwc-space-4);
-  /* 设计稿 03b:委托 chip 与 shell 的 winwincode ∨ 下拉同一行(右上)。 */
   flex-wrap: wrap;
 }
 
@@ -94,10 +90,6 @@
   font-weight: var(--wwc-font-weight-display);
 }
 
-/* Design pages 03a/03b: no status line under the title — the live region
-   stays in the DOM for announcements only. */
-/* 设计稿 03a/03b:对话区固定为视口内高度——消息列表内部滚动,composer
-   任何状态下都常驻贴在内容区底部,底部留白,不再随消息流滚出视口。 */
 .wwc-chat-conversation > .wwc-chat-composer {
   margin-top: auto;
 }
@@ -146,8 +138,6 @@
   background: var(--wwc-color-surface);
 }
 
-/* Design page 03a: the empty canvas centers the architecture and flow
-   diagrams behind the「架构图 | 流程图」tabs. */
 .wwc-chat-diagram {
   display: grid;
   flex: 1;
@@ -245,8 +235,6 @@
   color: var(--wwc-color-text-muted);
 }
 
-/* Geometric monochrome glyphs drawn with boxes so no icon font or inline SVG
-   is needed inside the diagram nodes. */
 .wwc-chat-diagram-glyph {
   position: relative;
   width: 2.5rem;
@@ -450,8 +438,6 @@
   background: var(--wwc-color-surface);
 }
 
-/* Design page 03b: a created Delivery surfaces as an in-flow receipt line
-   with an underlined link to the StrongFlow surface. */
 .wwc-chat-delegation-receipt {
   display: flex;
   align-items: baseline;
@@ -479,8 +465,6 @@
   box-shadow: 0 4px 12px rgb(0 0 0 / 2%), 0 2px 8px rgb(0 0 0 / 4%);
 }
 
-/* The composer is announced by its label; the design shows only the
-   placeholder text. */
 .wwc-chat-composer-label {
   position: absolute;
   width: 1px;
@@ -520,8 +504,6 @@
   gap: var(--wwc-space-2);
 }
 
-/* Design page 03b: attach entry on the left, model route beside it, actions
-   pushed to the right edge of the composer bar. */
 .wwc-chat-composer-attach {
   width: 36px;
   min-height: 36px;
@@ -571,7 +553,6 @@
   margin-left: auto;
 }
 
-/* DSH circular send action uses the information blue in both themes. */
 .wwc-chat-send {
   min-width: 36px;
   min-height: 36px;
@@ -612,3 +593,10 @@
 
 .wwc-chat-send:hover:not(:disabled) { background: var(--dsw-alias-button-info-hover); }
 .wwc-chat-composer-controls > button { min-height: 36px; }
+
+.wwc-chat-runtime { margin-block: 12px; padding: 12px; border: 1px solid var(--wwc-color-border); border-radius: 8px; }
+.wwc-chat-runtime-heading { cursor: pointer; font-weight: 600; }
+.wwc-runtime-activity { display: grid; gap: 4px; padding-block: 8px; overflow-wrap: anywhere; }
+.wwc-runtime-activity-detail { font-size: 0.875rem; color: var(--wwc-color-text-muted); }
+.wwc-runtime-activity-question { margin-block: 4px; }
+.wwc-runtime-activity-evidence { font-size: 0.875rem; padding-inline-start: 20px; }

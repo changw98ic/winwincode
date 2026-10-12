@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server-side `ClientNode` registry and Client exchange cursors.
-//!
-//! This module stores the persisted Control Plane projection of device-reported
-//! Client facts (ADR-0030): identity, presence, capacity, heartbeat, and the
-//! per-client bidirectional `ClientControlPort` exchange acknowledgement cursors
-//! that must survive a Server restart. Presence states and their legal
-//! transitions follow the frozen state machine in
-//! `docs/contracts/client-control-state-machines.md`; every mutation uses
-//! optimistic `expectedRevision` compare-and-swap on the node revision.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -58,24 +48,32 @@ CREATE TABLE IF NOT EXISTS client_exchange_cursors (
         CHECK (server_to_client_ack_sequence >= 0),
     FOREIGN KEY (client_node_id) REFERENCES client_nodes(client_node_id) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS client_exchange_frames (
+    client_node_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, sequence),
+    UNIQUE (client_node_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS client_exchange_commands (
+    client_node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, idempotency_key)
+);
+DROP TABLE IF EXISTS client_credential_rotations;
 ";
 
-/// Machine-level presence of one `ClientNode` (plan 4.1, contract 1).
-///
-/// It belongs to no browser session. `Revoked` is the only terminal state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientPresenceState {
-    /// Registered but not yet accepted (`client.enroll` recorded).
     PendingEnrollment,
-    /// Reachable and exchanging within the heartbeat window.
     Online,
-    /// Reachable but local Worker/occupancy reconciliation is unfinished.
     Degraded,
-    /// Heartbeat/exchange did not arrive within the timeout window.
     Offline,
-    /// Locked by a local operator or `client.client_lock`.
     Locked,
-    /// Terminal: the device or its credential was revoked.
     Revoked,
 }
 
@@ -114,14 +112,9 @@ impl fmt::Display for ClientPresenceState {
     }
 }
 
-/// Machine-level lock switch on one `ClientNode` (plan 7.2, 12.1).
-///
-/// It is an independent boolean projection, not a presence state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientLockState {
-    /// The node accepts new connections and occupancy.
     Unlocked,
-    /// The node is locked and rejects new work.
     Locked,
 }
 
@@ -152,9 +145,6 @@ impl fmt::Display for ClientLockState {
     }
 }
 
-/// Device-reported `ClientNode` registration facts (plan 7.2).
-///
-/// Device Client owns these facts; the Control Plane persists the projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientNodeRegistration {
     client_node_id: String,
@@ -169,12 +159,6 @@ pub struct ClientNodeRegistration {
 }
 
 impl ClientNodeRegistration {
-    /// Builds one validated registration command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, out-of-range fields, and unsupported
-    /// platform or architecture values before any durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         client_node_id: impl Into<String>,
@@ -293,86 +277,49 @@ impl ClientNodeRegistration {
     }
 }
 
-/// Durable `ClientNode` projection row (plan 7.2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientNodeRecord {
-    /// Stable Server-side node identifier.
     pub client_node_id: String,
-    /// Stable public device number, not a secret.
     pub public_client_id: String,
-    /// Human-readable device name.
     pub display_name: String,
-    /// Operating system platform release target.
     pub platform: String,
-    /// CPU architecture.
     pub architecture: String,
-    /// Device client software version.
     pub client_version: String,
-    /// Digest of the device credential; the credential itself never persists.
     pub device_credential_digest: Option<String>,
-    /// Current Device Client process instance identifier.
     pub current_instance_id: Option<String>,
-    /// Machine-level presence state.
     pub presence_state: ClientPresenceState,
-    /// Whether the node accepts new connections.
     pub accepting_connections: bool,
-    /// Machine-level lock switch.
     pub lock_state: ClientLockState,
-    /// Device-reported concurrent Worker session capacity.
     pub max_concurrent_worker_sessions: u32,
-    /// Device-reported currently running Worker sessions.
     pub reported_running_worker_sessions: u32,
-    /// Last accepted heartbeat instant, if any.
     pub last_heartbeat_at: Option<Instant>,
-    /// Instant the registry record was created.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Per-`ClientNode` bidirectional `ClientControlPort` exchange cursors (plan 9.2).
-///
-/// Both directions are keyed by `clientNodeId` so an exchange can resume after
-/// a Server restart or network partition without replaying settled frames.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientExchangeCursors {
-    /// Highest acknowledged Client-to-Server sequence.
     pub client_to_server_ack_sequence: u64,
-    /// Highest acknowledged Server-to-Client sequence.
     pub server_to_client_ack_sequence: u64,
 }
 
-/// Result of a registry registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientNodeRegistrationReceipt {
-    /// Exact durable projection after the registration.
     pub record: ClientNodeRecord,
-    /// True when a new `pending_enrollment` identity was created; false when an
-    /// existing identity had its device-reported projection refreshed.
     pub enrolled: bool,
 }
 
-/// Stable registry failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientRegistryErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// The identity binding conflicts with durable facts, or the identity is
-    /// terminal (`revoked`) and cannot be reused.
     IdentityConflict,
-    /// The supplied `expectedRevision` no longer matches the durable revision.
     RevisionConflict,
-    /// The requested presence change is not a legal state machine transition.
     PresenceTransition,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free `ClientNode` registry error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientRegistryError {
     kind: ClientRegistryErrorKind,
@@ -394,23 +341,134 @@ impl fmt::Display for ClientRegistryError {
 
 impl std::error::Error for ClientRegistryError {}
 
-/// `ClientNode` registry borrowing the sole product-state `SQLite` authority.
 pub struct ClientNodeRegistry<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable `ClientNode` registry on this same product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn client_node_registry(&mut self) -> Result<ClientNodeRegistry<'_>, ClientRegistryError> {
         ClientNodeRegistry::new(self)
     }
 }
 
 impl<'storage> ClientNodeRegistry<'storage> {
+    pub fn reserve_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        message_id: &str,
+        digest: &str,
+        command_key: Option<&str>,
+    ) -> Result<bool, ClientRegistryError> {
+        validate_client_node_id(node)?;
+        validate_sequence(sequence, "received sequence")?;
+        let tx = self.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO client_exchange_frames
+             (client_node_id, sequence, message_id, payload_digest) VALUES (?1, ?2, ?3, ?4)",
+            params![node, sql_integer(sequence)?, message_id, digest],
+        )
+        .map_err(|sql| sql_error(&sql))?;
+        let stored: Option<(String, String, bool)> = tx
+            .query_row(
+                "SELECT message_id, payload_digest, completed FROM client_exchange_frames
+             WHERE client_node_id = ?1 AND sequence = ?2",
+                params![node, sql_integer(sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        let Some((stored_id, stored_digest, mut completed)) = stored else {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange message identity conflict",
+            ));
+        };
+        if stored_id != message_id || stored_digest != digest {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame payload conflict",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "INSERT OR IGNORE INTO client_exchange_commands
+                 (client_node_id, idempotency_key, payload_digest) VALUES (?1, ?2, ?3)",
+                params![node, key, digest],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+            let (prior, settled): (String, bool) = tx
+                .query_row(
+                    "SELECT payload_digest, completed FROM client_exchange_commands
+                 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                    params![node, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|sql| sql_error(&sql))?;
+            if prior != digest {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "exchange idempotency conflict",
+                ));
+            }
+            completed |= settled;
+        }
+        tx.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(completed)
+    }
+
+    pub fn complete_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+    ) -> Result<(), ClientRegistryError> {
+        self.complete_exchange_frame_with_reply(node, sequence, command_key, None)
+    }
+
+    pub fn complete_exchange_frame_with_reply(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+        reply: Option<(&crate::ClientDownlinkAppend, &Instant)>,
+    ) -> Result<(), ClientRegistryError> {
+        let tx = self.transaction()?;
+        if let Some((reply, now)) = reply {
+            let next: i64 = tx.query_row("SELECT MAX(COALESCE((SELECT MAX(sequence) FROM client_downlink_frames WHERE client_node_id = ?1), 0), server_to_client_ack_sequence) + 1 FROM client_exchange_cursors WHERE client_node_id = ?1", [node], |row| row.get(0)).map_err(|sql| sql_error(&sql))?;
+            if reply.client_node_id() != node || sql_integer(reply.sequence())? != next {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "downlink reply sequence changed",
+                ));
+            }
+            tx.execute("INSERT INTO client_downlink_frames (client_node_id, sequence, message_id, frame, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![node, next, reply.message_id(), reply.frame(), now.0]).map_err(|sql| sql_error(&sql))?;
+        }
+        let changed = tx.execute(
+            "UPDATE client_exchange_frames SET completed = 1 WHERE client_node_id = ?1 AND sequence = ?2",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        if changed != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame is not reserved",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "UPDATE client_exchange_commands SET completed = 1 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                params![node, key],
+            ).map_err(|sql| sql_error(&sql))?;
+        }
+        tx.execute(
+            "UPDATE client_exchange_cursors SET client_to_server_ack_sequence = MAX(client_to_server_ack_sequence, ?2)
+             WHERE client_node_id = ?1",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        tx.commit().map_err(|sql| sql_error(&sql))
+    }
+
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, ClientRegistryError> {
         let connection = storage
             .connection()
@@ -422,19 +480,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(Self { storage })
     }
 
-    /// Registers a Device Client identity or refreshes its device-reported
-    /// projection (plan 11.4 `client.enroll`).
-    ///
-    /// A first registration creates the node in `pending_enrollment` with a
-    /// zeroed exchange cursor pair. A re-registration of the same
-    /// `clientNodeId`/`publicClientId` pair refreshes the device-reported facts
-    /// under `expectedRevision` compare-and-swap and leaves presence, lock, and
-    /// accepting-connections facts untouched.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a conflicting `publicClientId` binding, a `revoked` identity
-    /// reuse, a stale `expectedRevision`, or storage failure.
     pub fn register(
         &mut self,
         registration: &ClientNodeRegistration,
@@ -462,11 +507,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(receipt)
     }
 
-    /// Returns one durable `ClientNode` projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt stored rows or storage failure.
     pub fn snapshot(
         &self,
         client_node_id: &str,
@@ -475,13 +515,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         load_client_node(self.connection()?, client_node_id)
     }
 
-    /// Returns one durable `ClientNode` projection by its public device
-    /// number (plan 11.2: the public id only ever locates one Client).
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical public id, corrupt stored rows, or storage
-    /// failure.
     pub fn snapshot_by_public_client_id(
         &self,
         public_client_id: &str,
@@ -502,16 +535,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         }
     }
 
-    /// Applies one presence state transition under `expectedRevision` CAS.
-    ///
-    /// Only transitions in the frozen state machine are accepted; requesting
-    /// the current state is an accepted idempotent replay that leaves the
-    /// revision untouched.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, a stale `expectedRevision`, an illegal
-    /// transition out of the current state, or storage failure.
     pub fn update_presence(
         &mut self,
         client_node_id: &str,
@@ -561,19 +584,49 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(updated_record)
     }
 
-    /// Records one accepted Device Client heartbeat (plan 9.3
-    /// `client.heartbeat`).
-    ///
-    /// The heartbeat refreshes `lastHeartbeatAt` and the reported running
-    /// Worker session count. A heartbeat from `offline` reconnects the device
-    /// (`offline -> online`); `pending_enrollment` and `revoked` reject
-    /// heartbeats because enrollment acceptance has not happened or the
-    /// identity is terminal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, a stale `expectedRevision`, a
-    /// heartbeat outside a legal state, or storage failure.
+    pub fn update_connection_policy(
+        &mut self,
+        client_node_id: &str,
+        accepting_connections: bool,
+        lock_state: ClientLockState,
+        expected_revision: u64,
+    ) -> Result<ClientNodeRecord, ClientRegistryError> {
+        validate_client_node_id(client_node_id)?;
+        validate_revision(expected_revision)?;
+        let transaction = self.transaction()?;
+        let record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        ensure_revision(&record, expected_revision)?;
+        if record.accepting_connections == accepting_connections && record.lock_state == lock_state
+        {
+            transaction.commit().map_err(|sql| sql_error(&sql))?;
+            return Ok(record);
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE client_nodes
+                 SET accepting_connections = ?2, lock_state = ?3, revision = revision + 1
+                 WHERE client_node_id = ?1 AND revision = ?4",
+                params![
+                    client_node_id,
+                    accepting_connections,
+                    lock_state.as_str(),
+                    sql_integer(record.revision)?,
+                ],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        if updated != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::RevisionConflict,
+                "client node revision changed during connection policy update",
+            ));
+        }
+        let updated_record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(updated_record)
+    }
+
     pub fn heartbeat(
         &mut self,
         client_node_id: &str,
@@ -652,17 +705,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(updated_record)
     }
 
-    /// Projects unreachable `online` and `degraded` devices to `offline`
-    /// (contract 1 heartbeat timeout judgement).
-    ///
-    /// The caller owns the timeout policy: every client whose last accepted
-    /// heartbeat is at or before `cutoff` is swept. `locked` and
-    /// `pending_enrollment` devices are never swept because their offline
-    /// projection is not defined by the frozen state machine.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn sweep_offline(&mut self, cutoff: &Instant) -> Result<Vec<String>, ClientRegistryError> {
         validate_instant(cutoff, "offline cutoff")?;
         let transaction = self.transaction()?;
@@ -701,11 +743,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(swept)
     }
 
-    /// Returns the durable exchange cursors for one client node.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity, corrupt rows, or storage failure.
     pub fn exchange_cursors(
         &self,
         client_node_id: &str,
@@ -714,16 +751,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
         load_exchange_cursors(self.connection()?, client_node_id)
     }
 
-    /// Advances the per-client bidirectional exchange acknowledgement cursors
-    /// (plan 9.2 sequence/acknowledgement, 18.2 restart recovery).
-    ///
-    /// Each direction is monotonic: an acknowledgement at or below the stored
-    /// sequence is an accepted replay no-op, never a regression.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, an out-of-range sequence, or storage
-    /// failure.
     pub fn advance_exchange_cursors(
         &mut self,
         client_node_id: &str,
@@ -773,7 +800,6 @@ impl<'storage> ClientNodeRegistry<'storage> {
     }
 }
 
-/// Legal presence transitions of the frozen state machine (contract 1).
 const fn presence_transition_allowed(
     current: ClientPresenceState,
     target: ClientPresenceState,
@@ -1123,7 +1149,29 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientRegist
             "client_to_server_ack_sequence",
             "server_to_client_ack_sequence",
         ],
-    )
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_frames",
+        &[
+            "client_node_id",
+            "sequence",
+            "message_id",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_commands",
+        &[
+            "client_node_id",
+            "idempotency_key",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_columns(
@@ -1255,7 +1303,6 @@ const fn is_crockford_base32(byte: u8) -> bool {
     )
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), ClientRegistryError> {
     let bytes = value.0.as_bytes();
     let punctuation = [

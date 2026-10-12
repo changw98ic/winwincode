@@ -208,8 +208,6 @@ fn delivery_before_advance(seed: u64) -> Delivery {
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
     snapshot.status = DeliveryStatus::Ready;
-    // Each seeded Delivery owns a fresh canonical contract and one ready item.
-    // A settled run from the shared projection fixture is not execution authority.
     snapshot.work_run_aggregate.contract.id =
         winwincode_domain::WorkContractId(canonical_id("wct", seed));
     snapshot.work_run_aggregate.contract.revision = Revision(1);
@@ -514,8 +512,6 @@ fn accept_verification_artifact(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding.sent_at.clone(),
         session_identity: binding.session_identity.clone(),
-        // A verification frame must name the snapshot under test; the Control
-        // Plane rejects a verification frame with no snapshotId.
         snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
@@ -529,9 +525,6 @@ fn accept_verification_artifact(
         lease: binding.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
         payload: EncodedPayload {
-            // Same media type as `artifact.media_type` above: the decoded
-            // payload is the candidate manifest, and the pin gate reads
-            // `payload.content_type`.
             content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(manifest),
             payload_digest: digest,
@@ -540,7 +533,6 @@ fn accept_verification_artifact(
         sent_at: binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity.clone(),
-        // The re-upload names the same snapshot as its open frame.
         snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
@@ -1774,11 +1766,11 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_201));
     let expired_error = control_plane
         .commit_delivery_session_binding(&forged, &authority, &expired_server_time)
-        .expect_err("first-seen message cannot backdate sentAt after expiry");
+        .expect_err("a different binding message still conflicts with the existing phases");
     assert!(
-        expired_error
+        !expired_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_202));
@@ -1792,7 +1784,7 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     assert!(
         premature_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     let state = control_plane
@@ -2476,20 +2468,14 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     let expired = control_plane
         .accept_artifact_open(&scope, &expired_open, &authority)
         .expect("expired Artifact write acknowledgement");
-    assert_eq!(expired.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(expired.status, LeaseWriteStatus::Accepted);
     assert_eq!(expired.ack_sequence.0, 0);
-    assert_eq!(
-        expired.error.expect("expired lease error").code,
-        ExecutionPortErrorCode::LeaseExpired
-    );
-    let mut after_expiry = expired_open;
-    after_expiry.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 21));
-    after_expiry.request_id = RequestId(canonical_id("req", seed + 21));
-    after_expiry.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
+    assert!(expired.error.is_none());
+    let after_expiry = expired_open;
     let accepted_after_expiry = control_plane
         .accept_artifact_open(&scope, &after_expiry, &authority)
-        .expect("expired Artifact message must not reserve metadata");
-    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Accepted);
+        .expect("late Artifact open replays its receipt");
+    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Duplicate);
 
     let mut crossed_open_identities = open.clone();
     crossed_open_identities.request_id = RequestId(canonical_id("req", seed + 21));
@@ -2674,9 +2660,6 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     fs::remove_dir_all(root).expect("database directory release");
 }
 
-/// Production diagnostic command output uses `text/plain; charset=utf-8`.
-/// `start_local` must accept both the open and the matching final chunk;
-/// rejecting charset parameters after open leaves the Worker outbox pending.
 #[test]
 fn start_local_accepts_diagnostic_open_and_charset_chunk() {
     let seed = 1_403;
@@ -2810,11 +2793,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         lease: binding_message.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
         payload: EncodedPayload {
-            // The decoded payload is the candidate manifest, so its media type
-            // is the candidate type — matching `artifact.media_type` above and
-            // the `worker_lifecycle` fixture. `pin_candidate_git_after_final_
-            // artifact_ack` gates on this field, so `application/octet-stream`
-            // silently skipped the pin and left `load_by_artifact` empty.
             content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(&manifest),
             payload_digest: digest.clone(),
@@ -2832,10 +2810,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     assert_eq!(final_ack.status, LeaseWriteStatus::Accepted);
     assert_eq!(final_ack.ack_sequence, ExecutionAckSequence(1));
 
-    // The final Artifact acknowledgement is not observable until the
-    // retention ledger has durably reached Pinned and the stable ref points
-    // at the exact candidate commit.  Re-open the canonical store here to
-    // exercise the same restart/recovery boundary used by a fresh process.
     let candidate_cache = root.join("delivery-sources");
     let retained_repository = candidate_cache.join("project-one");
     let pin = {
@@ -2886,9 +2860,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         candidate_commit
     );
 
-    // Move the source branch away and aggressively prune unreachable objects.
-    // The stable retention ref is the only authority that keeps this commit
-    // available for later verification/rework checkout.
     git(
         &retained_repository,
         &["update-ref", "refs/heads/main", base_commit.as_str()],
@@ -2906,9 +2877,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         candidate_commit
     );
 
-    // A fresh Control Plane instance must reconcile the pin before accepting
-    // an exact final-chunk retry.  The retry is a Duplicate acknowledgement,
-    // and its pin receipt remains one exact durable record.
     control_plane
         .shutdown()
         .expect("Control Plane restart boundary");
@@ -2945,9 +2913,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     );
     assert_eq!(replayed_pin.receipt_digest(), pin.receipt_digest());
 
-    // A moved stable ref is a tamper/conflict, not a new candidate.  The
-    // duplicate final frame therefore fails before another acknowledgement is
-    // returned and leaves the foreign ref untouched.
     git(
         &retained_repository,
         &["update-ref", pin.reference_name(), base_commit.as_str()],
@@ -3365,9 +3330,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         .expect("settled WorkRun must still replay its durable artifact.chunk acknowledgement");
     assert_eq!(replayed_chunk.status, LeaseWriteStatus::Duplicate);
 
-    // The production Delivery authority now closes its review Attention.  We
-    // recover the exact generic command receipt that was committed by this
-    // typed API and use it as the only terminal fact for candidate release.
     let review_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("Delivery review state");
@@ -3628,7 +3590,7 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     let repository = root.join("repositories/project-one");
     let (base_commit, _) = git_candidate_repository(&repository);
     let mut snapshot = delivery_before_advance(seed).into_snapshot();
-    snapshot.status = DeliveryStatus::Ready; // Historical label is not a scheduling gate.
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.spec.repository.locator = "project-one".into();
     snapshot.spec.base_revision = base_commit;
     let mut second_item = snapshot.work_run_aggregate.items[0].clone();

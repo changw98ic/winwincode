@@ -1,32 +1,5 @@
-import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, type DeviceConfigurationEnvelope,
+import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, DeviceResponsesStructuredOutput, type DeviceConfigurationEnvelope,
   type DeviceProviderReport, type DeviceProviderConfig } from './device-provider.generated.js'
-
-/**
- * ClientControlPort contracts for the shared device Client model.
- *
- * Authoritative source: `schema/winwincode/v1/client-control.schema.json`
- * (shared scalars come from its `domain.schema.json` sibling). This module is
- * the Phase 0 TypeScript projection of that schema: the schema inlines the
- * envelope and command fields into every message, so message fields live flat
- * on the message beside `kind` and there is no payload sub-object. Every field
- * name, enumeration, pattern, identifier prefix, and classifier is taken
- * verbatim from the schema.
- *
- * Boundary invariants enforced by this module:
- * - no field carries a local filesystem path; repository bindings resolve only
- *   inside the Device Client and the Server never sees or stores a path;
- * - `ClientConnectCode` carries only `codeDigest`, never connect-code plaintext;
- * - exactly the 22 command-class messages carry `expectedRevision` plus
- *   `idempotencyKey` on the message envelope; the 8 non-command messages
- *   (heartbeat, hello, worker.state, worker.reconcile, and repository.status
- *   reports, the command ack, enrollment_accepted, and access.challenge)
- *   reject both fields;
- * - exactly 11 command-class messages are stamped with the occupancy lease
- *   pair `occupancyLeaseId` + `occupancyFencingToken`; `schemaVersion` is the
- *   string constant "winwincode/v1"; `occupancyFencingToken` is a decimal
- *   string matching ^[1-9][0-9]{0,19}$; every timestamp is an RFC3339
- *   `Instant` string with milliseconds.
- */
 
 export const CLIENT_CONTROL_SCHEMA_VERSION = 'winwincode/v1' as const
 
@@ -83,7 +56,6 @@ const CLIENT_NODE_ID_PATTERN = crockfordIdentifierPattern('cnd')
 const CLIENT_INSTANCE_ID_PATTERN = crockfordIdentifierPattern('cix')
 const CLIENT_OCCUPANCY_LEASE_ID_PATTERN = crockfordIdentifierPattern('ocl')
 const CLIENT_CONNECT_CODE_ID_PATTERN = crockfordIdentifierPattern('cct')
-const CLIENT_ACCESS_CHALLENGE_ID_PATTERN = crockfordIdentifierPattern('cac')
 const CLIENT_ACCESS_GRANT_ID_PATTERN = crockfordIdentifierPattern('cag')
 const OCCUPANCY_CLAIM_ID_PATTERN = crockfordIdentifierPattern('ocq')
 const REPOSITORY_BINDING_ID_PATTERN = crockfordIdentifierPattern('rbd')
@@ -121,7 +93,6 @@ export type ClientNodeId = BrandedText<'ClientNodeId'>
 export type ClientInstanceId = BrandedText<'ClientInstanceId'>
 export type ClientOccupancyLeaseId = BrandedText<'ClientOccupancyLeaseId'>
 export type ClientConnectCodeId = BrandedText<'ClientConnectCodeId'>
-export type ClientAccessChallengeId = BrandedText<'ClientAccessChallengeId'>
 export type ClientAccessGrantId = BrandedText<'ClientAccessGrantId'>
 export type OccupancyClaimId = BrandedText<'OccupancyClaimId'>
 export type RepositoryBindingId = BrandedText<'RepositoryBindingId'>
@@ -143,13 +114,10 @@ export type GitCommitSha = BrandedText<'GitCommitSha'>
 export type GitRefName = BrandedText<'GitRefName'>
 export type CandidateRef = BrandedText<'CandidateRef'>
 
-/** `domain.schema.json` Instant: RFC3339 UTC string with milliseconds. */
 export type Instant = string
 
-/** `domain.schema.json` Revision: a non-negative safe integer. */
 export type Revision = number
 
-/** Per-client exchange stream position: a positive safe integer. */
 export type ClientExchangeSequence = number
 
 function brandedText<Name extends string>(
@@ -191,10 +159,6 @@ export const CLIENT_OCCUPANCY_LEASE_ID = crockfordId(
 export const CLIENT_CONNECT_CODE_ID = crockfordId(
   'ClientConnectCodeId',
   CLIENT_CONNECT_CODE_ID_PATTERN,
-)
-export const CLIENT_ACCESS_CHALLENGE_ID = crockfordId(
-  'ClientAccessChallengeId',
-  CLIENT_ACCESS_CHALLENGE_ID_PATTERN,
 )
 export const CLIENT_ACCESS_GRANT_ID = crockfordId(
   'ClientAccessGrantId',
@@ -646,17 +610,7 @@ export const CLIENT_WORKER_RUN_STATES = Object.freeze([
 ] as const)
 export type ClientWorkerRunState = typeof CLIENT_WORKER_RUN_STATES[number]
 
-export const CLIENT_CHALLENGE_ACK_STATUSES = Object.freeze([
-  'confirmed',
-  'stale_generation',
-] as const)
-export type ClientChallengeAckStatus = typeof CLIENT_CHALLENGE_ACK_STATUSES[number]
 
-export const CLIENT_CREDENTIAL_ROTATE_REASONS = Object.freeze([
-  'scheduled',
-  'suspected_compromise',
-] as const)
-export type ClientCredentialRotateReason = typeof CLIENT_CREDENTIAL_ROTATE_REASONS[number]
 
 export const CLIENT_REPOSITORY_RESCAN_REASONS = Object.freeze([
   'occupant_requested',
@@ -716,10 +670,6 @@ export const CLIENT_CONTROL_ERROR_CODES = Object.freeze([
 ] as const)
 export type ClientControlErrorCode = typeof CLIENT_CONTROL_ERROR_CODES[number]
 
-/**
- * `ClientNode`. `publicClientId` is a stable, non-secret lookup id. This
- * projection never contains local filesystem paths.
- */
 export interface ClientNode {
   readonly clientNodeId: ClientNodeId
   readonly publicClientId: PublicClientId
@@ -739,10 +689,6 @@ export interface ClientNode {
   readonly revision: Revision
 }
 
-/**
- * `ClientConnectCode`. Only `codeDigest` is stored or transported; the
- * plaintext code never appears in a contract, log, or projection.
- */
 export interface ClientConnectCode {
   readonly connectCodeId: ClientConnectCodeId
   readonly clientNodeId: ClientNodeId
@@ -755,7 +701,6 @@ export interface ClientConnectCode {
   readonly revision: Revision
 }
 
-/** `ClientAccessGrant`. Many users may hold an active grant for one Client. */
 export interface ClientAccessGrant {
   readonly clientAccessGrantId: ClientAccessGrantId
   readonly clientNodeId: ClientNodeId
@@ -770,10 +715,6 @@ export interface ClientAccessGrant {
   readonly revision: Revision
 }
 
-/**
- * `ClientOccupancyLease`. At most one active lease per ClientNode. The
- * `fencingToken` is monotonic per ClientNode; stale tokens are always rejected.
- */
 export interface ClientOccupancyLease {
   readonly clientOccupancyLeaseId: ClientOccupancyLeaseId
   readonly clientNodeId: ClientNodeId
@@ -792,11 +733,6 @@ export interface ClientOccupancyLease {
   readonly revision: Revision
 }
 
-/**
- * `RepositoryBinding`. Security metadata projection only: this object has no
- * path field by contract. The binding-to-path mapping lives exclusively in the
- * Device Client local database and is never uploaded.
- */
 export interface RepositoryBinding {
   readonly repositoryBindingId: RepositoryBindingId
   readonly clientNodeId: ClientNodeId
@@ -811,10 +747,6 @@ export interface RepositoryBinding {
   readonly revision: Revision
 }
 
-/**
- * `RepositoryBindingProjection`. The secret-safe repository metadata a Device
- * Client reports on repository.upsert; no clientNodeId, revision, or path.
- */
 export interface RepositoryBindingProjection {
   readonly repositoryBindingId: RepositoryBindingId
   readonly displayName: string
@@ -827,7 +759,6 @@ export interface RepositoryBindingProjection {
   readonly lastScannedAt: Instant
 }
 
-/** `RepositoryAccessGrant`. Visibility requires an active grant per user. */
 export interface RepositoryAccessGrant {
   readonly repositoryAccessGrantId: RepositoryAccessGrantId
   readonly repositoryBindingId: RepositoryBindingId
@@ -842,10 +773,6 @@ export interface RepositoryAccessGrant {
 export const REPOSITORY_ACCESS_GRANT_STATES = Object.freeze(['active', 'revoked'] as const)
 export type RepositoryAccessGrantState = typeof REPOSITORY_ACCESS_GRANT_STATES[number]
 
-/**
- * `WorkerLaunchGrant`. Every identity field must match on launch; a mismatch
- * is rejected. Occupancy fields bind the grant to one fenced lease.
- */
 export interface WorkerLaunchGrant {
   readonly workerLaunchGrantId: WorkerLaunchGrantId
   readonly clientNodeId: ClientNodeId
@@ -858,14 +785,12 @@ export interface WorkerLaunchGrant {
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
-  /** Digest of the short-lived worker session credential; never the credential. */
   readonly credentialDigest: Sha256Digest
   readonly expiresAt: Instant
   readonly state: WorkerLaunchGrantState
   readonly revision: Revision
 }
 
-/** `LocalCandidateReceipt`. Candidate facts survive local worktree cleanup. */
 export interface LocalCandidateReceipt {
   readonly localCandidateReceiptId: LocalCandidateReceiptId
   readonly candidateRef: CandidateRef
@@ -877,7 +802,6 @@ export interface LocalCandidateReceipt {
   readonly revision: Revision
 }
 
-/** `LocalApplyReceipt`. One audited attempt to land a Candidate locally. */
 export interface LocalApplyReceipt {
   readonly localApplyReceiptId: LocalApplyReceiptId
   readonly candidateRef: CandidateRef
@@ -892,7 +816,6 @@ export interface LocalApplyReceipt {
   readonly revision: Revision
 }
 
-/** `ClientCapacityReport`. Client-reported worker session capacity. */
 export interface ClientCapacityReport {
   readonly maxConcurrentWorkerSessions: number
   readonly runningWorkerSessions: number
@@ -900,7 +823,6 @@ export interface ClientCapacityReport {
   readonly drainingWorkerSessions: number
 }
 
-/** `ClientWorkerReconciliation`. One worker verdict after a Client restart. */
 export interface ClientWorkerReconciliation {
   readonly workerSessionId: WorkerSessionId
   readonly workerInstanceId: WorkerInstanceId
@@ -908,11 +830,6 @@ export interface ClientWorkerReconciliation {
   readonly observedAt: Instant
 }
 
-/**
- * `ClientControlError`. Machine-readable error fact whose optional details
- * reuse the public redaction rules: authority-sensitive property names are
- * rejected recursively.
- */
 export interface ClientControlError {
   readonly code: ClientControlErrorCode
   readonly message: string
@@ -1470,11 +1387,6 @@ export function parseClientWorkerReconciliation(
   })
 }
 
-/**
- * Envelope identity shared by every message. The schema inlines these fields
- * into each message; command and fencing fields are siblings of `kind`, never
- * members of a payload sub-object.
- */
 export interface ClientControlMessageEnvelopeFields {
   readonly schemaVersion: SchemaVersion
   readonly messageId: ClientControlMessageId
@@ -1484,20 +1396,11 @@ export interface ClientControlMessageEnvelopeFields {
   readonly occurredAt: Instant
 }
 
-/**
- * Command base carried by exactly the 22 command-class messages: an
- * optimistic-concurrency Revision plus a replay-safe idempotency key.
- */
 export interface ClientControlCommandFields {
   readonly expectedRevision: Revision
   readonly idempotencyKey: IdempotencyKey
 }
 
-/**
- * Occupancy stamp carried by exactly 11 command-class messages. The pair binds
- * the command to the single active lease; the Device Client must reject every
- * command whose fencing token is not the current maximum.
- */
 export interface ClientControlFencedCommandFields extends ClientControlCommandFields {
   readonly occupancyLeaseId: ClientOccupancyLeaseId
   readonly occupancyFencingToken: OccupancyFencingToken
@@ -1536,12 +1439,6 @@ export interface ClientConnectCodePublishedMessage extends ClientControlMessageE
   readonly expiresAt: Instant
 }
 
-export interface ClientAccessChallengeAckMessage extends ClientControlMessageEnvelopeFields, ClientControlCommandFields {
-  readonly kind: 'client.access.challenge_ack'
-  readonly challengeId: ClientAccessChallengeId
-  readonly connectCodeId: ClientConnectCodeId
-  readonly status: ClientChallengeAckStatus
-}
 
 export interface ClientOccupancyAckMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
   readonly kind: 'client.occupancy.ack'
@@ -1628,22 +1525,6 @@ export interface ClientCommandAckMessage extends ClientControlMessageEnvelopeFie
   readonly error?: ClientControlError
 }
 
-export interface ClientEnrollmentAcceptedMessage extends ClientControlMessageEnvelopeFields {
-  readonly kind: 'client.enrollment_accepted'
-  readonly publicClientId: PublicClientId
-  readonly serverTime: Instant
-  readonly heartbeatIntervalMs: number
-}
-
-export interface ClientAccessChallengeMessage extends ClientControlMessageEnvelopeFields {
-  readonly kind: 'client.access.challenge'
-  readonly challengeId: ClientAccessChallengeId
-  readonly connectCodeId: ClientConnectCodeId
-  readonly codeDigest: Sha256Digest
-  readonly requesterUserId: UserId
-  readonly expiresAt: Instant
-}
-
 export interface ClientOccupancyOfferMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
   readonly kind: 'client.occupancy.offer'
   readonly holderUserId: UserId
@@ -1696,12 +1577,7 @@ export interface ClientLockMessage extends ClientControlMessageEnvelopeFields, C
   readonly lockState: ClientLockState
 }
 
-export interface ClientCredentialRotateMessage extends ClientControlMessageEnvelopeFields, ClientControlCommandFields {
-  readonly kind: 'client.credential_rotate'
-  readonly reason: ClientCredentialRotateReason
-}
 
-/** Kind → message mapping for the Client → Server direction (16 kinds). */
 export interface ClientProviderReportMessage extends ClientControlMessageEnvelopeFields, DeviceProviderReport {
   readonly kind: 'client.provider.report'
 }
@@ -1735,7 +1611,6 @@ export interface ClientToServerMessageByKind {
   'client.hello': ClientHelloMessage
   'client.heartbeat': ClientHeartbeatMessage
   'client.connect_code.published': ClientConnectCodePublishedMessage
-  'client.access.challenge_ack': ClientAccessChallengeAckMessage
   'client.occupancy.ack': ClientOccupancyAckMessage
   'client.occupancy.rejected': ClientOccupancyRejectedMessage
   'client.repository.upsert': ClientRepositoryUpsertMessage
@@ -1749,13 +1624,11 @@ export interface ClientToServerMessageByKind {
   'client.command_ack': ClientCommandAckMessage
 }
 
-/** Kind → message mapping for the Server → Client direction (11 kinds). */
 export interface ServerToClientMessageByKind {
+  'client.command_ack': ClientCommandAckMessage
   'client.repository.register': ClientRepositoryRegisterMessage
   'client.provider.apply': ClientProviderApplyMessage
   'client.extension.apply': ClientExtensionApplyMessage
-  'client.enrollment_accepted': ClientEnrollmentAcceptedMessage
-  'client.access.challenge': ClientAccessChallengeMessage
   'client.occupancy.offer': ClientOccupancyOfferMessage
   'client.occupancy.release': ClientOccupancyReleaseMessage
   'client.occupancy.force_fence': ClientOccupancyForceFenceMessage
@@ -1764,7 +1637,6 @@ export interface ServerToClientMessageByKind {
   'client.worker.stop': ClientWorkerStopMessage
   'client.candidate.apply': ClientCandidateApplyMessage
   'client.client_lock': ClientLockMessage
-  'client.credential_rotate': ClientCredentialRotateMessage
 }
 
 export type ClientToServerKind = keyof ClientToServerMessageByKind
@@ -1775,13 +1647,11 @@ export type ClientToServerMessage = ClientToServerMessageByKind[ClientToServerKi
 export type ServerToClientMessage = ServerToClientMessageByKind[ServerToClientKind]
 export type ClientControlMessage = ClientToServerMessage | ServerToClientMessage
 
-/** §9.3 Client → Server message kinds, verbatim. */
 export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.enroll',
   'client.hello',
   'client.heartbeat',
   'client.connect_code.published',
-  'client.access.challenge_ack',
   'client.occupancy.ack',
   'client.occupancy.rejected',
   'client.repository.upsert',
@@ -1798,10 +1668,7 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.repository.registered',
 ] as const)
 
-/** §9.4 Server → Client message kinds, verbatim. */
 export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
-  'client.enrollment_accepted',
-  'client.access.challenge',
   'client.occupancy.offer',
   'client.occupancy.release',
   'client.occupancy.force_fence',
@@ -1810,26 +1677,19 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.worker.stop',
   'client.candidate.apply',
   'client.client_lock',
-  'client.credential_rotate',
+  'client.command_ack',
   'client.provider.apply',
   'client.extension.apply',
   'client.repository.register',
 ] as const)
 
-/** Every ClientControlPort message kind, in schema ClientControlMessageKind order. */
 export const CLIENT_CONTROL_MESSAGE_KINDS = Object.freeze([
-  ...CLIENT_TO_SERVER_MESSAGE_KINDS,
-  ...SERVER_TO_CLIENT_MESSAGE_KINDS,
+  ...new Set([...CLIENT_TO_SERVER_MESSAGE_KINDS, ...SERVER_TO_CLIENT_MESSAGE_KINDS]),
 ] as const)
 
-/**
- * Exactly the 22 command-class messages per the schema `x-message-class`.
- * Each carries `expectedRevision` + `idempotencyKey` on the envelope.
- */
 export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.enroll',
   'client.connect_code.published',
-  'client.access.challenge_ack',
   'client.occupancy.ack',
   'client.occupancy.rejected',
   'client.repository.upsert',
@@ -1845,17 +1705,11 @@ export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.worker.stop',
   'client.candidate.apply',
   'client.client_lock',
-  'client.credential_rotate',
   'client.provider.apply',
   'client.extension.apply',
   'client.repository.register',
 ] as const)
 
-/**
- * Occupancy-stamped command kinds per direction: exactly 11 across the
- * protocol. Every one carries `occupancyLeaseId` + `occupancyFencingToken`;
- * worker.state, worker.reconcile, and the repository kinds are not stamped.
- */
 export const CLIENT_TO_SERVER_OCCUPANCY_FENCED_MESSAGE_KINDS = Object.freeze([
   'client.occupancy.ack',
   'client.occupancy.rejected',
@@ -1894,8 +1748,6 @@ type AssertListMatchesServerToClientMap = Assert<
     : false
 >
 
-// Compile-time guards: the frozen kind lists and the kind → message mappings
-// must stay exactly aligned in both directions.
 type AssertClientToServerKindList = AssertListMatchesClientToServerMap
 type AssertServerToClientKindList = AssertListMatchesServerToClientMap
 type AssertCommandKindList = Assert<
@@ -2096,33 +1948,6 @@ function parseClientConnectCodePublishedMessage(
   })
 }
 
-function parseClientAccessChallengeAckMessage(
-  input: Readonly<Record<string, unknown>>,
-  path: string,
-): ClientAccessChallengeAckMessage {
-  exactKeys(input, [
-    'kind',
-    'schemaVersion',
-    'messageId',
-    'clientNodeId',
-    'clientInstanceId',
-    'sequence',
-    'occurredAt',
-    'challengeId',
-    'connectCodeId',
-    'status',
-    'expectedRevision',
-    'idempotencyKey',
-  ], path)
-  return Object.freeze({
-    ...parseEnvelopeBase(input, path),
-    ...parseCommandFields(input, path),
-    kind: 'client.access.challenge_ack',
-    challengeId: CLIENT_ACCESS_CHALLENGE_ID(input.challengeId, `${path}.challengeId`),
-    connectCodeId: CLIENT_CONNECT_CODE_ID(input.connectCodeId, `${path}.connectCodeId`),
-    status: enumValue(input.status, CLIENT_CHALLENGE_ACK_STATUSES, `${path}.status`),
-  })
-}
 
 function parseClientOccupancyAckMessage(
   input: Readonly<Record<string, unknown>>,
@@ -2483,65 +2308,6 @@ function parseClientCommandAckMessage(
   })
 }
 
-function parseClientEnrollmentAcceptedMessage(
-  input: Readonly<Record<string, unknown>>,
-  path: string,
-): ClientEnrollmentAcceptedMessage {
-  exactKeys(input, [
-    'kind',
-    'schemaVersion',
-    'messageId',
-    'clientNodeId',
-    'clientInstanceId',
-    'sequence',
-    'occurredAt',
-    'publicClientId',
-    'serverTime',
-    'heartbeatIntervalMs',
-  ], path)
-  return Object.freeze({
-    ...parseEnvelopeBase(input, path),
-    kind: 'client.enrollment_accepted',
-    publicClientId: PUBLIC_CLIENT_ID(input.publicClientId, `${path}.publicClientId`),
-    serverTime: instant(input.serverTime, `${path}.serverTime`),
-    heartbeatIntervalMs: boundedInteger(
-      input.heartbeatIntervalMs,
-      `${path}.heartbeatIntervalMs`,
-      1_000,
-      300_000,
-    ),
-  })
-}
-
-function parseClientAccessChallengeMessage(
-  input: Readonly<Record<string, unknown>>,
-  path: string,
-): ClientAccessChallengeMessage {
-  exactKeys(input, [
-    'kind',
-    'schemaVersion',
-    'messageId',
-    'clientNodeId',
-    'clientInstanceId',
-    'sequence',
-    'occurredAt',
-    'challengeId',
-    'connectCodeId',
-    'codeDigest',
-    'requesterUserId',
-    'expiresAt',
-  ], path)
-  return Object.freeze({
-    ...parseEnvelopeBase(input, path),
-    kind: 'client.access.challenge',
-    challengeId: CLIENT_ACCESS_CHALLENGE_ID(input.challengeId, `${path}.challengeId`),
-    connectCodeId: CLIENT_CONNECT_CODE_ID(input.connectCodeId, `${path}.connectCodeId`),
-    codeDigest: SHA256_DIGEST(input.codeDigest, `${path}.codeDigest`),
-    requesterUserId: USER_ID(input.requesterUserId, `${path}.requesterUserId`),
-    expiresAt: instant(input.expiresAt, `${path}.expiresAt`),
-  })
-}
-
 function parseClientOccupancyOfferMessage(
   input: Readonly<Record<string, unknown>>,
   path: string,
@@ -2798,33 +2564,6 @@ function parseClientLockMessage(
   })
 }
 
-function parseClientCredentialRotateMessage(
-  input: Readonly<Record<string, unknown>>,
-  path: string,
-): ClientCredentialRotateMessage {
-  exactKeys(input, [
-    'kind',
-    'schemaVersion',
-    'messageId',
-    'clientNodeId',
-    'clientInstanceId',
-    'sequence',
-    'occurredAt',
-    'reason',
-    'expectedRevision',
-    'idempotencyKey',
-  ], path)
-  return Object.freeze({
-    ...parseEnvelopeBase(input, path),
-    ...parseCommandFields(input, path),
-    kind: 'client.credential_rotate',
-    reason: enumValue(
-      input.reason,
-      CLIENT_CREDENTIAL_ROTATE_REASONS,
-      `${path}.reason`,
-    ),
-  })
-}
 
 function parseClientToServerByKind(
   kind: ClientToServerKind,
@@ -2840,8 +2579,6 @@ function parseClientToServerByKind(
       return parseClientHeartbeatMessage(input, path)
     case 'client.connect_code.published':
       return parseClientConnectCodePublishedMessage(input, path)
-    case 'client.access.challenge_ack':
-      return parseClientAccessChallengeAckMessage(input, path)
     case 'client.occupancy.ack':
       return parseClientOccupancyAckMessage(input, path)
     case 'client.occupancy.rejected':
@@ -2888,10 +2625,8 @@ function parseServerToClientByKind(
   path: string,
 ): ServerToClientMessage {
   switch (kind) {
-    case 'client.enrollment_accepted':
-      return parseClientEnrollmentAcceptedMessage(input, path)
-    case 'client.access.challenge':
-      return parseClientAccessChallengeMessage(input, path)
+    case 'client.command_ack':
+      return parseClientCommandAckMessage(input, path)
     case 'client.occupancy.offer':
       return parseClientOccupancyOfferMessage(input, path)
     case 'client.occupancy.release':
@@ -2908,8 +2643,6 @@ function parseServerToClientByKind(
       return parseClientCandidateApplyMessage(input, path)
     case 'client.client_lock':
       return parseClientLockMessage(input, path)
-    case 'client.credential_rotate':
-      return parseClientCredentialRotateMessage(input, path)
     case 'client.repository.register':
       return parseConfigurationApply(input, path, 'client.repository.register')
     case 'client.extension.apply':
@@ -2919,7 +2652,6 @@ function parseServerToClientByKind(
   }
 }
 
-/** Parse and validate one Client → Server message (16 kinds). */
 export function parseClientToServerMessage(
   value: unknown,
   path = 'clientToServerMessage',
@@ -2929,7 +2661,6 @@ export function parseClientToServerMessage(
   return parseClientToServerByKind(kind, input, path)
 }
 
-/** Parse and validate one Server → Client message (11 kinds). */
 export function parseServerToClientMessage(
   value: unknown,
   path = 'serverToClientMessage',
@@ -2939,10 +2670,6 @@ export function parseServerToClientMessage(
   return parseServerToClientByKind(kind, input, path)
 }
 
-/**
- * Parse and validate one message of the full ClientControlMessage union
- * (all 27 kinds), trying the Client → Server direction first.
- */
 export function parseClientControlMessage(
   value: unknown,
   path = 'clientControlMessage',
@@ -2963,8 +2690,6 @@ export function parseClientControlMessage(
   }
 }
 
-// The kind-list asserts are compile-time only; this export keeps the check in
-// the type graph without emitting runtime code.
 export type { ClientControlKindListsCheck }
 
 function providerText(value: unknown, path: string, max: number): string {
@@ -2974,12 +2699,17 @@ function providerText(value: unknown, path: string, max: number): string {
 
 function parseProviderConfig(value: unknown, path: string): DeviceProviderConfig {
   const input = record(value, path)
-  exactKeys(input, ['providerId', 'displayName', 'endpoint', 'protocol', 'modelIds', 'enabled'], path)
+  exactKeys(input, ['providerId', 'displayName', 'endpoint', 'protocol', 'modelIds', 'enabled'], path, ['responsesStructuredOutput'])
   const modelIds = boundedArray(input.modelIds, `${path}.modelIds`, 100).map(item => providerText(item, path, 128))
   if (modelIds.length === 0 || new Set(modelIds).size !== modelIds.length) controlError('INVALID_VALUE', path, 'Provider models must be nonempty and unique')
+  const protocol = enumValue(input.protocol, Object.values(DeviceProviderProtocol), path)
+  const responsesStructuredOutput = Object.hasOwn(input, 'responsesStructuredOutput')
+    ? enumValue(input.responsesStructuredOutput, Object.values(DeviceResponsesStructuredOutput), `${path}.responsesStructuredOutput`)
+    : undefined
+  if (responsesStructuredOutput !== undefined && protocol !== DeviceProviderProtocol.OpenaiResponses) controlError('INVALID_VALUE', path, 'Structured output mode requires OpenAI Responses')
   return { providerId: providerText(input.providerId, path, 128), displayName: providerText(input.displayName, path, 200),
-    endpoint: providerText(input.endpoint, path, 2048), protocol: enumValue(input.protocol, Object.values(DeviceProviderProtocol), path),
-    modelIds, enabled: booleanValue(input.enabled, path) }
+    endpoint: providerText(input.endpoint, path, 2048), protocol,
+    modelIds, enabled: booleanValue(input.enabled, path), ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }) }
 }
 
 function parseProviderReport(input: Readonly<Record<string, unknown>>, path: string): ClientProviderReportMessage {

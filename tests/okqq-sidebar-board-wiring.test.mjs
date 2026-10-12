@@ -12,7 +12,11 @@ const compiler = spawnSync(
     'exec',
     'tsc',
     '-p',
-    'apps/client/tsconfig.candidate-run-preview-tests.json',
+    'apps/client/tsconfig.readiness-tests.json',
+    '--outDir',
+    'apps/client/node_modules/.cache/okqq-sidebar-tests',
+    '--incremental',
+    'false',
     '--pretty',
     'false',
   ],
@@ -24,87 +28,39 @@ assert.equal(
   `okqq wiring area did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const cache = resolve(root, '.cache/candidate-run-preview-tests')
+const cache = resolve(root, 'apps/client/node_modules/.cache/okqq-sidebar-tests')
 async function cachedModule(name) {
   return import(`${pathToFileURL(resolve(cache, name)).href}?run=${String(Date.now())}`)
 }
 
-const recentChats = await cachedModule('recent-chats.js')
-const homePresentation = await cachedModule('home-dashboard-page.js')
+const { visibleSessions } = await cachedModule('dsh/SessionBrowser.js')
+const { homeDashboardPresentation, homeDashboardAnnouncement } = await cachedModule('home-dashboard-page.js')
 
-const {
-  loadRecentChats,
-  recordRecentChat,
-  RECENT_CHATS_LIMIT,
-  RECENT_CHATS_STORAGE_KEY,
-} = recentChats
-const { homeDashboardPresentation, homeDashboardAnnouncement } = homePresentation
-
-function memoryStorage(seed = null) {
-  const map = new Map()
-  if (seed !== null) map.set(seed.key, seed.value)
-  return {
-    getItem(key) {
-      return map.get(key) ?? null
-    },
-    setItem(key, value) {
-      map.set(key, value)
-    },
-  }
-}
-
-test('recent chats: opening sessions writes shell sidebar source', () => {
-  const storage = memoryStorage()
-  const events = []
-  globalThis.window = {
-    dispatchEvent(event) {
-      events.push(event.type)
-      return true
-    },
-  }
-  try {
-    recordRecentChat(storage, {
-      sessionKey: 'psn_00000000000000000000000001',
-      title: '修复预览路由',
-      at: 1_700_000_000_000,
-    })
-    recordRecentChat(storage, {
-      sessionKey: 'psn_00000000000000000000000002',
-      title: '拆分三仓构建脚本',
-      at: 1_700_000_001_000,
-    })
-    // Re-open the first session: it moves to the front, no duplicate key.
-    recordRecentChat(storage, {
-      sessionKey: 'psn_00000000000000000000000001',
-      title: '修复预览路由',
-      at: 1_700_000_002_000,
-    })
-    const entries = loadRecentChats(storage)
-    assert.equal(entries.length, 2)
-    assert.equal(entries[0].sessionKey, 'psn_00000000000000000000000001')
-    assert.equal(entries[0].title, '修复预览路由')
-    assert.equal(entries[1].sessionKey, 'psn_00000000000000000000000002')
-    assert.ok(events.includes('wwc:recent-chats-changed'))
-    const raw = JSON.parse(storage.getItem(RECENT_CHATS_STORAGE_KEY))
-    assert.equal(raw.length, 2)
-  } finally {
-    delete globalThis.window
-  }
+const session = (id, title, updatedAt, extra = {}) => ({
+  id, title, updatedAt, repositoryId: 'rep_00000000000000000000000001',
+  archived: false, ...extra,
 })
 
-test('recent chats: list stays bounded and empty storage is safe', () => {
-  const storage = memoryStorage()
-  for (let index = 0; index < RECENT_CHATS_LIMIT + 3; index += 1) {
-    recordRecentChat(storage, {
-      sessionKey: `psn_${String(index).padStart(26, '0')}`,
-      title: `会话 ${String(index)}`,
-      at: 1_700_000_000_000 + index,
-    })
-  }
-  const entries = loadRecentChats(storage)
-  assert.equal(entries.length, RECENT_CHATS_LIMIT)
-  assert.equal(entries[0].title, `会话 ${String(RECENT_CHATS_LIMIT + 2)}`)
-  assert.deepEqual(loadRecentChats(null), [])
+test('history sidebar orders durable sessions without mutating the server projection', () => {
+  const rows = [
+    session('psn_00000000000000000000000001', '修复预览路由', '2026-10-02T08:00:00.000Z'),
+    session('psn_00000000000000000000000002', '拆分三仓构建脚本', '2026-10-02T09:00:00.000Z'),
+  ]
+  assert.deepEqual(visibleSessions(rows, '', '', false).map(row => row.id), [rows[1].id, rows[0].id])
+  assert.equal(rows[0].title, '修复预览路由')
+  const updated = [{ ...rows[0], updatedAt: '2026-10-02T10:00:00.000Z' }, rows[1]]
+  assert.deepEqual(visibleSessions(updated, '', '', false).map(row => row.id), [rows[0].id, rows[1].id])
+})
+
+test('history sidebar filters title, repository and archive state from durable sessions', () => {
+  const first = session('psn_00000000000000000000000001', 'Preview route', '2026-10-02T08:00:00.000Z')
+  const second = session('psn_00000000000000000000000002', 'Preview build', '2026-10-02T09:00:00.000Z', {
+    repositoryId: 'rep_00000000000000000000000002', archived: true,
+  })
+  assert.deepEqual(visibleSessions([first, second], ' PREVIEW ', first.repositoryId, false), [first])
+  assert.deepEqual(visibleSessions([first, second], '', second.repositoryId, true), [second])
+  assert.deepEqual(visibleSessions([first, second], 'unmatched', '', false), [])
+  assert.deepEqual(visibleSessions([], '', '', false), [])
 })
 
 test('board: default expand running + decisions; collapse others as count rows', () => {

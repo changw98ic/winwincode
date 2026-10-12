@@ -21,28 +21,37 @@ use crate::session::step_context::StepContext;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::parallel::ToolCallRuntime;
 
+type CellDispatchGates = Mutex<HashMap<CellId, watch::Sender<Option<Arc<StepContext>>>>>;
+
 pub(super) struct CodeModeDispatchBroker {
     dispatch_tx: async_channel::Sender<DispatchMessage>,
     dispatch_rx: async_channel::Receiver<DispatchMessage>,
-    dispatch_gates: Arc<Mutex<HashMap<CellId, watch::Sender<bool>>>>,
+    dispatch_gates: Arc<CellDispatchGates>,
+    terminal_handoffs: Arc<super::terminal::TerminalHandoffs>,
 }
 
 impl CodeModeDispatchBroker {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(terminal_handoffs: Arc<super::terminal::TerminalHandoffs>) -> Self {
         let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
         Self {
             dispatch_tx,
             dispatch_rx,
             dispatch_gates: Arc::new(Mutex::new(HashMap::new())),
+            terminal_handoffs,
         }
     }
 
-    pub(super) fn mark_cell_ready_for_dispatch(&self, cell_id: &CellId) {
-        dispatch_gate(&self.dispatch_gates, cell_id).send_replace(true);
+    pub(super) fn mark_cell_ready_for_dispatch(
+        &self,
+        cell_id: &CellId,
+        step_context: Arc<StepContext>,
+    ) {
+        dispatch_gate(&self.dispatch_gates, cell_id).send_replace(Some(step_context));
     }
 
     pub(super) fn close_cell(&self, cell_id: &CellId) {
         remove_dispatch_gate(&self.dispatch_gates, cell_id);
+        self.terminal_handoffs.close_cell(cell_id);
     }
 
     pub(super) fn active_cell_ids(&self) -> Vec<CellId> {
@@ -60,8 +69,16 @@ impl CodeModeDispatchBroker {
         step_context: Arc<StepContext>,
         tracker: SharedTurnDiffTracker,
     ) -> CodeModeDispatchWorker {
-        let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
-        let host = Arc::new(CoreTurnHost { exec, tool_runtime });
+        let tool_runtime = ToolCallRuntime::new(
+            Arc::clone(&exec.session),
+            Arc::clone(&step_context),
+            tracker,
+        );
+        let host = Arc::new(CoreTurnHost {
+            exec,
+            tool_runtime,
+            step_context,
+        });
         let dispatch_rx = self.dispatch_rx.clone();
         let dispatch_gates = Arc::clone(&self.dispatch_gates);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -88,6 +105,7 @@ impl CodeModeDispatchBroker {
                             &cancellation_token,
                         )
                         .await
+                        .is_some()
                         {
                             host.notify(call_id, cell_id, text).await
                         } else {
@@ -102,14 +120,22 @@ impl CodeModeDispatchBroker {
                         response_tx,
                     } => {
                         let cell_id = invocation.cell_id.clone();
-                        if !wait_until_cell_ready_for_dispatch(
+                        let Some(origin_step) = wait_until_cell_ready_for_dispatch(
                             &dispatch_gates,
                             &cell_id,
                             &cancellation_token,
                         )
                         .await
-                        {
+                        else {
                             remove_dispatch_gate(&dispatch_gates, &cell_id);
+                            continue;
+                        };
+                        if let Err(error) = super::cell_scope::validate(
+                            &origin_step,
+                            &host.step_context,
+                            &invocation.tool_name,
+                        ) {
+                            let _ = response_tx.send(Err(error));
                             continue;
                         }
                         let host = Arc::clone(&host);
@@ -135,23 +161,20 @@ impl CodeModeDispatchBroker {
 }
 
 fn dispatch_gate(
-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
+    dispatch_gates: &CellDispatchGates,
     cell_id: &CellId,
-) -> watch::Sender<bool> {
+) -> watch::Sender<Option<Arc<StepContext>>> {
     let mut dispatch_gates = match dispatch_gates.lock() {
         Ok(dispatch_gates) => dispatch_gates,
         Err(poisoned) => poisoned.into_inner(),
     };
     dispatch_gates
         .entry(cell_id.clone())
-        .or_insert_with(|| watch::channel(false).0)
+        .or_insert_with(|| watch::channel(None).0)
         .clone()
 }
 
-fn remove_dispatch_gate(
-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
-    cell_id: &CellId,
-) {
+fn remove_dispatch_gate(dispatch_gates: &CellDispatchGates, cell_id: &CellId) {
     let mut dispatch_gates = match dispatch_gates.lock() {
         Ok(dispatch_gates) => dispatch_gates,
         Err(poisoned) => poisoned.into_inner(),
@@ -160,25 +183,25 @@ fn remove_dispatch_gate(
 }
 
 async fn wait_until_cell_ready_for_dispatch(
-    dispatch_gates: &Mutex<HashMap<CellId, watch::Sender<bool>>>,
+    dispatch_gates: &CellDispatchGates,
     cell_id: &CellId,
     cancellation_token: &CancellationToken,
-) -> bool {
+) -> Option<Arc<StepContext>> {
     if cancellation_token.is_cancelled() {
-        return false;
+        return None;
     }
     let mut ready_rx = dispatch_gate(dispatch_gates, cell_id).subscribe();
     loop {
-        if *ready_rx.borrow_and_update() {
-            return true;
+        if let Some(step_context) = ready_rx.borrow_and_update().clone() {
+            return Some(step_context);
         }
         tokio::select! {
             changed = ready_rx.changed() => {
                 if changed.is_err() {
-                    return false;
+                    return None;
                 }
             }
-            _ = cancellation_token.cancelled() => return false,
+            _ = cancellation_token.cancelled() => return None,
         }
     }
 }
@@ -279,6 +302,7 @@ impl Drop for CodeModeDispatchWorker {
 struct CoreTurnHost {
     exec: ExecContext,
     tool_runtime: ToolCallRuntime,
+    step_context: Arc<StepContext>,
 }
 
 impl CoreTurnHost {

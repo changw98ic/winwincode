@@ -1,9 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* Design page 08: 执行设备 — display title with the 更多 ∨ menu on the row's
-   right end, the connected device card, accessible directories, and collapsed
-   运行中的任务 / 连接记录 rows. */
-
 .wwc-device {
   display: grid;
   gap: var(--wwc-space-4);
@@ -46,7 +42,6 @@
   min-width: 0;
 }
 
-/* The connected device: outlined glyph, name, and one presence line. */
 .wwc-device-card {
   display: flex;
   align-items: center;
@@ -114,7 +109,6 @@
   min-width: 0;
 }
 
-/* 管理目录: the accent primary action under the directory list. */
 .wwc-device-manage {
   justify-self: start;
   width: fit-content;
@@ -135,7 +129,6 @@
   background: var(--wwc-color-accent-strong);
 }
 
-/* Collapsed 运行中的任务 / 连接记录 rows: bold label + trailing ›. */
 .wwc-device-rows {
   display: grid;
   margin-top: var(--wwc-space-4);

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
@@ -102,7 +103,17 @@ impl CancellableRequest {
         tokio::spawn(async move {
             tokio::select! {
                 _ = caller_cancellation.cancelled() => {
-                    let _ = event_tx.send(DriverEvent::RequestCancelled(id)).await;
+                    if event_tx.send(DriverEvent::RequestCancelled(id)).await.is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = watcher_stop.cancelled() => {}
+                        _ = tokio::time::sleep(super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT) => {
+                            let _ = event_tx.send(DriverEvent::Failed(format!(
+                                "code-mode host did not acknowledge cancellation for request {id:?}"
+                            ))).await;
+                        }
+                    }
                 }
                 _ = watcher_stop.cancelled() => {}
             }
@@ -143,6 +154,7 @@ pub(super) enum PendingRequest {
     },
     Execute {
         session: RemoteSession,
+        initial_timeout: Duration,
         response_tx: oneshot::Sender<Result<DeliveredExecute, String>>,
         initial_response_tx: oneshot::Sender<Result<RuntimeResponse, String>>,
         initial_response_rx: oneshot::Receiver<Result<RuntimeResponse, String>>,
@@ -184,7 +196,15 @@ impl PendingRequest {
 
     pub(super) fn fail(self, reason: String) {
         match self {
-            Self::OpenSession { response_tx, .. } | Self::ShutdownSession { response_tx, .. } => {
+            Self::OpenSession {
+                cleanup,
+                response_tx,
+                ..
+            } => {
+                cleanup.complete();
+                let _ = response_tx.send(Err(reason));
+            }
+            Self::ShutdownSession { response_tx, .. } => {
                 let _ = response_tx.send(Err(reason));
             }
             Self::Execute { response_tx, .. } => {

@@ -1,0 +1,180 @@
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -258,12 +258,25 @@
+     started_at: std::time::Instant,
+ ) -> Result<FunctionToolOutput, String> {
+     let script_status = format_script_status(&response);
+-    let feedback = crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
++    let mut feedback: Vec<_> = crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
+         &exec.session,
+         &exec.turn,
+         call_id,
+     )
+-    .await;
++    .await
++    .into_iter()
++    .collect();
++
++    let cell_id = match &response {
++        RuntimeResponse::Yielded { cell_id, .. }
++        | RuntimeResponse::Terminated { cell_id, .. }
++        | RuntimeResponse::Result { cell_id, .. } => cell_id,
++    };
++    if let Some(receipts) =
++        crate::tools::tool_receipts::feedback(&exec.session, cell_id.as_str()).await
++    {
++        feedback.push(receipts);
++    }
+ 
+     match response {
+         RuntimeResponse::Yielded { content_items, .. } => {
+@@ -271,9 +284,7 @@
+             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+-            if let Some(feedback) = feedback {
+-                content_items.push(feedback);
+-            }
++            content_items.extend(feedback);
+             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
+         }
+         RuntimeResponse::Terminated { content_items, .. } => {
+@@ -281,9 +292,7 @@
+             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+-            if let Some(feedback) = feedback {
+-                content_items.push(feedback);
+-            }
++            content_items.extend(feedback);
+             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
+         }
+         RuntimeResponse::Result {
+@@ -301,9 +310,7 @@
+             }
+             content_items = truncate_code_mode_result(content_items, max_output_tokens);
+             prepend_script_status(&mut content_items, &script_status, started_at.elapsed());
+-            if let Some(feedback) = feedback {
+-                content_items.push(feedback);
+-            }
++            content_items.extend(feedback);
+             Ok(FunctionToolOutput::from_content(
+                 content_items,
+                 Some(success),
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -155,3 +155,5 @@
+ }
+ 
+ pub(crate) use tool_diagnostics::ToolDiagnostics;
++
++mod tool_receipts;
+diff --git a/codex-rs/core/src/tools/tool_diagnostics.rs b/codex-rs/core/src/tools/tool_diagnostics.rs
+--- a/codex-rs/core/src/tools/tool_diagnostics.rs
++++ b/codex-rs/core/src/tools/tool_diagnostics.rs
+@@ -3,6 +3,8 @@
+ mod detector;
+ use super::execution_facts::ExecutionFacts;
+ use super::execution_facts::digest;
++use crate::context::ContextualUserFragment;
++use crate::context::ToolDiagnosticFeedback;
+ use crate::session::session::Session;
+ use crate::session::turn_context::TurnContext;
+ use codex_protocol::models::FunctionCallOutputContentItem;
+@@ -172,21 +174,8 @@
+         if diagnostics.is_empty() {
+             return None;
+         }
+-        // Compact references resolve to full durable facts. Fixed two-item and
+-        // two-call bounds keep this context item below 1,000 tokens.
+-        let feedback: Vec<_> = diagnostics.iter().map(|diagnostic| serde_json::json!({
+-            "diagnostic_id": diagnostic.diagnostic_id, "evidence_version": diagnostic.evidence_version,
+-            "kind": diagnostic.kind, "progress": diagnostic.progress_source_sequence.map_or("unknown", |_| "verified_receipt"),
+-            "calls": diagnostic.evidence.iter().rev().take(2).map(|call| serde_json::json!({
+-                "request_sequence": call.request_sequence,
+-                "tool": call.tool_name.chars().take(64).collect::<String>(),
+-            })).collect::<Vec<_>>(),
+-            "question": diagnostic.question,
+-        })).collect();
+-        Some(FunctionCallOutputContentItem::InputText { text: serde_json::json!({
+-            "type": "model_behavior_diagnosis", "schema_version": 1,
+-            "assessment": "possible", "diagnostics": feedback,
+-            "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
+-        }).to_string() })
++        Some(FunctionCallOutputContentItem::InputText {
++            text: ToolDiagnosticFeedback(diagnostics).render(),
++        })
+     }
+ }
+diff --git a/codex-rs/core/src/tools/tool_receipts.rs b/codex-rs/core/src/tools/tool_receipts.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/tool_receipts.rs
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::execution_facts::ExecutionFacts;
++use crate::context::ContextualUserFragment;
++use crate::context::ToolReceipt;
++use crate::context::ToolReceipts;
++use crate::session::session::Session;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use codex_state::ToolOutputDelivery;
++use codex_state::ToolOutputDisposition;
++
++pub(super) async fn feedback(
++    session: &Session,
++    cell_id: &str,
++) -> Option<FunctionCallOutputContentItem> {
++    let facts = ExecutionFacts::for_session(session);
++    let store = facts.store.get()?;
++    let (_, scope) = facts.parent(cell_id)?;
++    let requests = match store
++        .list_tool_cell_receipts(&session.thread_id.to_string(), cell_id, &scope)
++        .await
++    {
++        Ok(requests) => requests,
++        Err(error) => {
++            tracing::warn!(%error, "Core tool receipt references unavailable");
++            return None;
++        }
++    };
++    let mut receipts = Vec::new();
++    for fact in requests {
++        if fact.request.source != "code_mode" || fact.request.logical_id.len() > 80 {
++            continue;
++        }
++        let shared = match store.tool_sharing_fact(fact.request_sequence).await {
++            Ok(shared) => shared,
++            Err(error) => {
++                tracing::warn!(%error, "shared receipt reference unavailable");
++                continue;
++            }
++        };
++        let attempt = fact.attempt.as_ref();
++        receipts.push(ToolReceipt {
++            source_id: fact.request.logical_id,
++            tool: fact.request.tool_name.chars().take(64).collect(),
++            request_sequence: fact.request_sequence,
++            execution: attempt.map(|attempt| attempt.execution),
++            disposition: shared
++                .as_ref()
++                .map(|shared| shared.disposition)
++                .or_else(|| attempt.map(|attempt| attempt.disposition))
++                .unwrap_or(ToolOutputDisposition::Pending),
++            delivery: shared
++                .as_ref()
++                .map(|shared| shared.delivery)
++                .or_else(|| attempt.map(|attempt| attempt.delivery))
++                .unwrap_or(ToolOutputDelivery::Pending),
++            source_request_sequence: shared.map(|shared| shared.source_request_sequence),
++        });
++    }
++    if receipts.is_empty() {
++        return None;
++    }
++    Some(FunctionCallOutputContentItem::InputText {
++        text: ToolReceipts(receipts).render(),
++    })
++}

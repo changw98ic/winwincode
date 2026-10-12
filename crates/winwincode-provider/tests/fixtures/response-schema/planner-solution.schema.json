@@ -1,0 +1,381 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "architectureDiagram": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "id",
+              "label",
+              "to"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "system-architecture"
+          ],
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "interaction",
+                  "delivery-control",
+                  "execution",
+                  "repository",
+                  "component",
+                  "data-store",
+                  "decision",
+                  "external",
+                  "stage"
+                ],
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "trustBoundary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unresolved": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "description",
+              "id",
+              "kind",
+              "label",
+              "trustBoundary",
+              "unresolved"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "edges",
+        "id",
+        "kind",
+        "nodes",
+        "title"
+      ],
+      "type": "object"
+    },
+    "processDiagram": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "id",
+              "label",
+              "to"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "process-flow"
+          ],
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "interaction",
+                  "delivery-control",
+                  "execution",
+                  "repository",
+                  "component",
+                  "data-store",
+                  "decision",
+                  "external",
+                  "stage"
+                ],
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "trustBoundary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unresolved": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "description",
+              "id",
+              "kind",
+              "label",
+              "trustBoundary",
+              "unresolved"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "edges",
+        "id",
+        "kind",
+        "nodes",
+        "title"
+      ],
+      "type": "object"
+    },
+    "protocol": {
+      "enum": [
+        "winwincode.planner-solution.v1"
+      ],
+      "type": "string"
+    },
+    "risks": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "solution": {
+      "additionalProperties": false,
+      "properties": {
+        "approach": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "components": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "component",
+                  "data-store",
+                  "external"
+                ],
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "repositoryPathPrefixes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "responsibility": {
+                "type": "string"
+              },
+              "trustBoundary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unresolved": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "label",
+              "repositoryPathPrefixes",
+              "responsibility",
+              "trustBoundary",
+              "unresolved"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "id",
+              "label",
+              "to"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approach",
+        "components",
+        "connections",
+        "id",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "taskProposals": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptanceCriterionIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "blockedByTaskIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "acceptanceCriterionIds",
+          "blockedByTaskIds",
+          "goal",
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "unresolvedItems": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "architectureDiagram",
+    "processDiagram",
+    "protocol",
+    "risks",
+    "schemaVersion",
+    "solution",
+    "taskProposals",
+    "unresolvedItems"
+  ],
+  "type": "object"
+}

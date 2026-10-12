@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Executable ADR-0037 regression fixtures under `fusion-regression/`.
-
 use serde::Deserialize;
 use serde_json::Value;
 

@@ -3327,13 +3327,17 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
 async fn wait_agent_times_out_when_status_is_not_final() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    session.services.agent_control = thread.thread.session.services.agent_control.clone();
+    session
+        .services
+        .agent_control
+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -3370,13 +3374,17 @@ async fn wait_agent_times_out_when_status_is_not_final() {
 async fn wait_agent_clamps_short_timeouts_to_minimum() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    session.services.agent_control = thread.thread.session.services.agent_control.clone();
+    session
+        .services
+        .agent_control
+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -3408,15 +3416,20 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
 async fn wait_agent_returns_final_status_without_timeout() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
-    let mut status_rx = manager
-        .agent_control()
+    session.services.agent_control = thread.thread.session.services.agent_control.clone();
+    session
+        .services
+        .agent_control
+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+    let mut status_rx = session
+        .services
+        .agent_control
         .subscribe_status(agent_id)
         .await
         .expect("subscribe should succeed");
@@ -3449,7 +3462,7 @@ async fn wait_agent_returns_final_status_without_timeout() {
     assert_eq!(
         result,
         wait::WaitAgentResult {
-            status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
+            status: HashMap::from([(AgentPath::root().to_string(), AgentStatus::Shutdown)]),
             timed_out: false
         }
     );

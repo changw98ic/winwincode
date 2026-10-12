@@ -90,6 +90,8 @@ pub(crate) struct ToolDefinition {
     pub(crate) tool_name: ToolName,
     pub(crate) description: String,
     pub(crate) kind: ToolKind,
+    pub(crate) input_schema: Option<JsonValue>,
+    pub(crate) output_schema: Option<JsonValue>,
 }
 
 /// A tool name with an optional namespace.

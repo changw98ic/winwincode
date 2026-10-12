@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Encrypted Web → Device commands and public Device → Web receipts.
-
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -162,8 +160,6 @@ pub(crate) fn apply(
     } else {
         write_state(&mut storage, &stream, &payload)?;
     }
-    // A lost HTTP response may enqueue the same encrypted command again. Device receipts are
-    // idempotent; repeating delivery also recovers a crash between command persistence and append.
     let cursors = ClientRegistryService::new(&mut storage)
         .exchange_cursors(&node.client_node_id)
         .map_err(|_| ProviderRelayError::Unavailable)?
@@ -474,8 +470,6 @@ fn route_reference(node: &str, provider: &str) -> String {
     )
 }
 
-/// Lists only the requesting user's Device projections. A cursor is tied to the
-/// entire visible snapshot, actor, and repository; configuration changes require a refresh.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn model_routes(
     storage: &mut SqliteStorage,

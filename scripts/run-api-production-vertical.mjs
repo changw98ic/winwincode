@@ -1,15 +1,7 @@
 #!/usr/bin/env node
 
-/**
- * API-only production vertical for the standalone Server.
- *
- * This runner deliberately talks to the generated HTTP command/query
- * endpoints. It does not import a UI, start an interactive page, or manufacture
- * runtime/Delivery projections in JavaScript. The only values asserted here
- * are values returned by the public API.
- */
-
 import assert from 'node:assert/strict'
+import { executeRequest, NetworkError, classifyError, httpFailure, retryAfter, withResponseFailure } from '../packages/network-request/src/index.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   createHash,
@@ -35,12 +27,15 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
+
+import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
@@ -55,6 +50,7 @@ import {
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
   establishDeviceOnlyExecutionPath,
+  getDeviceWorker,
   seedDeviceLocalProvider,
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
@@ -95,8 +91,13 @@ const API_SOURCE_TRACKED_PATHS = [
   'Cargo.toml',
   'rust-toolchain.toml',
   'crates',
+  'third_party/codex/codex-rs',
+  'third_party/codex.UPSTREAM.json',
+  'upstream/sources.lock.json',
+  'upstream/vendor',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
+  'scripts/compact-kernel-helper.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
   'cliBinaryMode',
@@ -163,14 +164,6 @@ const SCOPE = Object.freeze({
   repositoryId: IDS.repository,
 })
 
-/**
- * Device-local model route for production acceptance.
- *
- * Production Server execution is Device-only. The route is bound to the
- * Device Provider credential reference, not Server model environment
- * variables. Callers must pass the enrolled Device client node id (or the
- * public client id used by the Device Provider projection) after pairing.
- */
 function configuredModelRoute(deviceRoute = {}) {
   if (
     typeof deviceRoute.clientNodeId === 'string'
@@ -186,8 +179,6 @@ function configuredModelRoute(deviceRoute = {}) {
         ?? 'device-deterministic-model',
     })
   }
-  // Pre-pairing placeholder. chat.submit is rejected with the public
-  // DEVICE_SESSION_REQUIRED code until Device prerequisites exist.
   return configuredDeviceModelRoute({
     clientNodeId: 'cix_device_session_required_placeholder',
     providerId: 'winwincode-device-deterministic',
@@ -339,11 +330,6 @@ function sourceTreeIdentity(root) {
   }
 }
 
-/**
- * Digest the Rust build inputs and this runner itself.  The helper source is
- * included by projectSourceDigest, while the runner and its build contract are
- * included explicitly so an old target cannot be used with a changed API gate.
- */
 export function apiProductionSourceDigest(root = ROOT) {
   const runnerPath = join(root, API_RUNNER_SOURCE_PATH)
   return createHash('sha256')
@@ -564,10 +550,6 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
   }
 }
 
-/**
- * Emit a source seal after a fresh Server, CLI, Worker and helper build. The seal is kept
- * beside the binaries and is never rewritten by a skip-build invocation.
- */
 export function writeApiProductionSourceSeal({
   root = ROOT,
   serverBinary,
@@ -649,11 +631,6 @@ export function writeApiProductionSourceSeal({
   })
 }
 
-/**
- * Validate a prebuilt target against the current source tree before starting
- * the API.  Missing or stale seals fail closed, so an old target cannot report
- * a contradictory Delivered/released result.
- */
 export function verifyApiProductionSourceSeal({
   root = ROOT,
   serverBinary,
@@ -723,7 +700,7 @@ function commandRequest(requestId, command, expectedRevision, payload, actor = A
   }
 }
 
-function queryRequest(requestId, query, parameters, actor = ACTOR) {
+function queryRequest(requestId, query, parameters, actor = ACTOR, pagination = page()) {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId,
@@ -731,7 +708,7 @@ function queryRequest(requestId, query, parameters, actor = ACTOR) {
     scope: SCOPE,
     query,
     parameters,
-    page: page(),
+    page: pagination,
   }
 }
 
@@ -742,11 +719,7 @@ function responseSetCookie(headers) {
   return cookie?.length > 0 ? cookie : null
 }
 
-/**
- * Request JSON without a UI process or global TLS switches. The fixture uses a
- * self-signed certificate, so only this local request opts out of trust.
- */
-function requestJson(url, {
+function requestJsonOnce(url, {
   method = 'GET',
   origin,
   cookie = null,
@@ -754,9 +727,11 @@ function requestJson(url, {
   body = undefined,
   timeoutMillis = 30_000,
   ca,
+  signal,
+  serializedBody,
 } = {}) {
   const target = new URL(url)
-  const serialized = body === undefined ? null : JSON.stringify(body)
+  const serialized = serializedBody === undefined ? (body === undefined ? null : JSON.stringify(body)) : serializedBody
   const headers = {
     Accept: 'application/json',
     Connection: 'close',
@@ -769,7 +744,9 @@ function requestJson(url, {
     ...(authorization === null ? {} : { Authorization: `Bearer ${authorization}` }),
   }
   return new Promise((resolvePromise, reject) => {
+    let connected = false
     const request = httpsRequest(target, {
+      signal,
       method,
       headers,
       rejectUnauthorized: ca !== undefined,
@@ -779,7 +756,18 @@ function requestJson(url, {
     }, response => {
       const chunks = []
       response.setEncoding('utf8')
-      response.on('data', chunk => chunks.push(chunk))
+      let bytes = 0
+      response.on('data', chunk => {
+        bytes += Buffer.byteLength(chunk)
+        if (bytes > 32 * 1024 * 1024) {
+          const failure = new NetworkError({ kind: 'integrity_invalid', acceptance: 'response_received', phase: 'response_body', httpStatus: response.statusCode ?? null, retryAfterMs: null })
+          reject(failure)
+          response.destroy()
+        } else chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('aborted', () => reject(Object.assign(
+        new Error('HTTP response was interrupted'), { code: 'ECONNRESET' })))
       response.on('end', () => {
         const text = chunks.join('')
         let json = null
@@ -787,8 +775,10 @@ function requestJson(url, {
           try {
             json = JSON.parse(text)
           } catch {
-            reject(new Error(`HTTP ${response.statusCode ?? 0} returned invalid JSON`))
-            return
+            if ((response.statusCode ?? 0) >= 200 && (response.statusCode ?? 0) <= 299) {
+              reject(new NetworkError({ kind: 'protocol_invalid', acceptance: 'response_received', phase: 'decode', httpStatus: response.statusCode ?? null, retryAfterMs: null }))
+              return
+            }
           }
         }
         resolvePromise({
@@ -799,14 +789,65 @@ function requestJson(url, {
         })
       })
     })
-    request.on('timeout', () => request.destroy(new Error('HTTP request timed out')))
-    request.on('error', reject)
+    request.on('timeout', () => request.destroy(Object.assign(
+      new Error('HTTP request timed out'), { code: 'ETIMEDOUT' })))
+    request.on('socket', socket => { socket.once('secureConnect', () => { connected = true }) })
+    request.on('error', error => reject(Object.assign(error, { networkFailure: classifyError(error, { notSent: !connected }) })))
     if (serialized !== null) request.write(serialized)
     request.end()
   })
 }
 
-class ApiClient {
+export async function requestJson(url, options = {}) {
+  const target = new URL(url)
+  const method = options.method ?? 'GET'
+  const occupancyClaim = method === 'POST' && target.pathname === '/api/v1/clients/occupancy'
+  const prepared = { ...options, serializedBody: options.body === undefined ? null : JSON.stringify(options.body) }
+  const configurationApply = method === 'POST'
+    && /^\/api\/v1\/clients\/[^/]+\/(?:providers|extensions|repositories)$/u.test(target.pathname)
+    && retainedDeviceConfigurationEnvelope(prepared.serializedBody)
+  const exact = method === 'GET' || occupancyClaim || configurationApply
+    || ['/api/v1/queries', '/api/v1/commands'].includes(target.pathname)
+  const deadline = performance.now() + (options.timeoutMillis ?? (occupancyClaim ? 120_000 : 30_000))
+  try {
+    return await executeRequest(async ({ signal }) => {
+      const response = await requestJsonOnce(url, { ...prepared, signal, timeoutMillis: Math.max(1, deadline - performance.now()) })
+      if (response.status < 200 || response.status > 299) throw new NetworkError(httpFailure(response.status, retryAfter(response.headers['retry-after'])), response)
+      return response
+    }, { replay: exact ? 'replay_exact' : 'reconcile_first', deadline })
+  } catch (error) {
+    if (error instanceof NetworkError && error.response !== undefined) {
+      Object.defineProperty(error.response, 'networkError', { value: error, configurable: true })
+      return error.response
+    }
+    throw error
+  }
+}
+
+function retainedDeviceConfigurationEnvelope(serialized) {
+  if (typeof serialized !== 'string') return false
+  const body = JSON.parse(serialized)
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
+    && typeof body.requestId === 'string' && /^[A-Za-z0-9_-]{8,200}$/u.test(body.requestId)
+    && Number.isSafeInteger(body.expectedRevision) && body.expectedRevision >= 0
+    && ['clientNodeId', 'nonce', 'publicKey', 'ciphertext']
+      .every(key => typeof body[key] === 'string' && body[key].length > 0)
+}
+
+async function requestReadOnlyJson(url, options) {
+  return requestJson(url, options)
+}
+
+function controlHttpError(response, phase, requestId) {
+  const receivedCode = response.json?.error?.code
+  const code = typeof receivedCode === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(receivedCode)
+    ? receivedCode : 'HTTP_ERROR'
+  return withResponseFailure(Object.assign(new Error('Control Plane request was rejected'), {
+    code, status: response.status, phase, requestId,
+  }), response)
+}
+
+export class ApiClient {
   constructor(baseUrl, origin, nextRequest = 1, ca = undefined) {
     assert.equal(Number.isSafeInteger(nextRequest) && nextRequest > 0, true)
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
@@ -820,17 +861,14 @@ class ApiClient {
   }
 
   requestId() {
-    const value = id('req', this.nextRequest)
     this.nextRequest += 1
-    return value
+    return `req_${randomBytes(13).toString('hex').toUpperCase()}`
   }
 
   async bootstrap(proof, { login = false, localOpen = false } = {}) {
     const mode = process.env.WWC_SERVER_AUTH_MODE ?? 'local-open'
     const useLocalOpen = localOpen || mode === 'local-open'
     if (useLocalOpen) {
-      // Community local-open: the Server caches a loopback Owner principal and
-      // session GET returns it without password or bootstrap proof.
       const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
         origin: this.origin,
         ca: this.ca,
@@ -880,12 +918,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${command} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_command', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${command} request correlation`)
     assert.equal(response.json?.command, command, `${command} command correlation`)
@@ -893,8 +926,8 @@ class ApiClient {
     return response.json
   }
 
-  async query(query, parameters) {
-    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR)
+  async query(query, parameters, pagination = page()) {
+    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR, pagination)
     const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
@@ -903,12 +936,7 @@ class ApiClient {
       body: request,
     })
     if (response.status < 200 || response.status >= 300) {
-      const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const message = response.json?.error?.message
-      const error = new Error(`${query} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
-      error.code = code
-      error.status = response.status
-      throw error
+      throw controlHttpError(response, 'control_query', request.requestId)
     }
     assert.equal(response.json?.requestId, request.requestId, `${query} request correlation`)
     assert.equal(response.json?.query, query, `${query} query correlation`)
@@ -982,13 +1010,6 @@ async function waitForRemoteWorker(
   }, `remote Worker ${IDS.remoteWorker} ready heartbeat`, timeoutMillis)
 }
 
-/**
- * Device StrongFlow WorkerSessions are launched by the Client after
- * Controller dispatch. Registration is not instant (Codex/helper boot), and
- * `workRunAggregate.runs` stays empty until the job is Leased/Running — so
- * the vertical must wait for the launched Device Worker identity to appear
- * with a heartbeat instead of treating a queued WorkRun as a stall.
- */
 export async function waitForDeviceWorkerRegistered(
   client,
   launched,
@@ -997,8 +1018,7 @@ export async function waitForDeviceWorkerRegistered(
   const workerId = launched?.workerId
   assert.equal(typeof workerId, 'string', 'Device launch anchor must return workerId')
   return waitFor(async () => {
-    const response = await client.query('worker.list', { states: [] })
-    const worker = response.result?.items?.find(item => item.id === workerId)
+    const worker = await getDeviceWorker(client, workerId)
     return worker?.state === 'enabled' && typeof worker.lastHeartbeatAt === 'string'
       ? worker
       : false
@@ -1018,10 +1038,19 @@ async function freePort() {
   return port
 }
 
-function createCertificate(directory) {
+export function createCertificate(directory) {
   const configuration = join(directory, 'openssl.cnf')
   const key = join(directory, 'fixture-key.pem')
   const cert = join(directory, 'fixture-cert.pem')
+  if (existsSync(cert) || existsSync(key)) {
+    const certificate = new X509Certificate(readFileSync(cert))
+    for (const path of [cert, key]) assert.equal(lstatSync(path).isFile(), true,
+      'retained TLS identity must use regular files')
+    assert.equal(certificate.checkPrivateKey(createPrivateKey(readFileSync(key))), true,
+      'retained TLS certificate and private key must match')
+    assert.ok(Date.parse(certificate.validTo) > Date.now(), 'retained TLS certificate expired')
+    return { cert, key }
+  }
   writeFileSync(configuration, `[req]
 distinguished_name = dn
 x509_extensions = extensions
@@ -1053,30 +1082,57 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
   const sourceRoot = resolve(fixtureDirectory, 'source-repositories')
   const repository = join(sourceRoot, IDS.repository)
   mkdirSync(sourceRoot, { recursive: true })
+  const expected = verificationCommand === null ? {
+    'package.json': `${JSON.stringify({ name: 'winwincode-api-fixture', private: true,
+      scripts: { verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'" } }, null, 2)}\n`,
+    'package-lock.json': '{}\n',
+    '.winwincode-api-candidate': 'deterministic StrongFlow candidate baseline\n',
+    ...files,
+  } : files
+  for (const [name, content] of Object.entries(expected)) {
+    assert.ok(resolve(repository, name).startsWith(`${repository}/`) && !name.split('/').includes('.git'),
+      'scenario files must stay inside the source repository')
+    assert.equal(typeof content, 'string', 'scenario file content must be text')
+  }
+  const checkpoint = join(fixtureDirectory, 'controlled-repository.json')
+  const inputDigest = createHash('sha256').update(JSON.stringify(
+    [verificationCommand, Object.entries(expected).sort(([a], [b]) => a.localeCompare(b))],
+  )).digest('hex')
+  if (existsSync(join(repository, '.git'))) {
+    assert.equal(lstatSync(repository).isSymbolicLink(), false, 'retained repository must not be a symlink')
+    assert.equal(lstatSync(join(repository, '.git')).isDirectory(), true,
+      'retained repository must have its original Git directory')
+    const git = args => {
+      const result = spawnSync('git', ['-C', repository, ...args], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `retained repository lookup failed: ${result.stderr}`)
+      return result.stdout.trim()
+    }
+    assert.equal(realpathSync(git(['rev-parse', '--show-toplevel'])), realpathSync(repository))
+    const revision = git(['rev-parse', 'HEAD'])
+    if (existsSync(checkpoint)) {
+      const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
+      assert.equal(saved.inputDigest, inputDigest, 'retained repository input changed')
+      assert.equal(saved.revision, revision, 'retained repository baseline changed')
+    }
+    assert.equal(git(['status', '--porcelain']), '', 'retained repository is dirty; preserve its evidence')
+    const paths = git(['ls-tree', '-r', '--name-only', revision]).split('\n').filter(Boolean).sort()
+    assert.deepEqual(paths, Object.keys(expected).sort(), 'retained repository baseline paths changed')
+    for (const [path, content] of Object.entries(expected)) {
+      const result = spawnSync('git', ['-C', repository, 'show', `${revision}:${path}`], { encoding: 'utf8' })
+      assert.equal(result.status, 0)
+      assert.equal(result.stdout, content, 'retained repository baseline content changed')
+    }
+    if (!existsSync(checkpoint)) writeJsonAtomically(checkpoint, { inputDigest, revision })
+    return { sourceRoot, repository, revision }
+  }
+  assert.equal(existsSync(checkpoint), false, 'retained repository is missing; preserve its checkpoint')
   const init = spawnSync(
     'git',
     ['init', '--quiet', '--initial-branch=main', repository],
     { cwd: sourceRoot, encoding: 'utf8', stdio: 'pipe' },
   )
   assert.equal(init.status, 0, `controlled API fixture repository creation failed: ${init.stderr}`)
-  if (verificationCommand === null) writeFileSync(
-    join(repository, 'package.json'),
-    `${JSON.stringify({
-      name: 'winwincode-api-fixture',
-      private: true,
-      scripts: {
-        verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'",
-      },
-    }, null, 2)}\n`,
-  )
-  // Prefer npm over pnpm/corepack so the Worker sandbox can execute the
-  // scanned verification command without a package-manager bootstrap.
-  if (verificationCommand === null) writeFileSync(join(repository, 'package-lock.json'), '{}\n')
-  if (verificationCommand === null) writeFileSync(
-    join(repository, '.winwincode-api-candidate'),
-    'deterministic StrongFlow candidate baseline\n',
-  )
-  for (const [name, contents] of Object.entries(files)) {
+  for (const [name, contents] of Object.entries(expected)) {
     const destination = resolve(repository, name)
     assert.ok(destination.startsWith(`${repository}/`) && !name.split('/').includes('.git'),
       'scenario files must stay inside the source repository')
@@ -1120,6 +1176,7 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
     0,
     `controlled API fixture revision lookup failed: ${revision.stderr}`,
   )
+  writeJsonAtomically(checkpoint, { inputDigest, revision: revision.stdout.trim() })
   return { sourceRoot, repository, revision: revision.stdout.trim() }
 }
 
@@ -1161,9 +1218,6 @@ function spawnStandaloneServer({
     detached: process.platform !== 'win32',
     env: {
       ...runtimeChildEnvironment(),
-      // Community loopback production Server: local-open initializes the Owner
-      // at process start. Password mode requires a pre-seeded Owner and is not
-      // the isolated vertical path.
       WWC_SERVER_AUTH_MODE: serverEnvironment.WWC_SERVER_AUTH_MODE ?? 'local-open',
       ...serverEnvironment,
       WWC_SERVER_BIND: `127.0.0.1:${String(port)}`,
@@ -1197,9 +1251,6 @@ function spawnStandaloneServer({
   })
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
-  // Allow the CLI runner to capture the same runtime diagnostics as callers
-  // using runApiProductionVertical({ serverEnvironment }). The explicit
-  // option still wins when a test needs a per-run log path.
   const debugLog = serverEnvironment.WWC_DEBUG_RUNTIME_LOG
     ?? process.env.WWC_DEBUG_RUNTIME_LOG
   child.stdout.on('data', chunk => {
@@ -1251,7 +1302,7 @@ function spawnStandaloneWorker({
       WWC_WORKER_JEV_JUDGE: process.env.WWC_WORKER_JEV_JUDGE,
       WWC_WORKER_JEV_CONTEXT: process.env.WWC_WORKER_JEV_CONTEXT,
       WWC_DEVICE_JEV_SETTINGS_FILE: process.env.WWC_DEVICE_JEV_SETTINGS_FILE,
-      WWC_BENCHMARK_TOOL_REPEAT_GUARD: process.env.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
+      WWC_BENCHMARK_SEALED_TOOLS: process.env.WWC_BENCHMARK_SEALED_TOOLS,
       WWC_WORKER_ID: IDS.remoteWorker,
       WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
       WWC_WORKER_STARTED_AT: fixture.startedAt,
@@ -1320,10 +1371,6 @@ async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMilli
 async function stopServer(child) {
   if (child.exitCode !== null || child.signalCode !== null) return
   const exited = new Promise(resolvePromise => child.once('exit', resolvePromise))
-  // Let the Server own shutdown of its supervised Worker. Sending SIGINT to
-  // the whole detached process group also interrupts the helper before the
-  // Server can release its durable lease, making an immediate restart look
-  // like a stale-instance failure.
   child.kill('SIGINT')
   const graceful = await Promise.race([
     exited.then(() => true),
@@ -1540,8 +1587,6 @@ function deliverySpec(baseRevision, options = {}) {
     repositoryId: IDS.repository,
     scope: ['canonical local API chat and StrongFlow workflow'],
     sourceProductSessionId,
-    // Device-bound Delivery requires a confirmed verification command on the
-    // sealed Device repository. Keep it repository-truthful (no fake verdict).
     verificationCommand: options.verificationCommand
       ?? (sourceProductSessionId === null ? undefined : 'git rev-parse --verify HEAD'),
     title: 'API production StrongFlow',
@@ -1557,12 +1602,14 @@ export function workItemCreatePayload(workRunAggregate, expectedRevision) {
   const items = workRunAggregate.items
   assert.ok(Array.isArray(items), 'workrun.get must return canonical WorkItems')
   if (items.length > 0) return null
+  const deliveryId = workRunAggregate.readCursor?.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   return {
-    deliveryId: IDS.delivery,
+    deliveryId,
     expectedRevision,
     contractRevision: contract.revision,
     items: [{
-      id: IDS.workItem,
+      id: `wit_${deliveryId.slice(4)}`,
       title: 'Execute the accepted API delivery',
       goal: 'Reach the terminal API delivery state from the accepted contract.',
       criterionIds: contract.criteria.map(criterion => criterion.id),
@@ -1622,11 +1669,11 @@ function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
 function transientDeliveryErrorSummary(errors) {
   const counts = new Map()
   for (const error of errors) {
-    const key = `${error.command}:${error.code}`
+    const key = `${error.query ?? error.command}:${error.code}`
     const previous = counts.get(key)
     if (previous === undefined) {
       counts.set(key, {
-        command: error.command,
+        ...(error.query === undefined ? { command: error.command } : { query: error.query }),
         code: error.code,
         status: error.status,
         count: 1,
@@ -1662,7 +1709,10 @@ export function terminalDeviceFailure(observation) {
       || items.some(item => !['done', 'candidate_ready', 'failed', 'cancelled'].includes(item.state))
       || !runs.some(run => ['failed', 'cancelled'].includes(run.state))) return null
   if (['failed', 'cancelled'].includes(delivery.status)
-      && !items.some(item => ['failed', 'cancelled'].includes(item.state))) return null
+      && !items.some(item => ['failed', 'cancelled'].includes(item.state)
+        || (item.state === 'candidate_ready' && item.id !== undefined
+          && ['failed', 'cancelled'].includes(runs.findLast(run => run.workItemId === item.id
+            && run.workItemRevision === item.revision)?.state)))) return null
   if (!['failed', 'cancelled'].includes(delivery.status) && delivery.status !== 'candidate_ready') return null
   const stalled = delivery.status === 'candidate_ready'
   return { code: stalled ? 'DEVICE_PRODUCT_STALLED'
@@ -1677,30 +1727,67 @@ export async function driveDelivery(
   now = Date.now,
   hooks = {},
 ) {
+  const deliveryId = hooks.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
   const transientErrors = []
   const deadline = timeoutMillis === null ? Infinity : now() + timeoutMillis
   let detail = null
+  let workRunAggregate = null
   let terminalCommand = null
   let idlePolls = 0
   const stuckPollLimit = 80
+  const pollIntervalMillis = hooks.pollIntervalMillis ?? POLL_INTERVAL_MILLIS
+  assert.ok(Number.isSafeInteger(pollIntervalMillis) && pollIntervalMillis > 0)
+  let priorCursor = null
+  let priorAggregate = null
+  let priorStatus = null
+  let priorDeliveryRevision = null
   for (;;) {
     await hooks.assertRunning?.()
-    detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
-    // Scheduling and completion use the current WorkRun aggregate.
-    let workRunAggregate
+    detail = null
+    workRunAggregate = null
+    let projectionChanged = false
+    let query = 'delivery.get'
     try {
-      workRunAggregate = (await client.query('workrun.get', {
-        deliveryId: IDS.delivery,
-        workItemId: null,
-        atCursor: detail.readCursor,
-      })).result
+      detail = (await client.query(query, { deliveryId })).result
+      query = 'workrun.get'
+      if (detail.readCursor?.token && priorAggregate !== null
+          && JSON.stringify(detail.readCursor) === priorCursor
+          && detail.status === priorStatus && detail.deliveryRevision === priorDeliveryRevision) {
+        workRunAggregate = priorAggregate
+      } else {
+        workRunAggregate = (await client.query('workrun.get', {
+          deliveryId,
+          workItemId: null,
+          atCursor: detail.readCursor,
+        })).result
+        projectionChanged = true
+        priorCursor = detail.readCursor?.token ? JSON.stringify(detail.readCursor) : null
+        priorAggregate = workRunAggregate
+        priorStatus = detail.status
+        priorDeliveryRevision = detail.deliveryRevision
+      }
     } catch (error) {
-      if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
+      if (query === 'workrun.get'
+          && (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED')) continue
+      if (error?.code === 'TRUSTED_FACTS_UNAVAILABLE' && error.status === 503) {
+        detail = null
+        workRunAggregate = null
+        if (transientErrors.length < 128) {
+          transientErrors.push({ query, code: error.code, status: error.status, message: error.message })
+        }
+        if (now() >= deadline) {
+          error.unresolvedDeviceExecution = true
+          throw error
+        }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
+        continue
+      }
       throw error
     }
-    await hooks.onProjection?.({ detail, workRunAggregate })
+    if (projectionChanged) await hooks.onProjection?.({ detail, workRunAggregate })
     const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
     const activeWorkRuns = workRuns
       .filter(run => ['queued', 'leased', 'running'].includes(run.state))
@@ -1708,10 +1795,6 @@ export async function driveDelivery(
     if (terminalFailure) {
       throw Object.assign(new Error(`Product execution ended in ${terminalFailure.status}`), terminalFailure)
     }
-    // Queued Device WorkRuns are not projected into workRunAggregate.runs
-    // (append_run accepts only Leased/Running). The Client launch anchor is
-    // still product authority until that run appears in the aggregate.
-    // Already projected terminal runs cannot keep this launch wait alive.
     const pendingDeviceWorkRunIds = typeof hooks.pendingDeviceWorkRunIds === 'function'
       ? hooks.pendingDeviceWorkRunIds().filter(id => !workRuns.some(run => run.id === id))
       : []
@@ -1734,20 +1817,15 @@ export async function driveDelivery(
     let command = null
     let payload = null
     if (activeWorkRuns.length > 0) {
-      // The Controller owns active WorkRuns (executor → reviewer → verifier →
-      // submit_verdict, and retry verification after a resolved Attention).
-      // Device execution still requires one Client launch anchor per WorkRun;
-      // the caller supplies that product-authority step via hooks.
       if (typeof hooks.onActiveWorkRuns === 'function') {
         try {
           await hooks.onActiveWorkRuns(activeWorkRuns)
         } catch (error) {
           if (hooks.strictLaunchAnchor === true) throw error
-          // Launch anchors can lag WorkRun creation; keep polling.
         }
       }
       idlePolls = 0
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     }
     if (typeof hooks.onPendingDeviceWorkRuns === 'function') {
@@ -1783,7 +1861,7 @@ export async function driveDelivery(
       idlePolls = 0
       command = 'delivery.resolve_attention'
       payload = {
-        deliveryId: IDS.delivery,
+        deliveryId,
         attentionItemId: attention.id,
         decision: 'resolve',
         resolution: hooks.resolveAttention === 'verified-candidate'
@@ -1792,17 +1870,10 @@ export async function driveDelivery(
         remediation: null,
       }
     } else if (expectDeviceWorkRun) {
-      // Device StrongFlow: Controller dispatched a queued executor job and the
-      // Client consumed a launch grant. The WorkerSession still has to
-      // register and lease before the aggregate can append the run. Wait out
-      // the caller timeout instead of the short local-stall budget.
       idlePolls = 0
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     } else {
-      // No active WorkRun and no open Attention while the Delivery is not
-      // done: the Controller should already have dispatched the next step.
-      // A stuck projection is a product bug, not a slow poll.
       idlePolls += 1
       if (idlePolls >= stuckPollLimit) {
         fail(`StrongFlow stalled without a dispatchable next action: ${JSON.stringify({
@@ -1813,7 +1884,7 @@ export async function driveDelivery(
           transientErrors: transientDeliveryErrorSummary(transientErrors),
         })}`)
       }
-      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
       continue
     }
 
@@ -1839,16 +1910,15 @@ export async function driveDelivery(
             message: error.message,
           })
         }
-        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        await new Promise(resolvePromise => setTimeout(resolvePromise, pollIntervalMillis))
         continue
       }
       let failureDetail = detail
       try {
         failureDetail = (await client.query('delivery.get', {
-          deliveryId: IDS.delivery,
+          deliveryId,
         })).result ?? detail
       } catch {
-        // Preserve the command error when the diagnostic query is unavailable.
       }
       const summary = JSON.stringify(deliveryFailureSummary(failureDetail, modelRoute))
       if (error instanceof Error) error.message = `${error.message}; delivery=${summary}`
@@ -1865,11 +1935,7 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  const terminalWorkRunAggregate = (await client.query('workrun.get', {
-    deliveryId: IDS.delivery,
-    workItemId: null,
-    atCursor: terminal.readCursor ?? null,
-  })).result
+  const terminalWorkRunAggregate = workRunAggregate
   assertCompletedDelivery(terminal, terminalWorkRunAggregate)
   return {
     actions,
@@ -1952,10 +2018,73 @@ async function runtimeWorkRunEvidence(client, detail) {
   return snapshots
 }
 
-/**
- * Start one standalone Server and prove the API-only Chat + StrongFlow path.
- * The returned report contains only canonical, secret-free observations.
- */
+export async function probeDeviceErrorTruthfulness(api) {
+  const probeSessionId = 'psn_01J00000000000000000000099'
+  const probe = {
+    probeSessionId,
+    sessionCreate: null,
+    chatSubmit: null,
+    truthfulDeviceCodes: false,
+    notWrongStateDisguise: false,
+  }
+  try {
+    const created = await api.command('session.create', 0, {
+      productSessionId: probeSessionId,
+      projectId: IDS.project,
+      repositoryId: IDS.repository,
+      title: 'Device gate truthfulness probe',
+      modelRoute: configuredModelRoute({}),
+    })
+    probe.sessionCreate = {
+      outcome: created.outcome,
+      revision: created.currentRevision,
+    }
+    try {
+      await api.command('chat.submit', 1, {
+        productSessionId: probeSessionId,
+        message: 'probe without Device prerequisites',
+      })
+      probe.chatSubmit = { accepted: true, code: null, status: 200 }
+      probe.truthfulDeviceCodes = false
+      probe.notWrongStateDisguise = true
+    } catch (error) {
+      probe.chatSubmit = {
+        accepted: false,
+        code: error.code ?? null,
+        status: error.status ?? null,
+        message: error.message,
+      }
+      probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+        || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+      probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+    }
+  } catch (error) {
+    probe.sessionCreate = {
+      outcome: 'error',
+      code: error.code ?? null,
+      message: error.message,
+    }
+    probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+      || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+    probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+  }
+  assert.equal(probe.truthfulDeviceCodes, true,
+    'Device prerequisite probe must reject with a dedicated Device error')
+  assert.equal(probe.notWrongStateDisguise, true,
+    'Device prerequisite probe must not disguise a missing Device as WRONG_STATE')
+  return probe
+}
+
+export async function stopDevicePath(report, devicePath) {
+  try {
+    await devicePath.stop?.()
+  } finally {
+    if (report.devicePath !== null) {
+      report.devicePath.modelServerRequestCount = devicePath.modelServer?.requests?.length ?? 0
+    }
+  }
+}
+
 export async function runApiProductionVertical({
   build = process.env.WWC_API_SKIP_BUILD !== '1',
   directory = null,
@@ -1974,8 +2103,11 @@ export async function runApiProductionVertical({
   deviceProvider = deterministicDeviceProvider(),
   deviceAgentEnvironment = process.env,
   scenario = null,
+  retainRepository = false,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
+  assert.ok(!retainRepository || (directory !== null && scenario !== null),
+    'retaining a runtime repository requires an explicit directory and scenario')
   assertServerEnvironmentIsDeviceOnly(serverEnvironment)
   assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
   const modelRoute = configuredModelRoute(deviceRoute ?? {})
@@ -2006,17 +2138,9 @@ export async function runApiProductionVertical({
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
-    // Prefer the freshly built compact helper; oversized development builds
-    // still require release compilation to satisfy the signed helper boundary.
-    const debugHelper = resolve(serverTargetDirectory(root), 'debug/winwincode-kernel-helper')
-    let builtHelper = debugHelper
-    if (lstatSync(debugHelper).size > 64 * 1024 * 1024) {
-      const helperResult = spawnSync('cargo', [
-        'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
-      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
-      assert.equal(helperResult.status, 0, 'winwincode-kernel-helper release build failed')
-      builtHelper = resolve(serverTargetDirectory(root), 'release/winwincode-kernel-helper')
-    }
+    const builtHelper = prepareCompactKernelHelper({
+      root, targetDirectory: serverTargetDirectory(root), environment: buildEnvironment, offline: true,
+    })
     const colocatedHelper = resolve(dirname(binary), 'winwincode-kernel-helper')
     if (builtHelper !== colocatedHelper) copyFileSync(builtHelper, colocatedHelper)
     chmodSync(colocatedHelper, 0o755)
@@ -2027,10 +2151,6 @@ export async function runApiProductionVertical({
     workerIdentity = fileIdentity(remoteWorkerBinary, 'Worker binary')
     assert.notEqual(workerIdentity.mode & 0o111, 0, 'Worker binary must be executable')
   }
-  // Keep the helper and Server in one executable directory.  The production
-  // adapter authenticates that both paths share the running executable's
-  // directory; deriving the helper from CARGO_TARGET_DIR would silently pick
-  // another target when callers provide --server-binary.
   const helperExecutable = resolve(dirname(binary), 'winwincode-kernel-helper')
   assert.equal(existsSync(helperExecutable), true, `kernel helper binary is missing: ${helperExecutable}`)
   if (build) {
@@ -2078,7 +2198,6 @@ export async function runApiProductionVertical({
         WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
       }
   const proof = randomBytes(32).toString('base64url')
-  // Bootstrap proof only. Device Provider secrets are never Server proofs.
   const proofs = [proof].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
@@ -2125,7 +2244,20 @@ export async function runApiProductionVertical({
     errorCodeTruthfulness: null,
   }
 
-  const stableServerPort = remoteWorkerBinary === null ? null : await freePort()
+  const endpointPath = join(fixtureDirectory, 'server-endpoint.json')
+  const retainedEndpoint = retainRepository && existsSync(endpointPath)
+    ? JSON.parse(readFileSync(endpointPath, 'utf8')) : null
+  if (retainedEndpoint !== null) {
+    const endpoint = new URL(retainedEndpoint.controlUrl)
+    assert.equal(endpoint.protocol, 'https:')
+    assert.equal(endpoint.hostname, '127.0.0.1')
+    assert.equal(endpoint.username + endpoint.password + endpoint.search + endpoint.hash, '')
+    assert.equal(endpoint.pathname, '/')
+    assert.equal(retainedEndpoint.origin, `https://api.localhost:${endpoint.port}`)
+    assert.ok(Number(endpoint.port) > 0)
+  }
+  const stableServerPort = retainedEndpoint !== null ? Number(new URL(retainedEndpoint.controlUrl).port)
+    : remoteWorkerBinary === null ? null : await freePort()
 
   try {
     started = await startServer({
@@ -2145,61 +2277,10 @@ export async function runApiProductionVertical({
     })
     report.health.initial = started.health.status
     api = new ApiClient(started.controlUrl, started.origin)
-    await api.bootstrap(proof)
+    await api.bootstrap(proof, { login: retainedEndpoint !== null })
 
-    // Live public-error truthfulness: without Device prerequisites the Server
-    // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
-    if (devicePrerequisites) {
-      const probeSessionId = 'psn_01J00000000000000000000099'
-      const probe = {
-        probeSessionId,
-        sessionCreate: null,
-        chatSubmit: null,
-        truthfulDeviceCodes: false,
-        notWrongStateDisguise: false,
-      }
-      try {
-        const created = await api.command('session.create', 0, {
-          productSessionId: probeSessionId,
-          projectId: IDS.project,
-          repositoryId: IDS.repository,
-          title: 'Device gate truthfulness probe',
-          modelRoute: configuredModelRoute({}),
-        })
-        probe.sessionCreate = {
-          outcome: created.outcome,
-          revision: created.currentRevision,
-        }
-        try {
-          await api.command('chat.submit', 1, {
-            productSessionId: probeSessionId,
-            message: 'probe without Device prerequisites',
-          })
-          probe.chatSubmit = { accepted: true, code: null, status: 200 }
-          probe.truthfulDeviceCodes = false
-          probe.notWrongStateDisguise = true
-        } catch (error) {
-          probe.chatSubmit = {
-            accepted: false,
-            code: error.code ?? null,
-            status: error.status ?? null,
-            message: error.message,
-          }
-          probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-            || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-          probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-        }
-      } catch (error) {
-        probe.sessionCreate = {
-          outcome: 'error',
-          code: error.code ?? null,
-          message: error.message,
-        }
-        probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-          || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-        probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-      }
-      report.errorCodeTruthfulness = probe
+    if (devicePrerequisites && retainedEndpoint === null) {
+      report.errorCodeTruthfulness = await probeDeviceErrorTruthfulness(api)
     }
 
     if (remoteWorkerBinary !== null) {
@@ -2272,7 +2353,6 @@ export async function runApiProductionVertical({
           credentialReferenceId: devicePath.modelRoute.credentialReferenceId,
         },
       }
-      // Prefer the Device-bound model route after pairing.
       Object.assign(modelRoute, devicePath.modelRoute)
     }
 
@@ -2365,14 +2445,9 @@ export async function runApiProductionVertical({
       }
     }
 
-    // StrongFlow runs before cancel so Device WorkerSession capacity stays
-    // available for Controller-dispatched role WorkRuns.
     let delivery = null
     if (includeStrongFlow) {
       try {
-        // Device StrongFlow is sealed to an already-launched Device
-        // ProductSession so Controller-dispatched role jobs carry the Device
-        // target and model route. Chat already launched IDS.session.
         const strongFlowSourceSessionId = devicePath === null ? null : IDS.session
         const deliveryCreated = await commandEventually(api, 'delivery.create', 0, {
           deliveryId: IDS.delivery,
@@ -2429,9 +2504,6 @@ export async function runApiProductionVertical({
           deliveryBeforeDispatch.result.deliveryRevision,
         )
         assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
-        // Device product authority: each StrongFlow WorkRun needs its own
-        // WorkerLaunchGrant before Device execution can dispatch. Controller
-        // owns role sequencing; the Client owns launch anchors.
         const anchoredWorkRunIds = new Set()
         const deviceWorkersByWorkRun = new Map()
         const anchorWorkRun = async workRunId => {
@@ -2445,8 +2517,6 @@ export async function runApiProductionVertical({
             deviceWorkersByWorkRun.set(workRunId, launched)
           }
           report.devicePath.steps = [...devicePath.steps]
-          // Wait for the Device WorkerSession process to register/heartbeat
-          // so the Server can lease the queued StrongFlow executor job.
           if (launched?.workerId !== undefined) {
             try {
               await waitForDeviceWorkerRegistered(
@@ -2455,8 +2525,6 @@ export async function runApiProductionVertical({
                 Math.min(timeoutMillis, 90_000),
               )
             } catch {
-              // worker.list may omit Device sessions; driveDelivery still waits
-              // for the WorkRun lease/aggregate projection.
             }
           }
           return true
@@ -2465,9 +2533,6 @@ export async function runApiProductionVertical({
           ?? deliveryAdvanced.result?.workRunId
           ?? null
         await anchorWorkRun(executorWorkRunId)
-        // Device StrongFlow needs Worker boot + registration + lease. Cap the
-        // wait well above chat register time but below the full vertical budget
-        // so a residual is reported instead of hanging the acceptance script.
         delivery = await driveDelivery(
           api,
           Math.min(timeoutMillis, 180_000),
@@ -2504,6 +2569,8 @@ export async function runApiProductionVertical({
             executionJobId: item.session.executionJobId,
             workerSessionId: item.session.workerSessionId,
             codexThreadId: item.session.codexThreadId,
+            coreToolCalls: item.session.activities.flatMap(activity => activity.coreTool?.call === null
+              || activity.coreTool?.call === undefined ? [] : [activity.coreTool.call]),
           })),
           status: delivery.detail.status,
           workItemStates: delivery.workRunAggregate.items.map(item => item.state),
@@ -2512,10 +2579,6 @@ export async function runApiProductionVertical({
           coupledTo72t361: false,
         }
       } catch (error) {
-        // StrongFlow can stall after Controller dispatch: Device reviewer/
-        // verifier execution may still fail (72t.36.1 residual) even when
-        // role WorkRuns were created. Record the exact subset and continue
-        // when the caller asked for Device-path chat/cancel/restart evidence.
         let detail = null
         let failedWorkRunStates = []
         try {
@@ -2591,9 +2654,6 @@ export async function runApiProductionVertical({
         port: stableServerPort,
       })
       report.health.afterRestart = started.health.status
-      // Request receipts survive the Server process. Use a disjoint request
-      // namespace for new work after restart while retaining the original ids
-      // only for the explicit terminal replay assertion below.
       const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
       await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
       if (workerStarted !== null) {
@@ -2656,7 +2716,7 @@ export async function runApiProductionVertical({
     failure = error
   } finally {
     if (devicePath !== null) {
-      devicePath.stop?.()
+      try { await stopDevicePath(report, devicePath) } catch (error) { failure ??= error }
       serverOutput += ''
     }
     if (workerStarted !== null) {
@@ -2701,10 +2761,10 @@ export async function runApiProductionVertical({
         failure = new Error(`${String(failure)}\nServer output:\n${diagnostic}`)
       }
     }
-    removeControlledRepository({ repository: controlledRepository.repository })
+    if (!retainRepository) removeControlledRepository({ repository: controlledRepository.repository })
     if (ownedDirectory) rmSync(fixtureDirectory, { recursive: true, force: true })
+    if (failure !== null) throw failure
   }
-  if (failure !== null) throw failure
   return report
 }
 

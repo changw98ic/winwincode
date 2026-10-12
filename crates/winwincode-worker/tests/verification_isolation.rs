@@ -289,6 +289,52 @@ exit 0
 }
 
 #[tokio::test]
+async fn cancelled_validation_task_terminates_the_entire_process_group() {
+    let (_root, scope, scratch, checkout) = isolation_fixture("cancelled-process-group");
+    let isolation = VerificationIsolation::open(scope, scratch.clone(), helper_executable())
+        .await
+        .expect("open cancellation isolation");
+    let cancellation = isolation.cancellation_handle();
+    let script = r#"set -eu
+/bin/sh -c 'sleep 1; printf leaked > "$WWC_SCRATCH/cancelled-leaked"' >/dev/null 2>&1 &
+printf started > "$WWC_SCRATCH/started"
+sleep 30
+"#;
+    let task = tokio::spawn(async move {
+        isolation
+            .run(
+                &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+                &checkout,
+                HashMap::new(),
+                Duration::from_secs(40),
+                1_048_576,
+            )
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !scratch.root().join("started").exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "actual process must start before cancellation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled command must be killed and reaped")
+            .expect("owned verification task joins")
+            .is_err()
+    );
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !scratch.root().join("cancelled-leaked").exists(),
+        "cancellation must kill descendants, not just the command leader"
+    );
+}
+
+#[tokio::test]
 async fn timeout_terminates_the_entire_process_group() {
     let (_root, scope, scratch, checkout) = isolation_fixture("timeout-process-group");
     let isolation = VerificationIsolation::open(scope, scratch.clone(), helper_executable())

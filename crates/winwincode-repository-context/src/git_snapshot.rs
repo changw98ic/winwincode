@@ -11,12 +11,6 @@ pub struct GitRepositorySnapshot {
 }
 
 impl GitRepositorySnapshot {
-    /// Opens the immutable tree for an exact Git commit SHA.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SHA is symbolic, missing, not a commit, or
-    /// when Git cannot list the baseline tree.
     pub fn open(root: &Path, baseline_sha: &str) -> Result<Self, RepositoryContextError> {
         validate_exact_sha(baseline_sha)?;
         let resolved = git_output(
@@ -75,12 +69,6 @@ impl GitRepositorySnapshot {
         &self.files
     }
 
-    /// Reads one UTF-8 file from the immutable baseline tree.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the path is absent, is not a blob, or does not
-    /// contain UTF-8 text.
     pub fn read_text(&self, path: &str) -> Result<String, RepositoryContextError> {
         let object = format!("{}:{path}", self.baseline_sha);
         let output = git_output_bytes(&self.root, "read baseline file", ["show", &object])

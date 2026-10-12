@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::large_futures)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -468,7 +467,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
         Ok(Vec::new())
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &winwincode_execution_port::generated::JobOutcomeMessage,

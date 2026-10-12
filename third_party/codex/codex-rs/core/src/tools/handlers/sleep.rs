@@ -13,7 +13,6 @@ use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ResponsesApiTool;
-use codex_tools::ToolExposure;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
@@ -67,10 +66,6 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
 
     fn spec(&self) -> ToolSpec {
         create_sleep_tool()
-    }
-
-    fn exposure(&self) -> ToolExposure {
-        ToolExposure::DirectModelOnly
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
@@ -153,4 +148,8 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
     }
 }
 
-impl CoreToolRuntime for SleepHandler {}
+impl CoreToolRuntime for SleepHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+}

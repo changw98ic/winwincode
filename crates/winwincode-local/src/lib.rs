@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Single-process composition of the Rust Control Plane and Execution Worker.
-//!
-//! The launcher owns only process lifecycle and transport wiring. Product
-//! state remains in the injected Control Plane endpoint, execution remains in
-//! [`WorkerMain`], and every message crosses the canonical typed
-//! `ExecutionPort` adapter used by separated deployments.
-
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -35,26 +28,17 @@ const MAX_TRACE_FRAMES: usize = 256;
 const MAX_TRACE_IDENTIFIER_BYTES: usize = 160;
 const MAX_TRACE_KIND_BYTES: usize = 64;
 
-/// Stable local-launcher failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalLauncherErrorKind {
-    /// Process configuration was invalid before startup.
     InvalidConfiguration,
-    /// The Control Plane instance could not start, drain, or release.
     ControlPlaneLifecycle,
-    /// The canonical typed frame was rejected.
     ExecutionPortFrame,
-    /// The injected Control Plane endpoint rejected a message.
     ControlPlaneEndpoint,
-    /// The bounded trace rejected unsafe or excessive data.
     Trace,
-    /// The Worker lifecycle rejected an operation.
     Worker,
-    /// A shared local handle was poisoned.
     SharedState,
 }
 
-/// Secret-safe local-launcher error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalLauncherError {
     kind: LocalLauncherErrorKind,
@@ -129,7 +113,6 @@ impl fmt::Display for LocalLauncherError {
 
 impl std::error::Error for LocalLauncherError {}
 
-/// Validated configuration for one local process generation.
 #[derive(Clone, Debug)]
 pub struct LocalLauncherConfig {
     data_directory: PathBuf,
@@ -142,12 +125,6 @@ pub struct LocalLauncherConfig {
 }
 
 impl LocalLauncherConfig {
-    /// Validates one process-local composition configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-absolute data directory, zero process time, or a trace
-    /// capacity outside the fixed 1..=256 bound before creating any files.
     pub fn try_new(
         data_directory: impl AsRef<Path>,
         source_directory: impl AsRef<Path>,
@@ -176,14 +153,12 @@ impl LocalLauncherConfig {
         })
     }
 
-    /// Selects the Worker Observer policy for this local process.
     #[must_use]
     pub const fn with_observer_mode(mut self, mode: ObserverMode) -> Self {
         self.observer_mode = mode;
         self
     }
 
-    /// Installs the independent one-shot Observer route for the local Worker.
     #[must_use]
     pub fn with_observation_model(mut self, model: ObservationModelConfiguration) -> Self {
         self.observation_model = Some(model);
@@ -195,7 +170,6 @@ impl LocalLauncherConfig {
         &self.data_directory
     }
 
-    /// Controlled root containing repositories named by `ExecutionJob`.
     #[must_use]
     pub fn source_directory(&self) -> &Path {
         &self.source_directory
@@ -207,7 +181,6 @@ impl LocalLauncherConfig {
     }
 }
 
-/// Trace direction after canonical frame validation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LocalTraceDirection {
@@ -224,8 +197,6 @@ impl From<FrameDirection> for LocalTraceDirection {
     }
 }
 
-/// One allow-listed correlation frame. It contains no payload, summary,
-/// provider route, command text, path, artifact content, or credential field.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalTraceFrame {
@@ -312,7 +283,6 @@ impl LocalTraceFrame {
     }
 }
 
-/// Bounded, deterministic, secret-safe trace of the local typed adapter.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalRuntimeTrace {
@@ -321,11 +291,6 @@ pub struct LocalRuntimeTrace {
 }
 
 impl LocalRuntimeTrace {
-    /// Creates an empty bounded trace.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a capacity outside 1..=256.
     pub fn try_new(capacity: usize) -> Result<Self, LocalLauncherError> {
         if !(1..=MAX_TRACE_FRAMES).contains(&capacity) {
             return Err(LocalLauncherError::invalid_configuration());
@@ -336,12 +301,6 @@ impl LocalRuntimeTrace {
         })
     }
 
-    /// Records only the canonical message kind and allow-listed correlation
-    /// identities from an already validated frame.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the bound is full or a selected identity is unsafe.
     pub fn record(&mut self, frame: &TypedFrame) -> Result<(), LocalLauncherError> {
         if self.frames.len() >= self.capacity {
             return Err(LocalLauncherError::trace());
@@ -360,11 +319,6 @@ impl LocalRuntimeTrace {
         &self.frames
     }
 
-    /// Serializes the stable field order for reproducible fixture comparison.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed trace error if serialization fails.
     pub fn to_json(&self) -> Result<Vec<u8>, LocalLauncherError> {
         serde_json::to_vec(self).map_err(|_| LocalLauncherError::trace())
     }
@@ -411,9 +365,6 @@ fn safe_identifier(value: &str) -> bool {
         .any(|marker| normalized.contains(marker))
 }
 
-/// Shared handle to the exact Control Plane endpoint injected into the local
-/// process. HTTP/WS composition can keep its application, storage, hub, and
-/// `ExecutionPort` router in this one object; the launcher never copies them.
 pub struct SharedControlPlaneHandle<Core> {
     inner: Arc<Mutex<Core>>,
 }
@@ -433,12 +384,6 @@ impl<Core> SharedControlPlaneHandle<Core> {
         }
     }
 
-    /// Runs one short synchronous operation against the same Control Plane
-    /// object used by the local Worker transport.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed error if another panic poisoned the shared object.
     pub fn with<R>(&self, operation: impl FnOnce(&mut Core) -> R) -> Result<R, LocalLauncherError> {
         let mut core = self
             .inner
@@ -461,10 +406,6 @@ struct LinkState {
 
 type SharedLink = Arc<Mutex<LinkState>>;
 
-/// Cloneable CP-to-Worker side of the same local typed adapter.
-///
-/// A scheduler or Server composition enqueues generated messages here and the
-/// process driver calls [`LocalLauncher::drive`] to apply them to `WorkerMain`.
 pub struct LocalExecutionPortHandle {
     link: SharedLink,
 }
@@ -478,11 +419,6 @@ impl Clone for LocalExecutionPortHandle {
 }
 
 impl LocalExecutionPortHandle {
-    /// Validates and queues one Control Plane-to-Worker generated message.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a wrong-direction frame, unsafe/full trace, or poisoned queue.
     pub fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), LocalLauncherError> {
         self.route_control(message)
     }
@@ -588,13 +524,11 @@ fn lock_link(link: &SharedLink) -> Result<MutexGuard<'_, LinkState>, LocalLaunch
     link.lock().map_err(|_| LocalLauncherError::shared_state())
 }
 
-/// Successful, deterministic two-module shutdown report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalShutdownReport {
     pub worker: WorkerShutdownReport,
 }
 
-/// One local process containing a running Control Plane instance and Worker.
 pub struct LocalLauncher<Core, Codex>
 where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
@@ -612,13 +546,6 @@ where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Starts the Control Plane instance first, then registers the local Worker
-    /// through the same typed adapter used by every later message.
-    ///
-    /// # Errors
-    ///
-    /// Returns fixed, secret-safe lifecycle, transport, endpoint, trace, or
-    /// Worker failures. A failed Worker start releases the Control Plane lease.
     pub async fn start(
         config: LocalLauncherConfig,
         worker_config: WorkerConfig,
@@ -640,13 +567,6 @@ where
         let execution_port = LocalExecutionPortHandle {
             link: Arc::clone(&link),
         };
-        // Action requests remain on the ordinary Worker -> Control Plane
-        // ExecutionPort path.  A synchronous response transport would enter
-        // the Control Plane while Kernel is still inside `next_event`; that
-        // re-entrant path can leave the follow-up model exchange waiting on a
-        // Worker drive that cannot run until `next_event` returns.  The
-        // adapter's bounded event poll already provides the retry window, so
-        // the durable queue is both the local and separated-deployment path.
         let port = SameProcessExecutionPort {
             control_plane: control_plane.clone(),
             link,
@@ -684,26 +604,16 @@ where
         Ok(launcher)
     }
 
-    /// Shared formal Control Plane composition object. A Server adapter can
-    /// expose HTTP/WS APIs over this exact object without copying state.
     #[must_use]
     pub fn control_plane(&self) -> SharedControlPlaneHandle<Core> {
         self.control_plane.clone()
     }
 
-    /// Shared typed CP-to-Worker queue for scheduler and Server composition.
     #[must_use]
     pub fn execution_port(&self) -> LocalExecutionPortHandle {
         self.execution_port.clone()
     }
 
-    /// Applies every already-validated queued Control Plane message to the one
-    /// Worker core. Messages emitted while driving are synchronously routed
-    /// back through the Control Plane side before the next queued message.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed shared-state or Worker failure.
     pub async fn drive(&mut self, now: Instant) -> Result<usize, LocalLauncherError> {
         let mut applied = 0_usize;
         loop {
@@ -724,12 +634,6 @@ where
         }
     }
 
-    /// Enqueues and immediately drives one typed CP-to-Worker message.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`LocalExecutionPortHandle::enqueue_control`]
-    /// or [`Self::drive`].
     pub async fn accept_control(
         &mut self,
         message: ExecutionPortMessage,
@@ -739,22 +643,12 @@ where
         self.drive(now).await.map(|_| ())
     }
 
-    /// Emits one canonical Worker heartbeat through the local adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed Worker failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), LocalLauncherError> {
         Box::pin(self.worker.heartbeat(now))
             .await
             .map_err(|_| LocalLauncherError::worker())
     }
 
-    /// Polls the embedded Codex adapter once for each active job.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed Worker failure.
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), LocalLauncherError> {
         self.worker
             .poll_codex(now.clone())
@@ -763,13 +657,6 @@ where
         self.drive(now).await.map(|_| ())
     }
 
-    /// Drains the Worker, then drains and permanently releases the Control
-    /// Plane process generation. The Control Plane object and transport trace
-    /// remain readable, but no process owner or active Worker job remains.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed Worker or Control Plane lifecycle failure.
     pub async fn shutdown(
         &mut self,
         worker_now: Instant,
@@ -778,10 +665,6 @@ where
         if self.stopped {
             return Err(LocalLauncherError::worker());
         }
-        // Shutdown is a resource boundary: even when the Worker reports a
-        // failure, the Control Plane lease must still be drained and released
-        // before this launcher is dropped. Keep the first stable error while
-        // running every cleanup step.
         let mut first_error = None;
         let worker = if let Ok(report) = self.worker.shutdown(worker_now).await {
             Some(report)
@@ -809,9 +692,6 @@ where
         } else {
             first_error.get_or_insert_with(LocalLauncherError::control_plane_lifecycle);
         }
-        // Drop the process generation even when a lifecycle operation above
-        // failed. The returned error records the failed phase; the lease and
-        // owned handles do not remain reachable from this launcher.
         drop(self.control_plane_instance.take());
 
         let Some(worker) = worker else {
@@ -848,26 +728,10 @@ where
             && self.pending_frame_count() == 0
     }
 
-    /// Returns a stable JSON snapshot of the bounded trace.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fixed shared-state or trace serialization error.
     pub fn trace_json(&self) -> Result<Vec<u8>, LocalLauncherError> {
         lock_link(&self.execution_port.link)?.trace.to_json()
     }
 
-    /// Starts a fresh bounded trace window for a long-lived local runtime.
-    ///
-    /// A supervised process may emit heartbeats for its entire lifetime. The
-    /// production supervisor rotates this diagnostic window between drive
-    /// cycles so a maintenance stream cannot exhaust the bounded trace while
-    /// preserving the fail-closed behavior of [`LocalRuntimeTrace::record`]
-    /// for each individual window.
-    /// # Errors
-    ///
-    /// Returns a fixed shared-state error when the local runtime link is
-    /// unavailable.
     pub fn reset_trace(&mut self) -> Result<(), LocalLauncherError> {
         lock_link(&self.execution_port.link)?.trace.frames.clear();
         Ok(())

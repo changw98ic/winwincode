@@ -28,11 +28,11 @@ assert.equal(
 
 const modelModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/readiness-tests/readiness-view-model.js',
+  'apps/client/node_modules/.cache/readiness-tests/readiness-view-model.js',
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/readiness-tests/community-control-plane-client.js',
+  'apps/client/node_modules/.cache/readiness-tests/community-control-plane-client.js',
 )).href}`)
 const { createReadinessViewModel } = modelModule
 const { ControlPlaneClientError } = facadeModule

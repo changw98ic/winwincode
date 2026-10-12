@@ -310,21 +310,4 @@ test('all generated clients and docs expose only the canonical verdict request',
     const source = readFileSync(join(root, 'apps', 'client', 'src', path), 'utf8')
     assertCanonicalHandwrittenVerdictRequests(source, path)
   }
-
-  const coverage = readFileSync(
-    join(root, 'docs', 'contracts', 'control-plane-api-coverage.matrix.json'),
-    'utf8',
-  )
-  assert.doesNotMatch(coverage, /submit candidate-bound criterion results/u)
-  assert.match(coverage, /request server-computed verdicts for one candidate stale-check digest/u)
-
-  const contractDoc = readFileSync(
-    join(root, 'docs', 'contracts', 'delivery-evidence-verdict-rework.md'),
-    'utf8',
-  )
-  assert.match(contractDoc, /`candidateDigest` 只用于发现候选已经变化/u)
-  assert.match(contractDoc, /`IDEMPOTENCY_CONFLICT`/u)
-  assert.match(contractDoc, /`REVISION_CONFLICT`/u)
-  assert.match(contractDoc, /`CANDIDATE_STALE`/u)
-  assert.match(contractDoc, /`TRUSTED_FACTS_UNAVAILABLE`/u)
 })

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Immutable panel intent and result, separate from the individual model receipts.
-
 use std::{collections::HashMap, sync::Arc};
 
 use futures::future::BoxFuture;
@@ -13,10 +11,8 @@ use winwincode_fusion::{
 
 use crate::store::AdapterStore;
 
-/// Owned work: the Worker must keep polling the execution transport while awaiting it.
 pub type FusionPanelFuture = BoxFuture<'static, Result<FusionPanelResult, FusionProviderError>>;
 
-/// A provider can host several sealed members; candidate identity selects its port.
 #[derive(Debug, Default)]
 pub(crate) struct MemberRoutes {
     pub members: HashMap<String, Arc<dyn FusionProvider>>,
@@ -138,8 +134,6 @@ fn claim_keys_from_candidates(
     Ok(grouped.into_values().collect())
 }
 
-/// Read Git objects from the exact frozen candidate, never mutable workspace files.
-/// Symlink blobs remain text and submodules remain references; neither is followed.
 pub(crate) fn candidate_context(
     workspace: &std::path::Path,
     candidate_ref: &str,
@@ -165,6 +159,8 @@ pub(crate) fn candidate_context(
         if !output.status.success() {
             return Err(error("FUSION_CANDIDATE_UNAVAILABLE"));
         }
+        #[cfg(test)]
+        mechanism_regression_tests::record_git_output(args[0]);
         Ok(output.stdout)
     };
     let tree_bytes = git(&["rev-parse", "--verify", &format!("{commit}^{{tree}}")])?;
@@ -176,6 +172,7 @@ pub(crate) fn candidate_context(
     }
     let inventory = git(&["ls-tree", "--full-tree", "-r", "-z", commit])?;
     let mut files = Vec::new();
+    let mut batch: Option<GitBlobBatch> = None;
     for row in inventory
         .split(|byte| *byte == 0)
         .filter(|row| !row.is_empty())
@@ -191,7 +188,13 @@ pub(crate) fn candidate_context(
         let mut file =
             serde_json::json!({"path":path,"mode":fields[0],"kind":fields[1],"objectId":fields[2]});
         if fields[1] == "blob" {
-            let bytes = git(&["cat-file", "blob", fields[2]])?;
+            if batch.is_none() {
+                batch = Some(GitBlobBatch::open(workspace)?);
+            }
+            let bytes = batch
+                .as_mut()
+                .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?
+                .read_blob(fields[2])?;
             let (encoding, content) = match String::from_utf8(bytes) {
                 Ok(text) => ("utf8", text),
                 Err(error) => (
@@ -204,11 +207,109 @@ pub(crate) fn candidate_context(
         }
         files.push(file);
     }
+    if let Some(batch) = batch {
+        batch.finish()?;
+    }
     Ok(serde_json::json!({"commit":commit,"tree":tree,"files":files}))
 }
 
-// Claim is committed before polling any provider. A pending claim is never retried
-// automatically: its paid requests may have completed without a local final receipt.
+struct GitBlobBatch {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+impl GitBlobBatch {
+    fn open(workspace: &std::path::Path) -> Result<Self, FusionProviderError> {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["cat-file", "--batch"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        Ok(Self {
+            child,
+            input: Some(input),
+            output: std::io::BufReader::new(output),
+        })
+    }
+    fn read_blob(&mut self, object_id: &str) -> Result<Vec<u8>, FusionProviderError> {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        if object_id.len() != 40 || !object_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        writeln!(input, "{object_id}").map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        input
+            .flush()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let mut header = String::new();
+        self.output
+            .read_line(&mut header)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let fields = header.trim_end().split(' ').collect::<Vec<_>>();
+        if fields.len() != 3 || fields[0] != object_id || fields[1] != "blob" {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        let length = fields[2]
+            .parse::<usize>()
+            .map_err(|_| error("FUSION_CANDIDATE_INVALID"))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        bytes.resize(length, 0);
+        self.output
+            .read_exact(&mut bytes)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        let mut end = [0_u8; 1];
+        self.output
+            .read_exact(&mut end)
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        if end != [b'\n'] {
+            return Err(error("FUSION_CANDIDATE_INVALID"));
+        }
+        Ok(bytes)
+    }
+    fn finish(mut self) -> Result<(), FusionProviderError> {
+        drop(self.input.take());
+        let status = self
+            .child
+            .wait()
+            .map_err(|_| error("FUSION_CANDIDATE_UNAVAILABLE"))?;
+        if !status.success() {
+            return Err(error("FUSION_CANDIDATE_UNAVAILABLE"));
+        }
+        #[cfg(test)]
+        mechanism_regression_tests::record_git_output("cat-file");
+        Ok(())
+    }
+}
+impl Drop for GitBlobBatch {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn claim(
     store: &AdapterStore,
     run: &str,
@@ -471,3 +572,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "durable_fusion_mechanism_regression_tests.rs"]
+mod mechanism_regression_tests;

@@ -350,6 +350,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
@@ -893,14 +894,14 @@ impl SessionIo {
         thread_settings: ThreadSettingsOverrides,
         trace: Option<W3cTraceContext>,
         turn_id: String,
-        submit_change_batch: bool,
+        start: TurnStartOptions,
     ) -> CodexResult<TurnInputSubmission> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_with_id(Submission {
             id: turn_id,
             op: Op::RecoverTurn {
                 thread_settings,
-                submit_change_batch,
+                start,
                 reply: reply_tx,
             },
             trace,
@@ -2477,8 +2478,18 @@ impl Session {
             available_decisions: Some(available_decisions),
             parsed_cmd,
         });
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::record_request(&event);
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        let decision = rx_approve.await;
+        #[cfg(feature = "mechanism-test-support")]
+        if decision.is_ok() {
+            crate::mechanism_interaction_test_barrier::record_waiter_consumed(
+                "approval",
+                &effective_approval_id,
+            );
+        }
+        decision.unwrap_or(ReviewDecision::Abort)
     }
 
     #[expect(
@@ -2712,33 +2723,18 @@ impl Session {
         let _elicitation = self.services.elicitations.register();
         let sub_id = turn_context.sub_id.clone();
         let (tx_response, rx_response) = oneshot::channel();
-        let event_id = sub_id.clone();
-        let (queued_response, prev_entry) = {
+        let key = (sub_id.clone(), call_id.clone());
+        // The exact waiter is installed before its event becomes observable.
+        // An unregistered answer remains in the host's durable input record;
+        // Core never guesses the next call or caches an unknown response.
+        {
             let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    if let Some(response) = ts.take_pending_user_input_response(&sub_id) {
-                        (Some(response), None)
-                    } else {
-                        let mut pending = self.pending_user_input_responses.lock().await;
-                        match pending.remove(&sub_id) {
-                            Some(response) => (Some(response), None),
-                            None => (
-                                None,
-                                ts.insert_pending_user_input(sub_id.clone(), tx_response),
-                            ),
-                        }
-                    }
-                }
-                None => {
-                    let mut pending = self.pending_user_input_responses.lock().await;
-                    (pending.remove(&sub_id), None)
-                }
+            let at = active.as_mut()?;
+            let mut ts = at.turn_state.lock().await;
+            if ts.insert_pending_user_input(key, tx_response).is_some() {
+                warn!("Duplicate exact user input waiter rejected");
+                return None;
             }
-        };
-        if prev_entry.is_some() {
-            warn!("Overwriting existing pending user input for sub_id: {event_id}");
         }
 
         let event = EventMsg::RequestUserInput(RequestUserInputEvent {
@@ -2751,11 +2747,15 @@ impl Session {
         turn_context
             .turn_metadata_state
             .mark_user_input_requested_during_turn();
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::record_request(&event);
         self.send_event(turn_context, event).await;
-        match queued_response {
-            Some(response) => Some(response),
-            None => rx_response.await.ok(),
+        let response = rx_response.await.ok();
+        #[cfg(feature = "mechanism-test-support")]
+        if response.is_some() {
+            crate::mechanism_interaction_test_barrier::record_waiter_consumed("input", &sub_id);
         }
+        response
     }
 
     #[expect(
@@ -2765,43 +2765,30 @@ impl Session {
     pub async fn notify_user_input_response(
         &self,
         sub_id: &str,
+        call_id: &str,
         response: RequestUserInputResponse,
-    ) {
-        let (entry, replaced_response, response_to_send) = {
+    ) -> bool {
+        let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    match ts.remove_pending_user_input(sub_id) {
-                        Some(entry) => (Some(entry), None, Some(response)),
-                        None => {
-                            let replaced =
-                                ts.insert_pending_user_input_response(sub_id.to_string(), response);
-                            (None, replaced, None)
-                        }
-                    }
-                }
-                None => {
-                    let mut pending = self.pending_user_input_responses.lock().await;
-                    let replaced = pending.insert(sub_id.to_string(), response);
-                    (None, replaced, None)
-                }
+                Some(at) => at
+                    .turn_state
+                    .lock()
+                    .await
+                    .remove_pending_user_input(&(sub_id.to_owned(), call_id.to_owned())),
+                None => None,
             }
         };
-        match entry {
-            Some(tx_response) => {
-                if let Some(response) = response_to_send {
-                    tx_response.send(response).ok();
-                }
-            }
-            None => {
-                if replaced_response.is_some() {
-                    warn!("Overwriting queued user input response for sub_id: {sub_id}");
-                } else {
-                    debug!("Queued user input response until turn waiter is restored: {sub_id}");
-                }
-            }
-        }
+        let Some(tx_response) = entry else {
+            #[cfg(feature = "mechanism-test-support")]
+            crate::mechanism_interaction_test_barrier::record_response_delivery(
+                "input", "rejected",
+            );
+            return false;
+        };
+        #[cfg(feature = "mechanism-test-support")]
+        crate::mechanism_interaction_test_barrier::record_response_delivery("input", "sent");
+        tx_response.send(response).is_ok()
     }
 
     #[expect(
@@ -2999,9 +2986,17 @@ impl Session {
         };
         match entry {
             Some(tx_approve) => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "approval", "sent",
+                );
                 tx_approve.send(decision).ok();
             }
             None => {
+                #[cfg(feature = "mechanism-test-support")]
+                crate::mechanism_interaction_test_barrier::record_response_delivery(
+                    "approval", "dropped",
+                );
                 warn!("No pending approval found for call_id: {approval_id}");
             }
         }
@@ -4295,3 +4290,7 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "tool_fact_shutdown_tests.rs"]
+mod tool_fact_shutdown_tests;

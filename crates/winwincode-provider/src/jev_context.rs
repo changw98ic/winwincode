@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider scoring and deterministic retention share one auditable operation.
-
 use std::fmt;
 use std::time::Duration;
 
@@ -15,7 +13,6 @@ use crate::{
     JevRuntime, JevScores,
 };
 
-/// The host supplies protection and archive eligibility; the provider cannot change them.
 #[derive(Clone, serde::Serialize)]
 pub struct JevContextRequest {
     pub task: String,
@@ -24,7 +21,6 @@ pub struct JevContextRequest {
     pub archive_eligible: bool,
 }
 
-/// Original H1-H4 probabilities alongside the action, for deterministic replay.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JevContextEvaluation {
@@ -45,17 +41,22 @@ impl fmt::Debug for JevContextRequest {
 }
 
 impl JevRuntime {
-    /// Scores H1-H4 in one batch, then applies system-owned retention policy.
-    /// An unavailable or invalid inference returns no decision and retains its
-    /// failures and usage; the caller must keep the previous context.
-    ///
-    /// # Errors
-    /// Rejects empty inputs and invalid policy before contacting a provider.
     pub async fn evaluate_context(
         &self,
         input: JevContextRequest,
         policy: &JevPolicy,
         options: JevExecutionOptions,
+    ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
+        self.evaluate_context_authorized(input, policy, options, &|| true)
+            .await
+    }
+
+    pub(crate) async fn evaluate_context_authorized(
+        &self,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
     ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
         validate_policy(policy)?;
         if input.task.trim().is_empty() || input.candidate.trim().is_empty() {
@@ -73,7 +74,9 @@ impl JevRuntime {
             premise: premise.clone(),
             hypothesis: hypothesis.to_owned(),
         });
-        let run = self.batch_evaluate(hypotheses.into(), options).await;
+        let run = self
+            .batch_evaluate_authorized(hypotheses.into(), options, can_start)
+            .await;
         let mut failures = run.failures;
         let mut value = None;
         if let (Some(batch), Some(observation)) = (&run.value, &run.observation) {
@@ -106,6 +109,20 @@ impl JevRuntime {
                     provider_id: observation.provider_id.clone(),
                     kind: JevProviderErrorKind::InvalidResponse,
                     latency: Duration::ZERO,
+                    network: Some(
+                        winwincode_network::NetworkFailure::new(
+                            winwincode_network::ErrorKind::ProtocolInvalid,
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::Decode,
+                        )
+                        .with_diagnostic(
+                            winwincode_network::NetworkDiagnostic::new(
+                                winwincode_network::DiagnosticCode::ResponseInvariant,
+                            ),
+                        ),
+                    ),
+                    attempt: None,
+                    connection_wait: false,
                 });
             }
         }

@@ -21,10 +21,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::ConnectionDriver;
+use super::cleanup::SessionCleanup;
 use super::notify_cell_closed;
 use super::session_registry::CellOwner;
 use super::session_registry::DelegateTarget;
-use super::session_registry::FailedSession;
+use super::session_registry::RetiredSession;
 use super::types::DriverEvent;
 
 const MAX_RECENT_DELEGATE_REQUEST_IDS: usize = 4096;
@@ -228,7 +229,7 @@ impl DelegateRuntime {
         effects
     }
 
-    pub(super) fn fail_all(&mut self, failed_sessions: Vec<FailedSession>) {
+    pub(super) fn fail_all(&mut self, failed_sessions: Vec<RetiredSession>) {
         for (_, call) in self.calls.drain() {
             call.revoke();
         }
@@ -334,10 +335,18 @@ impl ConnectionDriver {
         self.apply_delegate_effects(effects)
     }
 
-    pub(super) fn close_session_locally(&mut self, session_id: &SessionId) -> DelegateEffects {
+    pub(super) fn close_session_locally(
+        &mut self,
+        session_id: &SessionId,
+    ) -> (DelegateEffects, Option<SessionCleanup>) {
         self.requests.remove_unclaimed_for_session(session_id);
-        let owners = self.sessions.remove_session(session_id);
-        self.delegates.close_cells(owners)
+        match self.sessions.remove_session(session_id) {
+            Some(session) => (
+                self.delegates.close_cells(session.cells),
+                Some(session.cleanup),
+            ),
+            None => (DelegateEffects::empty(), None),
+        }
     }
 
     pub(super) fn apply_delegate_effects(&mut self, effects: DelegateEffects) -> bool {

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable execution-resource admission and budget reservations.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -147,8 +145,6 @@ fn prepare_admission_schema(connection: &mut Connection) -> Result<(), Execution
             .execute_batch(ADMISSION_SCHEMA)
             .map_err(sql_error);
     }
-    // Rebuild nullable limits in place. Foreign keys are checked before
-    // committing and restored even when the migration rolls back.
     connection
         .pragma_update(None, "foreign_keys", false)
         .map_err(sql_error)?;
@@ -220,11 +216,9 @@ fn prepare_admission_schema(connection: &mut Connection) -> Result<(), Execution
     result
 }
 
-/// Canonical worker-pool identity used by resource admission.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct WorkerPoolId(pub String);
 
-/// One independently limited scheduler boundary.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionAdmissionBoundary {
@@ -255,30 +249,24 @@ pub enum ExecutionAdmissionBoundary {
     },
 }
 
-/// Fixed limits for one scheduler boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionLimits {
     pub max_concurrent: u64,
     pub max_queued: u64,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub token_budget: Option<u64>,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub cost_budget_microunits: Option<u64>,
-    /// `None` explicitly permits execution without a runtime limit.
     #[serde(deserialize_with = "Option::deserialize")]
     pub max_runtime_millis: Option<u64>,
 }
 
-/// Immutable configured policy for one scheduler boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionPolicy {
     pub boundary: ExecutionAdmissionBoundary,
     pub limits: ExecutionAdmissionLimits,
 }
 
-/// Repository access determines whether two writes may run together.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionRepositoryAccess {
@@ -287,7 +275,6 @@ pub enum ExecutionRepositoryAccess {
     IsolatedWrite { worktree_key: String },
 }
 
-/// Durable admission reservation lifecycle.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionReservationState {
@@ -320,7 +307,6 @@ impl ExecutionReservationState {
     }
 }
 
-/// Why a queued/running reservation stopped without a completed result.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionReservationReleaseReason {
@@ -347,7 +333,6 @@ impl ExecutionReservationReleaseReason {
     }
 }
 
-/// Queue admission and full budget reservation request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRequest {
     pub scope: ExecutionQueueScope,
@@ -356,19 +341,15 @@ pub struct ExecutionReservationRequest {
     pub job_id: ExecutionJobId,
     pub request_id: RequestId,
     pub repository_access: ExecutionRepositoryAccess,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub reserved_tokens: Option<u64>,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub reserved_cost_microunits: Option<u64>,
-    /// `None` explicitly permits execution without a runtime limit.
     #[serde(deserialize_with = "Option::deserialize")]
     pub runtime_limit_millis: Option<u64>,
     pub submitted_at: Instant,
 }
 
-/// Starts one queued reservation after concurrent-resource checks.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationStart {
     pub scope: ExecutionQueueScope,
@@ -379,7 +360,6 @@ pub struct ExecutionReservationStart {
     pub started_at: Instant,
 }
 
-/// Releases all queue, concurrency, and unspent budget reservations.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRelease {
     pub scope: ExecutionQueueScope,
@@ -391,7 +371,6 @@ pub struct ExecutionReservationRelease {
     pub released_at: Instant,
 }
 
-/// Settles a completed execution against actual usage.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationSettlement {
     pub scope: ExecutionQueueScope,
@@ -400,14 +379,12 @@ pub struct ExecutionReservationSettlement {
     pub request_id: RequestId,
     pub expected_revision: u64,
     pub actual_tokens: u64,
-    /// None records an unknown Provider charge, never a free call.
     #[serde(deserialize_with = "Option::deserialize")]
     pub actual_cost_microunits: Option<u64>,
     pub actual_runtime_millis: u64,
     pub completed_at: Instant,
 }
 
-/// Complete durable reservation record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRecord {
     pub scope: ExecutionQueueScope,
@@ -416,13 +393,10 @@ pub struct ExecutionReservationRecord {
     pub job_id: ExecutionJobId,
     pub repository_access: ExecutionRepositoryAccess,
     pub state: ExecutionReservationState,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub reserved_tokens: Option<u64>,
-    /// `None` explicitly permits unlimited usage; actual usage is still recorded.
     #[serde(deserialize_with = "Option::deserialize")]
     pub reserved_cost_microunits: Option<u64>,
-    /// `None` explicitly permits execution without a runtime limit.
     #[serde(deserialize_with = "Option::deserialize")]
     pub runtime_limit_millis: Option<u64>,
     pub actual_tokens: Option<u64>,
@@ -436,7 +410,6 @@ pub struct ExecutionReservationRecord {
     pub release_reason: Option<ExecutionReservationReleaseReason>,
 }
 
-/// Immutable worker usage fact committed with a successful settlement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerSettlementSourceFact {
@@ -447,13 +420,11 @@ pub struct WorkerSettlementSourceFact {
     pub user_id: UserId,
     pub actual_runtime_millis: u64,
     pub actual_tokens: u64,
-    /// None records an unknown Provider charge, never a free call.
     #[serde(deserialize_with = "Option::deserialize")]
     pub actual_cost_microunits: Option<u64>,
     pub completed_at: Instant,
 }
 
-/// One immutable worker-settlement source for usage reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourceEntry {
     pub sequence: u64,
@@ -461,7 +432,6 @@ pub struct WorkerSettlementSourceEntry {
     pub fact: WorkerSettlementSourceFact,
 }
 
-/// Stable cursor over one immutable worker-settlement source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourceCursor {
     snapshot_sequence: u64,
@@ -480,7 +450,6 @@ impl WorkerSettlementSourceCursor {
     }
 }
 
-/// One bounded page from a fixed worker-settlement source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourcePage {
     pub snapshot_sequence: u64,
@@ -488,14 +457,12 @@ pub struct WorkerSettlementSourcePage {
     pub next: Option<WorkerSettlementSourceCursor>,
 }
 
-/// Replay-safe response for reserve/start/release/settle.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionReceipt {
     pub reservation: ExecutionReservationRecord,
     pub replayed: bool,
 }
 
-/// Transactionally consistent usage for one configured boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionAdmissionUsage {
     pub queued: u64,
@@ -503,9 +470,7 @@ pub struct ExecutionAdmissionUsage {
     pub reserved_tokens: u64,
     pub reserved_cost_microunits: u64,
     pub committed_tokens: u64,
-    /// Finished executions awaiting a final token total; execution slots are already free.
     pub accounting_pending: u64,
-    /// None means at least one settled charge is unknown.
     pub committed_cost_microunits: Option<u64>,
 }
 
@@ -523,7 +488,6 @@ impl Default for ExecutionAdmissionUsage {
     }
 }
 
-/// Stable machine-readable rejection and adapter failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionAdmissionErrorCode {
     InvalidInput,
@@ -539,7 +503,6 @@ pub enum ExecutionAdmissionErrorCode {
     Adapter,
 }
 
-/// Admission error with a stable code and optional failing boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionAdmissionError {
     code: ExecutionAdmissionErrorCode,
@@ -595,17 +558,11 @@ impl fmt::Display for ExecutionAdmissionError {
 
 impl std::error::Error for ExecutionAdmissionError {}
 
-/// SQLite-backed execution admission service.
 pub struct ExecutionAdmission<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens durable execution admission over this storage connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the admission schema cannot be prepared.
     pub fn execution_admission(
         &mut self,
     ) -> Result<ExecutionAdmission<'_>, ExecutionAdmissionError> {
@@ -626,16 +583,58 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(admission)
     }
 
-    /// Installs one immutable boundary policy. Exact repeats are idempotent;
-    /// changing an installed policy is rejected so concurrent callers cannot
-    /// weaken an active limit.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed boundaries/limits, changed policies, and `SQLite` failures.
     pub fn configure_policy(
         &mut self,
         policy: &ExecutionAdmissionPolicy,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        self.configure_policy_inner(policy, None)
+    }
+
+    pub fn configure_runtime_policy(
+        &mut self,
+        boundary: ExecutionAdmissionBoundary,
+        runtime_limited: bool,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        let limits = ExecutionAdmissionLimits {
+            max_concurrent: if matches!(boundary, ExecutionAdmissionBoundary::ProductSession { .. })
+            {
+                1
+            } else {
+                i64::MAX as u64
+            },
+            max_queued: 10_000,
+            token_budget: None,
+            cost_budget_microunits: None,
+            max_runtime_millis: runtime_limited.then_some(604_800_000),
+        };
+        let old_max_concurrent = match &boundary {
+            ExecutionAdmissionBoundary::ProductSession { .. } => None,
+            ExecutionAdmissionBoundary::WorkerPool { worker_pool_id, .. } => {
+                match worker_pool_id.0.as_str() {
+                    "wpl_00000000000000000000000001" | "wpl_000000000000000000000000D3" => Some(1),
+                    "wpl_000000000000000000000000F7" => Some(4),
+                    _ => None,
+                }
+            }
+            _ => Some(1),
+        };
+        let former_default = old_max_concurrent.map(|max_concurrent| ExecutionAdmissionPolicy {
+            boundary: boundary.clone(),
+            limits: ExecutionAdmissionLimits {
+                max_concurrent,
+                ..limits
+            },
+        });
+        self.configure_policy_inner(
+            &ExecutionAdmissionPolicy { boundary, limits },
+            former_default.as_ref(),
+        )
+    }
+
+    fn configure_policy_inner(
+        &mut self,
+        policy: &ExecutionAdmissionPolicy,
+        former_default: Option<&ExecutionAdmissionPolicy>,
     ) -> Result<bool, ExecutionAdmissionError> {
         validate_policy(policy)?;
         let boundary_key = boundary_key(&policy.boundary)?;
@@ -659,9 +658,19 @@ impl<'storage> ExecutionAdmission<'storage> {
         if let Some(existing) = existing {
             let existing = complete_policy(&existing)?;
             if existing != *policy {
-                return Err(ExecutionAdmissionError::invalid(
-                    "execution admission policy is already configured differently",
-                ));
+                if former_default != Some(&existing) {
+                    return Err(ExecutionAdmissionError::invalid(
+                        "execution admission policy is already configured differently",
+                    ));
+                }
+                upgrade_runtime_policy(
+                    &transaction,
+                    &boundary_key,
+                    &existing.limits,
+                    policy.limits.max_concurrent,
+                )?;
+                transaction.commit().map_err(sql_error)?;
+                return Ok(true);
             }
             transaction.commit().map_err(sql_error)?;
             return Ok(false);
@@ -700,13 +709,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(true)
     }
 
-    /// Atomically reserves queue capacity plus the requested token and cost
-    /// budgets across every boundary in the request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, missing/exhausted policies, conflicting replays,
-    /// duplicate jobs, and `SQLite` failures.
     pub fn reserve(
         &mut self,
         request: &ExecutionReservationRequest,
@@ -761,12 +763,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(receipt)
     }
 
-    /// Atomically consumes concurrency slots and starts one queued reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/invalid requests, exhausted concurrency, repository-write
-    /// conflicts, conflicting replays, and `SQLite` failures.
     pub fn start(
         &mut self,
         request: &ExecutionReservationStart,
@@ -852,11 +848,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Releases a queued or running reservation after cancellation/failure.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/terminal requests, conflicting replays, and `SQLite` failures.
     pub fn release(
         &mut self,
         request: &ExecutionReservationRelease,
@@ -864,9 +855,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         self.release_with_accounting(request, None)
     }
 
-    /// Ends execution while retaining unknown usage for durable budget reconciliation.
-    /// # Errors
-    /// Rejects inconsistent accounting, changed terminal replay, or storage failure.
     pub fn release_with_unknown_usage(
         &mut self,
         request: &ExecutionReservationRelease,
@@ -956,9 +944,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Applies a final usage fact to a finished execution without changing its outcome.
-    /// # Errors
-    /// Rejects unknown usage, foreign terminal identity, changed settlement replay, or storage failure.
     pub fn settle_reconciliation(
         &mut self,
         job_id: &ExecutionJobId,
@@ -1046,13 +1031,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(changed)
     }
 
-    /// Settles a running reservation using actual usage and releases the
-    /// unused portion of its token/cost reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/non-running requests, actual usage above the reservation,
-    /// conflicting replays, and `SQLite` failures.
     #[allow(clippy::too_many_lines)]
     pub fn settle(
         &mut self,
@@ -1176,11 +1154,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Loads one reservation only for its exact scope and worker pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input and `SQLite` failures.
     pub fn load_reservation(
         &self,
         scope: &ExecutionQueueScope,
@@ -1198,16 +1171,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         )
     }
 
-    /// Loads the one durable reservation identified by its globally unique Job.
-    ///
-    /// This is the scheduler/Worker composition seam: tenant attribution and
-    /// pool placement are returned from the stored admission receipt rather
-    /// than being repeated by a caller that is about to claim the Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, corrupt stored reservations, and
-    /// `SQLite` failures.
     pub fn load_reservation_by_job(
         &self,
         job_id: &ExecutionJobId,
@@ -1233,11 +1196,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         stored.map(complete_reservation).transpose()
     }
 
-    /// Loads the immutable settlement source for one exact execution job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identity, corrupt source facts, and `SQLite` failures.
     pub fn load_settlement_source(
         &self,
         job_id: &ExecutionJobId,
@@ -1251,11 +1209,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(source)
     }
 
-    /// Scans immutable settlement sources using a bounded fixed snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid cursors/limits, corrupt source facts, and `SQLite` failures.
     pub fn scan_settlement_sources(
         &self,
         cursor: Option<&WorkerSettlementSourceCursor>,
@@ -1268,11 +1221,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         )
     }
 
-    /// Reads current queue, concurrency, reserved, and committed budget usage.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/missing policies and `SQLite` failures.
     pub fn usage(
         &self,
         boundary: &ExecutionAdmissionBoundary,
@@ -2715,6 +2663,46 @@ fn to_sql_integer(value: u64, field: &str) -> Result<i64, ExecutionAdmissionErro
     i64::try_from(value).map_err(|_| {
         ExecutionAdmissionError::invalid(format!("{field} exceeds the supported range"))
     })
+}
+
+fn upgrade_runtime_policy(
+    connection: &Connection,
+    boundary_key: &str,
+    previous: &ExecutionAdmissionLimits,
+    max_concurrent: u64,
+) -> Result<(), ExecutionAdmissionError> {
+    let updated = connection
+        .execute(
+            "UPDATE execution_admission_policies SET max_concurrent = ?2
+             WHERE boundary_key = ?1 AND max_concurrent = ?3
+               AND max_queued = ?4 AND token_budget IS ?5
+               AND cost_budget_microunits IS ?6 AND max_runtime_millis IS ?7",
+            params![
+                boundary_key,
+                to_sql_integer(max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_queued, "maxQueued")?,
+                previous
+                    .token_budget
+                    .map(|value| to_sql_integer(value, "tokenBudget"))
+                    .transpose()?,
+                previous
+                    .cost_budget_microunits
+                    .map(|value| to_sql_integer(value, "costBudgetMicrounits"))
+                    .transpose()?,
+                previous
+                    .max_runtime_millis
+                    .map(|value| to_sql_integer(value, "maxRuntimeMillis"))
+                    .transpose()?,
+            ],
+        )
+        .map_err(sql_error)?;
+    if updated != 1 {
+        return Err(ExecutionAdmissionError::invalid(
+            "execution admission defaults changed during upgrade",
+        ));
+    }
+    Ok(())
 }
 
 fn from_sql_integer(value: i64, field: &str) -> Result<u64, ExecutionAdmissionError> {

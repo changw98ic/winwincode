@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Execution-time protection for verification inputs and private scratch.
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -24,9 +22,8 @@ use sandboxing::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
-/// Version of the protected input and writable scratch contract.
 pub const PROTECTED_INPUT_SCOPE_VERSION: u8 = 1;
 
 const PROTECTED_INPUT_CATEGORIES: &[&str] = &[
@@ -37,7 +34,6 @@ const PROTECTED_INPUT_CATEGORIES: &[&str] = &[
     "controlled-config",
 ];
 
-/// Stable error returned by verification isolation setup or execution.
 #[derive(Debug)]
 pub struct IsolationError {
     message: String,
@@ -59,7 +55,6 @@ impl std::fmt::Display for IsolationError {
 
 impl std::error::Error for IsolationError {}
 
-/// Versioned protected source contract. Enforcement covers the whole checkout.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectedInputScope {
     version: u8,
@@ -77,11 +72,6 @@ struct ProtectedInputScopeDigest<'a> {
 }
 
 impl ProtectedInputScope {
-    /// Declares the immutable input root and additional contract paths.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical roots and declared paths that escape the root.
     pub fn new(root: impl AsRef<Path>, declared_paths: &[String]) -> Result<Self, IsolationError> {
         let root = canonical_directory(root.as_ref(), "protected input root")?;
         let mut normalized = declared_paths.to_vec();
@@ -134,7 +124,6 @@ impl ProtectedInputScope {
     }
 }
 
-/// Private writable directories allocated to one verification profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationScratch {
     id: String,
@@ -147,11 +136,6 @@ pub struct VerificationScratch {
 }
 
 impl VerificationScratch {
-    /// Allocates a collision-free scratch tree below a job-private workspace.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid run identifiers or filesystem failures.
     pub fn create(
         workspace_root: impl AsRef<Path>,
         run_identity: &str,
@@ -203,11 +187,6 @@ impl VerificationScratch {
         Ok(scratch)
     }
 
-    /// Allocates an independent sibling scratch from the same workspace pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scratch roots or run identities and filesystem failures.
     pub fn sibling(&self, run_id: &str, ordinal: usize) -> Result<Self, IsolationError> {
         let base = self
             .root
@@ -246,7 +225,6 @@ impl VerificationScratch {
     }
 }
 
-/// Host-enforced protection capability discovered by a real mutation probe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtectionCapability {
     Available { backend: String },
@@ -259,16 +237,66 @@ impl ProtectionCapability {
     }
 }
 
-/// One verification profile bound to immutable input and isolated scratch.
 #[derive(Clone, Debug)]
 pub struct VerificationIsolation {
     scope: ProtectedInputScope,
     scratch: VerificationScratch,
     helper_executable: Option<PathBuf>,
     capability: ProtectionCapability,
+    cancellation: VerificationCancellation,
 }
 
-/// Complete output from an isolated test-only or capability command.
+#[derive(Clone, Debug)]
+pub struct VerificationCancellation {
+    requested: tokio::sync::watch::Sender<bool>,
+    cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "test-support"))]
+    force_cleanup_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for VerificationCancellation {
+    fn default() -> Self {
+        Self {
+            requested: tokio::sync::watch::channel(false).0,
+            cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-support"))]
+            force_cleanup_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl VerificationCancellation {
+    pub fn cancel(&self) {
+        self.requested.send_replace(true);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.requested.borrow()
+    }
+
+    pub(crate) fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_cleanup_failure(&self) {
+        self.cleanup_failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn force_cleanup_failure_for_test(&self) {
+        self.force_cleanup_failure
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.requested.subscribe();
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
+    }
+}
+
 #[derive(Debug)]
 pub struct IsolatedOutput {
     pub status: std::process::ExitStatus,
@@ -285,16 +313,25 @@ impl IsolatedOutput {
 }
 
 impl VerificationIsolation {
-    /// Builds the host policy and proves the enforcement with live mutation attempts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope or scratch. An unsupported host is retained as a
-    /// fail-closed capability instead of permitting verification execution.
     pub async fn open(
         scope: ProtectedInputScope,
         scratch: VerificationScratch,
         helper_executable: Option<PathBuf>,
+    ) -> Result<Self, IsolationError> {
+        Self::open_with_cancellation(
+            scope,
+            scratch,
+            helper_executable,
+            VerificationCancellation::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_cancellation(
+        scope: ProtectedInputScope,
+        scratch: VerificationScratch,
+        helper_executable: Option<PathBuf>,
+        cancellation: VerificationCancellation,
     ) -> Result<Self, IsolationError> {
         let scratch_root = canonical_directory(&scratch.root, "verification scratch root")?;
         if paths_overlap(&scope.root, &scratch_root) {
@@ -315,6 +352,7 @@ impl VerificationIsolation {
             scope,
             scratch,
             helper_executable,
+            cancellation,
             capability: ProtectionCapability::Unavailable {
                 backend: platform_backend_name().to_owned(),
                 reason: "capability probe has not completed".to_owned(),
@@ -329,7 +367,15 @@ impl VerificationIsolation {
                 reason: error.to_string(),
             },
         };
+        if candidate.cancellation.is_cancelled() {
+            return Err(IsolationError::new("verification cancelled"));
+        }
         Ok(candidate)
+    }
+
+    #[must_use]
+    pub fn cancellation_handle(&self) -> VerificationCancellation {
+        self.cancellation.clone()
     }
 
     pub const fn capability(&self) -> &ProtectionCapability {
@@ -348,11 +394,6 @@ impl VerificationIsolation {
         capability.allows_strong_pass()
     }
 
-    /// Runs one no-shell command with all descendants under the host policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable protection, path escapes, or process launch failure.
     pub async fn run(
         &self,
         argv: &[String],
@@ -362,14 +403,15 @@ impl VerificationIsolation {
         output_limit_bytes: usize,
     ) -> Result<IsolatedOutput, IsolationError> {
         let command = self.command(argv, working_directory, environment)?;
-        Box::pin(run_isolated_command(command, timeout, output_limit_bytes)).await
+        Box::pin(run_isolated_command(
+            command,
+            timeout,
+            output_limit_bytes,
+            &self.cancellation,
+        ))
+        .await
     }
 
-    /// Builds the exact production command wrapper used by validation execution.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable protection, empty argv, path escapes, or policy errors.
     pub fn command(
         &self,
         argv: &[String],
@@ -444,8 +486,6 @@ impl VerificationIsolation {
                 "host cannot enforce protected verification input",
             ));
         }
-        // The helper discovers the platform sandbox launcher through PATH,
-        // including during the capability probe before a command environment exists.
         environment.entry("PATH".to_owned()).or_insert_with(|| {
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned())
         });
@@ -512,8 +552,6 @@ impl VerificationIsolation {
         let policy = FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry::new(root, FileSystemAccessMode::Read),
             FileSystemSandboxEntry::new(scratch, FileSystemAccessMode::Write),
-            // Linux bubblewrap mounts its own writable /dev. Treating a device
-            // file as a writable root also invents directory exclusions below it.
             #[cfg(not(target_os = "linux"))]
             FileSystemSandboxEntry::new(
                 FileSystemPath::from(absolute_path(Path::new("/dev/null"))?),
@@ -527,8 +565,6 @@ impl VerificationIsolation {
     }
 
     async fn probe(&mut self) -> Result<(), IsolationError> {
-        // Bubblewrap versions without --argv0 re-exec the helper by its first
-        // argument. Keep that absolute alias outside the writable scratch.
         #[cfg(target_os = "linux")]
         if let Some(helper) = &mut self.helper_executable {
             let source = fs::canonicalize(&*helper)
@@ -541,9 +577,6 @@ impl VerificationIsolation {
                 .map_err(|error| IsolationError::new(format!("sandbox launcher alias: {error}")))?;
             *helper = alias;
         }
-        // Probe the same read-only policy outside both the sealed input and
-        // writable scratch. Never create/delete probe files in a Snapshot:
-        // it may already contain those names or serve concurrent verifiers.
         let probe_root = self.scratch.root.with_extension("probe");
         fs::create_dir(&probe_root)
             .map_err(|error| IsolationError::new(format!("probe directory: {error}")))?;
@@ -594,6 +627,7 @@ test ! -e "$WWC_PROBE_GRANDCHILD"
             command,
             Duration::from_secs(10),
             1024 * 1024,
+            &self.cancellation,
         ))
         .await?;
         if !output.status.success() || output.timed_out || output.overflowed {
@@ -606,11 +640,26 @@ test ! -e "$WWC_PROBE_GRANDCHILD"
     }
 }
 
+struct ProcessGroupGuard(Option<i32>);
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.0 {
+            let _ = kill_process_group_by_id(process_group);
+        }
+    }
+}
+
 async fn run_isolated_command(
     mut command: Command,
     timeout: Duration,
     output_limit_bytes: usize,
+    cancellation: &VerificationCancellation,
 ) -> Result<IsolatedOutput, IsolationError> {
+    if cancellation.is_cancelled() {
+        return Err(IsolationError::new("verification cancelled"));
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
     command.kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
         IsolationError::new(format!(
@@ -618,56 +667,36 @@ async fn run_isolated_command(
         ))
     })?;
     let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| IsolationError::new("isolated command stdout cannot be captured"))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| IsolationError::new("isolated command stderr cannot be captured"))?;
+    let mut process_group_guard = ProcessGroupGuard(process_group);
+    let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
+    else {
+        terminate_process_group(&mut child, process_group, cancellation).await?;
+        process_group_guard.0 = None;
+        return Err(IsolationError::new(
+            "isolated command output cannot be captured",
+        ));
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut overflowed = false;
-    let read = async {
-        let mut stdout_open = true;
-        let mut stderr_open = true;
-        loop {
-            let mut out_chunk = [0_u8; 8192];
-            let mut err_chunk = [0_u8; 8192];
-            if !stdout_open && !stderr_open {
-                break;
-            }
-            tokio::select! {
-                left = stdout_pipe.read(&mut out_chunk), if stdout_open => {
-                    let left = left.map_err(|error| {
-                        IsolationError::new(format!("isolated command stdout failed: {error}"))
-                    })?;
-                    if left == 0 {
-                        stdout_open = false;
-                    } else {
-                        overflowed |= extend_bounded(&mut stdout, &out_chunk[..left], output_limit_bytes);
-                    }
-                }
-                right = stderr_pipe.read(&mut err_chunk), if stderr_open => {
-                    let right = right.map_err(|error| {
-                        IsolationError::new(format!("isolated command stderr failed: {error}"))
-                    })?;
-                    if right == 0 {
-                        stderr_open = false;
-                    } else {
-                        overflowed |= extend_bounded(&mut stderr, &err_chunk[..right], output_limit_bytes);
-                    }
-                }
-            }
-            if overflowed {
-                break;
-            }
+    let read = drain_isolated_output(
+        &mut stdout_pipe,
+        &mut stderr_pipe,
+        &mut stdout,
+        &mut stderr,
+        &mut overflowed,
+        output_limit_bytes,
+    );
+    let read_result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            terminate_process_group(&mut child, process_group, cancellation).await?;
+            process_group_guard.0 = None;
+            return Err(IsolationError::new("verification cancelled"));
         }
-        Ok::<(), IsolationError>(())
+        result = tokio::time::timeout_at(deadline, Box::pin(read)) => result,
     };
-    let read_result = tokio::time::timeout(timeout, Box::pin(read)).await;
-    let timed_out = read_result.is_err();
+    let mut timed_out = read_result.is_err();
     let read_error = if timed_out {
         None
     } else {
@@ -677,19 +706,34 @@ async fn run_isolated_command(
         }
     };
     let status = if timed_out || overflowed || read_error.is_some() {
-        terminate_process_group(&mut child, process_group).await?
-    } else {
-        let status = child.wait().await.map_err(|error| {
+        terminate_process_group(&mut child, process_group, cancellation).await?
+    } else if let Some(Ok(status)) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        result = tokio::time::timeout_at(deadline, child.wait()) => Some(result),
+    } {
+        let status = status.map_err(|error| {
+            cancellation.record_cleanup_failure();
             IsolationError::new(format!("isolated command cannot be reaped: {error}"))
         })?;
         if let Some(process_group) = process_group {
-            kill_process_group_by_id(process_group)?;
+            kill_process_group_by_id(process_group).inspect_err(|_| {
+                cancellation.record_cleanup_failure();
+            })?;
         }
         status
+    } else {
+        timed_out = !cancellation.is_cancelled();
+        terminate_process_group(&mut child, process_group, cancellation).await?
     };
+    if cancellation.is_cancelled() {
+        process_group_guard.0 = None;
+        return Err(IsolationError::new("verification cancelled"));
+    }
     if let Some(error) = read_error {
         return Err(error);
     }
+    process_group_guard.0 = None;
     Ok(IsolatedOutput {
         status,
         stdout,
@@ -697,6 +741,51 @@ async fn run_isolated_command(
         timed_out,
         overflowed,
     })
+}
+
+async fn drain_isolated_output(
+    stdout_pipe: &mut ChildStdout,
+    stderr_pipe: &mut ChildStderr,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    overflowed: &mut bool,
+    output_limit_bytes: usize,
+) -> Result<(), IsolationError> {
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    loop {
+        let mut out_chunk = [0_u8; 8192];
+        let mut err_chunk = [0_u8; 8192];
+        if !stdout_open && !stderr_open {
+            break;
+        }
+        tokio::select! {
+            left = stdout_pipe.read(&mut out_chunk), if stdout_open => {
+                let left = left.map_err(|error| {
+                    IsolationError::new(format!("isolated command stdout failed: {error}"))
+                })?;
+                if left == 0 {
+                    stdout_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stdout, &out_chunk[..left], output_limit_bytes);
+                }
+            }
+            right = stderr_pipe.read(&mut err_chunk), if stderr_open => {
+                let right = right.map_err(|error| {
+                    IsolationError::new(format!("isolated command stderr failed: {error}"))
+                })?;
+                if right == 0 {
+                    stderr_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stderr, &err_chunk[..right], output_limit_bytes);
+                }
+            }
+        }
+        if *overflowed {
+            break;
+        }
+    }
+    Ok::<(), IsolationError>(())
 }
 
 fn extend_bounded(target: &mut Vec<u8>, source: &[u8], output_limit_bytes: usize) -> bool {
@@ -709,14 +798,27 @@ fn extend_bounded(target: &mut Vec<u8>, source: &[u8], output_limit_bytes: usize
 async fn terminate_process_group(
     child: &mut Child,
     process_group: Option<i32>,
+    cancellation: &VerificationCancellation,
 ) -> Result<std::process::ExitStatus, IsolationError> {
-    if let Some(process_group) = process_group {
-        kill_process_group_by_id(process_group)?;
-    }
+    let group_result = process_group.map(kill_process_group_by_id).transpose();
     let _ = child.start_kill();
     let status = child.wait().await.map_err(|error| {
+        cancellation.record_cleanup_failure();
         IsolationError::new(format!("isolated command cannot be reaped: {error}"))
     })?;
+    group_result.inspect_err(|_| {
+        cancellation.record_cleanup_failure();
+    })?;
+    #[cfg(any(test, feature = "test-support"))]
+    if cancellation
+        .force_cleanup_failure
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        cancellation.record_cleanup_failure();
+        return Err(IsolationError::new(
+            "verification cleanup confirmation fault",
+        ));
+    }
     Ok(status)
 }
 
@@ -807,4 +909,118 @@ fn resolve_below(root: &Path, relative: &Path, context: &str) -> Result<PathBuf,
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn early_eof_does_not_remove_the_process_exit_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let descendant = root.path().join("descendant.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "exec 1>&- 2>&-; sleep 10 & printf '%s' \"$!\" > \"$1\"; sleep 1",
+                "fixture",
+            ])
+            .arg(&descendant)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let began = std::time::Instant::now();
+        let result = run_isolated_command(
+            command,
+            Duration::from_millis(100),
+            1024,
+            &VerificationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert!(result.timed_out, "EOF is not proof of process termination");
+        assert!(began.elapsed() < Duration::from_millis(800));
+        let pid = fs::read_to_string(descendant).unwrap();
+        for _ in 0..20 {
+            let status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&status.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("descendant must be terminated with the verification process group");
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_reaps_the_command_before_returning() {
+        for close_output in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let leader = root.path().join("leader.pid");
+            let descendant = root.path().join("descendant.pid");
+            let mut command = Command::new("/bin/sh");
+            let script = format!(
+                "{}sleep 30 & printf '%s' \"$!\" > \"$2\"; printf '%s' \"$$\" > \"$1\"; wait",
+                if close_output { "exec 1>&- 2>&-; " } else { "" }
+            );
+            command
+                .args(["-c", &script, "fixture"])
+                .arg(&leader)
+                .arg(&descendant)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let cancellation = VerificationCancellation::default();
+            let task_cancellation = cancellation.clone();
+            let task = tokio::spawn(async move {
+                run_isolated_command(command, Duration::from_secs(40), 1024, &task_cancellation)
+                    .await
+            });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !leader.exists() || fs::read_to_string(&leader).unwrap_or_default().is_empty() {
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            cancellation.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "cancelled commands produce no accepted output"
+            );
+            let pid = fs::read_to_string(&leader).unwrap();
+            let leader_status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&leader_status.stdout)
+                    .trim()
+                    .is_empty(),
+                "direct child must already be reaped when cancellation returns"
+            );
+            let descendant_pid = fs::read_to_string(&descendant).unwrap();
+            let mut terminated = false;
+            for _ in 0..20 {
+                let status = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &descendant_pid])
+                    .output()
+                    .unwrap();
+                let state = String::from_utf8_lossy(&status.stdout);
+                if state.trim().is_empty() || state.trim().starts_with('Z') {
+                    terminated = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(terminated, "process-group descendants must be terminated");
+        }
+    }
 }

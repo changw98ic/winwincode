@@ -228,7 +228,6 @@ test('blocking decisions are ordered first, then soonest expiry, then identity',
   assert.deepEqual(view.items.map(item => item.kind), ['approval', 'input', 'attention'])
   assert.equal(view.items[0].id, 'apr_00000000000000000000000002')
   assert.equal(view.items[0].urgency, 'blocking')
-  // One stable order, so a refreshed snapshot never reshuffles the card rows.
   const reversed = orderedContextualDecisions([...view.items].reverse())
   assert.deepEqual(reversed.map(item => item.id), view.items.map(item => item.id))
 })
@@ -303,4 +302,20 @@ test('one row keeps its controls only while the decision is still decidable', ()
     contextualDecisionKindLabel('attention'),
     '业务待处理',
   )
+})
+
+
+test('Other permission belongs only to an explicitly open single-choice input', () => {
+  for (const [mode, allowOther, expected] of [
+    ['single_choice', undefined, false],
+    ['single_choice', false, false],
+    ['single_choice', true, true],
+    ['confirmation', true, false],
+    ['text', true, false],
+  ]) {
+    const item = contextualDecisions(source({ inputs: [input({ mode, allowOther })] })).items[0]
+    assert.equal(item.allowOther, expected)
+  }
+  assert.equal(contextualDecisions(source({ approvals: [approval()] })).items[0].allowOther, false)
+  assert.equal(contextualDecisions(source({ attention: [attention()] })).items[0].allowOther, false)
 })

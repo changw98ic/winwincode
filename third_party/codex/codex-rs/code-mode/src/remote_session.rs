@@ -23,6 +23,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_install_context::InstallContext;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use self::connection::Connection;
 use self::connection::ConnectionError;
@@ -258,6 +259,7 @@ enum SessionState {
     Opening {
         remote: RemoteSession,
         result_rx: watch::Receiver<Option<Result<SessionBinding, String>>>,
+        cancellation: CancellationToken,
     },
     Open(SessionBinding),
     Closing,
@@ -360,11 +362,13 @@ impl SessionInner {
                             generation,
                         };
                         let (result_tx, result_rx) = watch::channel(None);
+                        let cancellation = CancellationToken::new();
                         *state = SessionState::Opening {
                             remote: remote.clone(),
                             result_rx: result_rx.clone(),
+                            cancellation: cancellation.clone(),
                         };
-                        (result_rx, Some((remote, result_tx)))
+                        (result_rx, Some((remote, result_tx, cancellation)))
                     }
                     SessionState::Opening { result_rx, .. } => (result_rx.clone(), None),
                     SessionState::Open(binding) if binding.connection.is_alive() => {
@@ -380,13 +384,17 @@ impl SessionInner {
                     }
                 }
             };
-            if let Some((remote, result_tx)) = start {
+            if let Some((remote, result_tx, cancellation)) = start {
                 let inner = Arc::clone(self);
                 tokio::spawn(async move {
-                    inner.open(remote, result_tx).await;
+                    inner.open(remote, result_tx, cancellation).await;
                 });
             }
-            return wait_for_watch(result_rx).await;
+            let result = wait_for_watch(result_rx).await;
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Err("code mode session is shutting down".to_string());
+            }
+            return result;
         }
     }
 
@@ -394,6 +402,7 @@ impl SessionInner {
         self: Arc<Self>,
         remote: RemoteSession,
         result_tx: watch::Sender<Option<Result<SessionBinding, String>>>,
+        cancellation: CancellationToken,
     ) {
         let result = match self.host.connection().await {
             Ok(connection) => {
@@ -402,6 +411,7 @@ impl SessionInner {
                         remote.clone(),
                         Arc::clone(&self.delegate),
                         self.limits.clone(),
+                        cancellation,
                     )
                     .await;
                 cleanup.map(|cleanup| SessionBinding {
@@ -464,7 +474,12 @@ impl SessionInner {
                         *state = SessionState::Closed;
                         ShutdownAction::Finish
                     }
-                    SessionState::Opening { result_rx, .. } => {
+                    SessionState::Opening {
+                        result_rx,
+                        cancellation,
+                        ..
+                    } => {
+                        cancellation.cancel();
                         ShutdownAction::WaitForOpen(result_rx.clone())
                     }
                     SessionState::Open(binding) if !binding.connection.is_alive() => {

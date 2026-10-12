@@ -154,6 +154,75 @@ fn normalize_request_user_input_tool_args_rejects_missing_options() {
     );
 }
 
+fn input_question(id: &str) -> RequestUserInputQuestion {
+    RequestUserInputQuestion {
+        id: id.to_string(),
+        header: "Choice".to_string(),
+        question: "Choose?".to_string(),
+        is_other: false,
+        is_secret: false,
+        options: Some(vec![RequestUserInputQuestionOption {
+            label: "Continue".to_string(),
+            description: "Continue.".to_string(),
+        }]),
+    }
+}
+
+#[test]
+fn input_question_count_and_identity_errors_return_correctable_messages() {
+    for questions in [
+        vec![],
+        (0..4)
+            .map(|index| input_question(&format!("q{index}")))
+            .collect(),
+    ] {
+        assert_eq!(
+            normalize_request_user_input_tool_args(RequestUserInputToolArgs { questions }),
+            Err("request_user_input requires one to three questions".to_string())
+        );
+    }
+    for questions in [
+        vec![input_question("")],
+        vec![input_question("same"), input_question("same")],
+    ] {
+        assert_eq!(
+            normalize_request_user_input_tool_args(RequestUserInputToolArgs { questions }),
+            Err("request_user_input requires a unique non-empty id for every question".to_string())
+        );
+    }
+    for count in 1..=3 {
+        let questions = (0..count)
+            .map(|index| input_question(&format!("q{index}")))
+            .collect();
+        assert!(
+            normalize_request_user_input_tool_args(RequestUserInputToolArgs { questions }).is_ok()
+        );
+    }
+}
+
+#[test]
+fn input_question_projection_bounds_and_duplicate_options_are_correctable() {
+    let mut question = input_question("choice");
+    question.question = "x".repeat(4_001);
+    assert!(
+        normalize_request_user_input_tool_args(RequestUserInputToolArgs {
+            questions: vec![question]
+        })
+        .unwrap_err()
+        .contains("prompt")
+    );
+    let mut question = input_question("choice");
+    let option = question.options.as_ref().unwrap()[0].clone();
+    question.options.as_mut().unwrap().push(option);
+    assert!(
+        normalize_request_user_input_tool_args(RequestUserInputToolArgs {
+            questions: vec![question]
+        })
+        .unwrap_err()
+        .contains("distinct options")
+    );
+}
+
 #[test]
 fn request_user_input_unavailable_messages_respect_default_mode_feature_flag() {
     assert_eq!(

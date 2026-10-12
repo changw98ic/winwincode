@@ -1,6 +1,6 @@
+#![allow(
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(
     clippy::too_many_lines,
     reason = "the black-box cutover tracer keeps one Delivery, Artifact, GitHub, recovery, and audit proof together"
 )]

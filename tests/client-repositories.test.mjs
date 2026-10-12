@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, 'apps/client/node_modules/.cache/client-repositories-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -78,10 +76,11 @@ function repository(overrides = {}) {
   }
 }
 
-function response(status, payload = '') {
+function response(status, payload = '', retryAfter = null) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: name => name.toLowerCase() === 'retry-after' ? retryAfter : null },
     async text() {
       return typeof payload === 'string' ? payload : JSON.stringify(payload)
     },
@@ -231,7 +230,7 @@ test('facade rejects malformed repository list responses', async () => {
     async fetch(input, init) {
       assert.equal(init.method, 'GET')
       assert.equal(String(input), listPath)
-      return response(status, payload)
+      return response(status, payload, status === 503 ? '301' : null)
     },
   })
   assert.deepEqual(await directory.listRepositories({ clientId: '123456789012' }), [
@@ -243,7 +242,10 @@ test('facade rejects malformed repository list responses', async () => {
     directory.listRepositories({ clientId: '123456789012' }),
     error => error.code === 'SERVICE_UNAVAILABLE'
       && error.kind === 'server'
-      && error.retryable === true,
+      && error.retryable === true
+      && error.cause.failure.httpStatus === 503
+      && error.cause.networkStopReason === 'deferred'
+      && error.cause.networkAttempts.length === 1,
   )
   status = 200
   for (const malformed of [
@@ -270,7 +272,7 @@ test('facade rejects malformed repository list responses', async () => {
   )
   const offline = directoryFixture({
     async fetch() {
-      throw new TypeError('network unreachable')
+      throw Object.assign(new TypeError('invalid TLS certificate'), { code: 'CERT_HAS_EXPIRED' })
     },
   })
   await assert.rejects(
@@ -279,6 +281,37 @@ test('facade rejects malformed repository list responses', async () => {
       && error.kind === 'network'
       && error.code === 'NETWORK_ERROR',
   )
+})
+
+test('facade recovers a retryable repository query through the real shared executor', async () => {
+  let calls = 0
+  const directory = directoryFixture({
+    async fetch() {
+      calls += 1
+      return calls === 1
+        ? response(503, errorPayload('SERVICE_UNAVAILABLE', 'outage', true))
+        : response(200, { schemaVersion, repositories: [repository()] })
+    },
+  })
+  assert.deepEqual(await directory.listRepositories({ clientId: '123456789012' }), [repository()])
+  assert.equal(calls, 2)
+})
+
+test('facade cancels an exact-replay repository query while recovery is waiting', async () => {
+  let calls = 0
+  const controller = new AbortController()
+  const directory = directoryFixture({
+    async fetch() {
+      calls += 1
+      setTimeout(() => controller.abort(), 10)
+      throw new TypeError('network unreachable')
+    },
+  })
+  await assert.rejects(
+    directory.listRepositories({ clientId: '123456789012' }, { signal: controller.signal }),
+    error => error instanceof ControlPlaneClientError && error.code === 'REQUEST_CANCELLED' && error.kind === 'cancelled',
+  )
+  assert.equal(calls, 1)
 })
 
 test('facade validates the repository list input before any request exists', async () => {
@@ -401,8 +434,6 @@ test('repositories view-model keeps shown cards across an unavailable read and n
   assert.equal(model.state.status, 'unavailable')
   assert.deepEqual(model.state.repositories, [repository()], 'a failed read keeps shown cards')
 
-  // A different device selected while its own read hangs in flight: the shown
-  // cards of the previous device must never bleed into the new selection.
   const third = model.showDevice('999999999999')
   await new Promise(resolvePromise => setImmediate(resolvePromise))
   assert.equal(model.state.clientId, '999999999999')
@@ -548,8 +579,6 @@ test('repositories page renders every card field and never renders a path', asyn
   assert.equal(findOne(cards[1], 'wwc-repositories-card-head').textContent, 'HEAD def4567')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-availability').hidden, true)
 
-  // §16.5: the card surface carries display names, branches, dirty state, and
-  // the short HEAD hash only; no absolute path appears anywhere.
   assert.doesNotMatch(renderedText(rootElement), /\/Users\/|\/home\/|\/Volumes\//u)
   model.close()
 })

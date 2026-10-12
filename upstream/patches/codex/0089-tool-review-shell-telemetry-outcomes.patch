@@ -1,0 +1,163 @@
+diff --git a/codex-rs/core/tests/suite/otel.rs b/codex-rs/core/tests/suite/otel.rs
+--- a/codex-rs/core/tests/suite/otel.rs
++++ b/codex-rs/core/tests/suite/otel.rs
+@@ -987,15 +987,24 @@
+     });
+ }
+ 
+-#[tokio::test]
+-#[traced_test]
++#[tokio::test(flavor = "current_thread")]
+ async fn handle_response_item_records_tool_result_for_shell_command_call() {
+-    let server = start_mock_server().await;
+-
+-    mount_sse_once(
+-        &server,
+-        sse(vec![
+-            shell_command_call("shell-call", "echo shell"),
++    // tracing_test filters continuation lines by span name and drops multiline
++    // tool output and trailing MCP fields. Keep this test's complete records.
++    let buffer: &'static Mutex<Vec<u8>> = Box::leak(Box::new(Mutex::new(Vec::new())));
++    let subscriber = tracing_subscriber::fmt()
++        .with_ansi(false)
++        .with_max_level(Level::TRACE)
++        .with_writer(MockWriter::new(buffer))
++        .finish();
++    let _guard = tracing::subscriber::set_default(subscriber);
++    let server = start_mock_server().await;
++
++    mount_sse_once(
++        &server,
++        sse(vec![
++            shell_command_call("shell-call", "echo shell-success"),
++            shell_command_call("shell-failure-call", "echo shell-failure; exit 7"),
+             ev_completed("done"),
+         ]),
+     )
+@@ -1010,7 +1019,7 @@
+     )
+     .await;
+ 
+-    let TestCodex { codex, .. } = test_codex()
++    let test = test_codex()
+         .with_config(move |config| {
+             config
+                 .features
+@@ -1021,6 +1030,13 @@
+         .build(&server)
+         .await
+         .unwrap();
++    let cwd = test.cwd.path().to_owned();
++    let codex = test.codex.clone();
++    drop(test);
++    assert!(
++        cwd.is_dir(),
++        "the thread must retain its real shell workspace"
++    );
+ 
+     codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+@@ -1030,33 +1046,83 @@
+         .await
+         .unwrap();
+ 
+-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+-
+-    logs_assert(|lines: &[&str]| {
+-        let line = lines
++    let mut outcomes = std::collections::BTreeMap::new();
++    wait_for_event(&codex, |event| {
++        if let EventMsg::ExecCommandEnd(result) = event {
++            outcomes.insert(
++                result.call_id.clone(),
++                (result.exit_code, result.stdout.clone()),
++            );
++        }
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    assert_eq!(
++        outcomes.get("shell-call"),
++        Some(&(0, "shell-success\n".into()))
++    );
++    assert_eq!(
++        outcomes.get("shell-failure-call"),
++        Some(&(7, "shell-failure\n".into()))
++    );
++
++    let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
++    assert_shell_outcome_telemetry(&logs.lines().collect::<Vec<_>>()).unwrap();
++}
++
++fn assert_shell_outcome_telemetry(lines: &[&str]) -> Result<(), String> {
++    for (call, command, success, marker) in [
++        ("shell-call", "echo shell-success", true, "shell-success"),
++        (
++            "shell-failure-call",
++            "echo shell-failure; exit 7",
++            false,
++            "shell-failure",
++        ),
++    ] {
++        let index = lines
+             .iter()
+-            .find(|line| line.contains("codex.tool_result") && line.contains("call_id=shell-call"))
+-            .ok_or_else(|| "missing codex.tool_result event".to_string())?;
+-
++            .position(|line| {
++                line.contains("codex_otel.log_only:")
++                    && line.contains("codex.tool_result")
++                    && extract_log_field(line, "call_id").as_deref() == Some(call)
++            })
++            .ok_or_else(|| format!("missing codex.tool_result for {call}"))?;
++        // Shell output contains newlines; MCP metadata follows the output
++        // in the same event, before the next timestamped tracing record.
++        let record = std::iter::once(lines[index])
++            .chain(
++                lines[index + 1..]
++                    .iter()
++                    .take_while(|line| {
++                        !(line.get(4..5) == Some("-")
++                            && line.get(7..8) == Some("-")
++                            && line.get(10..11) == Some("T"))
++                    })
++                    .copied(),
++            )
++            .collect::<Vec<_>>()
++            .join("\n");
++        let line = record.as_str();
+         if !line.contains("tool_name=shell_command") {
+             return Err("missing tool_name field".to_string());
+         }
+-        if !line.contains("arguments={\"command\":\"echo shell\"}") {
+-            return Err("missing arguments field".to_string());
+-        }
+-        let output_idx = line
+-            .find("output=")
++        let arguments = serde_json::json!({"command": command}).to_string();
++        if !line.contains(&format!("arguments={arguments}")) {
++            return Err(format!("missing arguments for {call}"));
++        }
++        let output = line
++            .split_once("output=")
++            .map(|(_, output)| output)
+             .ok_or_else(|| "missing output field".to_string())?;
+-        if line[output_idx + "output=".len()..].is_empty() {
+-            return Err("empty output field".to_string());
+-        }
+-        if !line.contains("success=false") {
+-            return Err("missing success field".to_string());
++        if !output.contains(marker) || !line.contains(&format!("success={success}")) {
++            return Err(format!(
++                "tool telemetry disagrees with the real shell outcome for {call}"
++            ));
+         }
+         assert_empty_mcp_tool_fields(line)?;
+-
+-        Ok(())
+-    });
++    }
++    Ok(())
+ }
+ 
+ fn tool_decision_assertion<'a>(

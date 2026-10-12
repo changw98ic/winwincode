@@ -23,11 +23,6 @@ pub struct PublicationTarget {
 }
 
 impl PublicationTarget {
-    /// Builds one canonical GitHub pull-request target.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed repository or branch identity.
     pub fn try_github(
         repository: impl Into<String>,
         base_branch: impl Into<String>,
@@ -109,11 +104,6 @@ pub struct PublicationSourceIssue {
 }
 
 impl PublicationSourceIssue {
-    /// Builds one canonical GitHub issue source.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed repository or issue number.
     pub fn try_github(repository: impl Into<String>, number: u64) -> Result<Self, String> {
         let source = Self {
             schema_version: DELIVERY_FACT_SCHEMA_VERSION,
@@ -165,7 +155,6 @@ impl PublicationSourceIssue {
     }
 }
 
-/// Immutable identity stored with one trusted publication intent/result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicationFactBinding {
@@ -183,11 +172,6 @@ pub struct PublicationFactBinding {
 }
 
 impl PublicationFactBinding {
-    /// Builds the immutable identity shared by publication intent and result facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects incomplete or malformed Delivery, candidate, verdict, approval, or target facts.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         delivery_id: DeliveryId,
@@ -309,11 +293,6 @@ pub struct PublicationResourceFact {
 }
 
 impl PublicationResourceFact {
-    /// Builds one secret-safe provider resource identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed repository or resource number.
     pub fn try_new(
         kind: PublicationResourceKind,
         repository: impl Into<String>,
@@ -352,7 +331,6 @@ impl PublicationResourceFact {
     }
 }
 
-/// Safe publication result fields supplied by the publication owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicationResultFact {
@@ -366,11 +344,6 @@ pub struct PublicationResultFact {
 }
 
 impl PublicationResultFact {
-    /// Builds one secret-safe publication projection fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid publication identity, state, revision, timestamp, binding, or resource.
     pub fn try_new(
         publication_id: PublicationId,
         revision: Revision,
@@ -466,14 +439,6 @@ pub struct PublicationAuthorization {
 }
 
 impl PublicationAuthorization {
-    /// Seals one adapter-confirmed current Delivery, candidate, Artifact, approval, and target.
-    ///
-    /// This is a trusted Rust application seam, not a wire DTO: callers must derive every
-    /// argument from current durable facts before invoking the publication coordinator.
-    ///
-    /// # Errors
-    ///
-    /// Rejects incomplete, stale, cross-target, or non-canonical fact sets.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_current_facts(
         binding: PublicationFactBinding,

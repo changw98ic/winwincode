@@ -16,13 +16,9 @@ import { runWorkGraphStateTone, taskRunCommitText } from './task-run-view-model.
 export interface TaskRunPageOptions {
   readonly root: HTMLElement
   readonly model: TaskRunViewModel
-  /** The task-board deep link, so the running task is never a dead end. */
   readonly homeHref?: string
-  /** Exact Delivery review route; omitted when the route has no Delivery fact. */
   readonly reviewHref?: string
-  /** Canonical Delivery Spec editor route. */
   readonly clarificationHref?: string
-  /** 已知锚点(假优先种子/表单创建):提供设计稿 05 的任务名与改动/验收两行。 */
   readonly anchor?: {
     readonly title?: string
     readonly changes?: string
@@ -34,11 +30,6 @@ export interface TaskRunPage {
   close(): void
 }
 
-/**
- * The one status line under the title.  The page is the StrongFlow task's own
- * run surface, so the line carries the surface label plus the zone status the
- * snapshot actually reports - never an invented stage.
- */
 function statusLineText(snapshot: TaskRunState): string {
   const zone = snapshot.status === 'loading'
     ? '正在加载'
@@ -73,15 +64,6 @@ const ROW_TERMS = Object.freeze([
   '应用结果',
 ]) as readonly string[]
 
-/**
- * Mount the §16.7 run page in the design-05 shape: back link and the 流程与记录
- * display slot on one row, the running-task title with its status line and
- * description, the collapsed identity table, and the StrongFlow-owned
- * approval actions (visible but disabled - this page never fakes a decision).
- * The module owns DOM and ARIA only; every value is projected from the one run
- * view-model snapshot, and a missing row names its gap instead of inventing
- * state.
- */
 export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   const document = options.root.ownerDocument
   const section = element(document, 'section', 'wwc-task-run')
@@ -97,12 +79,9 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   const heading = element(document, 'h2', 'wwc-task-run-heading')
   const statusLine = element(document, 'p', 'wwc-task-run-status')
   const description = element(document, 'p', 'wwc-task-run-description')
-  // 设计稿 05:描述段下方的「改动：…」「验收：…」两行。
   const changesLine = element(document, 'p', 'wwc-task-run-scope-line')
   const acceptanceLine = element(document, 'p', 'wwc-task-run-scope-line')
   const zone = element(document, 'section', 'wwc-task-run-identity')
-  // Design page 05: the full identity table stays collapsed behind one row;
-  // the stage the user acts on stays up front.
   const identityToggle = element(document, 'button', 'wwc-task-run-identity-toggle')
   const rows = element(document, 'div', 'wwc-task-run-rows')
   const identityNotice = element(document, 'p', 'wwc-task-run-identity-notice')
@@ -133,8 +112,6 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   })
   identityNotice.setAttribute('role', 'status')
   identityNotice.hidden = true
-  // Design page 05 display slot: 流程与记录 and ⋯ 更多 are placeholders; the
-  // commands stay StrongFlow-owned, so they are rendered inert.
   recordSlot.textContent = '流程与记录'
   reviewLink.textContent = '查看审核产物'
   if (options.reviewHref !== undefined) reviewLink.href = options.reviewHref
@@ -231,7 +208,6 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   ): void {
     refs.row.hidden = false
     if (value === null) {
-      // A row without a fact names the gap; it never invents state.
       refs.value.classList.add('wwc-task-run-row-pending')
       refs.value.textContent = pendingText
       refs.value.append(refs.badge)

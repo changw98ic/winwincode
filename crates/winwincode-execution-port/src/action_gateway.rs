@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Single pre-action gateway for Codex Core tool side effects.
-//!
-//! The gateway does not implement another tool runtime. It validates the
-//! current lease, `WorkerSession`, `SessionIdentity`, and Execution Envelope token,
-//! normalizes the real Codex tool request, runs one injected deterministic
-//! gate, and only then forwards an approved request to the injected Codex tool
-//! executor.
-
 use std::fmt;
 
 use winwincode_domain::{Instant, RequestId, Sha256Digest, WorkerSessionId};
@@ -27,75 +19,48 @@ use crate::repository_rule_pack::{
 };
 use winwincode_domain::SessionIdentity;
 
-/// Version and digest bound into a Worker's execution token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExecutionEnvelopeToken {
-    /// Monotonically increasing compiled-envelope version.
     pub version: u64,
-    /// Digest of the exact compiled envelope contents.
     pub digest: Sha256Digest,
 }
 
-/// The current compiled policy and the token which identifies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionEnvelope<Policy> {
-    /// Token presented by every action authorized under this envelope.
     pub token: ExecutionEnvelopeToken,
-    /// Compiled deterministic policy consumed by the injected gate.
     pub policy: Policy,
 }
 
-/// Exact active `WorkerSession` authority accepted by the gateway.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveWorkerAuthority {
-    /// Current scheduler lease including attempt and fencing token.
     pub lease: ExecutionLeaseStamp,
-    /// Current `WorkerSession` identity.
     pub worker_session_id: WorkerSessionId,
-    /// Current `ProductSession`, `WorkRun`, `WorkerSession`, and `CodexThread` binding.
     pub session_identity: SessionIdentity,
 }
 
-/// Authority presented by one pending Codex Core tool request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerActionAuthority {
-    /// Lease under which the action was prepared.
     pub lease: ExecutionLeaseStamp,
-    /// `WorkerSession` under which the action was prepared.
     pub worker_session_id: WorkerSessionId,
-    /// Session binding under which the action was prepared.
     pub session_identity: SessionIdentity,
-    /// Execution Envelope token under which the action was prepared.
     pub envelope: ExecutionEnvelopeToken,
 }
 
-/// One pending action submitted to the only Codex Core side-effect gateway.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerActionRequest {
-    /// Stable action invocation identity allocated before Policy evaluation.
     pub invocation_request_id: RequestId,
-    /// Lease, session, and envelope authority presented by the Worker.
     pub authority: WorkerActionAuthority,
-    /// Executor-declared intent.
     pub intent: ActionIntent,
-    /// Actual typed Codex tool request to normalize and, if approved, execute.
     pub request: ToolRequest,
 }
 
-/// Deterministic gate outcome. Only the two allow outcomes authorize execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
-    /// Execute the action without an observer notification.
     Allow,
-    /// Execute the action and emit the supplied reason to the observer path.
     AllowWithWatch { reason: String },
-    /// Stop before execution and request a bounded plan change.
     RequestPlanDelta { reason: String },
-    /// Stop before execution and route the action to human attention.
     PauseForHuman { reason: String },
-    /// Stop before execution because the action is forbidden.
     DenyAction { reason: String },
-    /// Stop before execution because the current plan is no longer valid.
     ReplanRequired { reason: String },
 }
 
@@ -105,52 +70,26 @@ impl GateDecision {
     }
 }
 
-/// Complete deterministic input presented to the gate.
 #[derive(Debug, Clone, Copy)]
 pub struct GateInput<'action, Policy> {
-    /// Exact current compiled Execution Envelope.
     pub envelope: &'action ExecutionEnvelope<Policy>,
-    /// Validated executor intent.
     pub intent: &'action ActionIntent,
-    /// Normalized action derived from the real tool request.
     pub observed: &'action ObservedAction,
 }
 
-/// Injected deterministic policy evaluator.
-///
-/// This trait owns policy evaluation only. It cannot run the tool request.
 pub trait DeterministicActionGate<Policy> {
-    /// Decides one already-authority-checked and already-normalized action.
     fn decide(&mut self, input: GateInput<'_, Policy>) -> GateDecision;
 }
 
-/// Durable pre-action journal for one deterministic gate decision.
-///
-/// Implementations append to the Worker runtime `TraceOutbox`. The gateway calls
-/// this after the gate decides and before either executing or returning a
-/// structured stop decision.
 pub trait PreActionDecisionRecorder<Policy> {
-    /// Durable journal failure.
     type Error;
 
-    /// Persists one gate decision before any tool side effect.
-    ///
-    /// # Errors
-    ///
-    /// Returns an outbox or identity-allocation failure. The gateway then
-    /// stops without invoking the Codex tool executor.
     fn record(
         &mut self,
         input: GateInput<'_, Policy>,
         decision: &GateDecision,
     ) -> Result<(), Self::Error>;
 
-    /// Persists deterministic hooks derived from the observed request and the
-    /// executor result.
-    ///
-    /// # Errors
-    ///
-    /// Returns the recorder's durable-write error.
     fn record_post_action(
         &mut self,
         input: GateInput<'_, Policy>,
@@ -159,7 +98,6 @@ pub trait PreActionDecisionRecorder<Policy> {
     ) -> Result<(), Self::Error>;
 }
 
-/// Derives post-action work from trusted normalized facts, never model text.
 #[must_use]
 pub fn post_action_hooks(
     observed: &ObservedAction,
@@ -211,98 +149,56 @@ fn post_action_hooks_with_rules(
         .collect()
 }
 
-/// The existing Codex Core tool runtime seam.
-///
-/// Implementations delegate to the embedded Codex Core runtime. The gateway
-/// intentionally defines no file, Git, shell, network, or MCP implementation.
 pub trait CodexToolExecutor {
-    /// Successful tool result.
     type Output;
-    /// Error returned by the existing Codex Core tool runtime.
     type Error;
 
-    /// Executes one request after the gateway has authorized it.
-    ///
-    /// # Errors
-    ///
-    /// Returns the existing Codex Core tool error.
     fn execute(&mut self, request: &ToolRequest) -> Result<Self::Output, Self::Error>;
 }
 
-/// Successful gateway result, including the exact decision and normalization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutedAction<Output> {
-    /// Normalized action which the gate approved.
     pub normalization: ActionNormalization,
-    /// Exact allowing gate decision.
     pub decision: GateDecision,
-    /// Result returned by the embedded Codex Core tool runtime.
     pub output: Output,
 }
 
-/// Result returned by the canonical Action Gateway execution point.
 pub type ActionGatewayResult<Output, RecorderError, ExecutorError> =
     Result<ExecutedAction<Output>, ActionGatewayError<RecorderError, ExecutorError>>;
 
-/// Stable pre-execution rejection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionGatewayRejectionCode {
-    /// The current authority itself is internally invalid.
     InvalidCurrentAuthority,
-    /// The presented lease differs from the active lease or fencing token.
     StaleLease,
-    /// The exact current lease has expired.
     ExpiredLease,
-    /// The presented `WorkerSession` differs from the active `WorkerSession`.
     StaleWorkerSession,
-    /// The presented `SessionIdentity` differs from the active binding.
     StaleSessionIdentity,
-    /// The presented envelope token differs from the current envelope.
     StaleExecutionEnvelope,
-    /// The real request does not match the executor-declared intent.
     IntentMismatch,
-    /// The deterministic gate did not authorize the action.
     ActionNotApproved,
-    /// The Control Plane receipt is invalid or does not match this action.
     InvalidActionReceipt,
-    /// This exact action receipt was already consumed.
     ActionReceiptConsumed,
-    /// Durable receipt-use state conflicts with this invocation.
     ActionReceiptConflict,
-    /// Durable receipt-use state is unavailable.
     ActionReceiptUnavailable,
 }
 
-/// Gateway failure. All variants except [`Self::Executor`] happen before a side effect.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionGatewayError<RecorderError, ExecutorError> {
-    /// A stable fail-closed authority or decision rejection.
     Rejected {
-        /// Stable rejection category.
         code: ActionGatewayRejectionCode,
-        /// Secret-free explanation.
         reason: String,
     },
-    /// The actual tool request or intent could not be normalized.
     Normalization(ActionNormalizationError),
-    /// Intent differs from the actual normalized request.
     IntentMismatch(Vec<IntentMismatch>),
-    /// Gate outcome stopped execution.
     NotApproved(GateDecision),
-    /// The Control Plane receipt failed verification.
     ActionEnforcement(ActionEnforcementError),
-    /// The durable receipt-use claim failed.
     ReceiptUse(ActionReceiptUseError),
-    /// The gate decided, but its control event was not durably retained.
     DecisionRecord(RecorderError),
-    /// The tool returned, but its machine-derived post-action hook was not retained.
     PostActionRecord(RecorderError),
-    /// The authorized request reached Codex Core and its existing runtime failed.
     Executor(ExecutorError),
 }
 
 impl<RecorderError, ExecutorError> ActionGatewayError<RecorderError, ExecutorError> {
-    /// Returns a stable rejection code for errors raised before execution.
     #[must_use]
     pub const fn rejection_code(&self) -> Option<ActionGatewayRejectionCode> {
         match self {
@@ -365,7 +261,6 @@ where
 {
 }
 
-/// Single Worker action gateway for all Codex Core tool request families.
 pub struct WorkerActionGateway<Policy, Gate, Recorder, Executor> {
     authority: ActiveWorkerAuthority,
     envelope: ExecutionEnvelope<Policy>,
@@ -381,7 +276,6 @@ where
     Recorder: PreActionDecisionRecorder<Policy>,
     Executor: CodexToolExecutor,
 {
-    /// Creates a gateway bound to the current lease, `WorkerSession`, and envelope.
     #[must_use]
     pub fn new(
         authority: ActiveWorkerAuthority,
@@ -400,11 +294,6 @@ where
         }
     }
 
-    /// Adds a repository-local pack to the project defaults.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid rules before the gateway can execute an action.
     pub fn with_repository_rules(
         mut self,
         rules: RepositoryRulePack,
@@ -413,10 +302,6 @@ where
         Ok(self)
     }
 
-    /// Atomically replaces the authority used for all subsequent actions.
-    ///
-    /// Replacing the envelope immediately makes requests carrying its prior
-    /// token stale, even when their old lease has not expired yet.
     pub fn replace_authority(
         &mut self,
         authority: ActiveWorkerAuthority,
@@ -426,16 +311,6 @@ where
         self.envelope = envelope;
     }
 
-    /// Validates, gates, and executes one pending Codex Core tool request.
-    ///
-    /// The executor is unreachable until every authority check, action
-    /// normalization, intent comparison, and gate approval succeeds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a fail-closed rejection before execution for invalid, expired,
-    /// stale, mismatched, or unapproved actions. Returns [`ActionGatewayError::Executor`]
-    /// only after the gate authorized the action and Codex Core was invoked.
     pub fn execute(
         &mut self,
         now: &Instant,

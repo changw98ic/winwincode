@@ -146,8 +146,6 @@ test('Client shell has one facade and the canonical community product surfaces',
   assert.match(surfaces, /id: 'chat'[\s\S]+default: true/u)
   assert.match(surfaces, /id: 'chat'[\s\S]+default: true[\s\S]+id: 'home'/u)
   assert.match(application, /activeSurface\.id === 'home'/u)
-  // The shell imports and invokes the exact base factory once. Product-specific
-  // directory extensions do not count as another transport composition root.
   assert.equal((application.match(/\bcreateControlPlaneClient\b/gu) ?? []).length, 2)
   assert.doesNotMatch(
     application,

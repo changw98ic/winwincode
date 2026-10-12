@@ -11,16 +11,12 @@ import {
   parseBoundedWinWinCodeExportJson,
 } from './parse-bounded.js'
 
-/** The only format identifier accepted by `winwincode-export/v1`. */
 export const WINWINCODE_EXPORT_FORMAT = 'winwincode-export/v1'
 
-/** Maximum number of organization records in one v1 document. */
 export const MAX_WINWINCODE_EXPORT_ORGANIZATIONS = 10_000
 
-/** Maximum number of project records in one v1 document. */
 export const MAX_WINWINCODE_EXPORT_PROJECTS = 100_000
 
-/** Rejection categories of the strict v1 gate, in reporting precedence. */
 export const WINWINCODE_EXPORT_REJECTION_CATEGORIES = Object.freeze([
   'too-large',
   'invalid-json',
@@ -53,12 +49,6 @@ function contentProblem(category, message) {
   return { category, message }
 }
 
-/**
- * Reports whether the value holds a lone UTF-16 surrogate.
- *
- * Lone surrogates are not Unicode scalar values, so they cannot exist in Rust
- * input bytes; the strict gate therefore treats them as malformed JSON.
- */
 function hasLoneSurrogate(value) {
   for (let index = 0; index < value.length;) {
     const first = value.charCodeAt(index)
@@ -74,7 +64,6 @@ function hasLoneSurrogate(value) {
   return false
 }
 
-/** ECMA-262 whitespace plus U+0085, the set shared with the Rust boundary. */
 function isContractWhitespace(character) {
   return /\s/u.test(character) || character === ''
 }
@@ -95,12 +84,6 @@ function looksLikeAbsolutePath(value) {
     && (value.charAt(2) === '/' || value.charAt(2) === '\\')
 }
 
-/**
- * Applies one shared text rule for source identifiers and display names.
- *
- * Lengths count Unicode code points. Returns `null` when the value is inside
- * the boundary and a `{category, message}` problem otherwise.
- */
 function checkText(value, maximumCharacters, label) {
   const characters = [...value]
   if (characters.length === 0) {
@@ -189,7 +172,6 @@ function arrayProblem(value, label) {
   return Array.isArray(value) ? null : `${label} must be an array`
 }
 
-/** Checks the JSON value shape that serde enforces while decoding the document. */
 function structuralProblem(document) {
   let problem = exactMembersProblem(
     document,
@@ -244,7 +226,6 @@ function walkLoneSurrogates(value) {
   return false
 }
 
-/** Validates records, references, uniqueness and byte limits for one content value. */
 function contentGate(content) {
   const profileProblem = checkDisplayName(content.profileDisplayName, 'profileDisplayName')
   if (profileProblem) return profileProblem
@@ -311,7 +292,6 @@ function sameProject(left, right) {
     && left.displayName === right.displayName
 }
 
-/** Checks that arrays already appear in the canonical scalar-value order. */
 function recordOrderProblem(content) {
   const sortedOrganizations = [...content.organizations].sort((left, right) => compareUnicodeScalars(
     left.sourceOrganizationId,
@@ -360,15 +340,6 @@ function sameBytes(left, right) {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])
 }
 
-/**
- * Validates one `winwincode-export/v1` value without its serialized spelling.
- *
- * This mirrors `WinWinCodeExport::validate` in the Rust contract owner: record
- * text, record counts, uniqueness, references, canonical record order, and the
- * content digest. Canonical byte spelling needs the original bytes, so use
- * {@link validateWinWinCodeExportBytes} to also reject another serialization
- * of the same JSON value.
- */
 export function validateWinWinCodeExportDocument(document) {
   const structural = structuralProblem(document)
   if (structural) return rejection('invalid-json', structural)
@@ -389,16 +360,6 @@ export function validateWinWinCodeExportDocument(document) {
   return { status: 'accepted', document, contentSha256: document.contentSha256 }
 }
 
-/**
- * Runs the complete strict v1 gate over original document bytes.
- *
- * The gate applies the 16 MiB byte limit, decodes UTF-8 and JSON, enforces the
- * structural and semantic rules of the contract, recomputes `contentSha256`,
- * and finally requires the exact canonical byte spelling. It returns
- * `{status: "accepted", document, contentSha256}` or
- * `{status: "rejected", category, message}` without throwing. The categories
- * match the Rust `WinWinCodeExportError` variants one for one.
- */
 export function validateWinWinCodeExportBytes(bytes) {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError('WinWinCode export input must be a byte array')
@@ -425,7 +386,6 @@ export function validateWinWinCodeExportBytes(bytes) {
   return validated
 }
 
-/** Throws when the strict v1 gate rejects the document bytes. */
 export function assertWinWinCodeExportBytes(bytes) {
   const result = validateWinWinCodeExportBytes(bytes)
   if (result.status === 'rejected') {

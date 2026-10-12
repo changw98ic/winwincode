@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control Plane instance lifecycle over the sole product-state authority.
-//!
-//! This facade generates process identities and applies bounded lease/drain
-//! windows. Product commands are admitted and committed by the storage
-//! ledger, so business consistency never depends on a process-local lock.
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +13,6 @@ use winwincode_storage::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Bounded renewable lease and graceful drain windows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceRuntimeConfig {
     lease_duration_millis: u64,
@@ -27,11 +20,6 @@ pub struct ControlPlaneInstanceRuntimeConfig {
 }
 
 impl ControlPlaneInstanceRuntimeConfig {
-    /// Builds one lifecycle configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or unsafe integer durations.
     pub fn try_new(
         lease_duration_millis: u64,
         drain_timeout_millis: u64,
@@ -72,7 +60,6 @@ impl Default for ControlPlaneInstanceRuntimeConfig {
     }
 }
 
-/// Stable runtime failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlPlaneInstanceRuntimeErrorKind {
     InvalidConfiguration,
@@ -80,7 +67,6 @@ pub enum ControlPlaneInstanceRuntimeErrorKind {
     Instance(ControlPlaneInstanceErrorKind),
 }
 
-/// Secret-free runtime error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneInstanceRuntimeError {
     kind: ControlPlaneInstanceRuntimeErrorKind,
@@ -118,7 +104,6 @@ impl From<ControlPlaneInstanceError> for ControlPlaneInstanceRuntimeError {
     }
 }
 
-/// Running instance owner over one connection to the canonical product-state database.
 pub struct ControlPlaneInstanceRuntime {
     storage: SqliteStorage,
     authority: ControlPlaneInstanceAuthority,
@@ -126,11 +111,6 @@ pub struct ControlPlaneInstanceRuntime {
 }
 
 impl ControlPlaneInstanceRuntime {
-    /// Starts one process with fresh random instance and boot identities.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable error when entropy, storage, schema, or registration fails.
     pub fn start(
         data_directory: impl AsRef<Path>,
         now: u64,
@@ -140,11 +120,6 @@ impl ControlPlaneInstanceRuntime {
         Self::start_with_identity(data_directory, &identity, now, config)
     }
 
-    /// Deterministic startup seam for deployment adapters and tests.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid time arithmetic, storage failure, or conflicting ownership.
     pub fn start_with_identity(
         data_directory: impl AsRef<Path>,
         identity: &ControlPlaneInstanceIdentity,
@@ -175,11 +150,6 @@ impl ControlPlaneInstanceRuntime {
         self.storage.database_path()
     }
 
-    /// Reads the durable readiness and drain projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale ownership, invalid time, corrupt state, or storage failure.
     pub fn preflight(
         &mut self,
         now: u64,
@@ -190,11 +160,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Renews this exact instance generation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects late renewal, replaced ownership, invalid time arithmetic, or storage failure.
     pub fn renew(
         &mut self,
         now: u64,
@@ -206,11 +171,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Stops accepting new commands and returns the first drain snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/expired ownership, conflicting replay, invalid time, or storage failure.
     pub fn begin_drain(
         &mut self,
         now: u64,
@@ -222,11 +182,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Returns the current drain snapshot for bounded caller-side polling.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, invalid time, corrupt state, or storage failure.
     pub fn await_drained(
         &mut self,
         now: u64,
@@ -234,11 +189,6 @@ impl ControlPlaneInstanceRuntime {
         self.preflight(now)
     }
 
-    /// Cancels a still-live drain and resumes admissions.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-draining, expired, or replaced ownership and storage failure.
     pub fn resume(
         &mut self,
         now: u64,
@@ -249,11 +199,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Permanently releases one fully drained generation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects active commands, wrong lifecycle state, stale ownership, or storage failure.
     pub fn release(
         &mut self,
         now: u64,
@@ -264,11 +209,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Claims a not-yet-committed canonical command or returns its durable receipt projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects drain, stale authority, live foreign ownership, changed request reuse, or storage failure.
     pub fn admit_command(
         &mut self,
         now: u64,
@@ -281,11 +221,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Commits one claimed command through the atomic instance-fenced path.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale claims/leases, changed commit facts, revisions, or storage failure.
     pub fn commit_claimed(
         &mut self,
         now: u64,
@@ -298,7 +233,6 @@ impl ControlPlaneInstanceRuntime {
             .map_err(Into::into)
     }
 
-    /// Returns the configured data directory used by deployment adapters.
     #[must_use]
     pub fn data_directory(&self) -> Option<PathBuf> {
         self.database_path().parent().map(Path::to_path_buf)

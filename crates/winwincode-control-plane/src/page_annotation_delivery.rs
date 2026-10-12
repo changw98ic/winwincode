@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical Delivery journal projection for page annotations.
-//!
-//! The page annotation payload remains owned by the Collaboration Inbox. This
-//! module only appends the corresponding canonical Attention and Evidence
-//! facts to the same Delivery journal publication, so Delivery projections and
-//! rework can consume the existing types.
-
 use winwincode_delivery::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     DeliverySpecId, EvidenceRef, EvidenceRefType, SessionBindingId,
@@ -26,10 +19,6 @@ use crate::{
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key},
 };
 
-/// Stages the canonical Delivery append for one page annotation.
-///
-/// A page annotation is committed only when its owning Delivery journal is
-/// present and can receive the derived Attention/Evidence append.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn stage(
     storage: &dyn ProductStateStorage,

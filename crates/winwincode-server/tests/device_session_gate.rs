@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The FLOW-100.3 `ProductSession` continue permission gate over the real
-//! composed Server application: a session bound to device execution through
-//! its durable launch anchor continues only for the current occupancy holder
-//! (`ACCESS_DENIED` otherwise) while the client stays occupied or draining
-//! (`OCCUPANCY_REQUIRED` otherwise) and the repository binding stays visible
-//! under the plan 13.4 dual-authorization projection (`BINDING_NOT_VISIBLE`
-//! otherwise). A session without a Device anchor cannot dispatch.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
@@ -25,7 +17,7 @@ use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound, EventPublishError,
     EventPublisher, OutboxEvent, ProductSessionExecutionConfig, WorkerLaunchGrantService,
 };
-use winwincode_domain::{Instant, UserActor, UserActorKind, UserId, WorkRunId};
+use winwincode_domain::{Instant, UserActor, UserActorKind, UserId};
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
     DurableEventHubConfig, StandaloneApplicationClock, StandaloneControlPlaneApplication,
@@ -153,9 +145,6 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
     .expect("compose application")
 }
 
-// ---- durable staging over the same product-state database ------------------
-
-/// Registers one online client node with four worker-session slots.
 fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     let node = format!("cnd_{}", suffix(seed));
     let registration = ClientNodeRegistration::try_new(
@@ -181,7 +170,6 @@ fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     node
 }
 
-/// Stages one active client `use` grant for the user.
 fn stage_client_grant(storage: &mut SqliteStorage, seed: u64, node: &str, user: &str) {
     let issuance = AccessGrantIssuance::try_new(
         format!("cag_{}", suffix(seed)),
@@ -204,8 +192,6 @@ fn stage_client_grant(storage: &mut SqliteStorage, seed: u64, node: &str, user: 
         .expect("grant");
 }
 
-/// Stages one repository binding on the node with an active `use` grant for
-/// the user; returns the binding id.
 fn stage_visible_binding(storage: &mut SqliteStorage, seed: u64, node: &str, user: &str) -> String {
     let binding = format!("rbd_{}", suffix(seed));
     let mut ledger = storage.repository_binding_ledger().expect("ledger");
@@ -240,7 +226,6 @@ fn stage_visible_binding(storage: &mut SqliteStorage, seed: u64, node: &str, use
     binding
 }
 
-/// Claims occupancy for the user and walks it to `occupied`.
 fn stage_occupied_lease(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -270,7 +255,6 @@ fn stage_occupied_lease(
     (occupied.occupancy_lease_id, occupied.fencing_token)
 }
 
-/// Issues one launch grant anchored to the product session.
 #[allow(clippy::too_many_arguments)]
 fn stage_anchor(
     storage: &mut SqliteStorage,
@@ -282,10 +266,18 @@ fn stage_anchor(
     binding: &str,
     product_session_id: &str,
 ) {
+    let instance = storage
+        .client_node_registry()
+        .expect("registry")
+        .snapshot(node)
+        .expect("node snapshot")
+        .expect("registered node")
+        .current_instance_id
+        .expect("registered Device instance");
     let issuance = LaunchGrantIssuance::try_new(
         format!("wlg_{}", suffix(seed)),
         node,
-        format!("cix_{}", suffix(seed + 40)),
+        instance,
         user,
         lease_id,
         fencing_token,
@@ -295,7 +287,7 @@ fn stage_anchor(
         format!("wki_{}", suffix(seed + 52)),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
+        None,
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");
@@ -303,8 +295,6 @@ fn stage_anchor(
         .issue(&issuance, &instant("2026-09-04T12:02:00.000Z"))
         .expect("issue anchor grant");
 }
-
-// ---- generated command helpers ---------------------------------------------
 
 fn session_create_request(request: u64, session: u64, user: &str, node: &str) -> CommandRequest {
     serde_json::from_value(serde_json::json!({
@@ -353,15 +343,12 @@ fn completed(response: CommandDispatchResponse) -> serde_json::Value {
     serde_json::to_value(response).expect("encode completed response")
 }
 
-/// Everything one staged device-anchored session exposes to the test.
 struct AnchoredSession {
     holder: String,
     binding: String,
     occupancy_lease_id: String,
 }
 
-/// Stages the authorized device world, creates the session as the holder, and
-/// anchors it through a real launch grant.
 fn stage_anchored_session(
     application: &StandaloneControlPlaneApplication,
     root: &Path,
@@ -433,8 +420,6 @@ fn an_anchored_turn_after_the_occupancy_ended_requires_occupancy() {
     let holder = id("usr", 1);
     let staged = stage_anchored_session(&application, &root, 200, 1, &holder);
     {
-        // The holder releases the client after the session was bound; with
-        // no active worker session the lease leaves the active set.
         let mut storage = SqliteStorage::open(&root).expect("reopen staging storage");
         let mut occupancy = storage.client_occupancy_ledger().expect("ledger");
         let lease = occupancy
@@ -494,9 +479,6 @@ fn an_anchored_turn_after_a_repository_grant_revocation_is_not_visible() {
     let holder = id("usr", 1);
     let staged = stage_anchored_session(&application, &root, 400, 1, &holder);
     {
-        // Revoking the repository access grant ends the binding's visibility
-        // immediately (plan 13.4): the next turn must be refused even though
-        // the occupancy and the anchor grant are untouched.
         let mut storage = SqliteStorage::open(&root).expect("reopen staging storage");
         let record = storage
             .repository_binding_ledger()
@@ -560,7 +542,6 @@ fn the_gate_denial_taxonomy_stays_on_the_central_wire_codes() {
         denial,
         DeviceSessionGateDenialKind::OccupancyRequired
     ));
-    // The three canonical denials stay distinct from the transport fallbacks.
     let kinds = [
         DeviceSessionGateDenialKind::OccupancyRequired,
         DeviceSessionGateDenialKind::AccessDenied,

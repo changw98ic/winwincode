@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Control Plane issuance of Worker action enforcement receipts.
-//!
-//! Worker input contributes only the normalized action facts and stable
-//! invocation identity. Tenant, actor, Job, lease, and session authority are
-//! reloaded from the canonical durable execution records before Policy is
-//! evaluated or a receipt is signed.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +22,7 @@ use winwincode_storage::{
     receipt_scope_key, repository_scope_from_receipt_key,
 };
 
-use crate::execution_port_service::{lease_stamp, load_runtime_replay_authority};
+use crate::execution_port_service::{lease_stamp, load_running_runtime_authority};
 
 const ACTION_RECEIPT_STREAM_PREFIX: &str = "action-enforcement-receipt:";
 const ACTION_RECEIPT_TOPIC: &str = "action.enforcement-receipt.issued";
@@ -49,7 +42,6 @@ struct FrozenActionEvaluationTime {
     evaluated_at: winwincode_domain::Instant,
 }
 
-/// Stable action receipt issuance failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionPolicyEnforcementErrorKind {
     InvalidRequest,
@@ -59,7 +51,6 @@ pub enum ActionPolicyEnforcementErrorKind {
     CorruptReceipt,
 }
 
-/// Secret-free action receipt issuance error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionPolicyEnforcementError {
     kind: ActionPolicyEnforcementErrorKind,
@@ -70,7 +61,6 @@ impl ActionPolicyEnforcementError {
         Self { kind }
     }
 
-    /// Returns the stable failure category.
     #[must_use]
     pub const fn kind(&self) -> ActionPolicyEnforcementErrorKind {
         self.kind
@@ -97,13 +87,6 @@ struct ResolvedActionAuthority {
     receipt_identity: ReceiptIdentity,
 }
 
-/// Issues or exactly replays one immutable action receipt.
-///
-/// # Errors
-///
-/// Rejects malformed Worker input, a stale/foreign lease or session, a
-/// non-User durable actor, changed request reuse, unavailable Policy/storage,
-/// or altered durable receipt bytes.
 pub fn issue_action_enforcement_receipt(
     storage: &mut SqliteStorage,
     issuer: &ActionEnforcementIssuer,
@@ -163,13 +146,16 @@ fn resolve_action_authority(
             .map_err(|_| authority_rejected())?
         }
         winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(_) => {
-            load_runtime_replay_authority(storage, &job, evaluated_at)
+            load_running_runtime_authority(storage, &job, evaluated_at)
                 .map_err(|_| authority_rejected())?
         }
     };
-    if request.lease != lease_stamp(&authority.lease)
-        || request.worker_session_id != authority.worker_session_id
+    if !winwincode_execution_port::execution_identity::retained_lease_matches_current(
+        &request.lease,
+        &lease_stamp(&authority.lease),
+    ) || request.worker_session_id != authority.worker_session_id
         || request.session_identity != authority.session_identity
+        || !winwincode_execution_port::execution_identity::canonical_instant(&request.sent_at)
         || request.sent_at.0 < authority.lease.issued_at.0
         || request.sent_at.0 >= authority.lease.expires_at.0
         || evaluated_at.0 < authority.lease.issued_at.0

@@ -2089,7 +2089,8 @@
       "type": "string",
       "enum": [
         "command",
-        "test"
+        "test",
+        "tool"
       ]
     },
     "RuntimeActivityStatus": {
@@ -2171,6 +2172,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024
+        },
+        "coreTool": {
+          "$ref": "#/$defs/CoreToolRuntimeProjection"
         }
       }
     },
@@ -3143,6 +3147,675 @@
         "immutable": {
           "type": "boolean",
           "const": true
+        }
+      }
+    },
+    "CoreToolFactKind": {
+      "type": "string",
+      "enum": [
+        "request",
+        "cell",
+        "wait",
+        "reconciliation",
+        "diagnostic",
+        "progress",
+        "diagnostic_response",
+        "sharing",
+        "waiter_cancellation",
+        "input_binding",
+        "input_validation",
+        "agent_wait"
+      ]
+    },
+    "CoreToolExecutionState": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "uncertain"
+      ]
+    },
+    "CoreToolOutputDisposition": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "accepted",
+        "rejected"
+      ]
+    },
+    "CoreToolOutputDelivery": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "offered"
+      ]
+    },
+    "CoreToolCellLifecycle": {
+      "type": "string",
+      "enum": [
+        "live",
+        "closed"
+      ]
+    },
+    "CoreToolWaitState": {
+      "type": "string",
+      "enum": [
+        "waiting",
+        "settled"
+      ]
+    },
+    "CoreToolSharingKind": {
+      "type": "string",
+      "enum": [
+        "reuse",
+        "merged"
+      ]
+    },
+    "CoreToolInputValidation": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "mismatch",
+        "unknown"
+      ]
+    },
+    "CoreToolRecoveryState": {
+      "type": "string",
+      "enum": [
+        "unavailable",
+        "unconfirmed",
+        "running",
+        "exited"
+      ]
+    },
+    "CoreToolDiagnosticKind": {
+      "type": "string",
+      "enum": [
+        "repeated_operation",
+        "alternating_cycle",
+        "branch_expansion",
+        "wait_cycle",
+        "unavailable_wait"
+      ]
+    },
+    "CoreToolDiagnosticDelivery": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "offered"
+      ]
+    },
+    "CoreToolCallReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestSequence",
+        "logicalId",
+        "toolName",
+        "parentCallId",
+        "cellId"
+      ],
+      "properties": {
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "logicalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "toolName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "parentCallId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cellId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoreToolCallProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestSequence",
+        "logicalId",
+        "toolName",
+        "parentCallId",
+        "cellId",
+        "attemptId",
+        "execution",
+        "disposition",
+        "delivery",
+        "cancelled",
+        "inputValidation",
+        "parentRequestSequence"
+      ],
+      "properties": {
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "logicalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "toolName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "parentCallId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cellId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolExecutionState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolOutputDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolOutputDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "inputValidation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolInputValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentRequestSequence": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionSequence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoreToolCellProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "cellId",
+        "parentRequestSequence",
+        "lifecycle"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "cellId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "parentRequestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/CoreToolCellLifecycle"
+        }
+      }
+    },
+    "CoreToolWaitProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestSequence",
+        "targetCellSequence",
+        "state"
+      ],
+      "properties": {
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "targetCellSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
+        }
+      }
+    },
+    "CoreToolSharingProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceRequestSequence",
+        "sourceAttemptId",
+        "kind"
+      ],
+      "properties": {
+        "sourceRequestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "sourceAttemptId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreToolSharingKind"
+        }
+      }
+    },
+    "CoreToolDiagnosticProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnosticId",
+        "evidenceVersion",
+        "kind",
+        "question",
+        "evidence",
+        "delivery"
+      ],
+      "properties": {
+        "diagnosticId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "evidenceVersion": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "kind": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "question": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/CoreToolCallReference"
+          }
+        },
+        "delivery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "waitGraph": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+          }
+        }
+      }
+    },
+    "CoreToolRecoveryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestSequence",
+        "state",
+        "businessId",
+        "exitCode"
+      ],
+      "properties": {
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolRecoveryState"
+        },
+        "businessId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exitCode": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoreToolRuntimeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceThreadId",
+        "sourceSequence",
+        "kind",
+        "call",
+        "cell",
+        "wait",
+        "diagnosis",
+        "sharing",
+        "recovery"
+      ],
+      "properties": {
+        "sourceThreadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sourceSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreToolFactKind"
+        },
+        "call": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolCallProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cell": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolCellProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnosis": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sharing": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolSharingProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolRecoveryProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agentWait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolAgentWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ExecutionSequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "CoreToolWaitNodeKind": {
+      "type": "string",
+      "enum": [
+        "thread",
+        "cell"
+      ]
+    },
+    "CoreToolWaitNodeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "threadId",
+        "ownerId",
+        "cellId",
+        "scopeId"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CoreToolWaitNodeKind"
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "cellId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scopeId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoreToolWaitEdgeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "treeId",
+        "requestSequence",
+        "logicalId",
+        "source",
+        "targets",
+        "targetCount",
+        "deadlineUnixMs"
+      ],
+      "properties": {
+        "treeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "logicalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "source": {
+          "$ref": "#/$defs/CoreToolWaitNodeProjection"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitNodeProjection"
+          }
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deadlineUnixMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "CoreToolAgentWaitProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edge",
+        "state"
+      ],
+      "properties": {
+        "edge": {
+          "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
         }
       }
     }

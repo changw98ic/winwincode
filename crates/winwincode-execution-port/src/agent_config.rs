@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable Agent identity and immutable per-session profile snapshots.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -10,26 +8,18 @@ use winwincode_domain::{Sha256Digest, WorkerId};
 
 use crate::generated::WorkerCapabilitySet;
 
-/// Version of the Worker-owned session configuration snapshot.
 pub const AGENT_SESSION_CONFIG_SCHEMA_VERSION: u64 = 1;
 
-/// Agent identity that remains stable across process and Session restarts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentIdentity {
-    /// Stable identity derived from the Worker and role.
     pub id: String,
-    /// Stable Worker identity that owns this Agent.
     pub worker_id: WorkerId,
-    /// Human-readable role name.
     pub name: String,
-    /// Execution role inherited from the dispatched job.
     pub role: String,
-    /// Exact capabilities registered by the Worker.
     pub capabilities: WorkerCapabilitySet,
 }
 
-/// Device provider and deterministic retention policy sealed for one session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentJevContextSettings {
@@ -37,7 +27,6 @@ pub struct AgentJevContextSettings {
     pub policy: crate::jev_decision::JevPolicy,
 }
 
-/// One permitted independent Fusion member sealed into the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentFusionMember {
@@ -47,17 +36,12 @@ pub struct AgentFusionMember {
     pub reasoning: String,
 }
 
-/// Exact members authorized for the frozen candidate's independent review panel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentFusionSettings {
     pub members: Vec<AgentFusionMember>,
 }
 
-/// Validates bounded, distinct routes before any member inference.
-///
-/// # Errors
-/// Rejects ambiguous identities, duplicate routes and fewer than three providers.
 pub fn validate_fusion_settings(settings: &AgentFusionSettings) -> Result<(), AgentConfigError> {
     if !(3..=16).contains(&settings.members.len()) {
         return Err(AgentConfigError);
@@ -81,70 +65,47 @@ pub fn validate_fusion_settings(settings: &AgentFusionSettings) -> Result<(), Ag
     Ok(())
 }
 
-/// Effective model, tool, sandbox, and instruction settings for one profile.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfileSettings {
-    /// Host-owned member routes; absent sessions cannot dispatch a Fusion panel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fusion: Option<AgentFusionSettings>,
-    /// None retains the Core context; Some binds the Device JEV policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev_context: Option<AgentJevContextSettings>,
-    /// Device-local semantic Judge provider, sealed independently of context retention.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev_judge: Option<String>,
-    /// Provider selected by the embedded runtime.
     pub provider: String,
-    /// Model selected within the provider.
     pub model: String,
-    /// Effective reasoning setting or its explicit provider-default marker.
     pub reasoning: String,
-    /// Sorted effective tool capability identifiers.
     pub tools: Vec<String>,
-    /// Effective sandbox or workspace mode.
     pub sandbox: String,
-    /// Effective developer instructions; absent when the Session has none.
     pub instructions: Option<String>,
 }
 
-/// Explainable inputs of one resolved profile revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfileSource {
-    /// Execution profile selected by the dispatched job.
     pub execution_profile: String,
-    /// Capability revision registered by the Worker.
     pub worker_capability_digest: Sha256Digest,
-    /// Exact effective settings used to start the Session.
     pub settings: AgentProfileSettings,
 }
 
-/// Immutable profile revision copied into a newly accepted Session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfile {
-    /// Content-derived revision of the profile source.
     pub revision: Sha256Digest,
-    /// Inputs that explain this revision.
     pub source: AgentProfileSource,
 }
 
-/// Reproducible configuration inherited by one `WorkerSession`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentSessionConfigSnapshot {
-    /// Snapshot schema version.
     pub schema_version: u64,
-    /// Stable Agent identity inherited by the Session.
     pub identity: AgentIdentity,
-    /// Immutable profile revision inherited by the Session.
     pub profile: AgentProfile,
-    /// Digest of the complete Session configuration.
     pub snapshot_digest: Sha256Digest,
 }
 
-/// Secret-free Agent configuration error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentConfigError;
 
@@ -156,15 +117,6 @@ impl fmt::Display for AgentConfigError {
 
 impl std::error::Error for AgentConfigError {}
 
-/// Resolves the exact Agent identity and effective profile inherited by a Session.
-///
-/// The stable identity excludes process-specific and Session-specific ids. The
-/// profile revision includes every effective runtime setting, so a change is
-/// visible and never mutates an already stored Session snapshot.
-///
-/// # Errors
-///
-/// Rejects empty, unbounded, or control-bearing values and canonicalizes tools.
 pub fn resolve_agent_session_config(
     worker_id: &WorkerId,
     capabilities: &WorkerCapabilitySet,
@@ -225,11 +177,6 @@ pub fn resolve_agent_session_config(
     })
 }
 
-/// Verifies that a stored snapshot is exactly reproducible from its own source.
-///
-/// # Errors
-///
-/// Rejects altered identity, profile, settings, capability, or digest fields.
 pub fn validate_agent_session_config(
     snapshot: &AgentSessionConfigSnapshot,
 ) -> Result<(), AgentConfigError> {

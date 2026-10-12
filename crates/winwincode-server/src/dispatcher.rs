@@ -11,7 +11,6 @@ use winwincode_api::generated::{
 
 use crate::{ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription};
 
-/// Product-owned command application selected from the generated command enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandFamily {
     Session,
@@ -56,7 +55,6 @@ impl CommandFamily {
     }
 }
 
-/// Product-owned query application selected from the generated query enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryFamily {
     Session,
@@ -104,44 +102,23 @@ impl QueryFamily {
     }
 }
 
-/// Exact generated response forms accepted from a command application.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommandDispatchResponse {
     Accepted(CommandAcceptedResponse),
     Completed(Box<CommandCompletedResponse>),
 }
 
-/// Typed application boundary behind the public HTTP/WebSocket listener.
-///
-/// Implementations authorize a generated scope before a handler is called.
-/// Business validation, persistence, and idempotency remain in the selected
-/// Control Plane application.
 pub trait TypedControlPlaneApiPort: Send + Sync {
-    /// Reports whether the application and its supervised execution runtime are healthy.
-    ///
-    /// Implementations keep this check synchronous and side-effect free. A
-    /// runtime supervisor may override it to fail closed after any worker,
-    /// launcher, or durable-outbox task exits unexpectedly.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the application or supervised runtime is faulted.
     fn health(&self) -> Result<(), ApiError> {
         Ok(())
     }
 
-    /// # Errors
-    ///
-    /// Rejects a principal that has no authority over the exact generated scope.
     fn authorize_scope(
         &self,
         principal: &AuthenticatedPrincipal,
         scope: &Scope,
     ) -> Result<(), ApiError>;
 
-    /// # Errors
-    ///
-    /// Returns a typed application error without transport or credential data.
     fn command(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -149,9 +126,6 @@ pub trait TypedControlPlaneApiPort: Send + Sync {
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError>;
 
-    /// # Errors
-    ///
-    /// Returns a typed application error without transport or credential data.
     fn query(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -159,31 +133,21 @@ pub trait TypedControlPlaneApiPort: Send + Sync {
         request: QueryRequest,
     ) -> Result<QueryResultResponse, ApiError>;
 
-    /// # Errors
-    ///
-    /// Rejects an invalid or unauthorized generated subscription frame.
     fn subscribe(
         &self,
         principal: &AuthenticatedPrincipal,
         first_frame: ControlPlaneWebSocketClientFrame,
     ) -> Result<EventSubscription, ApiError>;
 
-    /// # Errors
-    ///
-    /// Rejects an invalid or unauthorized generated control frame.
     fn event_control(
         &self,
         principal: &AuthenticatedPrincipal,
         frame: ControlPlaneWebSocketClientFrame,
     ) -> Result<Vec<Value>, ApiError>;
 
-    /// # Errors
-    ///
-    /// Returns a redacted application shutdown failure.
     fn shutdown(&self) -> Result<(), ApiError>;
 }
 
-/// Strict generated-contract adapter used by the one public listener.
 pub struct GeneratedContractDispatcher {
     application: Arc<dyn TypedControlPlaneApiPort>,
 }

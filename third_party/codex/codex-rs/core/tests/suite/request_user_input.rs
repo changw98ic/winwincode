@@ -192,6 +192,7 @@ async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Resul
     let response = RequestUserInputResponse { answers };
     codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id.clone(),
             response,
         })

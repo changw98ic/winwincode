@@ -405,6 +405,24 @@ impl ExecCommandHandler {
 }
 
 impl CoreToolRuntime for ExecCommandHandler {
+    fn reconcile_execution<'a>(
+        &'a self,
+        original: &'a ToolInvocation,
+    ) -> futures::future::BoxFuture<'a, codex_state::ToolRecoveryEvidence> {
+        Box::pin(async {
+            original
+                .session
+                .services
+                .unified_exec_manager
+                .reconcile_original_call(&original.session, &original.call_id)
+                .await
+        })
+    }
+
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

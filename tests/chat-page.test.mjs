@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
+import { sharedCoreActivity, diagnosticCoreActivity, agentWaitCoreActivity } from './fixtures/core-tool-activity.mjs'
 import { JSDOM } from 'jsdom'
 import { createRequire } from 'node:module'
 const clientRequire = createRequire(new URL('../apps/client/package.json', import.meta.url))
@@ -459,8 +460,6 @@ test('empty Chat does not show WinWinCode system diagrams as project data', () =
   assert.equal(findByClass(rootElement, 'wwc-chat-messages').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').placeholder,
     '描述你的想法…')
-  // Project architecture/flow diagrams belong to Delivery solution review in
-  // StrongFlow, not the Chat empty state.
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram').length, 0)
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-tab').length, 0)
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-label').length, 0)
@@ -505,7 +504,6 @@ test('Chat keeps the Session decisions on the first screen and retires the card 
   assert.notEqual(findByClass(rootElement, 'wwc-chat-decisions').getAttribute('aria-hidden'), 'true')
   const items = findAllByClass(rootElement, 'wwc-contextual-decision-item')
   assert.equal(items.length, 2)
-  // The blocking tool approval is the first row of the card.
   assert.equal(items[0].dataset.kind, 'approval')
   assert.equal(items[0].dataset.urgency, 'blocking')
   assert.match(
@@ -513,7 +511,6 @@ test('Chat keeps the Session decisions on the first screen and retires the card 
     /Run the approved test command/u,
   )
   assert.equal(items[1].dataset.kind, 'input')
-  // The card is not a second announcement channel: Chat keeps one polite status.
   assert.equal(findByClass(card, 'wwc-contextual-decision-note').getAttribute('aria-live'), null)
 
   model.publish(state())
@@ -544,7 +541,6 @@ test('Chat decides an approval and answers an input through its own commands', (
     'approve',
     'Reviewed the exact command.',
   ])
-  // The typed reason survives until the server stops listing the decision.
   assert.equal(reason.value, 'Reviewed the exact command.')
 
   const inputRow = items.find(row => row.dataset.kind === 'input')
@@ -556,7 +552,6 @@ test('Chat decides an approval and answers an input through its own commands', (
     { mode: 'single_choice', value: 'candidate' },
   ])
 
-  // A read-only Chat renders the decisions but submits nothing.
   const sealedRoot = document.createElement('main')
   const sealed = mountChatPage({
     root: sealedRoot,
@@ -746,8 +741,6 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   const modelContext = findByClass(rootElement, 'wwc-chat-convert-model')
   const confirmation = findByClass(rootElement, 'wwc-chat-convert-confirm')
   assert.equal(confirmationPanel.hidden, false)
-  // UI-604: the confirmation is a named dialog that takes focus on open and
-  // hands it back to the trigger on Escape.
   assert.equal(confirmationPanel.getAttribute('role'), 'dialog')
   assert.equal(confirmationPanel.getAttribute('aria-modal'), 'false')
   const labelledBy = confirmationPanel.getAttribute('aria-labelledby')
@@ -792,7 +785,6 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     ],
   }])
 
-  // A created Delivery surfaces as the in-flow receipt line of design 03b.
   deliveryCreator.publish({ status: 'created', error: null, deliveryId: 'dlv_00000000000000000000000001' })
   const receipt = findByClass(rootElement, 'wwc-chat-delegation-receipt')
   assert.equal(receipt.hidden, false)
@@ -920,5 +912,22 @@ test('DSH renders safe Markdown, highlighted code and user attachments in the co
   assert.equal(rootElement.querySelectorAll('.wwc-chat-messages table').length, 1)
   assert.ok(rootElement.querySelector('.wwc-chat-messages pre .wwc-syntax-token-keyword'))
   assert.equal(rootElement.querySelectorAll('.wwc-chat-messages pre [style]').length, 0)
+  mounted.close()
+})
+
+test('Chat renders canonical sharing and diagnostic relationships as text', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const activities = [sharedCoreActivity(), diagnosticCoreActivity(), agentWaitCoreActivity()]
+  const model = new FakeChatViewModel(state({ runtime: { sessions: [{ activities }] } }))
+  const mounted = mountChatPage({ root: rootElement, model })
+  const rows = [...rootElement.querySelectorAll('.wwc-runtime-activity')]
+  assert.equal(rows.length, 3)
+  assert.match(rows[0].textContent, /public_smoke · 已取消.*父请求 #1.*代码运行 cell-1.*合并等待请求 #7.*结果已接受.*结果已交付给调用者.*输入来源已验证/su)
+  assert.match(rows[1].textContent, /疑似等待成环 · 已提示模型.*这些等待是否成环？.*public_smoke · 调用 logical-8/su)
+  assert.match(rows[1].textContent, /代码运行 cell-1 → Agent agent-2 · 期限 2030-01-01T00:00:00.000Z/u)
+  assert.match(rows[2].textContent, /代码运行 cell-1.*等待 Agent agent-2.*等待状态待核对.*等待期限 2030-01-01T00:00:00.000Z/su)
+  assert.equal(rows[1].querySelector('script'), null)
+  assert.equal(findByClass(rootElement, 'wwc-chat-runtime').hidden, false)
   mounted.close()
 })

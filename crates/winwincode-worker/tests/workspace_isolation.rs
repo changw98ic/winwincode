@@ -297,7 +297,6 @@ fn lease_extension_preserves_workspace_and_recovers_exact_authority() {
     let origin = workspace.origin_provenance().clone();
     let checkout = workspace.layout().checkout().to_path_buf();
     active.lease.expires_at = Instant("2030-01-02T00:00:00.000Z".to_owned());
-    // Inject the state after rename succeeds but before the owner advances in memory.
     let manifest_path = workspace.layout().root().join(".winwincode-workspace.json");
     let mut manifest = fs::read_to_string(&manifest_path).expect("read manifest");
     let current_start = manifest

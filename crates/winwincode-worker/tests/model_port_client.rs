@@ -194,6 +194,15 @@ impl CurrentAuthority {
 }
 
 impl ModelLeaseAuthoritySource for CurrentAuthority {
+    fn validate_retained_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        _exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        self.validate_current(authority, now)
+    }
+
     fn validate_current(
         &self,
         authority: &ModelLeaseAuthority,
@@ -974,7 +983,7 @@ async fn wrong_work_run_terminal_frame_is_rejected_before_sink_delivery() {
 }
 
 #[tokio::test]
-async fn expired_lease_disconnect_terminates_and_releases_resources() {
+async fn expired_lease_disconnect_requests_retained_output_without_restarting_execution() {
     let authority = authority(None);
     let store = MemoryCursorStore::default();
     let sink = RecordingSink::default();
@@ -993,18 +1002,15 @@ async fn expired_lease_disconnect_terminates_and_releases_resources() {
         client
             .handle_disconnect(&ModelExchangeId(id("mdl", 9)), metadata(91, 50), true)
             .await
-            .expect("expired lease becomes terminal"),
-        ModelDisconnectOutcome::Terminated(ModelTerminationReason::StaleAuthority)
+            .expect("request only retained response frames"),
+        ModelDisconnectOutcome::ResumeRequested {
+            confirmed_sequence: 0,
+            replay_from_sequence: 1
+        }
     );
-    assert_eq!(
-        store.only_snapshot().termination,
-        Some(ModelTerminationReason::StaleAuthority)
-    );
-    assert_eq!(
-        sink.terminations(),
-        [(id("mdl", 9), ModelTerminationReason::StaleAuthority)]
-    );
-    assert_eq!(sink.released_count(), 1);
+    assert!(store.is_empty());
+    assert!(sink.terminations().is_empty());
+    assert_eq!(sink.released_count(), 0);
 }
 
 #[tokio::test]
@@ -1334,4 +1340,87 @@ async fn cancellation_intent_recovers_after_terminal_cursor_failure() {
     assert_eq!(sink.terminations().len(), 1);
     assert_eq!(sink.released_count(), 1);
     assert_eq!(model_acks(&port).len(), 1);
+}
+
+#[tokio::test]
+async fn consumed_model_chunk_is_acknowledged_after_expiry() {
+    let authority = authority(None);
+    let current = CurrentAuthority::new(authority.clone());
+    let port = RecordingPort::default();
+    let store = MemoryCursorStore::default();
+    let sink = RecordingSink::default();
+    let mut client = WorkerModelPortClient::new(port, store, current, sink);
+    client
+        .open(open_command(&authority, 6, 60, 'a'))
+        .await
+        .expect("open stream");
+    let original = chunk(&authority, 6, 1, 'b', false, None);
+    client
+        .accept_chunk(&original, metadata(61, 12))
+        .await
+        .expect("consume original frame");
+    let replay = client.accept_chunk(&original, metadata(62, 50)).await;
+    assert_eq!(
+        replay.expect("acknowledge exact retained frame"),
+        ModelChunkDisposition::Duplicate {
+            confirmed_sequence: 1
+        }
+    );
+}
+
+#[tokio::test]
+async fn late_model_output_and_cancellation_do_not_authorize_a_new_model_call() {
+    let authority = authority(None);
+    let sink = RecordingSink::default();
+    let mut client = WorkerModelPortClient::new(
+        RecordingPort::default(),
+        MemoryCursorStore::default(),
+        CurrentAuthority::new(authority.clone()),
+        sink.clone(),
+    );
+    client
+        .open(open_command(&authority, 17, 170, 'a'))
+        .await
+        .unwrap();
+    let mut duplicate_open = open_command(&authority, 17, 170, 'a');
+    duplicate_open.metadata.sent_at = at(51);
+    assert_eq!(
+        client.open(duplicate_open).await.unwrap(),
+        ModelOpenOutcome::Duplicate
+    );
+    let original = chunk(&authority, 17, 1, 'b', false, None);
+    assert!(matches!(
+        client
+            .accept_chunk(&original, metadata(171, 51))
+            .await
+            .unwrap(),
+        ModelChunkDisposition::Delivered {
+            confirmed_sequence: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        client
+            .accept_chunk(&original, metadata(172, 52))
+            .await
+            .unwrap(),
+        ModelChunkDisposition::Duplicate {
+            confirmed_sequence: 1
+        }
+    ));
+    let mut new_call = open_command(&authority, 18, 180, 'c');
+    new_call.metadata.sent_at = at(53);
+    assert_eq!(
+        client.open(new_call).await.unwrap_err().code(),
+        ModelPortClientErrorCode::ExpiredLease
+    );
+    client
+        .cancel_exchange(&ModelExchangeId(id("mdl", 17)), metadata(173, 54))
+        .await
+        .expect("stop the existing exchange after expiry");
+    assert_eq!(sink.sequences(), vec![1]);
+    assert_eq!(
+        sink.terminations(),
+        vec![(id("mdl", 17), ModelTerminationReason::Cancelled)]
+    );
 }

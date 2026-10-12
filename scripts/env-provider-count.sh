@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Count and list provider-related env vars (values redacted).
-# Usage: source .env first if you want Jev vars included.
 
 set -euo pipefail
 pattern='PROVIDER|OPENJEV|JEV_|TYPESAFE|GLM|ZHIPU|ANTHROPIC|OPENAI|MODEL'

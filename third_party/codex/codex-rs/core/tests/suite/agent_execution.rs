@@ -7,8 +7,8 @@ use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_code_mode_call;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
@@ -29,14 +29,14 @@ fn body_contains(request: &wiremock::Request, text: &str) -> bool {
         .is_ok_and(|body| body.to_string().contains(text))
 }
 
-fn has_function_call_output(request: &wiremock::Request, call_id: &str) -> bool {
+fn has_tool_call_output(request: &wiremock::Request, call_id: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(&request.body).is_ok_and(|body| {
         body.get("input")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| {
                 items.iter().any(|item| {
                     item.get("type").and_then(serde_json::Value::as_str)
-                        == Some("function_call_output")
+                        == Some("custom_tool_call_output")
                         && item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
                 })
             })
@@ -56,7 +56,7 @@ async fn mount_root_collaboration_call(
         move |request: &wiremock::Request| body_contains(request, prompt),
         sse(vec![
             ev_response_created(&response_id),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 call_id,
                 MULTI_AGENT_V2_NAMESPACE,
                 tool_name,
@@ -70,7 +70,7 @@ async fn mount_root_collaboration_call(
     let completion_id = format!("resp-{call_id}-complete");
     mount_sse_once_match(
         server,
-        move |request: &wiremock::Request| has_function_call_output(request, call_id),
+        move |request: &wiremock::Request| has_tool_call_output(request, call_id),
         sse(vec![
             ev_response_created(&completion_id),
             ev_assistant_message(&format!("msg-{call_id}"), "collaboration completed"),
@@ -86,15 +86,31 @@ async fn mount_completed_worker(
     parent_call_id: &'static str,
 ) -> ResponseMock {
     let response_id = format!("resp-worker-{parent_call_id}");
+    let catalog_call_id = format!("catalog-{parent_call_id}");
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
-            body_contains(request, task) && !has_function_call_output(request, parent_call_id)
+            body_contains(request, task) && !has_tool_call_output(request, parent_call_id)
         },
         sse(vec![
             ev_response_created(&response_id),
-            ev_assistant_message(&format!("msg-worker-{parent_call_id}"), "worker completed"),
+            core_test_support::responses::ev_custom_tool_call(
+                &catalog_call_id,
+                "exec",
+                "text(ALL_TOOLS.map(tool => tool.name));",
+            ),
             ev_completed(&response_id),
+        ]),
+    )
+    .await;
+    let completed_response_id = format!("resp-worker-complete-{parent_call_id}");
+    mount_sse_once_match(
+        server,
+        move |request: &wiremock::Request| has_tool_call_output(request, &catalog_call_id),
+        sse(vec![
+            ev_response_created(&completed_response_id),
+            ev_assistant_message(&format!("msg-worker-{parent_call_id}"), "worker completed"),
+            ev_completed(&completed_response_id),
         ]),
     )
     .await
@@ -112,7 +128,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
         |request: &wiremock::Request| body_contains(request, FIRST_PROMPT),
         sse(vec![
             ev_response_created("first-response"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 "first-call",
                 MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
@@ -129,11 +145,11 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            body_contains(request, FIRST_TASK) && !has_function_call_output(request, "first-call")
+            body_contains(request, FIRST_TASK) && !has_tool_call_output(request, "first-call")
         },
         sse(vec![
             ev_response_created("first-worker-response"),
-            ev_function_call_with_namespace(
+            ev_code_mode_call(
                 "second-call",
                 MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
@@ -145,7 +161,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     .await;
     let second_followup = mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| has_function_call_output(request, "second-call"),
+        |request: &wiremock::Request| has_tool_call_output(request, "second-call"),
         sse(vec![
             ev_response_created("second-followup-response"),
             ev_assistant_message("second-followup-message", "blocked"),
@@ -155,7 +171,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     .await;
     mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| has_function_call_output(request, "first-call"),
+        |request: &wiremock::Request| has_tool_call_output(request, "first-call"),
         sse(vec![
             ev_response_created("first-followup-response"),
             ev_assistant_message("first-followup-message", "spawned"),
@@ -175,6 +191,10 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
                 .features
                 .enable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
+            let _ = config.features.enable(Feature::CodeModeOnly);
+            config.web_search_mode = codex_config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
         });
     let test = builder.build(&server).await?;
@@ -182,16 +202,20 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
 
     let second_output = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(output) = second_followup.function_call_output_text("second-call") {
+            if let Some(output) = second_followup
+                .requests()
+                .iter()
+                .find_map(|request| request.custom_tool_call_output_text("second-call"))
+            {
                 return output;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
-    assert_eq!(
-        second_output,
-        "collab spawn failed: agent thread limit reached"
+    assert!(
+        second_output.contains("collab spawn failed: agent thread limit reached"),
+        "{second_output}"
     );
     assert_eq!(test.thread_manager.list_thread_ids().await.len(), 2);
 
@@ -247,6 +271,10 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
                     .expect("test config should allow feature update");
             }
             config.use_experimental_unified_exec_tool = true;
+            let _ = config.features.enable(Feature::CodeModeOnly);
+            config.web_search_mode = codex_config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
             config
                 .permissions
@@ -349,7 +377,22 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
             .expect("expected a model request for the original worker")
     };
     let reloaded_tools = worker_tools(&reloaded_worker_request);
-    assert!(reloaded_tools.to_string().contains("### `exec_command`"));
+    assert!(reloaded_tools.to_string().contains("\"name\":\"exec\""));
+    let request = reloaded_worker_request
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.body_json()["client_metadata"]["thread_id"] == json!(first_thread_id)
+        })
+        .expect("reloaded worker request");
+    let output = request.custom_tool_call_output("catalog-followup-call");
+    let tools: Vec<String> = serde_json::from_str(
+        output["output"][1]["text"]
+            .as_str()
+            .expect("nested catalog"),
+    )?;
+    assert!(tools.iter().any(|name| name == "exec_command"));
+    assert!(tools.iter().any(|name| name == "write_stdin"));
 
     Ok(())
 }

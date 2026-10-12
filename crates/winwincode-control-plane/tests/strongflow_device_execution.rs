@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `FLOW-100.5` `StrongFlow` role-to-Device `WorkerSession` routing over the
-//! real durable ledgers: every Delivery role `WorkRun` whose launch anchor
-//! exists dispatches to its own launched Device `WorkerSession` with its role
-//! stamped on the reservation facts, concurrent role dispatches stay within
-//! the Client's worker-session capacity, and a `WorkRun` without an anchor
-//! (or with a dead anchor, or a denied actor) keeps or restores the exact
-//! supervised local behavior — including the local queue exclusion reuse.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -61,8 +53,6 @@ fn canonical_id(prefix: &str, seed: u64) -> String {
     format!("{prefix}_{seed:026}")
 }
 
-/// A canonical 26-character Crockford identity body: distinct seeds differ
-/// across the whole suffix, like the ULID identities production mints.
 fn ulid(seed: u64) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut identity = String::with_capacity(26);
@@ -91,11 +81,6 @@ fn repository_scope(seed: u64) -> RepositorySchedulerScope {
     }
 }
 
-// ---- durable device fixtures (the shared launch-anchor chain) --------------
-
-/// Seeds node, client grant, visible repository binding, and the
-/// device-confirmed occupancy lease; returns the node, its client instance,
-/// the lease identity, fencing token, and the binding.
 fn work_run_device_fixture(
     storage: &mut SqliteStorage,
     seed: u64,
@@ -197,14 +182,11 @@ fn work_run_device_fixture(
     (node, instance, lease_id, fencing_token, binding)
 }
 
-/// The device identities one staged `WorkRun` anchor exposes to the test.
 struct WorkRunAnchor {
     worker_launch_grant_id: String,
     worker_session_id: String,
 }
 
-/// Issues one live launch grant anchored to the exact (product session,
-/// `WorkRun`) pair, exactly as the Client's two-phase scheduler would.
 #[allow(clippy::too_many_arguments)]
 fn work_run_anchor(
     storage: &mut SqliteStorage,
@@ -244,11 +226,6 @@ fn work_run_anchor(
     }
 }
 
-// ---- Delivery WorkRun job staging (what the dispatcher commits) --------------
-
-/// Submits one Delivery `WorkRun` job exactly like the canonical
-/// `LocalExecutionJobDispatcher`: the immutable generated `ExecutionJob` in
-/// the dispatch payload, the delivery scope, and the `WorkRun` reservation.
 #[allow(clippy::too_many_arguments)]
 fn work_run_role_job(
     storage: &mut SqliteStorage,
@@ -389,9 +366,6 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
     let mut storage = SqliteStorage::open(temporary_root("role-matrix")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
         work_run_device_fixture(&mut storage, 100, HOLDER);
-    // One role WorkRun job per Delivery role with its canonical write mode:
-    // writer roles execute on an isolated candidate, read-only roles on a
-    // frozen read-only workspace.
     let planner = work_run_role_job(
         &mut storage,
         200,
@@ -422,8 +396,6 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
         ("reviewer", &reviewer),
         ("verifier", &verifier),
     ];
-    // The Client launches one WorkerSession per role WorkRun, and the
-    // routing dispatches each job to exactly its own session.
     for (index, (role, (job_id, work_run_id, product_session_id))) in roles.iter().enumerate() {
         let seed = 300 + u64::try_from(index).expect("index") * 10;
         let anchor = work_run_anchor(
@@ -443,8 +415,6 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
             dispatch_work_run_to_device_worker(&mut storage, Some(HOLDER), work_run_id, &now)
                 .expect("role dispatch")
                 .expect("device-anchored WorkRun dispatches");
-        // The role identity travels on the facts, together with the exact
-        // device worker identities of this WorkRun's own launch.
         assert_eq!(dispatch.facts.role.as_deref(), Some(*role));
         assert_eq!(dispatch.facts.worker_session_id, anchor.worker_session_id);
         assert_eq!(
@@ -460,12 +430,8 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
             dispatch.facts.work_run_id.as_deref(),
             Some(work_run_id.0.as_str())
         );
-        // The binding is the WorkRun's own WorkerSession, bound once.
         assert_eq!(dispatch.binding.worker_session_id, anchor.worker_session_id);
         assert_eq!(dispatch.binding.state.as_str(), "bound");
-        // The reservation runs under the StrongFlow device pool and stays
-        // queued for the device worker; writer roles reserve an isolated
-        // candidate worktree, read-only roles stay read-only.
         let reservation = storage
             .execution_admission()
             .expect("admission")
@@ -486,8 +452,6 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
             );
         }
     }
-    // Four concurrent role dispatches stay within the Client's
-    // worker-session capacity, each anchored to its own launch.
     let capacity = DeviceExecutionBindingService::new(&mut storage)
         .capacity_snapshot(&node)
         .expect("capacity")
@@ -495,8 +459,6 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
     assert_eq!(capacity.reserved_worker_sessions, 4);
     assert_eq!(capacity.bound_bindings, 4);
     assert_eq!(capacity.free_worker_sessions, 0);
-    // No role ever reuses another role's WorkerSession: the four dispatch
-    // facts name four distinct sessions.
     let mut sessions = roles
         .iter()
         .map(|(_, (job_id, _, _))| {
@@ -520,8 +482,6 @@ fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
     let mut storage = SqliteStorage::open(temporary_root("local-exclusion")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
         work_run_device_fixture(&mut storage, 400, HOLDER);
-    // One anchored executor WorkRun and one unanchored reviewer WorkRun in the
-    // same repository scope.
     let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         500,
@@ -546,8 +506,6 @@ fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
         product_session_id.0.as_str(),
         work_run_id.0.as_str(),
     );
-    // The anchored WorkRun routes to the launched device WorkerSession; the
-    // unanchored WorkRun keeps the supervised local path unchanged.
     let dispatch = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
@@ -569,9 +527,6 @@ fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
         .is_none(),
         "a WorkRun without an anchor must not dispatch"
     );
-    // The local queue exclusion (FLOW-100.4) applies unchanged: the local
-    // embedded worker claims exactly the unanchored WorkRun job and can never
-    // claim the device-owned one.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     let first_claim = claim_locally(&mut storage, 701, &worker_id, &worker_instance_id);
     assert_ne!(first_claim.as_ref(), Some(&job_id));
@@ -580,8 +535,6 @@ fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
         local_job.iter().all(|claimed| claimed.0 != job_id.0),
         "the device-owned WorkRun job must stay unclaimable locally"
     );
-    // The device-owned job still waits for its device worker, not for a
-    // local slot.
     let queued = queued_jobs(&mut storage);
     assert!(queued.iter().any(|job| job == &job_id));
 }
@@ -617,9 +570,6 @@ fn registered_device_worker_claims_its_reserved_strongflow_job() {
     )
     .expect("anchored WorkRun dispatches")
     .expect("device dispatch");
-    // The Device WorkerSession process registers under the exact launch-grant
-    // worker identities that the reservation facts sealed. Local exclusion
-    // still holds for any other worker; this process may claim its own job.
     let worker_id = WorkerId(dispatch.facts.worker_id.clone());
     let worker_instance_id = WorkerInstanceId(dispatch.facts.worker_instance_id.clone());
     let request = WorkerRegistrationRequest {
@@ -683,7 +633,6 @@ fn a_dead_anchor_refuses_the_dispatch_without_binding() {
         product_session_id.0.as_str(),
         work_run_id.0.as_str(),
     );
-    // The launch is revoked before the device ever accepted it.
     WorkerLaunchGrantService::new(&mut storage)
         .revoke(
             &anchor.worker_launch_grant_id,
@@ -704,7 +653,6 @@ fn a_dead_anchor_refuses_the_dispatch_without_binding() {
         error.kind(),
         StrongflowDeviceDispatchErrorKind::AnchorNotLive
     );
-    // The dead anchor never binds a worker session and never attaches facts.
     assert!(
         DeviceExecutionBindingService::new(&mut storage)
             .snapshot(&anchor.worker_session_id)
@@ -743,8 +691,6 @@ fn a_gate_denial_routes_nothing() {
         product_session_id.0.as_str(),
         work_run_id.0.as_str(),
     );
-    // A non-holder may not dispatch to the holder's device: the gate denial
-    // carries the central wire code and routes nothing.
     let error = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(MEMBER),
@@ -768,7 +714,6 @@ fn a_gate_denial_routes_nothing() {
             .expect("facts lookup")
             .is_none()
     );
-    // The holder dispatches the same WorkRun afterwards.
     let dispatch = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
@@ -812,8 +757,6 @@ fn the_dispatch_replays_exactly_without_new_facts() {
     .expect("first dispatch")
     .expect("device dispatch");
     assert_eq!(first.facts.worker_session_id, anchor.worker_session_id);
-    // An exact command replay re-runs the routing and finds its durable
-    // receipts: same binding, same facts, nothing new.
     let replay = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
@@ -843,8 +786,6 @@ fn an_anchor_of_another_product_session_is_refused_as_corrupt() {
         "reviewer",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    // The grant anchors the right WorkRun but a foreign product session:
-    // the identity join must refuse instead of routing.
     let anchor = work_run_anchor(
         &mut storage,
         1900,
@@ -868,7 +809,6 @@ fn an_anchor_of_another_product_session_is_refused_as_corrupt() {
         error.kind(),
         StrongflowDeviceDispatchErrorKind::CorruptState
     );
-    // The refusal binds nothing and attaches nothing.
     assert!(
         DeviceExecutionBindingService::new(&mut storage)
             .snapshot(&anchor.worker_session_id)
@@ -887,8 +827,6 @@ fn an_anchor_of_another_product_session_is_refused_as_corrupt() {
 fn the_role_column_migrates_a_preexisting_facts_table() {
     let root = temporary_root("facts-role-migration");
     std::fs::create_dir_all(&root).expect("create root");
-    // A database written by the pre-`FLOW-100.5` schema: the facts table
-    // exists without the nullable `role` column.
     {
         let connection =
             rusqlite::Connection::open(root.join("control-plane.sqlite3")).expect("open database");
@@ -914,8 +852,6 @@ fn the_role_column_migrates_a_preexisting_facts_table() {
             )
             .expect("old facts table");
     }
-    // The routing still dispatches over the migrated table: the ledger open
-    // appends the `role` column exactly where the fresh schema declares it.
     let mut storage = SqliteStorage::open(&root).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
         work_run_device_fixture(&mut storage, 2000, HOLDER);

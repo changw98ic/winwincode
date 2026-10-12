@@ -1,0 +1,1070 @@
+diff --git a/codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs b/codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs
+new file mode 100644
+index 00000000..13a45de5
+--- /dev/null
++++ b/codex-rs/code-mode-runtime/src/runtime/mechanism_regression_tests.rs
+@@ -0,0 +1,262 @@
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++use std::time::Duration;
++
++use codex_code_mode_protocol::*;
++use codex_protocol::ToolName;
++use serde_json::Value;
++use tokio::sync::mpsc;
++use tokio_util::sync::CancellationToken;
++
++use super::PendingRuntimeMode;
++use super::RuntimeCommand;
++use super::RuntimeEvent;
++use super::spawn_runtime;
++use crate::InProcessCodeModeSession;
++
++static PENDING_CLONE_CALLS: AtomicUsize = AtomicUsize::new(0);
++static PENDING_CLONE_STRING_BYTES: AtomicUsize = AtomicUsize::new(0);
++
++// Observe the already cloned production value. This does not replace the clone algorithm.
++pub(super) fn record_pending_clone(values: &HashMap<String, Value>) {
++    fn string_bytes(value: &Value) -> usize {
++        match value {
++            Value::String(value) => value.len(),
++            Value::Array(values) => values.iter().map(string_bytes).sum(),
++            Value::Object(values) => values.values().map(string_bytes).sum(),
++            Value::Null | Value::Bool(_) | Value::Number(_) => 0,
++        }
++    }
++    PENDING_CLONE_CALLS.fetch_add(1, Ordering::SeqCst);
++    PENDING_CLONE_STRING_BYTES.fetch_add(values.values().map(string_bytes).sum(), Ordering::SeqCst);
++}
++
++fn request(source: &str) -> ExecuteRequest {
++    ExecuteRequest {
++        tool_call_id: "synthetic-mechanism-cell".to_string(),
++        enabled_tools: Vec::new(),
++        source: source.to_string(),
++        yield_time_ms: Some(100),
++        max_output_tokens: None,
++    }
++}
++
++fn thread_count() -> usize {
++    #[cfg(target_os = "linux")]
++    {
++        std::fs::read_dir("/proc/self/task").unwrap().count()
++    }
++    #[cfg(target_os = "macos")]
++    {
++        let output = std::process::Command::new("/bin/ps")
++            .args(["-M", "-p", &std::process::id().to_string()])
++            .output()
++            .unwrap();
++        assert!(output.status.success());
++        String::from_utf8(output.stdout)
++            .unwrap()
++            .lines()
++            .skip(1)
++            .filter(|line| !line.trim().is_empty())
++            .count()
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    {
++        panic!("thread count fixture supports release-target macOS and Linux")
++    }
++}
++
++#[derive(Default)]
++struct CloseDelegate {
++    closed: AtomicUsize,
++}
++impl CodeModeSessionDelegate for CloseDelegate {
++    fn invoke_tool<'a>(
++        &'a self,
++        _invocation: CodeModeNestedToolCall,
++        _cancellation_token: CancellationToken,
++    ) -> ToolInvocationFuture<'a> {
++        Box::pin(async { Ok(Value::Null) })
++    }
++    fn notify<'a>(
++        &'a self,
++        _call_id: String,
++        _cell_id: CellId,
++        _text: String,
++        _cancellation_token: CancellationToken,
++    ) -> NotificationFuture<'a> {
++        Box::pin(async { Ok(()) })
++    }
++    fn cell_closed(&self, _cell_id: &CellId) {
++        self.closed.fetch_add(1, Ordering::SeqCst);
++    }
++}
++
++#[tokio::test(flavor = "current_thread")]
++#[ignore = "mechanism audit: M16 selected prompt timer cleanup budget"]
++async fn mechanism_m16_cell_close_and_cancel_retire_timer_threads() {
++    // Warm V8's process-wide thread pool before measuring timer resources.
++    let warm = InProcessCodeModeSession::new();
++    warm.execute(request("text('warm');"))
++        .await
++        .unwrap()
++        .initial_response()
++        .await
++        .unwrap();
++    warm.shutdown().await.unwrap();
++    tokio::time::sleep(Duration::from_millis(200)).await;
++    let mut excess = Vec::new();
++    for mode in ["clear_then_close", "close_without_clear", "terminate"] {
++        let baseline = thread_count();
++        let delegate = Arc::new(CloseDelegate::default());
++        let session = InProcessCodeModeSession::with_delegate(delegate.clone());
++        let suffix = match mode {
++            "clear_then_close" => "for (const id of ids) clearTimeout(id);",
++            "close_without_clear" => "text('closed');",
++            "terminate" => "await new Promise(() => {});",
++            _ => unreachable!(),
++        };
++        let source = format!(
++            "const ids = []; for (let i=0; i<32; i++) ids.push(setTimeout(() => {{}}, 5000)); {suffix}"
++        );
++        let started = session.execute(request(&source)).await.unwrap();
++        let cell_id = started.cell_id.clone();
++        let response = tokio::time::timeout(Duration::from_secs(2), started.initial_response())
++            .await
++            .unwrap()
++            .unwrap();
++        if mode == "terminate" {
++            assert!(matches!(response, RuntimeResponse::Yielded { .. }));
++            tokio::time::timeout(Duration::from_secs(2), session.terminate(cell_id))
++                .await
++                .unwrap()
++                .unwrap();
++        } else {
++            assert!(matches!(
++                response,
++                RuntimeResponse::Result {
++                    error_text: None,
++                    ..
++                }
++            ));
++        }
++        tokio::time::timeout(Duration::from_secs(2), async {
++            while delegate.closed.load(Ordering::SeqCst) != 1 {
++                tokio::time::sleep(Duration::from_millis(5)).await;
++            }
++        })
++        .await
++        .unwrap();
++        session.shutdown().await.unwrap();
++        tokio::time::sleep(Duration::from_millis(150)).await;
++        let after_closed = thread_count();
++        // Always allow owned timers to expire before any red assertion.
++        tokio::time::sleep(Duration::from_millis(5400)).await;
++        let after_expiry = thread_count();
++        let row = serde_json::json!({"id":"M16","mode":mode,"timers":32,"delay_ms":5000,"baseline_os_threads":baseline,"after_cell_closed_os_threads":after_closed,"after_original_expiry_os_threads":after_expiry,"cell_closed_callbacks":delegate.closed.load(Ordering::SeqCst),"source":"actual InProcessCodeModeSession + V8 timers"});
++        eprintln!("MECHANISM_RECEIPT {row}");
++        assert!(
++            after_expiry <= baseline + 8,
++            "owned timer threads did not expire within cleanup bound"
++        );
++        excess.push(after_closed.saturating_sub(baseline));
++    }
++    assert!(
++        excess.iter().all(|threads| *threads <= 8),
++        "cell close/cancel must promptly retire timers; extra OS threads {excess:?}"
++    );
++}
++
++async fn pending_store(bytes: usize) -> (usize, usize, usize) {
++    PENDING_CLONE_CALLS.store(0, Ordering::SeqCst);
++    PENDING_CLONE_STRING_BYTES.store(0, Ordering::SeqCst);
++    let source = format!(
++        "{} for (let i=0; i<32; i++) await tools.echo({{}});",
++        if bytes == 0 {
++            String::new()
++        } else {
++            format!("store('synthetic', 'x'.repeat({bytes}));")
++        }
++    );
++    let mut execute = request(&source);
++    execute.enabled_tools = vec![ToolDefinition {
++        name: "echo".to_string(),
++        tool_name: ToolName::plain("echo"),
++        description: String::new(),
++        kind: CodeModeToolKind::Function,
++        input_schema: None,
++        output_schema: None,
++    }];
++    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
++    let (command_tx, _control_tx, _handle) = spawn_runtime(
++        HashMap::new(),
++        execute,
++        event_tx,
++        PendingRuntimeMode::Continue,
++        None,
++    )
++    .unwrap();
++    let mut replies = 0;
++    let mut pending_call = None;
++    let mut final_bytes = 0;
++    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
++        .await
++        .unwrap()
++    {
++        match event {
++            RuntimeEvent::ToolCall { id, .. } => {
++                pending_call = Some(id);
++            }
++            RuntimeEvent::Pending => {
++                if let Some(id) = pending_call.take() {
++                    command_tx
++                        .send(RuntimeCommand::ToolResponse {
++                            id,
++                            result: Value::Null,
++                        })
++                        .unwrap();
++                    replies += 1;
++                }
++            }
++            RuntimeEvent::Result {
++                stored_value_writes,
++                error_text,
++            } => {
++                assert_eq!(error_text, None);
++                final_bytes = stored_value_writes
++                    .get("synthetic")
++                    .and_then(Value::as_str)
++                    .map_or(0, str::len);
++            }
++            RuntimeEvent::ThreadPanicked => panic!("real V8 runtime panicked"),
++            RuntimeEvent::Started
++            | RuntimeEvent::ContentItem(_)
++            | RuntimeEvent::YieldRequested
++            | RuntimeEvent::Notify { .. } => {}
++        }
++    }
++    assert_eq!(replies, 32);
++    assert_eq!(final_bytes, bytes);
++    (
++        PENDING_CLONE_CALLS.load(Ordering::SeqCst),
++        PENDING_CLONE_STRING_BYTES.load(Ordering::SeqCst),
++        replies,
++    )
++}
++
++#[tokio::test(flavor = "current_thread")]
++#[ignore = "mechanism audit: M17 selected zero-copy Pending budget"]
++async fn mechanism_m17_pending_does_not_deep_clone_store() {
++    let baseline = pending_store(0).await;
++    let with_store = pending_store(1024 * 1024).await;
++    for (label, sample) in [("baseline", baseline), ("store_1mib", with_store)] {
++        let row = serde_json::json!({"id":"M17","case":label,"pending_clone_calls":sample.0,"pending_cloned_string_bytes":sample.1,"actual_tool_replies":sample.2,"source":"actual spawn_runtime + completion_state clone observation"});
++        eprintln!("MECHANISM_RECEIPT {row}");
++    }
++    assert_eq!(
++        with_store.1, 0,
++        "Pending completion must avoid deep cloning unmodified stored values"
++    );
++}
+diff --git a/codex-rs/code-mode-runtime/src/runtime/mod.rs b/codex-rs/code-mode-runtime/src/runtime/mod.rs
+index 09e9f4ae..925c0d86 100644
+--- a/codex-rs/code-mode-runtime/src/runtime/mod.rs
++++ b/codex-rs/code-mode-runtime/src/runtime/mod.rs
+@@ -512,3 +512,7 @@ await new Promise(() => {});
+             .unwrap();
+     }
+ }
++
++#[cfg(test)]
++#[path = "mechanism_regression_tests.rs"]
++mod mechanism_regression_tests;
+diff --git a/codex-rs/code-mode-runtime/src/runtime/module_loader.rs b/codex-rs/code-mode-runtime/src/runtime/module_loader.rs
+index 00185edb..76b51481 100644
+--- a/codex-rs/code-mode-runtime/src/runtime/module_loader.rs
++++ b/codex-rs/code-mode-runtime/src/runtime/module_loader.rs
+@@ -118,7 +118,11 @@ pub(super) fn completion_state(
+ 
+     let promise = v8::Local::new(scope, pending_promise);
+     match promise.state() {
+-        v8::PromiseState::Pending => CompletionState::Pending,
++        v8::PromiseState::Pending => {
++            #[cfg(test)]
++            super::mechanism_regression_tests::record_pending_clone(&stored_value_writes);
++            CompletionState::Pending
++        }
+         v8::PromiseState::Fulfilled => CompletionState::Completed {
+             stored_value_writes,
+             error_text: None,
+diff --git a/codex-rs/code-mode/src/remote_session/connection.rs b/codex-rs/code-mode/src/remote_session/connection.rs
+index 355ee6c7..f5533f18 100644
+--- a/codex-rs/code-mode/src/remote_session/connection.rs
++++ b/codex-rs/code-mode/src/remote_session/connection.rs
+@@ -810,3 +810,7 @@ async fn kill_and_reap(child: &mut Child) {
+     let _ = child.start_kill();
+     let _ = child.wait().await;
+ }
++
++#[cfg(test)]
++#[path = "connection/mechanism_regression_tests.rs"]
++mod mechanism_regression_tests;
+diff --git a/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs b/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs
+new file mode 100644
+index 00000000..fc6f0814
+--- /dev/null
++++ b/codex-rs/code-mode/src/remote_session/connection/mechanism_regression_tests.rs
+@@ -0,0 +1,393 @@
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::time::Duration;
++
++use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
++use codex_code_mode_protocol::ExecuteRequest;
++use codex_code_mode_protocol::NoopCodeModeSessionDelegate;
++use codex_code_mode_protocol::RuntimeResponse;
++use codex_code_mode_protocol::WaitRequest;
++use codex_code_mode_protocol::host::CapabilitySet;
++use codex_code_mode_protocol::host::HostHello;
++use codex_code_mode_protocol::host::HostResponse;
++use codex_code_mode_protocol::host::HostToClient;
++use codex_code_mode_protocol::host::ProtocolVersion;
++use codex_code_mode_protocol::host::RequestId;
++use codex_code_mode_protocol::host::SessionId;
++use codex_code_mode_protocol::host::WireCellId;
++use codex_code_mode_protocol::host::WireResult;
++use codex_code_mode_protocol::host::WireRuntimeResponse;
++use codex_code_mode_protocol::host::WireWaitOutcome;
++use serde_json::json;
++
++use super::Connection;
++use super::RemoteSession;
++
++struct FakeHost {
++    root: PathBuf,
++    program: PathBuf,
++}
++impl FakeHost {
++    fn new(mode: &str) -> Self {
++        use std::os::unix::fs::PermissionsExt;
++        let root = std::env::temp_dir().join(format!("wwc-fcr01-{}-{mode}", std::process::id()));
++        std::fs::create_dir_all(&root).unwrap();
++        let program = root.join("owned-stdio-host");
++        let python = std::process::Command::new("python3")
++            .args(["-c", "import sys; print(sys.executable)"])
++            .output()
++            .unwrap();
++        assert!(python.status.success());
++        let python = String::from_utf8(python.stdout).unwrap();
++        let session_id = SessionId::new("session-1".to_string()).unwrap();
++        let cell_id = WireCellId::new("1");
++        // Every reply template is produced by the canonical Rust protocol serializer.
++        let templates = json!({
++            "hello": HostToClient::HostHello(HostHello::new(ProtocolVersion::V1, CapabilitySet::empty())),
++            "open": HostToClient::Response { id: RequestId::new(1), result: WireResult::Ok { value: HostResponse::SessionReady { session_id: session_id.clone() } } },
++            "start": HostToClient::Response { id: RequestId::new(2), result: WireResult::Ok { value: HostResponse::ExecutionStarted { cell_id: cell_id.clone() } } },
++            "initial": HostToClient::InitialResponse { id: RequestId::new(2), result: WireResult::Ok { value: WireRuntimeResponse::Yielded { cell_id: cell_id.clone(), content_items: Vec::new() } } },
++            "wait": HostToClient::Response { id: RequestId::new(3), result: WireResult::Ok { value: HostResponse::WaitCompleted { outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded { cell_id: cell_id.clone(), content_items: Vec::new() }) } } },
++            "terminate": HostToClient::Response { id: RequestId::new(3), result: WireResult::Ok { value: HostResponse::WaitCompleted { outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Result { cell_id: cell_id.clone(), content_items: Vec::new(), error_text: None }) } } },
++            "close": HostToClient::Response { id: RequestId::new(4), result: WireResult::Ok { value: HostResponse::SessionClosed { session_id: session_id.clone() } } },
++            "closed": HostToClient::CellClosed { session_id, cell_id },
++            "cancel": HostToClient::Response { id: RequestId::new(1), result: WireResult::<HostResponse>::Err { message: "owned fake host acknowledged cancellation".to_string() } },
++        });
++        let script = format!(
++            "#!{}\nimport json\nMODE={}\nROOT={}\nTEMPLATES=json.loads({})\n{}",
++            python.trim(),
++            serde_json::to_string(mode).unwrap(),
++            serde_json::to_string(&root.to_string_lossy()).unwrap(),
++            serde_json::to_string(&serde_json::to_string(&templates).unwrap()).unwrap(),
++            FAKE_HOST_BODY
++        );
++        std::fs::write(&program, script).unwrap();
++        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
++        Self { root, program }
++    }
++    async fn observed(&self, marker: &str) {
++        let start = std::time::Instant::now();
++        while !self.root.join(marker).is_file() {
++            assert!(
++                start.elapsed() < Duration::from_secs(5),
++                "fake host did not observe {marker}"
++            );
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    }
++    fn cancellations(&self) -> usize {
++        std::fs::read_to_string(self.root.join("operations.log"))
++            .unwrap_or_default()
++            .lines()
++            .filter(|line| *line == "operation/cancel")
++            .count()
++    }
++    async fn assert_reaped(&self) {
++        let pid = std::fs::read_to_string(self.root.join("pid")).unwrap();
++        let start = std::time::Instant::now();
++        loop {
++            let status = std::process::Command::new("/bin/kill")
++                .args(["-0", pid.trim()])
++                .stderr(std::process::Stdio::null())
++                .status()
++                .unwrap();
++            if !status.success() {
++                break;
++            }
++            assert!(
++                start.elapsed() < Duration::from_secs(5),
++                "owned host not reaped within bound"
++            );
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    }
++}
++impl Drop for FakeHost {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.root);
++    }
++}
++
++// Fault-injection peer only. All client operation/timeout/cancellation behavior is actual Rust.
++const FAKE_HOST_BODY: &str = r#"
++import copy, json, os, pathlib, struct, sys
++root = pathlib.Path(ROOT)
++(root / 'pid').write_text(str(os.getpid()))
++blocked_once = False
++def read_exact(length):
++    result = b''
++    while len(result) < length:
++        chunk = sys.stdin.buffer.read(length - len(result))
++        if not chunk: return None
++        result += chunk
++    return result
++def send(template, request_id=None, session_id=None):
++    message = copy.deepcopy(TEMPLATES[template])
++    if request_id is not None: message['id'] = request_id
++    if session_id is not None:
++        if 'sessionId' in message: message['sessionId'] = session_id
++        if 'result' in message and 'sessionId' in message['result'].get('value', {}): message['result']['value']['sessionId'] = session_id
++    payload = json.dumps(message, separators=(',', ':')).encode()
++    sys.stdout.buffer.write(struct.pack('<I', len(payload)) + payload)
++    sys.stdout.buffer.flush()
++while True:
++    prefix = read_exact(4)
++    if prefix is None: break
++    payload = read_exact(struct.unpack('<I', prefix)[0])
++    if payload is None: break
++    message = json.loads(payload)
++    kind = message['type']
++    with (root / 'operations.log').open('a') as log: log.write(kind + '\n')
++    if kind == 'connection/hello':
++        send('hello'); (root / 'handshake').touch(); continue
++    if kind == 'operation/cancel':
++        (root / 'cancel').touch(); send('cancel', message['id']); continue
++    if kind != 'operation/request': continue
++    request = message['request']; method = request['method']; request_id = message['id']; session_id = request['sessionId']
++    block = {'open':'session/open', 'start':'session/execute', 'close':'session/shutdown', 'wait':'session/wait', 'terminate':'session/terminate', 'opening_outer_cancel':'session/open'}.get(MODE)
++    if method == block and not blocked_once:
++        blocked_once = True; (root / ('withheld-' + MODE)).touch(); continue
++    if method == 'session/open': send('open', request_id, session_id)
++    elif method == 'session/execute':
++        send('start', request_id)
++        if MODE == 'initial' and not blocked_once:
++            blocked_once = True; (root / 'withheld-initial').touch()
++        else: send('initial', request_id)
++    elif method == 'session/wait': send('wait', request_id)
++    elif method == 'session/terminate': send('terminate', request_id); send('closed', session_id=session_id)
++    elif method == 'session/shutdown': send('close', request_id, session_id)
++"#;
++
++fn remote() -> RemoteSession {
++    RemoteSession {
++        id: SessionId::new("session-1".to_string()).unwrap(),
++        generation: 1,
++    }
++}
++fn request() -> ExecuteRequest {
++    ExecuteRequest {
++        tool_call_id: "synthetic-fcr01".to_string(),
++        enabled_tools: Vec::new(),
++        source: "await new Promise(() => {});".to_string(),
++        yield_time_ms: Some(1),
++        max_output_tokens: None,
++    }
++}
++async fn advance_transport_interval() {
++    tokio::time::pause();
++    tokio::time::advance(Duration::from_secs(70)).await;
++    for _ in 0..100 {
++        tokio::task::yield_now().await;
++    }
++    tokio::time::resume();
++}
++
++#[tokio::test(flavor = "current_thread")]
++#[ignore = "mechanism audit: FC-R01 known transport-deadline defect"]
++async fn mechanism_fcr01_stdio_boundaries_have_transport_deadlines() {
++    let mut missing = Vec::new();
++    for mode in ["open", "start", "initial", "close", "wait", "terminate"] {
++        let fake = FakeHost::new(mode);
++        let connection = Arc::new(
++            Connection::spawn(&fake.program)
++                .await
++                .map_err(|err| err.to_string())
++                .unwrap(),
++        );
++        let cleanup = if mode != "open" {
++            Some(
++                connection
++                    .open_session(
++                        remote(),
++                        Arc::new(NoopCodeModeSessionDelegate),
++                        CodeModeSessionCellExecutionLimits::default(),
++                    )
++                    .await
++                    .unwrap(),
++            )
++        } else {
++            None
++        };
++        let started = if matches!(mode, "initial" | "wait" | "terminate") {
++            Some(connection.execute(remote(), request()).await.unwrap())
++        } else {
++            None
++        };
++        let cell_id = started.as_ref().map(|started| started.cell_id.clone());
++        // Consume ordinary initial yields for controls; preserve the stalled initial receiver.
++        let initial = if mode == "initial" {
++            started
++        } else {
++            if let Some(started) = started {
++                assert!(matches!(
++                    started.initial_response().await.unwrap(),
++                    RuntimeResponse::Yielded { .. }
++                ));
++            }
++            None
++        };
++        let c = Arc::clone(&connection);
++        let task = match mode {
++            "open" => tokio::spawn(async move {
++                c.open_session(
++                    remote(),
++                    Arc::new(NoopCodeModeSessionDelegate),
++                    CodeModeSessionCellExecutionLimits::default(),
++                )
++                .await
++                .map(|_| ())
++            }),
++            "start" => {
++                tokio::spawn(async move { c.execute(remote(), request()).await.map(|_| ()) })
++            }
++            "initial" => {
++                tokio::spawn(async move { initial.unwrap().initial_response().await.map(|_| ()) })
++            }
++            "close" => tokio::spawn(async move { c.shutdown_session(remote()).await }),
++            "wait" => tokio::spawn(async move {
++                c.wait(
++                    remote(),
++                    WaitRequest {
++                        cell_id: cell_id.unwrap(),
++                        yield_time_ms: 1,
++                    },
++                )
++                .await
++                .map(|_| ())
++            }),
++            "terminate" => {
++                tokio::spawn(
++                    async move { c.terminate(remote(), cell_id.unwrap()).await.map(|_| ()) },
++                )
++            }
++            _ => unreachable!(),
++        };
++        fake.observed(&format!("withheld-{mode}")).await;
++        advance_transport_interval().await;
++        let finished_after_70s = task.is_finished();
++        let alive_after_70s = connection.is_alive();
++        let result = if finished_after_70s {
++            format!("{:?}", task.await.unwrap())
++        } else {
++            task.abort();
++            let _ = task.await;
++            for _ in 0..20 {
++                tokio::task::yield_now().await;
++            }
++            "Pending; outer caller aborted".to_string()
++        };
++        // Give the actual driver cancellation watcher and pipe writer real time to run.
++        tokio::time::sleep(Duration::from_millis(100)).await;
++        let cancel_frames = fake.cancellations();
++        connection.cancellation.cancel();
++        if let Some(cleanup) = cleanup {
++            tokio::time::timeout(Duration::from_secs(2), cleanup.wait())
++                .await
++                .unwrap();
++        }
++        fake.assert_reaped().await;
++        let row = json!({"id":"FC-R01","phase":mode,"legal_handshake":true,"virtual_elapsed_s":70,"future_finished":finished_after_70s,"connection_alive_before_fixture_cleanup":alive_after_70s,"outer_cancel_frames":cancel_frames,"result":result,"owned_process_reaped":true,"source":"actual Connection::spawn and stdio driver"});
++        eprintln!("MECHANISM_RECEIPT {row}");
++        if matches!(mode, "wait" | "terminate") {
++            assert!(
++                finished_after_70s && !alive_after_70s,
++                "actual transport-deadline positive control failed"
++            );
++        } else if !finished_after_70s {
++            missing.push(mode);
++        }
++    }
++    assert!(
++        missing.is_empty(),
++        "stdio boundaries exceeded the actual 60-second transport budget: {missing:?}"
++    );
++}
++
++#[tokio::test(flavor = "current_thread")]
++#[ignore = "mechanism audit: FC-R01 known Opening cancellation defect"]
++async fn mechanism_fcr01_opening_outer_cancel_retires_shutdown() {
++    use super::super::OwnedCodeModeHost;
++    use super::super::ProcessOwnedCodeModeSession;
++    let fake = FakeHost::new("opening_outer_cancel");
++    let host = Arc::new(OwnedCodeModeHost::new(fake.program.clone()));
++    let session = Arc::new(ProcessOwnedCodeModeSession::with_host(
++        Arc::new(NoopCodeModeSessionDelegate),
++        Arc::clone(&host),
++        CodeModeSessionCellExecutionLimits::default(),
++    ));
++    let executing = Arc::clone(&session);
++    let execute_task = tokio::spawn(async move { executing.execute(request()).await.map(|_| ()) });
++    fake.observed("withheld-opening_outer_cancel").await;
++    let shutting_down = Arc::clone(&session);
++    let shutdown_task = tokio::spawn(async move { shutting_down.shutdown().await });
++    for _ in 0..20 {
++        tokio::task::yield_now().await;
++    }
++    advance_transport_interval().await;
++    let opening_pending = !execute_task.is_finished();
++    let shutdown_pending = !shutdown_task.is_finished();
++    execute_task.abort();
++    let _ = execute_task.await;
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    let shutdown_after_outer_cancel = !shutdown_task.is_finished();
++    let cancel_frames = fake.cancellations();
++    let connection = host.live_connection().unwrap();
++    connection.cancellation.cancel();
++    let shutdown_result = tokio::time::timeout(Duration::from_secs(2), shutdown_task)
++        .await
++        .unwrap()
++        .unwrap();
++    fake.assert_reaped().await;
++    let row = json!({"id":"FC-R01","phase":"Opening + actual SessionInner::drive_shutdown","virtual_elapsed_s":70,"open_pending":opening_pending,"shutdown_pending":shutdown_pending,"shutdown_pending_after_outer_execute_abort":shutdown_after_outer_cancel,"cancel_frames_after_outer_abort":cancel_frames,"shutdown_result_after_owned_connection_cancel":format!("{shutdown_result:?}"),"owned_process_reaped":true});
++    eprintln!("MECHANISM_RECEIPT {row}");
++    assert!(
++        !shutdown_after_outer_cancel,
++        "outer execute cancellation must retire Opening and pending shutdown"
++    );
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn mechanism_fcr01_stdio_long_yield_request_is_accepted() {
++    let fake = FakeHost::new("long_yield");
++    let connection = Connection::spawn(&fake.program)
++        .await
++        .map_err(|err| err.to_string())
++        .unwrap();
++    let _failure_cleanup = connection
++        .open_session(
++            remote(),
++            Arc::new(NoopCodeModeSessionDelegate),
++            CodeModeSessionCellExecutionLimits::default(),
++        )
++        .await
++        .unwrap();
++    let started = connection.execute(remote(), request()).await.unwrap();
++    let cell_id = started.cell_id.clone();
++    assert!(matches!(
++        started.initial_response().await.unwrap(),
++        RuntimeResponse::Yielded { .. }
++    ));
++    let outcome = connection
++        .wait(
++            remote(),
++            WaitRequest {
++                cell_id,
++                yield_time_ms: 600_001,
++            },
++        )
++        .await
++        .unwrap();
++    assert!(matches!(
++        outcome,
++        codex_code_mode_protocol::WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
++    ));
++    assert!(connection.is_alive());
++    connection.shutdown_session(remote()).await.unwrap();
++    // SessionCleanup is a failed-connection drain barrier, not a successful-close barrier.
++    connection.cancellation.cancel();
++    fake.assert_reaped().await;
++    eprintln!(
++        "MECHANISM_RECEIPT {}",
++        json!({"id":"FC-R01","phase":"normal wire yield control","requested_yield_ms":600_001,"yield_accepted":true,"connection_remained_alive":true,"owned_process_reaped":true,"limitation":"fake peer returns a legal yield; it does not execute JavaScript"})
++    );
++}
+diff --git a/codex-rs/core-api/Cargo.toml b/codex-rs/core-api/Cargo.toml
+index b82d5ee4..90a98fd1 100644
+--- a/codex-rs/core-api/Cargo.toml
++++ b/codex-rs/core-api/Cargo.toml
+@@ -10,6 +10,9 @@ name = "codex_core_api"
+ path = "src/lib.rs"
+ test = false
+ 
++[features]
++mechanism-test-support = ["codex-core/mechanism-test-support"]
++
+ [lints]
+ workspace = true
+ 
+diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
+index 9831fa8b..b7e8f468 100644
+--- a/codex-rs/core/Cargo.toml
++++ b/codex-rs/core/Cargo.toml
+@@ -8,6 +8,9 @@ version.workspace = true
+ name = "codex_core"
+ path = "src/lib.rs"
+ 
++[features]
++mechanism-test-support = []
++
+ [[bin]]
+ name = "codex-write-config-schema"
+ path = "src/bin/config_schema.rs"
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 9e125ffc..7b0bdb34 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -9,6 +9,8 @@ mod apply_patch;
+ mod apps;
+ mod client;
+ mod client_common;
++#[cfg(feature = "mechanism-test-support")]
++mod mechanism_interaction_test_barrier;
+ mod realtime_context;
+ mod realtime_conversation;
+ mod realtime_prompt;
+diff --git a/codex-rs/core/src/mechanism_interaction_test_barrier.rs b/codex-rs/core/src/mechanism_interaction_test_barrier.rs
+new file mode 100644
+index 00000000..c0d40048
+--- /dev/null
++++ b/codex-rs/core/src/mechanism_interaction_test_barrier.rs
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: Apache-2.0
++
++//! Isolated offline fault barriers. This module exists only with the explicit
++//! mechanism-test-support Cargo feature and never changes a normal build.
++
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::Op;
++use std::path::PathBuf;
++
++fn directory() -> Option<PathBuf> {
++    std::env::var_os("WWC_MECHANISM_INTERACTION_BARRIER").map(PathBuf::from)
++}
++
++pub(crate) fn record_request(event: &EventMsg) {
++    let Some(directory) = directory() else {
++        return;
++    };
++    std::fs::create_dir_all(&directory)
++        .unwrap_or_else(|error| panic!("isolated mechanism barrier directory: {error:?}"));
++    let filename = match event {
++        EventMsg::RequestUserInput(_) => "input.request.event.json",
++        EventMsg::ExecApprovalRequest(_) => "approval.request.event.json",
++        _ => return,
++    };
++    std::fs::write(
++        directory.join(filename),
++        serde_json::to_vec(event).unwrap_or_else(|error| panic!("real Core event JSON: {error:?}")),
++    )
++    .unwrap_or_else(|error| panic!("isolated Core event witness: {error:?}"));
++}
++
++pub(crate) async fn before_response_dispatch(op: &Op) {
++    let kind = match op {
++        Op::UserInputAnswer { .. } => "input",
++        Op::ExecApproval { .. } | Op::PatchApproval { .. } => "approval",
++        _ => return,
++    };
++    let Some(directory) = directory() else {
++        return;
++    };
++    if !directory.join(format!("{kind}.dispatch.arm")).exists() {
++        return;
++    }
++    std::fs::write(
++        directory.join(format!("{kind}.dispatch.paused")),
++        format!("{op:?}"),
++    )
++    .unwrap_or_else(|error| panic!("queued Core operation witness: {error:?}"));
++    let started = std::time::Instant::now();
++    while !directory.join(format!("{kind}.dispatch.release")).exists() {
++        assert!(
++            started.elapsed() < std::time::Duration::from_secs(15),
++            "isolated response barrier was not released"
++        );
++        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
++    }
++}
++
++pub(crate) fn record_waiter_consumed(kind: &str, identity: &str) {
++    let Some(directory) = directory() else {
++        return;
++    };
++    std::fs::write(
++        directory.join(format!("{kind}.waiter.consumed")),
++        identity.as_bytes(),
++    )
++    .unwrap_or_else(|error| panic!("real waiter consumption witness: {error:?}"));
++}
++
++pub(crate) fn record_response_delivery(kind: &str, state: &str) {
++    let Some(directory) = directory() else {
++        return;
++    };
++    std::fs::write(directory.join(format!("{kind}.notify.{state}")), state)
++        .unwrap_or_else(|error| panic!("real response dispatch witness: {error:?}"));
++}
++
++#[cfg(test)]
++#[path = "mechanism_interaction_test_barrier_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs b/codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs
+new file mode 100644
+index 00000000..192d9be3
+--- /dev/null
++++ b/codex-rs/core/src/mechanism_interaction_test_barrier_tests.rs
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use crate::session::tests::make_session_and_context_with_rx;
++use crate::state::ActiveTurn;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::ReviewDecision;
++use codex_protocol::request_user_input::RequestUserInputArgs;
++use codex_protocol::request_user_input::RequestUserInputResponse;
++use pretty_assertions::assert_eq;
++use std::collections::HashMap;
++
++#[tokio::test]
++async fn ra_c01_early_input_response_is_buffered_for_the_real_turn_waiter() {
++    let (session, turn, events) = make_session_and_context_with_rx().await;
++    let response = RequestUserInputResponse {
++        answers: HashMap::new(),
++    };
++    session
++        .notify_user_input_response(&turn.sub_id, response.clone())
++        .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    let request = tokio::spawn({
++        let session = session.clone();
++        let turn = turn.clone();
++        async move {
++            session
++                .request_user_input(
++                    turn.as_ref(),
++                    "early-input".into(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: true,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        }
++    });
++    assert!(matches!(
++        events.recv().await.unwrap().msg,
++        EventMsg::RequestUserInput(_)
++    ));
++    assert_eq!(request.await.unwrap(), Some(response));
++}
++
++#[tokio::test]
++#[ignore = "mechanism audit: current behavior baseline; early ordinary approval is dropped"]
++async fn ra_c01_early_approval_is_dropped_and_later_exact_waiter_stays_pending() {
++    let (session, turn, events) = make_session_and_context_with_rx().await;
++    let decision = ReviewDecision::Denied {
++        rejection: "synthetic ordinary denial".into(),
++    };
++    session
++        .notify_approval("early-approval", decision.clone())
++        .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    #[allow(deprecated)]
++    let cwd = turn.cwd.clone();
++    let mut request = tokio::spawn({
++        let session = session.clone();
++        let turn = turn.clone();
++        async move {
++            session
++                .request_command_approval(
++                    turn.as_ref(),
++                    "early-approval".into(),
++                    /*approval_id*/ None,
++                    /*environment_id*/ None,
++                    vec!["echo".into()],
++                    cwd,
++                    /*reason*/ None,
++                    /*network_approval_context*/ None,
++                    /*proposed_execpolicy_amendment*/ None,
++                    /*additional_permissions*/ None,
++                    /*available_decisions*/ None,
++                    /*plugin_attribution_override*/ None,
++                )
++                .await
++        }
++    });
++    assert!(matches!(
++        events.recv().await.unwrap().msg,
++        EventMsg::ExecApprovalRequest(_)
++    ));
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(30), &mut request)
++            .await
++            .is_err(),
++        "early ordinary approval was not buffered for its future waiter"
++    );
++    session
++        .notify_approval("early-approval", decision.clone())
++        .await;
++    assert_eq!(request.await.unwrap(), decision);
++}
++
++#[tokio::test]
++async fn ra_c01_early_input_response_is_buffered_in_the_active_turn_for_the_real_waiter() {
++    let (session, turn, events) = make_session_and_context_with_rx().await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    let response = RequestUserInputResponse {
++        answers: HashMap::from([(
++            "continue".to_string(),
++            codex_protocol::request_user_input::RequestUserInputAnswer {
++                answers: vec!["continue".to_string()],
++            },
++        )]),
++    };
++    session
++        .notify_user_input_response(&turn.sub_id, response.clone())
++        .await;
++    let request = tokio::spawn({
++        let session = session.clone();
++        let turn = turn.clone();
++        async move {
++            session
++                .request_user_input(
++                    turn.as_ref(),
++                    "early-active-turn-input".into(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: true,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        }
++    });
++    assert!(matches!(
++        events.recv().await.unwrap().msg,
++        EventMsg::RequestUserInput(_)
++    ));
++    assert_eq!(request.await.unwrap(), Some(response));
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 4c72eae4..e9727e64 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -520,6 +520,8 @@ pub(super) async fn submission_loop(
+     // To break out of this loop, send Op::Shutdown.
+     let mut shutdown_received = false;
+     while let Ok(sub) = rx_sub.recv().await {
++        #[cfg(feature = "mechanism-test-support")]
++        crate::mechanism_interaction_test_barrier::before_response_dispatch(&sub.op).await;
+         debug!(?sub, "Submission");
+         let dispatch_span = submission_dispatch_span(&sub);
+         let should_exit = async {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 2a3fb354..825850bb 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2478,8 +2478,18 @@ impl Session {
+             available_decisions: Some(available_decisions),
+             parsed_cmd,
+         });
++        #[cfg(feature = "mechanism-test-support")]
++        crate::mechanism_interaction_test_barrier::record_request(&event);
+         self.send_event(turn_context, event).await;
+-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
++        let decision = rx_approve.await;
++        #[cfg(feature = "mechanism-test-support")]
++        if decision.is_ok() {
++            crate::mechanism_interaction_test_barrier::record_waiter_consumed(
++                "approval",
++                &effective_approval_id,
++            );
++        }
++        decision.unwrap_or(ReviewDecision::Abort)
+     }
+ 
+     #[expect(
+@@ -2752,11 +2762,18 @@ impl Session {
+         turn_context
+             .turn_metadata_state
+             .mark_user_input_requested_during_turn();
++        #[cfg(feature = "mechanism-test-support")]
++        crate::mechanism_interaction_test_barrier::record_request(&event);
+         self.send_event(turn_context, event).await;
+-        match queued_response {
++        let response = match queued_response {
+             Some(response) => Some(response),
+             None => rx_response.await.ok(),
++        };
++        #[cfg(feature = "mechanism-test-support")]
++        if response.is_some() {
++            crate::mechanism_interaction_test_barrier::record_waiter_consumed("input", &sub_id);
+         }
++        response
+     }
+ 
+     #[expect(
+@@ -2791,11 +2808,19 @@ impl Session {
+         };
+         match entry {
+             Some(tx_response) => {
++                #[cfg(feature = "mechanism-test-support")]
++                crate::mechanism_interaction_test_barrier::record_response_delivery(
++                    "input", "sent",
++                );
+                 if let Some(response) = response_to_send {
+                     tx_response.send(response).ok();
+                 }
+             }
+             None => {
++                #[cfg(feature = "mechanism-test-support")]
++                crate::mechanism_interaction_test_barrier::record_response_delivery(
++                    "input", "buffered",
++                );
+                 if replaced_response.is_some() {
+                     warn!("Overwriting queued user input response for sub_id: {sub_id}");
+                 } else {
+@@ -3000,9 +3025,17 @@ impl Session {
+         };
+         match entry {
+             Some(tx_approve) => {
++                #[cfg(feature = "mechanism-test-support")]
++                crate::mechanism_interaction_test_barrier::record_response_delivery(
++                    "approval", "sent",
++                );
+                 tx_approve.send(decision).ok();
+             }
+             None => {
++                #[cfg(feature = "mechanism-test-support")]
++                crate::mechanism_interaction_test_barrier::record_response_delivery(
++                    "approval", "dropped",
++                );
+                 warn!("No pending approval found for call_id: {approval_id}");
+             }
+         }

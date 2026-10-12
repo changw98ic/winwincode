@@ -608,6 +608,7 @@ async fn settings_update_during_active_turn_applies_to_next_turn_only() -> Resul
 
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(

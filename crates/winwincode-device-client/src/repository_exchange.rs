@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production handling of Server repository commands.
-//!
-//! `client.repository.rescan` resolves only the durable local binding id,
-//! re-runs the repository registry's canonicalization and Git checks, and
-//! emits both the path-free `client.repository.status` response and the
-//! universal `client.command_ack`. Absolute paths and local failure detail
-//! remain in the device store and never enter either frame.
-
 use time::OffsetDateTime;
 use winwincode_client_port::domain::{
     ClientControlError, ClientControlErrorCode, ClientControlMessageKind, CommandAckStatus,
@@ -29,7 +21,6 @@ struct Registration {
     confirm_git_init: bool,
 }
 
-/// Register a browser-selected path; retain the result before acknowledging the command.
 pub(crate) fn apply_repository_registration(
     store: &mut DeviceStore,
     provider_directory: &std::path::Path,
@@ -132,29 +123,13 @@ pub(crate) fn apply_repository_registration(
     Ok(receipt)
 }
 
-/// Result of one consumed repository rescan command.
 #[derive(Debug)]
 pub struct RepositoryRescanApplication {
-    /// Fresh scan facts when the binding existed. Local-only detail may
-    /// contain a path and must not be serialized onto the control port.
     pub revalidation: Option<RepositoryRevalidation>,
-    /// Durable outbox sequence of the command acknowledgement.
     pub command_ack_outbox_sequence: u64,
-    /// Whether the request was accepted or rejected as an unknown binding.
     pub status: CommandAckStatus,
 }
 
-/// Applies one `client.repository.rescan` command against the device-local
-/// binding registry and durably enqueues its responses.
-///
-/// A missing binding is a handled command: it emits a stable rejection and
-/// leaves the daemon running. Storage and protocol failures still fail the
-/// exchange loop so they are observable rather than silently acknowledged.
-///
-/// # Errors
-///
-/// Returns a repository registry failure when the local store, Git scan, or
-/// durable outbox cannot complete the command.
 pub fn apply_repository_rescan(
     store: &mut DeviceStore,
     client_node_id: &str,

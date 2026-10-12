@@ -1,0 +1,119 @@
+diff --git a/codex-rs/core/src/tools/result_recovery.rs b/codex-rs/core/src/tools/result_recovery.rs
+--- a/codex-rs/core/src/tools/result_recovery.rs
++++ b/codex-rs/core/src/tools/result_recovery.rs
+@@ -23,7 +23,7 @@
+ 
+ /// Historical values do not recreate callbacks, continuations or external handles.
+ #[derive(Deserialize)]
+-struct StoredOutput {
++pub(super) struct StoredOutput {
+     schema_version: u32,
+     response: ResponseInputItem,
+     #[serde(default)]
+@@ -32,6 +32,10 @@
+     success: bool,
+     effective_input: Value,
+     continuation: Option<Value>,
++    #[serde(default)]
++    post_hook_input: Option<Value>,
++    #[serde(default)]
++    post_hook_response: Option<Value>,
+ }
+ 
+ impl ToolOutput for StoredOutput {
+@@ -41,20 +45,56 @@
+     fn success_for_logging(&self) -> bool {
+         self.success
+     }
+-    fn to_response_item(&self, _call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
++    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
+         let mut response = self.response.clone();
+         match &mut response {
+-            ResponseInputItem::FunctionCallOutput { output, .. }
+-            | ResponseInputItem::CustomToolCallOutput { output, .. } => {
++            ResponseInputItem::FunctionCallOutput {
++                call_id: original_id,
++                output,
++                ..
++            }
++            | ResponseInputItem::CustomToolCallOutput {
++                call_id: original_id,
++                output,
++                ..
++            } => {
++                *original_id = call_id.to_owned();
+                 output.success = self.response_success
+             }
+             _ => {}
+         }
+         response
+     }
++    fn post_tool_use_input(&self, _payload: &ToolPayload) -> Option<Value> {
++        self.post_hook_input.clone()
++    }
++    fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<Value> {
++        self.post_hook_response.clone()
++    }
+     fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
+         self.code_mode_result.clone()
+     }
++}
++
++/// Rebind a self-contained raw result to a new logical request. Current hooks
++/// receive the original handler's hook input/response and this caller's id.
++pub(super) fn shared_output(
++    encoded: &str,
++    invocation: &ToolInvocation,
++    runtime: &dyn CoreToolRuntime,
++) -> Result<AnyToolResult, FunctionCallError> {
++    let output: StoredOutput = serde_json::from_str(encoded).map_err(storage_error)?;
++    if output.schema_version != 1 || output.continuation.is_some() {
++        return Err(recovery_error("shared_result_not_self_contained"));
++    }
++    let post_tool_use_payload = runtime.post_tool_use_payload(invocation, &output);
++    Ok(AnyToolResult {
++        call_id: invocation.call_id.clone(),
++        payload: invocation.payload.clone(),
++        result: Box::new(output),
++        post_tool_use_payload,
++        continuation: None,
++    })
+ }
+ 
+ pub(super) async fn recover(
+@@ -62,6 +102,16 @@
+     invocation: &ToolInvocation,
+     runtime: Option<Arc<dyn CoreToolRuntime>>,
+ ) -> Result<AnyToolResult, FunctionCallError> {
++    if replay.fact.attempt.is_none()
++        && let Some(shared) = replay
++            .store
++            .tool_sharing_fact(replay.fact.request_sequence)
++            .await
++            .map_err(storage_error)?
++    {
++        let runtime = runtime.ok_or_else(|| recovery_error("shared_runtime_unavailable"))?;
++        return super::tool_sharing::recover_shared(replay, invocation, runtime, shared).await;
++    }
+     if replay.fact.attempt.as_ref().is_some_and(|attempt| {
+         matches!(
+             attempt.execution,
+@@ -78,9 +128,17 @@
+     }) else {
+         return Err(replay.response());
+     };
+-    let Some(runtime) = runtime.filter(|runtime| runtime.supports_result_replay()) else {
++    let Some(runtime) = runtime else {
+         return Err(replay.response());
+     };
++    if !runtime.supports_result_replay() {
++        let context =
++            super::tool_sharing::has_trusted_recovery_policy(&replay, runtime.as_ref()).await?;
++        if context {
++            return super::tool_sharing::recover_actual(replay, invocation, runtime).await;
++        }
++        return Err(replay.response());
++    }
+     let Some(attachment) = invocation
+         .session
+         .services

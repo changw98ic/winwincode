@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generated Delivery application boundary and its durable repository catalog.
-
 use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -88,7 +86,6 @@ struct DeliveryCatalogEntry {
     delivery_id: DeliveryId,
 }
 
-/// Atomic current Delivery cut used by the collaboration Inbox source adapter.
 pub(crate) struct CollaborationDeliverySourceSnapshot {
     pub records: Vec<CollaborationDeliverySourceRecord>,
 }
@@ -98,8 +95,6 @@ pub(crate) struct CollaborationDeliverySourceRecord {
     pub state_guards: Vec<StateRevisionGuard>,
 }
 
-/// Exact durable Delivery and repository-membership facts used by guarded
-/// collaboration writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryAuthoritySeal {
     pub delivery: Delivery,
@@ -109,13 +104,6 @@ pub struct DeliveryAuthoritySeal {
     pub scope_guard: StateRevisionGuard,
 }
 
-/// Loads one canonical Delivery plus both state guards needed to protect its
-/// aggregate and repository membership in another atomic commit.
-///
-/// # Errors
-///
-/// Returns not-found, corruption, or storage errors without decoding private
-/// catalog keys outside the Delivery owner.
 pub fn load_delivery_authority_seal(
     storage: &dyn ProductStateStorage,
     scope: &RepositoryScope,
@@ -150,10 +138,11 @@ pub fn load_delivery_authority_seal(
     })
 }
 
-/// Failure returned by a trusted Delivery authority adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryAuthorityError {
     message: String,
+    pub(crate) candidate_rejection:
+        Option<Box<winwincode_delivery::application::candidate_rejection::CandidateRejectionFact>>,
 }
 
 impl DeliveryAuthorityError {
@@ -161,6 +150,17 @@ impl DeliveryAuthorityError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            candidate_rejection: None,
+        }
+    }
+
+    pub(crate) fn rejected_candidate(
+        message: impl Into<String>,
+        fact: winwincode_delivery::application::candidate_rejection::CandidateRejectionFact,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            candidate_rejection: Some(Box::new(fact)),
         }
     }
 }
@@ -173,7 +173,6 @@ impl fmt::Display for DeliveryAuthorityError {
 
 impl std::error::Error for DeliveryAuthorityError {}
 
-/// Repository and product semantics resolved by a long-lived authority port.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliverySpecificationAuthority {
     pub now_millis: u64,
@@ -183,8 +182,6 @@ pub struct DeliverySpecificationAuthority {
     pub criterion_verification_methods: Vec<(String, String)>,
 }
 
-/// Sealed stage transition plus the execution configuration required only by
-/// a newly selected Codex stage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkRunStartAuthority {
     pub repository: RepositoryRef,
@@ -193,7 +190,6 @@ pub struct WorkRunStartAuthority {
     pub execution: Option<DeliveryExecutionConfig>,
 }
 
-/// Sealed current-Attention transition returned by the review authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryAttentionAuthority {
     pub repository: RepositoryRef,
@@ -201,8 +197,6 @@ pub struct DeliveryAttentionAuthority {
     pub transition: ResolvedAttentionTransition,
 }
 
-/// Candidate, verification and Evidence facts resolved behind the trusted
-/// verdict boundary. The HTTP command carries only a stale-check digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryVerdictAuthority {
     pub candidate: FrozenDeliveryCandidate,
@@ -211,7 +205,6 @@ pub struct DeliveryVerdictAuthority {
     pub produced_at_millis: u64,
 }
 
-/// Read-only command context offered to the installed authority adapter.
 pub struct DeliveryAuthorityRequest<'request> {
     command: &'request CommandEnvelope,
     delivery: Option<&'request Delivery>,
@@ -229,51 +222,28 @@ impl DeliveryAuthorityRequest<'_> {
     }
 }
 
-/// Long-lived trusted read boundary used by generated Delivery commands.
-/// Transport adapters never receive or construct the sealed transaction facts.
 pub trait DeliveryAuthorityPort: Send {
-    /// Resolves the repository and specification facts for create or update.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted source cannot resolve current facts.
     fn specification(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
     ) -> Result<DeliverySpecificationAuthority, DeliveryAuthorityError>;
 
-    /// Resolves the next stage transition and any required execution config.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted source cannot resolve current facts.
     fn advance(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
     ) -> Result<WorkRunStartAuthority, DeliveryAuthorityError>;
 
-    /// Resolves the current Attention transition.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted source cannot resolve current facts.
     fn resolve_attention(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
     ) -> Result<DeliveryAttentionAuthority, DeliveryAuthorityError>;
 
-    /// Resolves the current candidate, verification, and Evidence facts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted source cannot resolve current facts.
     fn verdict(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
     ) -> Result<DeliveryVerdictAuthority, DeliveryAuthorityError>;
 }
 
-/// Stable application error classes for generated Delivery commands/queries.
 #[derive(Debug)]
 pub enum DeliveryApplicationError {
     InvalidRequest(String),
@@ -368,12 +338,6 @@ struct LoadedDeliveryPage {
 }
 
 impl ControlPlane {
-    /// Installs the one long-lived trusted Delivery authority adapter.
-    /// Replacing a live adapter is rejected so request retries keep one source.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when an authority adapter is already installed.
     pub fn install_delivery_authority_port(
         &mut self,
         authority: Box<dyn DeliveryAuthorityPort>,
@@ -387,11 +351,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Installs the one durable `ExecutionJob` dispatcher used by Codex stages.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a dispatcher is already installed.
     pub fn install_delivery_execution_dispatcher(
         &mut self,
         dispatcher: Box<dyn ExecutionJobDispatcher>,
@@ -405,10 +364,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Continues one successful production `WorkRun` through the existing
-    /// generated command paths after its terminal state and execution resources
-    /// are durable. The terminal revision fences late replays, while the stable
-    /// Controller receipt makes a crash after dispatch or verdict commit a no-op.
     pub(crate) fn continue_delivery_after_terminal(
         &mut self,
         scope: &RepositoryScope,
@@ -456,6 +411,23 @@ impl ControlPlane {
         if !controller_followup_is_safe(&delivery, terminal_revision, completed_job_id) {
             return Ok(());
         }
+        if winwincode_delivery::application::candidate_rejection::current_candidate_rejection(
+            &delivery,
+        )
+        .is_some()
+        {
+            return Ok(());
+        }
+        if matches!(completed_profile, "executor" | "remediator")
+            && !self.prepare_writer_candidate_continuation(
+                scope,
+                &delivery,
+                completed_job_id,
+                initiating_actor,
+            )?
+        {
+            return Ok(());
+        }
         let expected_revision = Revision(i64::try_from(delivery.revision()).map_err(|_| {
             DeliveryApplicationError::InvalidRequest(
                 "Delivery Controller revision exceeds the public range".to_owned(),
@@ -497,13 +469,58 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Executes one generated `delivery.create` through the installed
-    /// repository authority and returns the exact committed revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error when validation, authority lookup,
-    /// durable commit, or projection publication fails.
+    fn prepare_writer_candidate_continuation(
+        &mut self,
+        scope: &RepositoryScope,
+        delivery: &Delivery,
+        completed_job_id: &ExecutionJobId,
+        initiating_actor: &PublicEventActor,
+    ) -> Result<bool, DeliveryApplicationError> {
+        let writer =
+            crate::delivery_verdict_authority::current_writer(delivery).map_err(authority_error)?;
+        let unchanged_recovery = delivery
+            .snapshot()
+            .same_candidate_reverification
+            .as_ref()
+            .is_some_and(|fact| fact.remediator_job_id == *completed_job_id);
+        if writer.execution_job_id != *completed_job_id && !unchanged_recovery {
+            return Ok(false);
+        }
+        let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
+            DeliveryApplicationError::TrustedFactsUnavailable(
+                "candidate Artifact store is unavailable".into(),
+            )
+        })?;
+        let resolver = self.git_source_resolver.as_deref().ok_or_else(|| {
+            DeliveryApplicationError::TrustedFactsUnavailable(
+                "candidate Git resolver is unavailable".into(),
+            )
+        })?;
+        if let Err(mut error) = crate::delivery_verdict_authority::resolve_current_candidate(
+            self.storage_ref()?,
+            artifacts,
+            resolver,
+            scope,
+            delivery,
+        ) {
+            let Some(fact) = error.candidate_rejection.take() else {
+                return Err(authority_error(error));
+            };
+            crate::candidate_rejection_transaction::execute(
+                self.storage_mut()?,
+                scope,
+                initiating_actor,
+                delivery,
+                *fact,
+            )?;
+            self.flush_outbox().map_err(|error| {
+                DeliveryApplicationError::TrustedFactsUnavailable(error.to_string())
+            })?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     pub fn delivery_create(
         &mut self,
         command: &DeliveryCreateCommand,
@@ -546,13 +563,6 @@ impl ControlPlane {
         create_response(command, &receipt, &delivery)
     }
 
-    /// Executes one generated `delivery.update_spec` using repository facts
-    /// resolved after exact scope/catalog validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error when validation, authority lookup,
-    /// durable commit, or projection publication fails.
     pub fn delivery_update_spec(
         &mut self,
         command: &DeliveryUpdateSpecCommand,
@@ -601,10 +611,6 @@ impl ControlPlane {
         update_response(command, &receipt, &delivery)
     }
 
-    /// Creates canonical work items and publishes the durable result.
-    ///
-    /// # Errors
-    /// Rejects invalid scope or revisions and reports storage or publication failures.
     pub fn work_items_create(
         &mut self,
         command: &WorkItemsCreateCommand,
@@ -647,13 +653,6 @@ impl ControlPlane {
         })
     }
 
-    /// Executes one generated `workrun.start` from an authority-sealed
-    /// stage transition. Human stages never reach the execution dispatcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error when validation, authority lookup,
-    /// durable commit, execution dispatch, or projection publication fails.
     pub fn workrun_start(
         &mut self,
         command: &WorkRunStartCommand,
@@ -754,12 +753,6 @@ impl ControlPlane {
         }
     }
 
-    /// Resolves one current Attention item from a sealed review transition.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error when validation, authority lookup,
-    /// durable commit, or projection publication fails.
     pub fn delivery_resolve_attention(
         &mut self,
         command: &DeliveryResolveAttentionCommand,
@@ -827,9 +820,6 @@ impl ControlPlane {
         attention_response(command, &receipt, &delivery)
     }
 
-    /// After a resolved `VerificationBlocked` Attention invalidates the current
-    /// verdict, the Controller owns the next independent verification dispatch.
-    /// The receipt on `workrun.start` makes a crash after this handoff a no-op.
     fn continue_delivery_after_retry_verification(
         &mut self,
         scope: &RepositoryScope,
@@ -906,13 +896,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Computes and commits a verdict only from the installed candidate,
-    /// verification and Evidence authorities.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error when validation, authority lookup,
-    /// verdict commit, or projection publication fails.
     pub fn delivery_submit_verdict(
         &mut self,
         command: &DeliverySubmitVerdictCommand,
@@ -998,8 +981,6 @@ impl ControlPlane {
             .filter(|item| item.status == AttentionItemStatus::Open && item.blocking)
             .cloned()
             .collect::<Vec<_>>();
-        // Only the policy-derived bounded repair decision is automatic. Conflicts,
-        // missing evidence and exhausted budgets retain their explicit user action.
         if attention.iter().any(|item| {
             serde_json::from_str::<serde_json::Value>(&item.context)
                 .ok()
@@ -1057,13 +1038,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Lists Delivery summaries only through the repository-scoped catalog
-    /// written atomically with each successful create.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable application error for invalid cursors or when durable
-    /// catalog and Delivery journal reads fail.
     pub fn delivery_list(
         &self,
         query: &DeliveryListQuery,
@@ -1362,13 +1336,6 @@ fn map_command<T: Serialize>(
     Ok(mapped)
 }
 
-/// Decides whether Controller follow-up is still safe at the terminal revision.
-///
-/// Exact revision equality is too strict when a durable candidate pin or
-/// projection commit lands after the `WorkRun` terminal revision. In that case
-/// proceed only when the completed `WorkRun` is still a successful terminal
-/// producer and no next-stage `WorkRun` is already active. The Controller
-/// receipt still makes a duplicate dispatch a no-op.
 fn controller_followup_is_safe(
     delivery: &Delivery,
     terminal_revision: u64,
@@ -1509,12 +1476,6 @@ fn advance_response(
     })
 }
 
-/// Builds the response for queue-authorized `WorkRun` cancellation. The queue
-/// transition is durable immediately; the Delivery revision advances only
-/// when the Worker later submits its verified terminal outcome.
-///
-/// # Errors
-/// Rejects an invalid revision or a projection that does not match the command scope.
 pub fn workrun_cancel_response(
     command: &WorkRunCancelCommand,
     delivery: &Delivery,
@@ -1866,12 +1827,6 @@ fn delivery_catalog_prefix(scope: &RepositoryScope) -> Result<String, DeliveryAp
     ))
 }
 
-/// Loads every current scoped Delivery from one verified read cut.
-///
-/// # Errors
-///
-/// Rejects oversized, concurrently changed, missing, foreign or corrupt
-/// Delivery catalog/state facts rather than returning a partial Inbox source.
 pub(crate) fn collaboration_delivery_snapshot<S: ProductStateStorage + ?Sized>(
     storage: &S,
     scope: &RepositoryScope,

@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
+use codex_code_mode_protocol::DEFAULT_EXEC_YIELD_TIME_MS;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
@@ -76,6 +78,7 @@ impl ConnectionDriver {
         response_tx: oneshot::Sender<Result<(), String>>,
     ) -> bool {
         if self.sessions.contains(&session.id) || self.requests.contains_pending_open(&session) {
+            cleanup.complete();
             let _ = response_tx.send(Err(format!(
                 "code-mode session {} is already open",
                 session.id
@@ -85,6 +88,7 @@ impl ConnectionDriver {
         let limits = match WireSessionCellExecutionLimits::try_from(limits) {
             Ok(limits) => limits,
             Err(error) => {
+                cleanup.complete();
                 let _ = response_tx.send(Err(format!(
                     "failed to encode code-mode session execution limits: {error}"
                 )));
@@ -94,6 +98,7 @@ impl ConnectionDriver {
         let request_id = match self.requests.allocate_id() {
             Ok(id) => id,
             Err(err) => {
+                cleanup.complete();
                 let _ = response_tx.send(Err(err));
                 return false;
             }
@@ -109,6 +114,7 @@ impl ConnectionDriver {
         let frame = match EncodedFrame::encode(&message) {
             Ok(frame) => frame,
             Err(err) => {
+                cleanup.complete();
                 let _ = response_tx.send(Err(format!(
                     "failed to encode code-mode open-session request: {err}"
                 )));
@@ -142,6 +148,10 @@ impl ConnectionDriver {
             let _ = response_tx.send(Err(err));
             return true;
         }
+        let initial_timeout =
+            Duration::from_millis(request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS))
+                .saturating_add(Duration::from_secs(1))
+                .saturating_add(super::super::DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT);
         let request = match request.try_into() {
             Ok(request) => request,
             Err(err) => {
@@ -180,6 +190,7 @@ impl ConnectionDriver {
             request_id,
             PendingRequest::Execute {
                 session,
+                initial_timeout,
                 response_tx,
                 initial_response_tx,
                 initial_response_rx,

@@ -21,6 +21,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@winwincode/contracts": "0.1.0-alpha.2"
+    "@winwincode/contracts": "0.1.0-alpha.2",
+    "@winwincode/network-request": "0.1.0-alpha.2"
   }
 }

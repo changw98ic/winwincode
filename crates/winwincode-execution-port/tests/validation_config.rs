@@ -14,9 +14,6 @@ use winwincode_execution_port::{
     },
 };
 
-// The canonical repository configuration is embedded so the contract test
-// stays hermetic: `.winwincode/validation.toml` is a local instance file and
-// is never committed.
 const CONFIGURATION: &str = r#"schemaVersion = 1
 
 [[commands]]

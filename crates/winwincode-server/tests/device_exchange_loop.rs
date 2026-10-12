@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The device exchange vertical over real HTTP: the device-client daemon
-//! runs against a real server (`POST /internal/v1/client/exchange` wired to
-//! `ClientExchangeApplication`) through the std HTTP transport, covering the
-//! whole enrollment lifecycle — enroll with credential issuance, hello
-//! takeover, heartbeat projection, a staged outage with backoff and
-//! redelivery, a manufactured gap answered by `replayFromSequence`, and
-//! durable recovery across a device restart and a server restart. The
-//! assertions land on both sides: the server registry projection and the
-//! device store.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -40,8 +30,6 @@ use winwincode_storage::{
 };
 
 const BOOTSTRAP_PROOF: &str = "device-exchange-loop-test-bootstrap";
-/// Quiet heartbeat cadence: every wire frame in this vertical is staged by
-/// the test, keeping the frame ledger deterministic.
 const QUIET_HEARTBEAT: Duration = Duration::from_mins(2);
 const DRIVE_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -219,10 +207,6 @@ fn exchange_endpoint(address: std::net::SocketAddr) -> String {
     format!("http://{address}/internal/v1/client/exchange")
 }
 
-/// The device-side transport for this vertical: the real std HTTP transport,
-/// plus two staged faults the loop test controls — a connection-refused
-/// outage (frames stay durable and back off) and a one-shot dropped frame
-/// that manufactures a server-side gap.
 struct LoopTransport {
     http: Arc<HttpExchangeTransport>,
     outage_remaining: AtomicUsize,
@@ -271,8 +255,6 @@ impl ExchangeTransport for LoopTransport {
     }
 }
 
-/// Drives the daemon loop until `predicate` holds, sleeping only the
-/// durations the loop schedules.
 fn drive_until(
     daemon: &mut DeviceDaemon,
     what: &str,
@@ -324,13 +306,113 @@ fn cursors(data_directory: &Path, node_id: &str) -> ClientExchangeCursors {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
+async fn enrollment_response_survives_restart_before_the_first_downlink_command() {
+    use winwincode_client_port::messages::{
+        CommandContext, ServerClientLockPayload, ServerToClientEnvelope, ServerToClientMessage,
+    };
+    let data_directory = test_directory("enrollment-only-server");
+    let device_root = test_directory("enrollment-only-device");
+    let running = start_with_client_exchange(&data_directory).await;
+    let transport = LoopTransport::new(running.local_address());
+    let config = daemon_config(&exchange_endpoint(running.local_address()));
+    let mut store = DeviceStore::open(&device_root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z").unwrap();
+    let mut daemon =
+        DeviceDaemon::start(config.clone(), store, transport.clone(), &identity).unwrap();
+    let outcome = daemon.tick(Instant::now()).unwrap();
+    assert!(matches!(
+        outcome,
+        TickOutcome::Exchanged {
+            downlink_frames: 0,
+            ..
+        }
+    ));
+    assert!(daemon.is_enrolled());
+    let node = daemon.client_node_id().to_owned();
+    let digest = node_snapshot(&data_directory, &node)
+        .device_credential_digest
+        .unwrap();
+    assert_eq!(
+        cursors(&data_directory, &node).server_to_client_ack_sequence,
+        0
+    );
+    assert!(
+        daemon
+            .store_mut()
+            .inbox_cursor(&config.server_profile_id)
+            .unwrap()
+            .is_none()
+    );
+    daemon.into_store().close().unwrap();
+
+    let mut store = DeviceStore::open(&device_root).unwrap();
+    let restarted =
+        ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:01.000Z").unwrap();
+    assert_eq!(restarted.identity().client_node_id(), node);
+    assert_eq!(restarted.credential().digest(), digest);
+    let mut daemon = DeviceDaemon::start(config, store, transport, &restarted).unwrap();
+    let command = ServerToClientEnvelope {
+        schema_version: "winwincode/v1".into(),
+        message_id: "cmsg_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        client_node_id: node.clone(),
+        client_instance_id: restarted.current_instance_id().into(),
+        sequence: 1,
+        occurred_at: "2026-09-04T00:00:01.000Z".into(),
+        message: ServerToClientMessage::ClientLock(ServerClientLockPayload {
+            command: CommandContext {
+                expected_revision: 0,
+                idempotency_key: "first-command".into(),
+            },
+            lock_state: ClientLockState::Locked,
+        }),
+    };
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    let mut outbox = storage.client_downlink_outbox().unwrap();
+    assert_eq!(outbox.high_water(&node).unwrap(), 0);
+    outbox
+        .append(
+            &winwincode_storage::ClientDownlinkAppend::try_new(
+                &node,
+                &command.message_id,
+                1,
+                serde_json::to_string(&command).unwrap(),
+            )
+            .unwrap(),
+            &winwincode_domain::Instant(command.occurred_at.clone()),
+        )
+        .unwrap();
+    drop(storage);
+    drive_until(
+        &mut daemon,
+        "the first command after restart to be acknowledged",
+        |daemon| {
+            daemon.status().downlink_accepted_through == 1
+                && cursors(&data_directory, &node).server_to_client_ack_sequence == 1
+        },
+    );
+    assert_eq!(
+        daemon.connection_policy().unwrap().lock_state,
+        ClientLockState::Locked
+    );
+    assert_eq!(
+        daemon.client_node_id(),
+        node,
+        "the saved credential resumes directly"
+    );
+    daemon.into_store().close().unwrap();
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(data_directory);
+    let _ = std::fs::remove_dir_all(device_root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
 async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     let data_directory = test_directory("device-loop-server");
     let device_root = test_directory("device-loop-device");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
 
-    // ---- Device first boot -------------------------------------------------
     let mut store = DeviceStore::open(&device_root).expect("device store should open");
     let first_identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z")
         .expect("device identity should load");
@@ -352,7 +434,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     )
     .expect("daemon start");
 
-    // ---- Phase 1: enroll over real HTTP ------------------------------------
     drive_until(&mut daemon, "the enrollment adoption", |daemon| {
         daemon.is_enrolled()
     });
@@ -362,8 +443,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the daemon must adopt the server-assigned cnd_ identity: {node_id}"
     );
 
-    // Server side: the node was created with the issued credential and the
-    // enrolling instance.
     let record = node_snapshot(&data_directory, &node_id);
     assert_eq!(
         record.presence_state,
@@ -378,9 +457,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .clone()
         .expect("the enrollment issues a persisted credential digest");
     let adopted_public_client_id = record.public_client_id.clone();
-    // Device side: the enrollment persisted the server profile, the downlink
-    // cursor accepted the acceptance frame, and the assigned stream was
-    // credited with the settled enroll sequence.
     let profile = daemon
         .store_mut()
         .server_profile(&config.server_profile_id)
@@ -390,19 +466,14 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     let inbox_cursor = daemon
         .store_mut()
         .inbox_cursor(&config.server_profile_id)
-        .expect("cursor read")
-        .expect("the acceptance frame advanced the inbox cursor");
-    assert_eq!(inbox_cursor.last_sequence, 1);
+        .expect("cursor read");
+    assert!(inbox_cursor.is_none());
     assert_eq!(
         cursors(&data_directory, &node_id).client_to_server_ack_sequence,
         1,
         "the assigned stream starts credited with the enroll sequence"
     );
 
-    // ---- Phase 2: hello takeover and heartbeat projection ------------------
-    // The hello is announced automatically after the adoption; it must
-    // settle first (it moves the node online), then two staged heartbeats
-    // drive the projection.
     drive_until(&mut daemon, "the announcement hello to settle", |daemon| {
         daemon.is_enrolled() && daemon.status().frames_sent >= 2
     });
@@ -435,7 +506,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     drop(storage);
     assert!(settled(&mut daemon), "the stream must be fully exchanged");
 
-    // ---- Phase 3: staged outage, backoff, and durable redelivery -----------
     transport.outage_remaining.store(3, Ordering::SeqCst);
     daemon
         .enqueue(heartbeat_message())
@@ -458,7 +528,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the durable frames survived the outage and settled once"
     );
 
-    // ---- Phase 4: manufactured gap and replayFromSequence replay -----------
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message())
@@ -471,8 +540,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .map(|frame| frame.sequence)
         .collect::<Vec<_>>();
     assert_eq!(staged_sequences, [9, 10, 11]);
-    // The middle frame is lost in transit: the server cursor sits at 9 while
-    // sequence 11 arrives, so the response carries replayFromSequence = 10.
     transport.drop_sequence.store(10, Ordering::SeqCst);
     drive_until(&mut daemon, "the manufactured gap", |daemon| {
         daemon.status().replays >= 1
@@ -493,8 +560,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the replayed heartbeats execute their projection exactly once"
     );
 
-    // ---- Phase 5: device restart from durable state -------------------------
-    // Three frames stay pending (never exchanged): the crash shape.
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message())
@@ -515,8 +580,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     let mut store = DeviceStore::open(&device_root).expect("restarted device store");
     let second_identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T01:00:00.000Z")
         .expect("restarted identity");
-    // Identity 不变: the adopted identity and the issued credential survive;
-    // only the launch instance rotates.
     assert_eq!(
         second_identity.identity().device_id(),
         first_identity.identity().device_id()
@@ -558,8 +621,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         node_id,
         "the restarted daemon exchanges under the assigned node id"
     );
-    // Outbox 不丢帧 + cursor 连续: the pending frames and the announcement
-    // hello settle contiguously through the instance takeover.
     drive_until(&mut daemon, "the restarted daemon to settle", |daemon| {
         settled(daemon) && daemon.status().acked_through >= 17
     });
@@ -575,7 +636,6 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the announcement hello took the launch instance over"
     );
 
-    // ---- Phase 6: server restart over the same durable state ---------------
     running.shutdown().await.expect("server shutdown");
     let restarted_server = start_with_client_exchange(&data_directory).await;
     transport
@@ -594,23 +654,19 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         |daemon| settled(daemon) && daemon.status().acked_through >= 19,
     );
     let status = daemon.status().clone();
-    // The fresh session started at the device restart without any replay;
-    // the server restart must not add one (both cursors are durable).
     assert_eq!(status.replays, 0, "a server restart replays nothing");
     assert_eq!(status.consecutive_failures, 0);
     assert_eq!(status.acked_through, 19);
     let server_cursors = cursors(&data_directory, &node_id);
     assert_eq!(server_cursors.client_to_server_ack_sequence, 19);
     assert_eq!(
-        server_cursors.server_to_client_ack_sequence, 1,
-        "the downlink cursor is durable across the server restart"
+        server_cursors.server_to_client_ack_sequence, 0,
+        "enrollment does not advance the downlink cursor, including after restart"
     );
     let record = node_snapshot(&data_directory, &node_id);
     assert_eq!(record.presence_state, ClientPresenceState::Online);
     assert!(record.last_heartbeat_at.is_some());
 
-    // Both sides agree at rest: the daemon's durable cursor equals the
-    // registry projection cursor, and the outbox retains nothing.
     let snapshot = daemon.outbox_snapshot().expect("final snapshot");
     assert!(snapshot.frames.is_empty());
     assert_eq!(snapshot.ack_sequence, snapshot.highest_sequence);

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-local model lane. Only execution control and public task events use the server port.
+#[cfg(test)]
+#[path = "device_model_concurrency_tests.rs"]
+mod concurrency_tests;
+
+#[cfg(all(test, feature = "test-support"))]
+#[path = "device_model_history_regression_tests.rs"]
+mod history_regression_tests;
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,45 +16,35 @@ use std::{
     sync::mpsc,
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelChunkMessage};
-use winwincode_provider::{DeviceProviderError, DeviceProviderStore, model_failure};
+use winwincode_provider::{
+    DeviceModelAdmission, DeviceModelPermit, DeviceProviderError, DeviceProviderStore,
+    model_failure,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceModelSendOutcome {
     Handled,
     Unhandled,
-    /// No Provider thread/call has started; the original durable open is retryable.
     NotStarted,
 }
 
 pub(crate) struct DeviceModels {
     directory: PathBuf,
+    recovery_store: DeviceProviderStore,
+    recovery_version: Option<i64>,
     pending: HashMap<String, String>,
     sender: mpsc::Sender<(String, Vec<ModelChunkMessage>)>,
     receiver: mpsc::Receiver<(String, Vec<ModelChunkMessage>)>,
     chunks: VecDeque<ModelChunkMessage>,
-    /// Highest Provider sequence already handed to the Worker poll loop.
-    /// Used to re-pull durable Device frames after an in-memory drop or a
-    /// process restart so a post-tool second model call cannot stall at
-    /// sequence 1 while Device already stores the full response.
     delivered_high_water: HashMap<String, i64>,
-    /// Exchange identities this Worker opened through `DeviceModels`.
-    /// Shared Device providers.sqlite3 stores every session's exchanges;
-    /// recover must not re-queue foreign-session frames into this Worker.
     owned_exchanges: HashSet<String>,
-    /// Session identities observed on `ModelOpen` messages this Worker sent.
     session_ids: HashSet<String>,
-    /// Worker instance identities that may own Device frames for this process.
     instance_ids: HashSet<String>,
-    /// Foreign exchanges already logged once (avoid 25ms poll spam).
-    logged_foreign: HashSet<String>,
-    /// Optional durable non-secret intake log shared with `model_bridge`.
     intake_log: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     fail_next_start: bool,
 }
 
-/// One durable intake log line. Bundled so the writer keeps a flat format
-/// string without an eight-argument signature.
 #[derive(Clone, Copy)]
 pub(crate) struct IntakeLogLine<'a> {
     pub stage: &'a str,
@@ -62,14 +58,13 @@ pub(crate) struct IntakeLogLine<'a> {
 
 impl DeviceModels {
     pub(crate) fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
-        DeviceProviderStore::open(directory)?;
-        // Managed workers keep durable diagnostics beside Codex runtime. The
-        // provider directory itself is shared across Worker sessions on one
-        // Device, so only an explicit env path is honoured — no derived fallback.
+        let recovery_store = DeviceProviderStore::open(directory)?;
         let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG").map(PathBuf::from);
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
             directory: directory.to_owned(),
+            recovery_store,
+            recovery_version: None,
             pending: HashMap::new(),
             sender,
             receiver,
@@ -78,7 +73,6 @@ impl DeviceModels {
             owned_exchanges: HashSet::new(),
             session_ids: HashSet::new(),
             instance_ids: HashSet::new(),
-            logged_foreign: HashSet::new(),
             intake_log,
             #[cfg(any(test, feature = "test-support"))]
             fail_next_start: false,
@@ -92,8 +86,9 @@ impl DeviceModels {
     }
 
     pub(crate) fn note_worker_instance_id(&mut self, worker_instance_id: &str) {
-        if !worker_instance_id.is_empty() {
-            self.instance_ids.insert(worker_instance_id.to_owned());
+        if !worker_instance_id.is_empty() && self.instance_ids.insert(worker_instance_id.to_owned())
+        {
+            self.recovery_version = None;
         }
     }
 
@@ -112,6 +107,7 @@ impl DeviceModels {
     ) {
         self.owned_exchanges
             .insert(open.model_exchange_id.0.clone());
+        self.recovery_version = None;
         let session = &open.session_identity;
         if !session.worker_session_id.0.is_empty() {
             self.session_ids.insert(session.worker_session_id.0.clone());
@@ -123,26 +119,6 @@ impl DeviceModels {
             self.instance_ids
                 .insert(open.lease.worker_instance_id.0.clone());
         }
-    }
-
-    fn exchange_is_recoverable(
-        &self,
-        store: &DeviceProviderStore,
-        exchange_id: &str,
-    ) -> Result<bool, DeviceProviderError> {
-        if self.owned_exchanges.contains(exchange_id) {
-            return Ok(true);
-        }
-        // After a process restart the live owned set is empty until ModelOpen
-        // is replayed. Durable Device frames still carry the session/instance
-        // identity of the Worker that opened the exchange; recover those.
-        let frames = store.replay_model(exchange_id, 1)?;
-        let Some(first) = frames.first() else {
-            return Ok(false);
-        };
-        let session = first.session_identity.worker_session_id.0.as_str();
-        let instance = first.lease.worker_instance_id.0.as_str();
-        Ok(self.session_ids.contains(session) || self.instance_ids.contains(instance))
     }
 
     pub(crate) fn send(
@@ -163,14 +139,31 @@ impl DeviceModels {
                         Err(DeviceProviderError)
                     };
                 }
-                if self.pending.len() >= 16 {
-                    return Ok(DeviceModelSendOutcome::NotStarted);
-                }
+                let store = DeviceProviderStore::open(&self.directory);
+                let admission = store
+                    .as_ref()
+                    .map_err(|error| *error)
+                    .and_then(|store| store.try_model_permit(open));
+                let permit = match admission {
+                    Ok(DeviceModelAdmission::Ready(permit)) => permit,
+                    Ok(DeviceModelAdmission::Deferred) => {
+                        return Ok(DeviceModelSendOutcome::NotStarted);
+                    }
+                    Err(_) => {
+                        let chunks = store
+                            .as_ref()
+                            .ok()
+                            .and_then(|store| store.reject_model_start(open).ok())
+                            .unwrap_or_else(|| {
+                                vec![model_failure(open, "DEVICE_PROVIDER_UNAVAILABLE")]
+                            });
+                        self.chunks.extend(chunks);
+                        return Ok(DeviceModelSendOutcome::Handled);
+                    }
+                };
                 self.pending.insert(id.clone(), digest);
-                // ponytail: bounded blocking HTTPS runs outside the Worker loop; adapter deadlines
-                // bound cancellation cleanup while heartbeats and tool approval remain responsive.
                 if self
-                    .start_provider(open, start_deadline, start_guard)
+                    .start_provider(open, start_deadline, start_guard, permit)
                     .is_err()
                 {
                     self.pending.remove(&id);
@@ -199,6 +192,7 @@ impl DeviceModels {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         start_deadline: Option<std::time::Instant>,
         start_guard: Option<winwincode_codex::LocalModelStartGuard>,
+        permit: DeviceModelPermit,
     ) -> std::io::Result<()> {
         #[cfg(any(test, feature = "test-support"))]
         if std::mem::take(&mut self.fail_next_start) {
@@ -210,9 +204,10 @@ impl DeviceModels {
         std::thread::Builder::new()
             .name("device-provider".to_owned())
             .spawn(move || {
+                let permit = std::cell::RefCell::new(Some(permit));
                 let chunks = DeviceProviderStore::open(&directory)
                     .and_then(|store| {
-                        store.execute_model_authorized(&open, || {
+                        let can_start = || {
                             start_guard.as_ref().map_or_else(
                                 || {
                                     start_deadline.is_some_and(|deadline| {
@@ -221,7 +216,37 @@ impl DeviceModels {
                                 },
                                 |check| check(),
                             )
-                        })
+                        };
+                        let before_attempt = || {
+                            if permit.borrow().is_some() {
+                                return Ok(());
+                            }
+                            loop {
+                                if !can_start()
+                                    || store.model_cancelled(&open.model_exchange_id.0)?
+                                {
+                                    return Err(DeviceProviderError);
+                                }
+                                match store.try_model_attempt_permit(&open)? {
+                                    DeviceModelAdmission::Ready(acquired) => {
+                                        *permit.borrow_mut() = Some(acquired);
+                                        return Ok(());
+                                    }
+                                    DeviceModelAdmission::Deferred => {
+                                        std::thread::sleep(std::time::Duration::from_millis(25));
+                                    }
+                                }
+                            }
+                        };
+                        let after_attempt = || {
+                            permit.borrow_mut().take();
+                        };
+                        store.execute_model_recovering_authorized(
+                            &open,
+                            can_start,
+                            before_attempt,
+                            after_attempt,
+                        )
                     })
                     .unwrap_or_else(|_| {
                         vec![model_failure(
@@ -245,7 +270,6 @@ impl DeviceModels {
         self.chunks.push_front(chunk);
     }
 
-    /// Drops a non-owned Device frame without pinning this Worker's queue.
     pub(crate) fn drop_chunk(&mut self, chunk: &ModelChunkMessage) {
         self.chunks.retain(|queued| {
             queued.model_exchange_id != chunk.model_exchange_id || queued.sequence != chunk.sequence
@@ -286,36 +310,26 @@ impl DeviceModels {
         Ok(Some(chunk))
     }
 
-    /// Re-queues durable Provider frames above the last delivered sequence.
-    ///
-    /// Device providers.sqlite3 is authoritative for completed exchanges. After
-    /// an in-memory drop or a Worker restart the live queue can stall at
-    /// sequence 1 even though later frames already exist; replaying only the
-    /// missing tail keeps the durable model-call ledger contiguous.
-    ///
-    /// The Device store is shared by every Worker session on one Device.
-    /// Recovering another session's exchange and then failing authority would
-    /// pin this Worker's in-memory queue on a foreign frame and starve its own
-    /// verification exchange. Only owned / identity-matching exchanges are
-    /// re-queued.
     fn recover_from_durable_store(&mut self) -> Result<(), DeviceProviderError> {
-        let store = DeviceProviderStore::open(&self.directory)?;
-        for exchange_id in store.list_stored_model_exchanges()? {
+        let version = self.recovery_store.model_data_version()?;
+        if self.recovery_version == Some(version) {
+            return Ok(());
+        }
+        let mut exchanges = self.owned_exchanges.clone();
+        for session in &self.session_ids {
+            exchanges.extend(
+                self.recovery_store
+                    .model_exchanges_for_owner(Some(session), None)?,
+            );
+        }
+        for instance in &self.instance_ids {
+            exchanges.extend(
+                self.recovery_store
+                    .model_exchanges_for_owner(None, Some(instance))?,
+            );
+        }
+        for exchange_id in exchanges {
             if self.pending.contains_key(&exchange_id) {
-                continue;
-            }
-            if !self.exchange_is_recoverable(&store, &exchange_id)? {
-                if self.logged_foreign.insert(exchange_id.clone()) {
-                    self.log_intake(IntakeLogLine {
-                        stage: "recover_skip",
-                        code: "FOREIGN_EXCHANGE",
-                        exchange_id: &exchange_id,
-                        sequence: 0,
-                        worker_session_id: "",
-                        thread_id: "",
-                        detail: "shared Device store exchange not owned by this Worker",
-                    });
-                }
                 continue;
             }
             let high_water = self
@@ -323,22 +337,16 @@ impl DeviceModels {
                 .get(&exchange_id)
                 .copied()
                 .unwrap_or(0);
-            let frames = store.replay_model(&exchange_id, high_water.saturating_add(1))?;
+            let frames = self
+                .recovery_store
+                .replay_model(&exchange_id, high_water.saturating_add(1))?;
             if frames.is_empty() {
                 continue;
             }
-            for frame in &frames {
-                let entry = self
-                    .delivered_high_water
-                    .entry(exchange_id.clone())
-                    .or_insert(0);
-                if frame.sequence.0 > *entry {
-                    *entry = frame.sequence.0;
-                }
-            }
-            self.owned_exchanges.insert(exchange_id.clone());
+            self.owned_exchanges.insert(exchange_id);
             self.chunks.extend(frames);
         }
+        self.recovery_version = Some(version);
         Ok(())
     }
 
@@ -455,14 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn full_local_lane_defers_a_never_started_request_without_losing_its_identity() {
+    fn full_provider_slots_defer_a_never_started_request_without_losing_its_identity() {
         let root = temp_root("deferred-start");
         let mut models = DeviceModels::open(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
         .unwrap();
-        let open: ExecutionPortMessage = serde_json::from_value(
+        let mut open: ExecutionPortMessage = serde_json::from_value(
             fixture["messages"]
                 .as_array()
                 .unwrap()
@@ -472,11 +480,22 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        for slot in 0..16 {
-            models
-                .pending
-                .insert(format!("occupied-{slot}"), "digest".into());
+        if let ExecutionPortMessage::ModelOpenMessage(request) = &mut open {
+            let payload = br#"{"provider":"fixture-provider","request":{"model":"fixture-model"}}"#;
+            request.request.data_base64 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
+            request.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(payload));
         }
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let ExecutionPortMessage::ModelOpenMessage(request) = &open else {
+            unreachable!()
+        };
+        let permits = (0..3)
+            .map(|_| match store.try_model_permit(request).unwrap() {
+                DeviceModelAdmission::Ready(permit) => permit,
+                DeviceModelAdmission::Deferred => panic!("expected a free Provider slot"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             models
                 .send(
@@ -487,7 +506,9 @@ mod tests {
                 .unwrap(),
             DeviceModelSendOutcome::NotStarted
         );
-        models.pending.clear();
+        assert!(models.pending.is_empty());
+        assert!(!store.model_start_recorded(request).unwrap());
+        drop(permits);
         models.fail_next_start = true;
         assert_eq!(
             models
@@ -526,7 +547,6 @@ mod tests {
             1,
             "same identity never launches two calls"
         );
-        // No configured provider: the background task produces a local failure without HTTP.
         let (_, chunks) = models
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -606,7 +626,6 @@ mod tests {
         let mut models = DeviceModels::open(&root).expect("open device models");
         models.note_worker_instance_id(&owned_wki);
         models.session_ids.insert(owned_wsn.clone());
-        // Simulate the verification ModelOpen that marked ownership.
         models.owned_exchanges.insert(owned_exchange.clone());
 
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap()).collect();
@@ -649,7 +668,6 @@ mod tests {
                 )
                 .expect("seed durable verification exchange");
         }
-        // Fresh process: owned_exchanges empty, but Worker re-seeded identity.
         let mut models = DeviceModels::open(&root).expect("open device models");
         models.session_ids.insert(wsn.clone());
         models.note_worker_instance_id(&wki);

@@ -62,6 +62,8 @@ pub(crate) enum ResolvedAppServerRequest {
         id: String,
     },
     UserInput {
+        thread_id: String,
+        turn_id: String,
         call_id: String,
     },
     McpElicitation {
@@ -75,7 +77,7 @@ pub(super) struct PendingAppServerRequests {
     exec_approvals: HashMap<(String, String), AppServerRequestId>,
     file_change_approvals: HashMap<(String, String), AppServerRequestId>,
     permissions_approvals: HashMap<(String, String), AppServerRequestId>,
-    user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
+    user_inputs: HashMap<(String, String), VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
 }
 
@@ -144,7 +146,10 @@ impl PendingAppServerRequests {
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
                 self.user_inputs
-                    .entry(params.turn_id.clone())
+                    .entry((
+                        Self::canonical_thread_id(&params.thread_id),
+                        params.turn_id.clone(),
+                    ))
                     .or_default()
                     .push_back(PendingUserInputRequest {
                         item_id: params.item_id.clone(),
@@ -260,8 +265,12 @@ impl PendingAppServerRequests {
                     })
                 })
                 .transpose()?,
-            AppCommand::UserInputAnswer { id, response } => self
-                .pop_user_input_request_for_turn(id)
+            AppCommand::UserInputAnswer {
+                id,
+                call_id,
+                response,
+            } => self
+                .pop_user_input_request_for_call(&thread_id, id, call_id)
                 .map(|pending| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id: pending.request_id,
@@ -338,8 +347,10 @@ impl PendingAppServerRequests {
             });
         }
 
-        if let Some(pending) = self.remove_user_input_request(request_id) {
+        if let Some((turn_id, pending)) = self.remove_user_input_request(&thread_id, request_id) {
             return Some(ResolvedAppServerRequest::UserInput {
+                thread_id,
+                turn_id,
                 call_id: pending.item_id,
             });
         }
@@ -393,40 +404,45 @@ impl PendingAppServerRequests {
         }
     }
 
-    fn pop_user_input_request_for_turn(
+    fn pop_user_input_request_for_call(
         &mut self,
+        thread_id: &str,
         turn_id: &str,
+        call_id: &str,
     ) -> Option<PendingUserInputRequest> {
-        let pending = self
-            .user_inputs
-            .get_mut(turn_id)
-            .and_then(VecDeque::pop_front);
-        if self
-            .user_inputs
-            .get(turn_id)
-            .is_some_and(VecDeque::is_empty)
-        {
-            self.user_inputs.remove(turn_id);
+        let key = (thread_id.to_owned(), turn_id.to_owned());
+        let pending = self.user_inputs.get_mut(&key).and_then(|requests| {
+            let index = requests
+                .iter()
+                .position(|request| request.item_id == call_id)?;
+            requests.remove(index)
+        });
+        if self.user_inputs.get(&key).is_some_and(VecDeque::is_empty) {
+            self.user_inputs.remove(&key);
         }
         pending
     }
 
     fn remove_user_input_request(
         &mut self,
+        thread_id: &str,
         request_id: &AppServerRequestId,
-    ) -> Option<PendingUserInputRequest> {
-        let (turn_id, index) = self.user_inputs.iter().find_map(|(turn_id, queue)| {
+    ) -> Option<(String, PendingUserInputRequest)> {
+        let (key, index) = self.user_inputs.iter().find_map(|(key, queue)| {
+            if key.0 != thread_id {
+                return None;
+            }
             queue
                 .iter()
                 .position(|pending| &pending.request_id == request_id)
-                .map(|index| (turn_id.clone(), index))
+                .map(|index| (key.clone(), index))
         })?;
-        let queue = self.user_inputs.get_mut(&turn_id)?;
-        let removed = queue.remove(index);
+        let queue = self.user_inputs.get_mut(&key)?;
+        let removed = queue.remove(index)?;
         if queue.is_empty() {
-            self.user_inputs.remove(&turn_id);
+            self.user_inputs.remove(&key);
         }
-        removed
+        Some((key.1, removed))
     }
 }
 
@@ -756,6 +772,7 @@ mod tests {
                 "thread-1",
                 &Op::UserInputAnswer {
                     id: "turn-2".to_string(),
+                    call_id: "tool-1".into(),
                     response: ToolRequestUserInputResponse {
                         answers: std::iter::once((
                             "question".to_string(),
@@ -1007,13 +1024,15 @@ mod tests {
         assert_eq!(
             pending.resolve_notification("thread-1", &AppServerRequestId::Integer(8)),
             Some(ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
                 call_id: "tool-1".to_string(),
             })
         );
     }
 
     #[test]
-    fn same_turn_user_input_answers_resolve_app_server_requests_fifo() {
+    fn same_turn_user_input_answers_resolve_exact_app_server_requests_in_reverse_order() {
         let mut pending = PendingAppServerRequests::default();
         for (request_id, item_id) in [(8, "tool-1"), (9, "tool-2")] {
             pending.note_server_request(&ServerRequest::ToolRequestUserInput {
@@ -1037,6 +1056,7 @@ mod tests {
                 "thread-1",
                 &Op::UserInputAnswer {
                     id: "turn-1".to_string(),
+                    call_id: "tool-2".into(),
                     response: response.clone(),
                 },
             )
@@ -1047,13 +1067,133 @@ mod tests {
                 "thread-1",
                 &Op::UserInputAnswer {
                     id: "turn-1".to_string(),
+                    call_id: "tool-1".into(),
                     response,
                 },
             )
             .expect("user input response should serialize")
             .expect("second user input request should be pending");
 
-        assert_eq!(first_response.request_id, AppServerRequestId::Integer(8));
-        assert_eq!(second_response.request_id, AppServerRequestId::Integer(9));
+        assert_eq!(first_response.request_id, AppServerRequestId::Integer(9));
+        assert_eq!(second_response.request_id, AppServerRequestId::Integer(8));
+    }
+
+    #[test]
+    fn user_input_answers_and_resolution_notifications_keep_thread_turn_call_identity() {
+        let mut pending = PendingAppServerRequests::default();
+        for (request_id, thread_id, turn_id) in [
+            (8, "thread-1", "turn-1"),
+            (9, "thread-1", "turn-2"),
+            (10, "thread-2", "turn-1"),
+        ] {
+            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: ToolRequestUserInputParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    item_id: "same-call".to_string(),
+                    questions: Vec::new(),
+                    is_blocking: true,
+                    auto_resolution_ms: None,
+                },
+            });
+        }
+        assert_eq!(
+            pending.resolve_notification("thread-2", &AppServerRequestId::Integer(9)),
+            None
+        );
+        let answer = Op::UserInputAnswer {
+            id: "turn-1".to_string(),
+            call_id: "same-call".to_string(),
+            response: ToolRequestUserInputResponse {
+                answers: HashMap::new(),
+            },
+        };
+        let foreign = pending.take_resolution("thread-3", &answer).unwrap();
+        assert!(foreign.is_none());
+        assert_eq!(
+            pending
+                .take_resolution("thread-2", &answer)
+                .unwrap()
+                .unwrap()
+                .request_id,
+            AppServerRequestId::Integer(10)
+        );
+        assert_eq!(
+            pending.resolve_notification("thread-1", &AppServerRequestId::Integer(9)),
+            Some(ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-2".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(
+            pending
+                .take_resolution("thread-1", &answer)
+                .unwrap()
+                .unwrap()
+                .request_id,
+            AppServerRequestId::Integer(8)
+        );
+        assert!(
+            pending
+                .take_resolution("thread-1", &answer)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn queued_user_input_answer_resolves_the_source_thread_after_active_thread_changes() {
+        use crate::app_event::AppEvent;
+        use crate::app_event_sender::AppEventSender;
+        let source_thread = codex_protocol::ThreadId::new();
+        let active_thread = codex_protocol::ThreadId::new();
+        let mut pending = PendingAppServerRequests::default();
+        for (request_id, thread_id) in [(8, source_thread), (9, active_thread)] {
+            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: ToolRequestUserInputParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: "same-turn".to_string(),
+                    item_id: "same-call".to_string(),
+                    questions: Vec::new(),
+                    is_blocking: true,
+                    auto_resolution_ms: None,
+                },
+            });
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        assert!(sender.user_input_answer(
+            &source_thread.to_string(),
+            "same-turn".to_string(),
+            "same-call".to_string(),
+            ToolRequestUserInputResponse {
+                answers: HashMap::new()
+            }
+        ));
+        let AppEvent::SubmitThreadOp { thread_id, op } = rx.try_recv().unwrap() else {
+            panic!("input answers must retain their source thread");
+        };
+        assert_eq!(thread_id, source_thread);
+        assert_ne!(thread_id, active_thread);
+        // event_dispatch forwards SubmitThreadOp's thread to take_resolution.
+        assert_eq!(
+            pending
+                .take_resolution(&thread_id.to_string(), &op)
+                .unwrap()
+                .unwrap()
+                .request_id,
+            AppServerRequestId::Integer(8)
+        );
+        assert_eq!(
+            pending
+                .take_resolution(&active_thread.to_string(), &op)
+                .unwrap()
+                .unwrap()
+                .request_id,
+            AppServerRequestId::Integer(9)
+        );
     }
 }

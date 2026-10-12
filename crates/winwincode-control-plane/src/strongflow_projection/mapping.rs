@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lossless mapping from Delivery-owned read models to generated transport DTOs.
-
 use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
@@ -663,12 +661,6 @@ fn verdict(
     })
 }
 
-/// Maps the durable Evidence source identity to the one canonical public id.
-///
-/// Delivery currently derives Evidence identities from a full SHA-256 source
-/// seal. The public contract uses a fixed Crockford identifier, so projection
-/// code deterministically narrows that seal rather than exposing an invalid or
-/// transport-specific identifier. Already-canonical ids remain unchanged.
 pub(super) fn public_evidence_id(source: &EvidenceId) -> EvidenceId {
     if is_public_evidence_id(&source.0) {
         return source.clone();
@@ -1066,15 +1058,11 @@ pub(super) fn runtime_snapshot_for_product_session(
     })
 }
 
-/// Maps the standalone `ProductSession` identity to the generated runtime
-/// session contract. `ProductSession` execution has no Delivery `WorkRun` or
-/// domain `SessionBinding` id; the stable projection key is derived from the
-/// exact ProductSession/ExecutionJob identity retained by the runtime ledger.
 fn runtime_product_session(
     source: &TrustedProductSessionRuntimeSession,
 ) -> Result<api::RuntimeSessionProjection, StrongFlowProjectionError> {
     Ok(api::RuntimeSessionProjection {
-        activities: Vec::new(),
+        activities: source.activities.iter().map(runtime_activity).collect(),
         agent_edges: Vec::new(),
         agents: Vec::new(),
         as_of_sequence: integer(source.as_of_sequence, "session sequence")?,
@@ -1187,65 +1175,7 @@ fn runtime_session(
                 child_thread_id: edge.child_thread_id.clone(),
             })
             .collect(),
-        activities: source
-            .activities
-            .iter()
-            .map(|activity| api::RuntimeActivityProjection {
-                call_id: activity.call_id.clone(),
-                activity_type: match activity.activity_type {
-                    runtime_projection::RuntimeActivityType::Command => {
-                        api::RuntimeActivityType::Command
-                    }
-                    runtime_projection::RuntimeActivityType::Test => api::RuntimeActivityType::Test,
-                },
-                command: activity.command.clone(),
-                status: match activity.status {
-                    runtime_projection::RuntimeActivityStatus::Running => {
-                        api::RuntimeActivityStatus::Running
-                    }
-                    runtime_projection::RuntimeActivityStatus::Completed => {
-                        api::RuntimeActivityStatus::Completed
-                    }
-                    runtime_projection::RuntimeActivityStatus::Failed => {
-                        api::RuntimeActivityStatus::Failed
-                    }
-                    runtime_projection::RuntimeActivityStatus::Declined => {
-                        api::RuntimeActivityStatus::Declined
-                    }
-                    runtime_projection::RuntimeActivityStatus::Cancelled => {
-                        api::RuntimeActivityStatus::Cancelled
-                    }
-                    runtime_projection::RuntimeActivityStatus::Unknown => {
-                        api::RuntimeActivityStatus::Unknown
-                    }
-                },
-                outcome: match activity.outcome {
-                    runtime_projection::RuntimeActivityOutcome::Observed => {
-                        api::RuntimeActivityOutcome::Observed
-                    }
-                    runtime_projection::RuntimeActivityOutcome::Succeeded => {
-                        api::RuntimeActivityOutcome::Succeeded
-                    }
-                    runtime_projection::RuntimeActivityOutcome::TaskFailed => {
-                        api::RuntimeActivityOutcome::TaskFailed
-                    }
-                    runtime_projection::RuntimeActivityOutcome::TimedOut => {
-                        api::RuntimeActivityOutcome::TimedOut
-                    }
-                    runtime_projection::RuntimeActivityOutcome::PolicyDenied => {
-                        api::RuntimeActivityOutcome::PolicyDenied
-                    }
-                    runtime_projection::RuntimeActivityOutcome::InfrastructureFailed => {
-                        api::RuntimeActivityOutcome::InfrastructureFailed
-                    }
-                    runtime_projection::RuntimeActivityOutcome::Cancelled => {
-                        api::RuntimeActivityOutcome::Cancelled
-                    }
-                },
-                exit_code: activity.exit_code.map(i64::from),
-                source_ref: activity.source_ref.clone(),
-            })
-            .collect(),
+        activities: source.activities.iter().map(runtime_activity).collect(),
         usage: source
             .usage
             .as_ref()
@@ -1389,6 +1319,64 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+fn runtime_activity(
+    activity: &runtime_projection::RuntimeActivityProjection,
+) -> api::RuntimeActivityProjection {
+    api::RuntimeActivityProjection {
+        core_tool: activity.core_tool.as_deref().cloned(),
+        call_id: activity.call_id.clone(),
+        activity_type: match activity.activity_type {
+            runtime_projection::RuntimeActivityType::Command => api::RuntimeActivityType::Command,
+            runtime_projection::RuntimeActivityType::Test => api::RuntimeActivityType::Test,
+            runtime_projection::RuntimeActivityType::Tool => api::RuntimeActivityType::Tool,
+        },
+        command: activity.command.clone(),
+        status: match activity.status {
+            runtime_projection::RuntimeActivityStatus::Running => {
+                api::RuntimeActivityStatus::Running
+            }
+            runtime_projection::RuntimeActivityStatus::Completed => {
+                api::RuntimeActivityStatus::Completed
+            }
+            runtime_projection::RuntimeActivityStatus::Failed => api::RuntimeActivityStatus::Failed,
+            runtime_projection::RuntimeActivityStatus::Declined => {
+                api::RuntimeActivityStatus::Declined
+            }
+            runtime_projection::RuntimeActivityStatus::Cancelled => {
+                api::RuntimeActivityStatus::Cancelled
+            }
+            runtime_projection::RuntimeActivityStatus::Unknown => {
+                api::RuntimeActivityStatus::Unknown
+            }
+        },
+        outcome: match activity.outcome {
+            runtime_projection::RuntimeActivityOutcome::Observed => {
+                api::RuntimeActivityOutcome::Observed
+            }
+            runtime_projection::RuntimeActivityOutcome::Succeeded => {
+                api::RuntimeActivityOutcome::Succeeded
+            }
+            runtime_projection::RuntimeActivityOutcome::TaskFailed => {
+                api::RuntimeActivityOutcome::TaskFailed
+            }
+            runtime_projection::RuntimeActivityOutcome::TimedOut => {
+                api::RuntimeActivityOutcome::TimedOut
+            }
+            runtime_projection::RuntimeActivityOutcome::PolicyDenied => {
+                api::RuntimeActivityOutcome::PolicyDenied
+            }
+            runtime_projection::RuntimeActivityOutcome::InfrastructureFailed => {
+                api::RuntimeActivityOutcome::InfrastructureFailed
+            }
+            runtime_projection::RuntimeActivityOutcome::Cancelled => {
+                api::RuntimeActivityOutcome::Cancelled
+            }
+        },
+        exit_code: activity.exit_code.map(i64::from),
+        source_ref: activity.source_ref.clone(),
+    }
 }
 
 #[cfg(test)]

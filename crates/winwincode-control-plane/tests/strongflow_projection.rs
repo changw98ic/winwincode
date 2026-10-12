@@ -129,11 +129,6 @@ enum PositiveTerminalDisposition {
     Settled { delivery_revision: u64 },
 }
 
-// PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
-// Missing sources return TRUSTED_FACTS_UNAVAILABLE.
-// WebSocket `runtime-projection.invalidated.v1` is only an invalidation; these reads
-// expose complete committed snapshots.
-
 #[derive(Clone)]
 struct JournalStorage {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
@@ -973,9 +968,6 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
 }
 
 fn normalize_projection_read_revision(delivery: &Delivery) -> Delivery {
-    // The read harness accepts one seeded journal record at revision one. The
-    // production transitions have already established the lifecycle facts;
-    // only the isolated query coordinate is normalized here.
     let mut snapshot = delivery.clone().into_snapshot();
     snapshot.revision = 1;
     Delivery::try_from_snapshot(snapshot).expect("projection read fixture")
@@ -2188,11 +2180,27 @@ fn product_runtime_state(
 ) -> Vec<u8> {
     let events = (1..=event_count)
         .map(|sequence| {
+            let core_fact = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion":"winwincode.core-tool-fact.v1",
+                "sourceThreadId":format!("core-{label}"), "sourceSequence":sequence,
+                "factJson":serde_json::json!({"kind":"cell","fact":{
+                    "schema_version":1,"sequence":sequence,"cell_id":format!("cell-{sequence}"),
+                    "parent_request_sequence":1,"lifecycle":"closed",
+                }}).to_string(),
+            }))
+            .expect("Core cell fact");
             let event = ExecutionEventRecord {
                 category: ExecutionEventCategory::Lifecycle,
                 event_id: ExecutionEventId(format!("xevt_product_{label}_{sequence}")),
                 occurred_at: Instant(format!("2026-08-25T00:00:{sequence:02}Z")),
-                payload: None,
+                payload: Some(winwincode_execution_port::generated::EncodedPayload {
+                    content_type: "application/vnd.winwincode.core-tool-fact+json".into(),
+                    data_base64: STANDARD.encode(&core_fact),
+                    payload_digest: Sha256Digest(format!(
+                        "sha256:{:x}",
+                        Sha256::digest(&core_fact)
+                    )),
+                }),
                 sequence: ExecutionSequence(
                     i64::try_from(sequence).expect("fixture sequence fits in i64"),
                 ),
@@ -2340,6 +2348,13 @@ fn assert_product_runtime_snapshot(
         format!("product-session-runtime:job_product_{label}")
     );
     assert_eq!(session.as_of_sequence, sequence);
+    assert_eq!(session.activities.len(), usize::try_from(sequence).unwrap());
+    assert!(session.activities.iter().all(|activity| {
+        activity
+            .core_tool
+            .as_ref()
+            .is_some_and(|meta| meta.source_thread_id == format!("core-{label}"))
+    }));
     assert_eq!(session.attempt, 1);
     assert!(session.work_run_id.is_none());
 }
@@ -2854,8 +2869,6 @@ fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
         Some(&session.work_run_id)
     );
 
-    // This test-only trusted source seals a different lease; the public read
-    // still has to compare it against the persisted accepted assignment.
     let binding = accepted_binding(
         &f.delivery,
         &session.id,

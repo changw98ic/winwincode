@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Secret-safe, exact-scope `ModelRoute` availability projection.
-//!
-//! The browser receives only a bounded server-owned join of effective Settings,
-//! Provider/model Catalog, Credential lifecycle, and request-pool readiness.
-//! Credential locators, secrets, Provider adapter configuration, and pool
-//! occupancy never cross this boundary.
-
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -59,7 +52,6 @@ const RUNTIME_STATUS_SCHEMA: &str = "winwincode.model-route-runtime-status.v1";
 const RUNTIME_STATUS_STREAM_PREFIX: &str = "model-route-runtime-status:";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Trusted runtime observation for one exact repository route.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRouteRuntimeStatusCommand {
@@ -73,7 +65,6 @@ pub struct ModelRouteRuntimeStatusCommand {
     pub source_revision: u64,
 }
 
-/// Durable result of one runtime-status update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRouteRuntimeStatusReceipt {
     pub revision: u64,
@@ -113,9 +104,6 @@ pub(crate) fn model_request_pool_readiness_stream_id(
     ))
 }
 
-/// Builds the canonical secret-free scope-stream invalidation beside an
-/// authority mutation. Callers append this value to the same storage commit as
-/// the source revision so a crash can never expose one without the other.
 pub(crate) fn model_route_availability_invalidated_event(
     actor: &Actor,
     scope: &Scope,
@@ -178,7 +166,6 @@ pub(crate) fn model_route_availability_invalidated_event(
     )
 }
 
-/// Stable public-query failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRouteAvailabilityErrorKind {
     InvalidRequest,
@@ -187,7 +174,6 @@ pub enum ModelRouteAvailabilityErrorKind {
     Storage,
 }
 
-/// Bounded failure that never copies Catalog, Credential, or pool details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRouteAvailabilityError {
     kind: ModelRouteAvailabilityErrorKind,
@@ -220,7 +206,6 @@ impl ModelRouteAvailabilityError {
         )
     }
 
-    /// Returns the stable public-query error category.
     #[must_use]
     pub const fn kind(&self) -> ModelRouteAvailabilityErrorKind {
         self.kind
@@ -273,7 +258,6 @@ struct PageCursor {
     next_index: u64,
 }
 
-/// Exact-scope query service backed by the one local product-state authority.
 pub struct ModelRouteAvailabilityService<'storage> {
     storage: &'storage mut SqliteStorage,
     pool_config: Option<ModelRequestPoolConfig>,
@@ -291,12 +275,6 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
         }
     }
 
-    /// Persists one explicit Provider/runtime observation. Quota states are
-    /// accepted only as reported facts; this service never estimates them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed, conflicting, or unpersistable facts.
     pub fn record_runtime_status(
         &mut self,
         command: &ModelRouteRuntimeStatusCommand,
@@ -372,12 +350,6 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
         })
     }
 
-    /// Returns one stable page of server-joined `ModelRoute` values.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/cross-scope input, changed page cursors, corrupt
-    /// canonical sources, or output rejected by the Credential leak gate.
     pub fn list(
         &mut self,
         query: &ModelRouteAvailabilityListQuery,

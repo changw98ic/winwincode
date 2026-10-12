@@ -722,7 +722,7 @@ impl CodexCoreAdapter for FixtureCodex {
         Ok(Vec::new())
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &winwincode_worker::composition::generated::JobOutcomeMessage,

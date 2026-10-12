@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/my-work-tests')
-// Plain module paths keep one module identity across the facade, the reused
-// projections, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -190,8 +188,6 @@ function contractFake(initialState = {}) {
     serverUrl: 'https://control.example/my-work',
     get deliveries() { return state.deliveries },
     set deliveries(value) { state.deliveries = value },
-    // One-shot: only the next query fails, so a refresh marks exactly the
-    // projection whose read broke and keeps every other served source.
     failNextQueries() { failQueries = true },
     async query(request) {
       queries.push(structuredClone(request))
@@ -221,7 +217,6 @@ function clientsFake(devices, overrides = {}) {
     listCalls: 0,
     get devices() { return current },
     set devices(value) { current = value },
-    // One-shot, matching failNextQueries above.
     failNextList() { failList = true },
     async listClients() {
       this.listCalls += 1
@@ -360,8 +355,6 @@ test('a failed read marks the sources unavailable and keeps every served list', 
     title: 'Failing',
     workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 0, waitingDependency: 0, done: 1, failed: 2, backlog: 0, total: 3, validating: 0 },
   })
-  // Every owning projection reports its failed read, and every one of them
-  // still carries the last served facts.
   const work = workState('error', 'error', [running, completed, failed])
   const state = myWorkState({
     work,

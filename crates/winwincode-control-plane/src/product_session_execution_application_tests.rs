@@ -9,14 +9,16 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 use winwincode_api::generated::ModelRoute;
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionJobId, ExecutionMessageId,
-    ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity, Sha256Digest, UserId,
-    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionEventId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity,
+    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::generated::{
-    EncodedPayload, ExecutionJob, ExecutionLeaseStamp, ModelChunkMessage, ModelChunkMessageKind,
+    EncodedPayload, ExecutionEventCategory, ExecutionEventRecord, ExecutionJob,
+    ExecutionLeaseStamp, ModelChunkMessage, ModelChunkMessageKind, RuntimeEventMessage,
+    RuntimeEventMessageKind,
 };
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
@@ -724,6 +726,213 @@ fn raw_provider_sequences_map_to_contiguous_public_ordinals_and_reject_changed_o
             .frames
             .is_empty()
     );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One real cancelled dispatch covers in-flight frames, immutable replay, and restart"
+)]
+fn cancelled_chat_retains_and_acknowledges_late_public_frames_without_rebinding() {
+    struct Publisher;
+    impl crate::EventPublisher for Publisher {
+        fn publish(&mut self, _: &crate::OutboxEvent) -> Result<(), crate::EventPublishError> {
+            Ok(())
+        }
+    }
+    struct Downstream;
+    impl DurableExecutionPortDelegate for Downstream {
+        fn accept(
+            &mut self,
+            _: DurableExecutionPortContext<'_>,
+            _: DurableExecutionPortSupplement<'_>,
+        ) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError> {
+            panic!("the ProductSession owner must accept the public frame");
+        }
+    }
+
+    let mut fixture = ProjectionFixture::new("cancel-late-public-frame", 16);
+    let scope = execution_scope(&fixture.repository_scope, &fixture.product_session_id);
+    let job = fixture
+        .storage
+        .execution_queue()
+        .expect("queue")
+        .load_job(&scope, &fixture.execution_job_id)
+        .expect("load Job")
+        .expect("Job");
+    let job: ExecutionJob = serde_json::from_slice(&job.dispatch_payload).expect("Job payload");
+    fixture
+        .storage
+        .execution_registry()
+        .expect("registry")
+        .record_dispatch_result(&winwincode_storage::DispatchResultRequest {
+            checked_at: at(6),
+            expires_at: fixture.lease.expires_at.clone(),
+            fencing_token: fixture.lease.fencing_token.clone(),
+            issued_at: fixture.lease.issued_at.clone(),
+            job_id: fixture.execution_job_id.clone(),
+            lease_id: fixture.lease.lease_id.clone(),
+            message_id: ExecutionMessageId(id("xmsg", 16_001)),
+            payload_digest: job.payload_digest,
+            request_id: RequestId(id("req", 16 * 100 + 6)),
+            sent_at: at(6),
+            status: winwincode_storage::DispatchResultStatus::Accepted,
+            attempt: 1,
+            error: None,
+            worker_id: fixture.authority.worker_id.clone(),
+            worker_instance_id: fixture.authority.worker_instance_id.clone(),
+            worker_session_id: Some(fixture.authority.worker_session_id.clone()),
+        })
+        .expect("accept dispatch");
+    let mut control_plane = crate::ControlPlane::start_local(
+        crate::ControlPlaneConfig::local(&fixture.directory.0),
+        Box::new(Publisher),
+    )
+    .expect("Control Plane");
+    let mut delegate = ProductSessionExecutionApplication::new(Downstream);
+    let mut initial = fixture.chunk(1, "before cancellation");
+    initial.sent_at = at(44);
+    crate::DurableExecutionPortIngress::with_delegate(
+        &mut control_plane,
+        &mut fixture.storage,
+        &fixture.repository_scope,
+        at(44),
+        &mut delegate,
+    )
+    .expect("shared ingress")
+    .handle(&ExecutionPortMessage::ModelChunkMessage(initial))
+    .expect("project the running Chat frame");
+    assert_eq!(fixture.assistant_content(), "before cancellation");
+    let mut cancel_context = command_context(&fixture.repository_scope, 16_030, 2);
+    cancel_context.occurred_at = at(45);
+    ProductSessionService::new(&mut fixture.storage)
+        .cancel_session(&crate::CancelProductSessionCommand {
+            context: cancel_context,
+            product_session_id: fixture.product_session_id.clone(),
+            actor: winwincode_session::AuthenticatedActor::User(UserId(id("usr", 1))),
+            reason: "cancel while a Provider frame is in flight".into(),
+        })
+        .expect("cancel ProductSession");
+    let mut chunk = fixture.chunk(1, "late output");
+    chunk.model_exchange_id = ModelExchangeId(id("mdl", 16_002));
+    for frame in [
+        fixture.chunk(2, "late bound output"),
+        chunk.clone(),
+        chunk.clone(),
+    ] {
+        let output = crate::DurableExecutionPortIngress::with_delegate(
+            &mut control_plane,
+            &mut fixture.storage,
+            &fixture.repository_scope,
+            at(46),
+            &mut delegate,
+        )
+        .expect("shared ingress")
+        .handle(&ExecutionPortMessage::ModelChunkMessage(frame.clone()))
+        .expect("late canonical Provider frame must be acknowledged so Core facts can drain");
+        let [ExecutionPortMessage::ModelAckMessage(ack)] = output.as_slice() else {
+            panic!("public frame acknowledgement");
+        };
+        assert_eq!(ack.ack_sequence.0, frame.sequence.0);
+        assert_eq!(ack.status, LeaseWriteStatus::Accepted);
+        assert!(ack.error.is_none());
+        let request_id = chat_model_frame_request_id(&frame).expect("frame receipt identity");
+        let retained = fixture
+            .storage
+            .load_state(&format!("chat-model-frame-authority:{}", request_id.0))
+            .expect("frame observation")
+            .expect("retained frame");
+        let body: Value =
+            serde_json::from_slice(&retained.payload).expect("frame observation body");
+        assert_eq!(
+            body["frame"],
+            serde_json::to_value(frame).expect("original frame")
+        );
+    }
+    let mut changed = chunk.clone();
+    changed.payload = fixture.chunk(1, "changed output").payload;
+    let mut foreign = chunk.clone();
+    foreign.session_identity.codex_thread_id = CodexThreadId(id("cdx", 16_003));
+    for frame in [changed, foreign] {
+        assert!(
+            crate::DurableExecutionPortIngress::with_delegate(
+                &mut control_plane,
+                &mut fixture.storage,
+                &fixture.repository_scope,
+                at(46),
+                &mut delegate,
+            )
+            .expect("shared ingress")
+            .handle(&ExecutionPortMessage::ModelChunkMessage(frame))
+            .is_err()
+        );
+    }
+    control_plane.shutdown().expect("shutdown before replay");
+    let mut control_plane = crate::ControlPlane::start_local(
+        crate::ControlPlaneConfig::local(&fixture.directory.0),
+        Box::new(Publisher),
+    )
+    .expect("restart Control Plane");
+    crate::DurableExecutionPortIngress::with_delegate(
+        &mut control_plane,
+        &mut fixture.storage,
+        &fixture.repository_scope,
+        at(55),
+        &mut delegate,
+    )
+    .expect("restart ingress")
+    .handle(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
+    .expect("exact frame replay after restart and lease expiry");
+    let runtime = RuntimeEventMessage {
+        codex_thread_id: fixture.authority.codex_thread_id.clone(),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Activity,
+            event_id: ExecutionEventId(id("xevt", 16_004)),
+            occurred_at: at(46),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "Execution observation after cancellation".into(),
+        },
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        lease: fixture.lease.clone(),
+        message_id: ExecutionMessageId(id("xmsg", 16_004)),
+        schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+        sent_at: at(46),
+        session_identity: chunk.session_identity.clone(),
+        worker_session_id: fixture.authority.worker_session_id.clone(),
+    };
+    let output = crate::DurableExecutionPortIngress::with_delegate(
+        &mut control_plane,
+        &mut fixture.storage,
+        &fixture.repository_scope,
+        at(55),
+        &mut delegate,
+    )
+    .expect("runtime ingress")
+    .handle(&ExecutionPortMessage::RuntimeEventMessage(runtime))
+    .expect("runtime observation after cancelled Provider frame and lease expiry");
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = output.as_slice() else {
+        panic!("runtime acknowledgement");
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::Accepted, "{:?}", ack.error);
+    assert_eq!(ack.ack_sequence.0, 1);
+    assert_eq!(fixture.assistant_content(), "before cancellation");
+    let record = ProductSessionService::new(&mut fixture.storage)
+        .get(&fixture.receipt_scope, &fixture.product_session_id)
+        .expect("read cancelled session")
+        .expect("session");
+    assert_eq!(
+        record.session().state(),
+        winwincode_session::ProductSessionState::Cancelled
+    );
+    assert_eq!(record.session().revision(), 3);
+    assert!(
+        !record
+            .bindings()
+            .iter()
+            .any(|binding| binding.includes_model_exchange(&chunk.model_exchange_id))
+    );
+    control_plane.shutdown().expect("shutdown Control Plane");
 }
 
 #[test]

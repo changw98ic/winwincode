@@ -1,8 +1,3 @@
-// [UI-100.3] Occupancy card close-out details, aligned with the landed
-// occupancy facade (CLIENT-300.4): the recovery-pending card shows the §12.4
-// recovery window and the Owner force-release entry, the draining card keeps
-// the explicit cancel-and-release confirmation, and the wire carries the
-// recovery deadline fail-closed.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
@@ -32,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/client-occupancy-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -84,7 +77,6 @@ function occupancyError(code, kind = 'server') {
   })
 }
 
-/** One deterministic occupancy port with the Owner seam; every call records. */
 function portFake({ withForceRelease = true } = {}) {
   const calls = []
   const pending = []
@@ -331,7 +323,6 @@ test('force release always asks first, submits through the Owner seam, and re-re
   )
   assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, '强制释放')
 
-  // Keep drops the armed draft without submitting.
   findOne(card, 'wwc-clients-card-confirm-keep').emit('click')
   assert.equal(confirm.hidden, true)
   assert.equal(occupancyModel.interaction('123456789012').kind, 'rest')
@@ -399,7 +390,6 @@ test('a snapshot that leaves recovery drops the armed force-release draft withou
   findOne(card, 'wwc-clients-card-force-release').emit('click')
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
 
-  // The Server recovered the lease while the draft was armed.
   await showDevices(handle, [device({ occupancy: 'available' })])
   assert.equal(occupancyModel.interaction('123456789012').kind, 'rest', 'the stale draft dropped')
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, true)

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Contract tests for the business-neutral local/remote `ExecutionPort` seam.
-//!
-//! The tests freeze the seam: both adapters accept the same typed frame, the
-//! remote adapter uses one canonical JSON envelope, and neither adapter
-//! interprets lease, dedupe, or execution outcomes.
-
 use std::collections::VecDeque;
 
 use serde_json::{Value, json};
@@ -106,7 +100,7 @@ fn worker_frame() -> TypedFrame {
 #[test]
 fn all_canonical_fixture_messages_round_trip_through_remote_json() {
     let messages = fixture_messages();
-    assert_eq!(messages.len(), 31);
+    assert_eq!(messages.len(), 30);
 
     for (direction, message) in messages {
         let frame = TypedFrame::new(direction, message).expect("typed frame is valid");
