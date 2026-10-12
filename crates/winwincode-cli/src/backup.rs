@@ -26,7 +26,6 @@ const CONTROL_PLANE_DATABASE: &str = "control-plane";
 const DEVICE_CLIENT_DATABASE: &str = "device-client";
 
 const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = 6;
-const SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS: [i64; 5] = [1, 2, 3, 4, 5];
 
 const VACUUM_TMP_SUFFIX: &str = ".vacuum-tmp";
 const RESTORE_TMP_SUFFIX: &str = ".restore-tmp";
@@ -493,11 +492,7 @@ fn store_display(store: BackupStoreKind) -> &'static str {
 
 fn supported_restore_versions(name: &str) -> Option<Vec<i64>> {
     match name {
-        CONTROL_PLANE_DATABASE => {
-            let mut supported = SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS.to_vec();
-            supported.push(SERVER_CONTROL_PLANE_SCHEMA_VERSION);
-            Some(supported)
-        }
+        CONTROL_PLANE_DATABASE => Some(vec![SERVER_CONTROL_PLANE_SCHEMA_VERSION]),
         DEVICE_CLIENT_DATABASE => Some(vec![winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION]),
         _ => None,
     }
@@ -1871,6 +1866,51 @@ mod tests {
     }
 
     #[test]
+    fn restore_fails_closed_on_previous_control_plane_schema_version() {
+        for previous_version in 0..SERVER_CONTROL_PLANE_SCHEMA_VERSION {
+            let fixture = Fixture::new("server-previous-schema");
+            let data = fixture.data_arg();
+            let backup = fixture.backup_arg();
+            let (user_id, username, temporary_password) = seed_server_store(&fixture.data_dir());
+            let data_directory = fixture.data_dir();
+            assert_success(&run(&[
+                "snapshot",
+                "--store",
+                "server",
+                "--data-dir",
+                &data,
+                "--output",
+                &backup,
+            ]));
+            patch_snapshot_version(&fixture.backup_dir(), "control-plane", previous_version);
+
+            let restore = run(&[
+                "restore",
+                "--store",
+                "server",
+                "--data-dir",
+                &data,
+                "--from",
+                &backup,
+            ]);
+            assert_eq!(restore.code, EXIT_SERVICE, "stderr: {}", restore.stderr);
+            assert!(
+                restore
+                    .stderr
+                    .contains("restore.unsupported-schema-version")
+            );
+            assert!(restore.stderr.contains("未改动"));
+
+            let service = UserAccountService::open(&data_directory).expect("reopen storage");
+            let verified = service
+                .verify_credentials(&username, &temporary_password)
+                .expect("verification runs")
+                .expect("account still live");
+            assert_eq!(verified.user_id.0, user_id);
+        }
+    }
+
+    #[test]
     fn restore_fails_closed_on_unsupported_device_schema_version() {
         let fixture = Fixture::new("device-newer-schema");
         let data = fixture.data_arg();
@@ -2373,12 +2413,9 @@ mod tests {
     }
 
     #[test]
-    fn supported_restore_versions_cover_migration_set_only() {
+    fn supported_restore_versions_use_current_managed_schemas() {
         let server = supported_restore_versions(CONTROL_PLANE_DATABASE).expect("gated");
-        assert_eq!(
-            server,
-            vec![1, 2, 3, 4, 5, SERVER_CONTROL_PLANE_SCHEMA_VERSION]
-        );
+        assert_eq!(server, vec![SERVER_CONTROL_PLANE_SCHEMA_VERSION]);
         let device = supported_restore_versions(DEVICE_CLIENT_DATABASE).expect("gated");
         assert_eq!(
             device,
