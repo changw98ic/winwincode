@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! JEV-01 `OpenJev` runtime adapter contract tests.
-//!
-//! These tests keep Jev fail-open for Coding Agent Worker: Provider outage
-//! never becomes a hard Worker failure.
-
 use std::{future::Future, sync::Arc, time::Duration};
 
 use winwincode_provider::{
     JevDevice, JevDtype, JevExecutionOptions, JevFallbackPolicy, JevHealth, JevHypothesis,
     JevProvider, JevProviderCapabilities, JevProviderErrorKind, JevRuntime, JevRuntimeConfig,
     JevScores, MockJevProvider, MockJevRemoteTransport, OPENJEV_LOCAL_RUNTIME_GAP,
-    OpenJevLocalProvider, OpenJevRemoteProvider, OpenJevRemoteSettings,
-    contract_capability_mocks, jev_provider_order, parse_jev_score_list, parse_jev_scores,
+    OpenJevLocalProvider, OpenJevRemoteProvider, OpenJevRemoteSettings, contract_capability_mocks,
+    jev_provider_order, parse_jev_score_list, parse_jev_scores,
 };
 
 fn hypothesis() -> JevHypothesis {
@@ -51,7 +46,11 @@ fn runtime(providers: Vec<Arc<dyn JevProvider>>) -> JevRuntime {
 fn contract_gate_covers_three_capability_mocks() {
     block_on(async {
         let mocks = contract_capability_mocks();
-        assert_eq!(mocks.len(), 3, "DoD requires at least three capability mocks");
+        assert_eq!(
+            mocks.len(),
+            3,
+            "DoD requires at least three capability mocks"
+        );
         let mut seen_batches = Vec::new();
         for mock in mocks {
             let capabilities = mock.capabilities();
@@ -61,16 +60,21 @@ fn contract_gate_covers_three_capability_mocks() {
                 dtype: capabilities.dtypes[0],
             };
             assert_eq!(mock.health().await, JevHealth::Healthy);
-            let evaluation = mock.evaluate(hypothesis(), options).await.expect("evaluate");
+            let evaluation = mock
+                .evaluate(hypothesis(), options)
+                .await
+                .expect("evaluate");
             assert!(evaluation.scores.confidence() > 0.0);
             assert_ne!(evaluation.device, JevDevice::Auto);
             let batch = mock
-                .batch_evaluate(vec![hypothesis(); capabilities.max_batch_size.min(2)], options)
+                .batch_evaluate(
+                    vec![hypothesis(); capabilities.max_batch_size.min(2)],
+                    options,
+                )
                 .await
                 .expect("batch");
             assert_eq!(batch.evaluations.len(), capabilities.max_batch_size.min(2));
         }
-        // Capability diversity is part of the contract coverage.
         assert!(seen_batches.windows(2).any(|pair| pair[0] != pair[1]));
     });
 }
@@ -83,11 +87,12 @@ fn jev_outage_does_not_block_coding_agent_worker() {
             Some(Arc::new(OpenJevLocalProvider::with_runtime_gap())),
             Some(Arc::new(MockJevProvider::unavailable("openjev-remote"))),
         );
-        let run = runtime(providers).evaluate(hypothesis(), cpu_options()).await;
+        let run = runtime(providers)
+            .evaluate(hypothesis(), cpu_options())
+            .await;
         assert!(run.value.is_none());
         assert!(run.observation.is_none());
         assert!(!run.failures.is_empty());
-        // The worker-side effect is "continue without Jev", not an Err channel.
         let worker_status = if run.value.is_none() {
             "continued-without-jev"
         } else {
@@ -127,11 +132,8 @@ dtypes = ["float32", "float16", "bfloat16"]
         Some(Arc::new(local)),
         Some(Arc::new(remote)),
     );
-    let run = block_on(JevRuntime::new(providers, runtime_config).evaluate(
-        hypothesis(),
-        cpu_options(),
-    ));
-    // Local gap fails, remote mock succeeds: remote fallback path is live.
+    let run =
+        block_on(JevRuntime::new(providers, runtime_config).evaluate(hypothesis(), cpu_options()));
     assert!(run.value.is_some());
     assert_eq!(
         run.observation.expect("observation").provider_id,
@@ -142,15 +144,14 @@ dtypes = ["float32", "float16", "bfloat16"]
 #[test]
 fn capability_mismatch_and_invalid_payload_fail_open() {
     block_on(async {
-        let cpu_only = MockJevProvider::healthy("cpu-only").with_capabilities(
-            JevProviderCapabilities {
+        let cpu_only =
+            MockJevProvider::healthy("cpu-only").with_capabilities(JevProviderCapabilities {
                 provider_id: "cpu-only".to_owned(),
                 model_id: "cpu-only-nli".to_owned(),
                 max_batch_size: 2,
                 devices: vec![JevDevice::Cpu],
                 dtypes: vec![JevDtype::Float32],
-            },
-        );
+            });
         let run = runtime(vec![Arc::new(cpu_only)])
             .evaluate(
                 hypothesis(),
@@ -164,7 +165,7 @@ fn capability_mismatch_and_invalid_payload_fail_open() {
         assert_eq!(run.failures[0].kind, JevProviderErrorKind::Unsupported);
 
         let invalid = MockJevProvider::healthy("invalid")
-            .with_device(JevDevice::Auto) // Auto is rejected by the runtime contract
+            .with_device(JevDevice::Auto)
             .with_scores(JevScores::try_new(0.8, 0.1, 0.1).expect("valid"));
         let run = runtime(vec![Arc::new(invalid)])
             .evaluate(hypothesis(), cpu_options())

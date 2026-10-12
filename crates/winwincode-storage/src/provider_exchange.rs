@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Restricted durable authority for Provider model exchanges.
-//!
-//! The table stores only request digests, secret-free frozen route authority,
-//! adapter request identity, and stable failure/terminal facts. Model request
-//! payloads and Provider diagnostics are never accepted by this interface.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -135,12 +129,16 @@ CREATE TABLE IF NOT EXISTS internal_provider_exchange_final_acks (
     acked_at TEXT NOT NULL,
     FOREIGN KEY(model_exchange_id) REFERENCES internal_provider_exchanges(model_exchange_id)
 );
+CREATE TABLE IF NOT EXISTS internal_provider_exchange_final_ack_semantics (
+    model_exchange_id TEXT PRIMARY KEY NOT NULL,
+    semantic_digest TEXT NOT NULL,
+    FOREIGN KEY(model_exchange_id) REFERENCES internal_provider_exchange_final_acks(model_exchange_id)
+);
 ";
 
 const MAX_METADATA_BYTES: usize = 256 * 1024;
 const MAX_TOKEN_BYTES: usize = 256;
 
-/// Durable exchange lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderExchangeState {
     Opening,
@@ -149,7 +147,6 @@ pub enum ProviderExchangeState {
     Terminal,
 }
 
-/// Durable progress around non-transactional Provider terminal side effects.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProviderExchangeTerminalStage {
     Prepared,
@@ -194,7 +191,6 @@ impl ProviderExchangeTerminalStage {
     }
 }
 
-/// Secret-free terminal saga checkpoint. A started step is never retried after restart.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderExchangeTerminalProgress {
     pub model_exchange_id: ModelExchangeId,
@@ -206,13 +202,11 @@ pub struct ProviderExchangeTerminalProgress {
     pub idempotent_replay: bool,
 }
 
-/// Complete bounded request-pool authority, including FIFO and route occupancy.
 pub struct ModelRequestPoolAuthority {
     state_json: Vec<u8>,
     pub updated_at: Instant,
 }
 
-/// Secret-free final Worker acknowledgement tombstone.
 pub struct ProviderExchangeFinalAck {
     pub model_exchange_id: ModelExchangeId,
     pub ack_digest: Sha256Digest,
@@ -223,7 +217,6 @@ pub struct ProviderExchangeFinalAck {
 }
 
 impl ProviderExchangeFinalAck {
-    /// Returns the canonical acknowledgement receipt bytes.
     #[must_use]
     pub fn receipt_json(&self) -> &[u8] {
         &self.receipt_json
@@ -245,7 +238,6 @@ impl fmt::Debug for ProviderExchangeFinalAck {
 }
 
 impl ModelRequestPoolAuthority {
-    /// Returns canonical internal pool authority bytes.
     #[must_use]
     pub fn state_json(&self) -> &[u8] {
         &self.state_json
@@ -263,13 +255,11 @@ impl fmt::Debug for ModelRequestPoolAuthority {
 }
 
 impl ProviderExchangeTerminalProgress {
-    /// Returns the secret-free admission receipt after that step commits.
     #[must_use]
     pub fn admission_receipt_json(&self) -> Option<&[u8]> {
         self.admission_receipt_json.as_deref()
     }
 
-    /// Returns the complete terminal receipt after settlement commits.
     #[must_use]
     pub fn terminal_receipt_json(&self) -> Option<&[u8]> {
         self.terminal_receipt_json.as_deref()
@@ -288,7 +278,6 @@ impl ProviderExchangeState {
     }
 }
 
-/// Stable storage failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderExchangeStoreErrorCode {
     InvalidInput,
@@ -298,7 +287,6 @@ pub enum ProviderExchangeStoreErrorCode {
     Storage,
 }
 
-/// Bounded error that never contains retained exchange metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderExchangeStoreError {
     code: ProviderExchangeStoreErrorCode,
@@ -355,21 +343,17 @@ impl fmt::Display for ProviderExchangeStoreError {
 
 impl std::error::Error for ProviderExchangeStoreError {}
 
-/// First durable tombstone written before any Provider or Credential call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderExchangeBegin {
     pub model_exchange_id: ModelExchangeId,
     pub request_id: RequestId,
     pub message_id: ExecutionMessageId,
     pub open_digest: Sha256Digest,
-    /// Provider selected by the frozen route before the opening side effect.
     pub provider_id: String,
-    /// Precommitted Provider idempotency identity used by open and cleanup.
     pub adapter_request_id: String,
     pub started_at: Instant,
 }
 
-/// Secret-free metadata committed after a Provider accepts the exchange.
 pub struct ProviderExchangeOpened {
     pub route_authority_fingerprint: Sha256Digest,
     route_authority_json: Vec<u8>,
@@ -379,11 +363,6 @@ pub struct ProviderExchangeOpened {
 }
 
 impl ProviderExchangeOpened {
-    /// Seals validated secret-free JSON for durable storage.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, or malformed JSON metadata.
     pub fn new(
         route_authority_fingerprint: Sha256Digest,
         route_authority_json: Vec<u8>,
@@ -422,14 +401,12 @@ impl fmt::Debug for ProviderExchangeOpened {
     }
 }
 
-/// Stable failed-open terminal fact. No Provider diagnostic is retained.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderExchangeFailure {
     pub failure_kind: String,
     pub failed_at: Instant,
 }
 
-/// Secret-free terminal receipt bytes and exact command digest.
 pub struct ProviderExchangeTerminal {
     pub terminal_digest: Sha256Digest,
     terminal_receipt_json: Vec<u8>,
@@ -437,11 +414,6 @@ pub struct ProviderExchangeTerminal {
 }
 
 impl ProviderExchangeTerminal {
-    /// Seals one terminal receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed digest, instant, or JSON receipt.
     pub fn new(
         terminal_digest: Sha256Digest,
         terminal_receipt_json: Vec<u8>,
@@ -469,7 +441,6 @@ impl fmt::Debug for ProviderExchangeTerminal {
     }
 }
 
-/// One restricted durable exchange snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderExchangeSnapshot {
     pub model_exchange_id: ModelExchangeId,
@@ -492,25 +463,21 @@ pub struct ProviderExchangeSnapshot {
 }
 
 impl ProviderExchangeSnapshot {
-    /// Returns the restricted frozen-authority JSON.
     #[must_use]
     pub fn route_authority_json(&self) -> Option<&[u8]> {
         self.route_authority_json.as_deref()
     }
 
-    /// Returns the restricted open-receipt JSON.
     #[must_use]
     pub fn open_receipt_json(&self) -> Option<&[u8]> {
         self.open_receipt_json.as_deref()
     }
 
-    /// Returns the restricted retry-settlement context JSON.
     #[must_use]
     pub fn settlement_context_json(&self) -> Option<&[u8]> {
         self.settlement_context_json.as_deref()
     }
 
-    /// Returns the restricted terminal-receipt JSON.
     #[must_use]
     pub fn terminal_receipt_json(&self) -> Option<&[u8]> {
         self.terminal_receipt_json.as_deref()
@@ -545,17 +512,11 @@ impl fmt::Debug for ProviderExchangeSnapshot {
     }
 }
 
-/// Borrowed restricted Provider exchange store.
 pub struct ProviderExchangeStore<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the restricted Provider exchange authority over this database.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable storage error if the internal schema cannot be prepared.
     pub fn provider_exchange_store(
         &mut self,
     ) -> Result<ProviderExchangeStore<'_>, ProviderExchangeStoreError> {
@@ -573,14 +534,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(Self { storage })
     }
 
-    /// Writes the opening tombstone before any Provider-side effect.
-    ///
-    /// Exact repeats return the existing state. A changed message body,
-    /// request identity, or message identity is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, identity conflicts, or storage failures.
     pub fn begin_open(
         &mut self,
         begin: &ProviderExchangeBegin,
@@ -599,15 +552,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Atomically writes the first active pool authority and its opening tombstone.
-    ///
-    /// This is the only transition from a queued/absent exchange into Provider
-    /// opening, so a crash cannot leave an active pool record without a durable
-    /// exchange identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed authority bytes, identity conflicts, or storage failures.
     pub fn begin_open_with_pool_authority(
         &mut self,
         begin: &ProviderExchangeBegin,
@@ -640,12 +584,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Commits the exact frozen route authority and accepted adapter receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/open-conflicting state, changed metadata replays, or
-    /// storage failures.
     pub fn commit_opened(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -714,12 +652,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Commits a stable failed-open tombstone.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed failure facts, changed replays, invalid state, or
-    /// storage failures.
     pub fn commit_failed(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -743,11 +675,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Atomically records a stable failed open and the resulting pool authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed failure identity, malformed authority bytes, or storage failures.
     pub fn commit_failed_with_pool_authority(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -785,15 +712,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Advances the durable terminal saga before and after each external side effect.
-    ///
-    /// Exact repeats replay the current checkpoint. A changed command digest or
-    /// a backward/out-of-order transition is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/non-opened exchanges, changed commands, invalid stage
-    /// transitions, or storage failures.
     pub fn record_terminal_progress(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -886,11 +804,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(progress)
     }
 
-    /// Loads a terminal saga checkpoint without exposing Provider payloads.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identifiers or corrupt durable state.
     pub fn load_terminal_progress(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -904,11 +817,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         )
     }
 
-    /// Atomically replaces the complete bounded request-pool authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed JSON/time or unavailable storage.
     pub fn save_pool_authority(
         &mut self,
         state_json: &[u8],
@@ -929,13 +837,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         })
     }
 
-    /// Atomically replaces pool authority and advances one secret-free Project
-    /// readiness revision. Exact receipt replays leave both authorities
-    /// unchanged and reuse the original public outbox event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input, changed replay identity, or storage failure.
     pub fn save_pool_authority_with_readiness(
         &mut self,
         state_json: &[u8],
@@ -967,11 +868,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         })
     }
 
-    /// Loads the complete bounded request-pool authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage failure for corrupt bytes or digest.
     pub fn load_pool_authority(
         &self,
     ) -> Result<Option<ModelRequestPoolAuthority>, ProviderExchangeStoreError> {
@@ -1008,13 +904,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         .transpose()
     }
 
-    /// Atomically forgets one fully acknowledged terminal buffer, persists the
-    /// complete remaining pool authority, and retains a payload-free ack tombstone.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-terminal exchanges, changed acknowledgements, malformed
-    /// canonical receipts, or unavailable storage.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_final_ack_with_pool_authority(
         &mut self,
@@ -1097,11 +986,38 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(acknowledgement)
     }
 
-    /// Loads a final acknowledgement tombstone for exact response replay.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identity or corrupt durable bytes.
+    pub fn retain_final_ack_semantics(
+        &mut self,
+        original: &ProviderExchangeFinalAck,
+        semantic_digest: &Sha256Digest,
+    ) -> Result<(), ProviderExchangeStoreError> {
+        validate_digest(semantic_digest)?;
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(|_| ProviderExchangeStoreError::storage())?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        let saved = load_final_ack(&transaction, &original.model_exchange_id)?
+            .ok_or_else(ProviderExchangeStoreError::not_found)?;
+        if saved.ack_digest != original.ack_digest
+            || saved.ack_sequence != original.ack_sequence
+            || saved.receipt_json != original.receipt_json
+        {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        transaction.execute("INSERT OR IGNORE INTO internal_provider_exchange_final_ack_semantics(model_exchange_id,semantic_digest) VALUES(?1,?2)",
+            params![original.model_exchange_id.0, semantic_digest.0]).map_err(|_| ProviderExchangeStoreError::storage())?;
+        let retained: String = transaction.query_row("SELECT semantic_digest FROM internal_provider_exchange_final_ack_semantics WHERE model_exchange_id=?1",
+            [&original.model_exchange_id.0], |row| row.get(0)).map_err(|_| ProviderExchangeStoreError::storage())?;
+        if retained != semantic_digest.0 {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProviderExchangeStoreError::storage())
+    }
+
     pub fn load_final_ack(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1115,12 +1031,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         )
     }
 
-    /// Commits the exact terminal command and secret-free terminal receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed terminal replays, non-opened exchanges, or storage
-    /// failures.
     pub fn commit_terminal(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -1140,11 +1050,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Atomically commits a terminal exchange and the complete resulting pool authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed terminal replay, malformed authority bytes, or storage failures.
     pub fn commit_terminal_with_pool_authority(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -1178,11 +1083,6 @@ impl<'storage> ProviderExchangeStore<'storage> {
         Ok(snapshot)
     }
 
-    /// Loads one exchange snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed identifier or corrupt durable record.
     pub fn load(
         &self,
         model_exchange_id: &ModelExchangeId,

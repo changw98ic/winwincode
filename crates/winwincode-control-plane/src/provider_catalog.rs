@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable, scope-bound Provider and model capability catalog.
-//!
-//! The catalog owns only stable adapter descriptions, capability metadata,
-//! availability, versions, and [`CredentialReferenceId`] values. It never
-//! accepts a vault locator or resolves secret material.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -28,10 +22,8 @@ const STATE_SCHEMA: &str = "winwincode.provider-catalog.v2";
 const STREAM_PREFIX: &str = "provider-catalog:";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Durable topic emitted once for every accepted catalog version change.
 pub const PROVIDER_CATALOG_VERSION_EVENT_TOPIC: &str = "provider.catalog.version.v1";
 
-/// Stable failure categories for Provider catalog commands and queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderCatalogErrorKind {
     InvalidRequest,
@@ -47,7 +39,6 @@ pub enum ProviderCatalogErrorKind {
     Storage,
 }
 
-/// Bounded Provider catalog error that never copies descriptor input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderCatalogError {
     kind: ProviderCatalogErrorKind,
@@ -122,7 +113,6 @@ impl ProviderCatalogError {
         )
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> ProviderCatalogErrorKind {
         self.kind
@@ -167,7 +157,6 @@ impl From<StorageError> for ProviderCatalogError {
     }
 }
 
-/// Tool-call behavior supported by one model.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelToolSupport {
@@ -176,7 +165,6 @@ pub enum ModelToolSupport {
     Parallel,
 }
 
-/// Stable capabilities and limits discovered for one model.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCapability {
@@ -186,24 +174,19 @@ pub struct ModelCapability {
     pub max_output_tokens: u64,
     pub tool_support: ModelToolSupport,
     pub structured_output_support: StructuredOutputSupport,
-    /// Empty means reasoning controls are unsupported.
     pub reasoning_efforts: Vec<String>,
 }
 
-/// Stable Provider adapter registration accepted by the catalog.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderDescriptor {
     pub provider_id: String,
     pub display_name: String,
-    /// Stable adapter implementation identifier, never adapter configuration.
     pub adapter_kind: String,
     pub credential_reference_id: CredentialReferenceId,
-    /// Complete currently-discovered enabled model snapshot.
     pub models: Vec<ModelCapability>,
 }
 
-/// Common request identity and optimistic catalog version for a mutation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderCatalogRequest {
@@ -213,7 +196,6 @@ pub struct ProviderCatalogRequest {
     pub expected_catalog_version: u64,
 }
 
-/// Availability shown in Provider and model projections.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogAvailability {
@@ -221,7 +203,6 @@ pub enum CatalogAvailability {
     Disabled,
 }
 
-/// Secret-free versioned model capability projection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCapabilityProjection {
@@ -236,7 +217,6 @@ pub struct ModelCapabilityProjection {
     pub version: u64,
 }
 
-/// Secret-free versioned Provider projection.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderCatalogEntryProjection {
@@ -249,7 +229,6 @@ pub struct ProviderCatalogEntryProjection {
     pub models: Vec<ModelCapabilityProjection>,
 }
 
-/// Complete exact-scope Provider catalog projection.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderCatalogProjection {
@@ -258,7 +237,6 @@ pub struct ProviderCatalogProjection {
     pub providers: Vec<ProviderCatalogEntryProjection>,
 }
 
-/// Enabled model resolution returned to the later route-selection layer.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedModelCapability {
@@ -270,7 +248,6 @@ pub struct ResolvedModelCapability {
     pub model: ModelCapabilityProjection,
 }
 
-/// Catalog change represented by one version event.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCatalogChange {
@@ -278,7 +255,6 @@ pub enum ProviderCatalogChange {
     Disabled,
 }
 
-/// Version/status tuple included in a catalog version event.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCatalogVersion {
@@ -287,7 +263,6 @@ pub struct ModelCatalogVersion {
     pub availability: CatalogAvailability,
 }
 
-/// Durable event emitted for every accepted Provider catalog mutation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderCatalogVersionEvent {
@@ -301,7 +276,6 @@ pub struct ProviderCatalogVersionEvent {
     pub models: Vec<ModelCatalogVersion>,
 }
 
-/// Durable result of one Provider catalog version change.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderCatalogMutationReceipt {
@@ -367,7 +341,6 @@ struct CommandReceipt {
     digest: Sha256Digest,
 }
 
-/// Application service backed by the shared atomic product-state storage seam.
 pub struct ProviderCatalogService<'a> {
     storage: &'a mut dyn ProductStateStorage,
 }
@@ -378,13 +351,6 @@ impl<'a> ProviderCatalogService<'a> {
         Self { storage }
     }
 
-    /// Creates or hot-updates one Provider from a complete adapter descriptor.
-    /// Missing models are retained as disabled versioned entries.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed descriptions, duplicate models, a stale catalog
-    /// version, or a conflicting scoped request replay.
     pub fn upsert(
         &mut self,
         request: &ProviderCatalogRequest,
@@ -420,12 +386,6 @@ impl<'a> ProviderCatalogService<'a> {
         self.commit(request, command, &state, &event)
     }
 
-    /// Disables one Provider at a precise catalog version.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown/already-disabled Provider, stale catalog version, or
-    /// conflicting scoped request replay.
     pub fn disable(
         &mut self,
         request: &ProviderCatalogRequest,
@@ -465,12 +425,6 @@ impl<'a> ProviderCatalogService<'a> {
         self.commit(request, command, &state, &event)
     }
 
-    /// Returns the complete sorted projection for exactly one scope.
-    /// An unconfigured scope returns version zero and no Providers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed scope or corrupt durable state.
     pub fn project(
         &self,
         scope: &Scope,
@@ -483,12 +437,6 @@ impl<'a> ProviderCatalogService<'a> {
         Ok(projection)
     }
 
-    /// Resolves one enabled Provider/model capability without reading its secret.
-    ///
-    /// # Errors
-    ///
-    /// Distinguishes unknown Provider, disabled Provider, unknown model, and
-    /// disabled model results.
     pub fn resolve_model(
         &self,
         scope: &Scope,

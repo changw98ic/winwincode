@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Delivery authority for candidate Git reference release.
-//!
-//! A candidate reference is released only after two independent durable facts
-//! exist in the Control Plane state store: the terminal Delivery mutation and
-//! a read-closure mutation.  The public receipt below is constructed from
-//! those stored facts; callers cannot manufacture a release authority by
-//! supplying receipt digests alone.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use winwincode_delivery::domain::{Delivery, DeliveryStatus};
@@ -32,8 +24,6 @@ const PUBLICATION_STREAM_PREFIX: &str = "publication:";
 const MAX_PUBLICATION_STREAMS: usize = 100_000;
 const MAX_PUBLICATION_DIRECTORY_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-/// Durable receipt proving that a Delivery reached its terminal state and all
-/// candidate readers have been closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateGitReadsClosedReceipt {
     delivery_id: DeliveryId,
@@ -105,12 +95,6 @@ struct StoredReadsClosed {
     delivery_revision: u64,
 }
 
-/// Commits or exactly replays the read-closure fact for one terminal Delivery.
-///
-/// The terminal receipt is checked against the canonical Delivery state and
-/// the storage receipt table before the closure state is written.  The
-/// resulting state and receipt are therefore the only release authority that
-/// the Control Plane exposes.
 pub(crate) fn commit(
     storage: &mut dyn ProductStateStorage,
     delivery_id: &DeliveryId,
@@ -198,16 +182,6 @@ pub(crate) fn commit(
     )
 }
 
-/// Verifies that every durable Publication reader for a Delivery is terminal.
-///
-/// Publication state is a separate aggregate from Delivery. A terminal
-/// Delivery therefore does not by itself close a Publication read: a pending
-/// or publishing Publication may still need the candidate's exact Git
-/// objects. The production finalizer calls this check before minting the
-/// read-closure authority. A Delivery with a configured publication target but
-/// no Publication intent yet is deferred rather than released: the subsequent
-/// Publication command still needs the candidate's stable Git reference.
-/// Malformed or unavailable directory reads fail closed.
 pub(crate) fn ensure_publication_readers_closed(
     storage: &dyn ProductStateStorage,
     delivery_id: &DeliveryId,
@@ -276,8 +250,6 @@ pub(crate) fn ensure_publication_readers_closed(
     Ok(Some(guards))
 }
 
-/// Validates that an externally supplied low-level release authority is backed
-/// by the exact durable terminal/read-closure state.
 pub(crate) fn validate_release_authority(
     storage: &dyn ProductStateStorage,
     pin: &CandidateGitPinReceipt,

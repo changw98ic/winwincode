@@ -1,0 +1,151 @@
+diff --git a/codex-rs/state/src/runtime/tool_sharing_tests.rs b/codex-rs/state/src/runtime/tool_sharing_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_sharing_tests.rs
+@@ -0,0 +1,146 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::tests::attempt;
++use super::tests::snapshot;
++use super::*;
++use crate::ToolOutputDelivery;
++use crate::ToolOutputDisposition;
++use crate::ToolRequestIdentity;
++use crate::ToolRequestObservation;
++use crate::ToolSharingFact;
++use crate::ToolSharingKind;
++use codex_utils_absolute_path::test_support::PathExt;
++#[tokio::test]
++async fn sharing_keeps_independent_disposition_delivery_and_cancellation_without_new_attempts() {
++    let home = crate::runtime::test_support::unique_temp_dir();
++    let store = StateRuntime::init(
++        crate::SqliteConfig::new_for_testing(home.as_path().abs()),
++        "test".into(),
++    )
++    .await
++    .unwrap();
++    let source = attempt(&store, "actual", snapshot("a"), Some("a")).await;
++    let mut ids = Vec::new();
++    for logical in ["accepted", "rejected", "cancelled"] {
++        let request = ToolRequestIdentity {
++            thread_id: "thread".into(),
++            logical_id: logical.into(),
++            turn_id: "turn".into(),
++            scope_id: "scope".into(),
++            cell_id: None,
++            parent_call_id: None,
++            tool_name: "smoke".into(),
++            source: "model".into(),
++            binding: logical.into(),
++        };
++        let ToolRequestObservation::New(fact) = store.observe_tool_request(&request).await.unwrap()
++        else {
++            panic!("new request")
++        };
++        let sharing = ToolSharingFact {
++            schema_version: 1,
++            thread_id: "thread".into(),
++            request_sequence: fact.request_sequence,
++            source_request_sequence: source,
++            source_attempt_id: "actual".into(),
++            operation_digest: "a".repeat(64),
++            snapshot: snapshot("a"),
++            kind: ToolSharingKind::Reuse,
++            disposition: ToolOutputDisposition::Pending,
++            delivery: ToolOutputDelivery::Pending,
++            cancelled: false,
++        };
++        store.link_tool_sharing(&sharing).await.unwrap();
++        store.link_tool_sharing(&sharing).await.unwrap();
++        let claim = store
++            .claim_tool_attempt(
++                fact.request_sequence,
++                logical,
++                "owner",
++                &"a".repeat(64),
++                "{}",
++            )
++            .await
++            .unwrap();
++        assert!(matches!(claim, crate::ToolAttemptClaim::Existing(_)));
++        assert!(
++            store
++                .tool_execution_fact(fact.request_sequence)
++                .await
++                .unwrap()
++                .attempt
++                .is_none()
++        );
++        ids.push(fact.request_sequence);
++    }
++    store
++        .decide_shared_tool_output(ids[0], ToolOutputDisposition::Accepted, "own output")
++        .await
++        .unwrap();
++    store.offer_shared_tool_output(ids[0]).await.unwrap();
++    store.offer_shared_tool_output(ids[0]).await.unwrap();
++    store
++        .decide_shared_tool_output(
++            ids[1],
++            ToolOutputDisposition::Rejected,
++            "own hook rejection",
++        )
++        .await
++        .unwrap();
++    store.cancel_tool_waiter(ids[2]).await.unwrap();
++    store.cancel_tool_waiter(ids[2]).await.unwrap();
++    assert!(store.tool_waiter_cancelled(ids[2]).await.unwrap());
++    assert!(!store.tool_waiter_cancelled(source).await.unwrap());
++    assert!(store.offer_shared_tool_output(ids[1]).await.is_err());
++    assert!(store.offer_shared_tool_output(ids[2]).await.is_err());
++    assert_eq!(
++        store
++            .read_shared_tool_output(ids[0])
++            .await
++            .unwrap()
++            .as_deref(),
++        Some("own output")
++    );
++    assert!(
++        store
++            .read_shared_tool_output(ids[1])
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let accepted = store.tool_sharing_fact(ids[0]).await.unwrap().unwrap();
++    assert_eq!(
++        (accepted.disposition, accepted.delivery, accepted.cancelled),
++        (
++            ToolOutputDisposition::Accepted,
++            ToolOutputDelivery::Offered,
++            false
++        )
++    );
++    assert_eq!(
++        store
++            .tool_sharing_fact(ids[1])
++            .await
++            .unwrap()
++            .unwrap()
++            .disposition,
++        ToolOutputDisposition::Rejected
++    );
++    assert!(
++        store
++            .tool_sharing_fact(ids[2])
++            .await
++            .unwrap()
++            .unwrap()
++            .cancelled
++    );
++    assert_eq!(
++        store
++            .tool_execution_fact(source)
++            .await
++            .unwrap()
++            .attempt
++            .unwrap()
++            .disposition,
++        ToolOutputDisposition::Accepted
++    );
++}

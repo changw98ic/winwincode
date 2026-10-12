@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { requestFetch as sendHttp } from '@winwincode/network-request'
+
 import {
   candidateBoundaryError,
   ControlPlaneClientError,
@@ -55,8 +57,6 @@ const MAX_FILE_CONTENT_BYTES = 256 * 1024 * 1024
 const LOG_READ_BYTES = 64 * 1024
 const LOG_ARTIFACT_KINDS = new Set(['log', 'test_output', 'command_output'])
 
-/** The only context accepted by candidate.files.list. It is a canonical
- * Delivery read cut, never a URL or device-local candidate projection. */
 export interface CandidatePreviewFileContext {
   readonly deliveryId: DeliveryId
   readonly atCursor: StrongFlowReadCursor
@@ -65,13 +65,12 @@ export interface CandidatePreviewFileContext {
   readonly diffSha256: Sha256Digest
 }
 
-/** Projects file-query context only from the canonical run identity read. */
 export function candidatePreviewFileContextFromIdentity(
   projection: ControlPlaneRunIdentityProjection,
 ): CandidatePreviewFileContext | null {
   const candidate = projection.candidate
   if (projection.deliveryId === null || projection.readCursor === null || candidate === null) return null
-  if (!/^git-candidate:sha256:[0-9a-f]{64}$/u.test(candidate.candidateRef)
+  if (!/^refs\/winwincode\/candidates\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(candidate.candidateRef)
     || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(candidate.candidateTreeId)
     || !/^sha256:[0-9a-f]{64}$/u.test(candidate.diffSha256)) return null
   return Object.freeze({
@@ -149,7 +148,7 @@ function hasCandidateFileContext(
 ): context is CandidatePreviewFileContext {
   return context !== undefined
     && /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u.test(context.deliveryId)
-    && /^git-candidate:sha256:[0-9a-f]{64}$/u.test(context.candidateRef)
+    && /^refs\/winwincode\/candidates\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(context.candidateRef)
     && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(context.candidateTreeId)
     && /^sha256:[0-9a-f]{64}$/u.test(context.diffSha256)
     && context.atCursor.deliveryId === context.deliveryId
@@ -207,21 +206,16 @@ function parseGrant(
   })
 }
 
-/** Browser facade for the existing short-lived Server preview access routes. */
 export function createControlPlaneCandidatePreviewPort(options: {
   readonly serverUrl: string
   readonly fetch: ControlPlaneTransportFetch | undefined
   readonly identity: CandidatePreviewIdentity
-  /** Canonical authenticated query seam used by the file-list adapter. */
   readonly client?: ControlPlaneClient
   readonly actor?: Actor
   readonly scope?: RepositoryScope
   readonly fileContext?: CandidatePreviewFileContext
-  /** Current canonical run projection; no local log source is accepted. */
   readonly runIdentityProjection?: () => Promise<ControlPlaneRunIdentityProjection | null>
-  /** Current holder lease used to fence managed-app commands. */
   readonly occupancyStatus?: (clientId: string) => Promise<ControlPlaneOccupancyStatus>
-  /** Candidate run config selected by the canonical execution projection. */
   readonly managedAppRunConfig?: ManagedAppRunControlProjection
   readonly nextRequestId?: () => RequestId
 }): CandidatePreviewPort {
@@ -242,10 +236,11 @@ export function createControlPlaneCandidatePreviewPort(options: {
     if (projection.deliveryId === null || projection.readCursor === null
       || evidence.workRunId !== sourceWorkRunId
       || (projection.candidate !== null && projection.candidate !== undefined
-        && evidence.candidateRef !== projection.candidate.candidateRef)) return null
+        && evidence.candidateId !== projection.candidate.candidateId)) return null
     return {
       atCursor: projection.readCursor,
-      candidateRef: evidence.candidateRef,
+      candidateId: evidence.candidateId,
+      snapshotId: evidence.snapshotId,
       deliveryId: projection.deliveryId,
       evidenceId: evidence.id,
       readPageLimit: 100,
@@ -294,10 +289,12 @@ export function createControlPlaneCandidatePreviewPort(options: {
       || result.artifact.sizeBytes !== entry.descriptor.sizeBytes
       || result.evidence.id !== entry.evidence.id
       || result.evidence.workRunId !== entry.evidence.workRunId
-      || result.evidence.candidateRef !== entry.evidence.candidateRef
+      || result.evidence.candidateId !== entry.evidence.candidateId
+      || result.evidence.snapshotId !== entry.evidence.snapshotId
       || result.artifact.provenance.evidenceId !== entry.evidence.id
       || result.artifact.provenance.workRunId !== entry.evidence.workRunId
-      || result.artifact.provenance.candidateRef !== entry.evidence.candidateRef
+      || result.artifact.provenance.candidateId !== entry.evidence.candidateId
+      || result.artifact.provenance.snapshotId !== entry.evidence.snapshotId
       || result.artifact.provenance.sessionBindingId !== entry.evidence.sessionBindingId
       || projection.deliveryId === null
       || result.artifact.provenance.deliveryId !== projection.deliveryId
@@ -396,7 +393,7 @@ export function createControlPlaneCandidatePreviewPort(options: {
       throw failure('protocol', 'TRANSPORT_UNAVAILABLE', '浏览器 HTTP transport 不可用。')
     }
     try {
-      return await Reflect.apply(options.fetch, undefined, [`${location.serverUrl}${path}`, {
+      return await sendHttp(options.fetch, `${location.serverUrl}${path}`, {
         method,
         headers: body === undefined ? {} : { 'content-type': 'application/json' },
         ...(body === undefined ? {} : { body }),
@@ -404,7 +401,7 @@ export function createControlPlaneCandidatePreviewPort(options: {
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
         credentials: 'include',
-      }])
+      })
     } catch (error) {
       if (error instanceof ControlPlaneClientError) throw error
       throw failure('network', 'NETWORK_ERROR', '无法连接 Server 的预览服务。')
@@ -468,8 +465,6 @@ export function createControlPlaneCandidatePreviewPort(options: {
             || candidateConfig.candidateCommit !== options.identity.candidateCommit))) {
         throw failure('protocol', 'MANAGED_APP_CONFIG_UNAVAILABLE', '当前候选没有可用的受管应用运行配置。')
       }
-      // The Server resolves the complete executable config from the durable
-      // WorkRun fact. The browser sends only the operation and run identity.
       config = null
     }
     const command: ManagedAppCommand = {
@@ -477,9 +472,6 @@ export function createControlPlaneCandidatePreviewPort(options: {
       operation: operation as ManagedAppCommand['operation'],
       idempotencyKey: requestId as ManagedAppCommand['idempotencyKey'],
       occupancyLeaseId: occupancy.occupancyLeaseId as ManagedAppCommand['occupancyLeaseId'],
-      // The browser occupancy facade keeps this as a safe JS number; the
-      // generated exchange alias is a wire bigint string. The managed-app
-      // HTTP endpoint is JSON/u64 and therefore receives the numeric value.
       occupancyFencingToken: occupancy.fencingToken as unknown as ManagedAppCommand['occupancyFencingToken'],
       config,
       runId: runId as ManagedAppCommand['runId'],

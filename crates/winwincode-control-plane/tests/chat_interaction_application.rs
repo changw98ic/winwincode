@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
 use std::fs;
@@ -33,19 +32,20 @@ use winwincode_domain::{
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_execution_port::generated::{
-    ApprovalRequestMessage, ExecutionPortMessage, InputRequestMessage,
+    ApprovalRequestMessage, ExecutionPortMessage, InputRequestMessage, LeaseRenewMessage,
 };
 use winwincode_execution_port::transport::{ExecutionPortCore, RemoteTransportAdapter};
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
     EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionLeaseClaim, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationStart, LeaseWriteStatus, ProductStateStorage,
-    PublicEventActor, PublicEventScope, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
-    SqliteStorage, WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerOutboundAuthority,
-    WorkerOutboundQueueConfig, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
-    WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotRecoveryAction,
-    WorkerSlotRecoveryRequest, WorkerSlotResourceLimits, WorkerSlotResources,
+    ExecutionAdmissionPolicy, ExecutionLeaseClaim, ExecutionLeaseRenewal, ExecutionQueueScope,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
+    LeaseWriteStatus, ProductStateStorage, PublicEventActor, PublicEventScope, ReceiptActorKey,
+    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, WorkerAuthenticationIdentity,
+    WorkerHeartbeatRequest, WorkerOutboundAuthority, WorkerOutboundQueueConfig, WorkerPlatform,
+    WorkerPoolId, WorkerRegistrationRequest, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotRecoveryAction, WorkerSlotRecoveryRequest, WorkerSlotResourceLimits,
+    WorkerSlotResources,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -245,9 +245,9 @@ fn prepare_runtime(storage: &mut SqliteStorage, delivery: bool) -> WorkerSlotAut
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 10_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(10_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -264,9 +264,9 @@ fn prepare_runtime(storage: &mut SqliteStorage, delivery: bool) -> WorkerSlotAut
                 job_id: ExecutionJobId(id("job", 1)),
                 request_id: RequestId(id("req", 1_010)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 100,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(100),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: at(4),
             })
             .expect("reserve");
@@ -802,7 +802,7 @@ fn gate_authority(
     GateInteractionAuthority {
         execution_scope: execution_scope(false),
         worker_pool_id: pool(),
-        product_session_revision,
+        product_session_revision: Some(product_session_revision),
         work_contract_id: None,
         work_contract_revision: None,
         work_item_id: None,
@@ -1497,5 +1497,418 @@ fn production_outbound_is_durable_authority_bound_and_transport_identical() {
             APPROVAL_SECRET,
             "CHANGED_QUEUE_APPROVAL_REASON",
         ],
+    );
+}
+
+#[test]
+fn production_outbound_replays_original_approval_after_lease_renewal() {
+    let (directory, mut storage, _scope, runtime, _revision) = setup_input("renewed-outbound");
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).expect("outbound storage"),
+        WorkerOutboundQueueConfig::default(),
+    )
+    .expect("outbound");
+    let authority = outbound_authority(&runtime);
+    let approval = approval_decision(&runtime, "retained original approval");
+    outbound.deliver(&approval).expect("enqueue original");
+    let before = outbound
+        .claim_page(&authority, &at(23), None, 10)
+        .expect("before renewal");
+    let original = before.claims[0].encoded_frame().to_vec();
+    let mut renewed = authority.clone();
+    renewed.lease_expires_at = at(58);
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&ExecutionLeaseRenewal {
+                expires_at: at(58),
+                prior_expires_at: at(50),
+                fencing_token: runtime.fencing_token.clone(),
+                job_id: runtime.job_id.clone(),
+                lease_id: runtime.lease_id.clone(),
+                message_id: ExecutionMessageId(id("xmsg", 910)),
+                request_id: RequestId(id("req", 910)),
+                sent_at: at(24),
+                worker_id: runtime.worker_id.clone(),
+                worker_instance_id: runtime.worker_instance_id.clone(),
+                attempt: runtime.attempt,
+            })
+            .expect("renew")
+            .status,
+        LeaseWriteStatus::Accepted
+    );
+    outbound.close().expect("close outbound");
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).expect("reopen"),
+        WorkerOutboundQueueConfig::default(),
+    )
+    .expect("outbound");
+    let after = outbound
+        .claim_page(&renewed, &at(51), None, 10)
+        .expect("historical approval");
+    assert_eq!(after.claims.len(), 1);
+    assert_eq!(after.claims[0].encoded_frame(), original);
+    assert_eq!(after.claims[0].typed_frame().message(), &approval);
+    assert!(after.claims[0].replayed());
+    let mut invented = approval.clone();
+    if let ExecutionPortMessage::ApprovalDecisionMessage(message) = &mut invented {
+        message.message_id = ExecutionMessageId(id("xmsg", 911));
+        message.lease.expires_at = at(55);
+    }
+    assert_eq!(
+        outbound
+            .deliver(&invented)
+            .expect_err("unaccepted historic deadline")
+            .kind(),
+        WorkerInteractionDeliveryErrorKind::Rejected
+    );
+    outbound
+        .acknowledge(&renewed, after.claims[0].message_id(), &at(52))
+        .expect("ack old message");
+    assert!(
+        outbound
+            .claim_page(&renewed, &at(53), None, 10)
+            .expect("drained")
+            .claims
+            .is_empty()
+    );
+    outbound.close().expect("close");
+    Box::new(storage).close().expect("close storage");
+}
+
+#[test]
+fn production_renewal_is_atomic_durable_and_uses_canonical_worker_transport() {
+    let (directory, mut storage, _scope, runtime, _revision) = setup_input("renewal-transport");
+    let config = WorkerOutboundQueueConfig {
+        max_claim_page_size: 1,
+        ..WorkerOutboundQueueConfig::default()
+    };
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).expect("outbound storage"),
+        config,
+    )
+    .expect("outbound");
+    let approval = approval_decision(&runtime, "pending approval");
+    outbound
+        .deliver(&approval)
+        .expect("pending original interaction");
+    let mut lease = match &approval {
+        ExecutionPortMessage::ApprovalDecisionMessage(message) => message.lease.clone(),
+        _ => unreachable!("approval fixture"),
+    };
+    lease.expires_at = at(58);
+    let renewal: LeaseRenewMessage = serde_json::from_value(json!({
+        "kind": "lease.renew", "lease": lease,
+        "messageId": id("xmsg", 920), "priorExpiresAt": at(50),
+        "requestId": id("req", 920), "schemaVersion": "winwincode/v1", "sentAt": at(24)
+    }))
+    .expect("renewal fixture");
+    let message = ExecutionPortMessage::LeaseRenewMessage(renewal.clone());
+    assert_eq!(
+        outbound
+            .deliver(&message)
+            .expect_err("must use atomic renewal entry")
+            .kind(),
+        WorkerInteractionDeliveryErrorKind::Rejected
+    );
+    let mut foreign = runtime.clone();
+    foreign.worker_session_id = WorkerSessionId(id("wsn", 999));
+    assert!(outbound.renew_lease(&foreign, &renewal).is_err());
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_lease(&runtime.job_id)
+            .expect("load")
+            .expect("lease")
+            .expires_at,
+        at(50)
+    );
+    let authority = outbound
+        .renew_lease(&runtime, &renewal)
+        .expect("atomic typed renewal");
+    assert_eq!(authority.lease_expires_at, at(58));
+    assert_eq!(
+        outbound
+            .renew_lease(&runtime, &renewal)
+            .expect("exact replay"),
+        authority
+    );
+    let mut changed = renewal.clone();
+    changed.prior_expires_at = at(49);
+    assert!(outbound.renew_lease(&runtime, &changed).is_err());
+    let earlier_authority = authority;
+    let mut second = renewal.clone();
+    second.lease.expires_at = at(59);
+    second.prior_expires_at = at(58);
+    second.message_id = ExecutionMessageId(id("xmsg", 921));
+    second.request_id = RequestId(id("req", 921));
+    second.sent_at = at(25);
+    let authority = outbound
+        .renew_lease(&runtime, &second)
+        .expect("second renewal");
+    outbound.close().expect("close");
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).expect("reopen"),
+        config,
+    )
+    .expect("outbound");
+    let claims = outbound
+        .claim_pending(&authority, &at(25))
+        .expect("ordered recovered batch");
+    assert_eq!(claims.len(), 3);
+    assert_eq!(claims[0].message_id(), &renewal.message_id);
+    assert_eq!(claims[1].message_id(), &second.message_id);
+    assert_eq!(claims[2].typed_frame().message(), &approval);
+    let claim = claims
+        .iter()
+        .find(|claim| claim.message_id() == &renewal.message_id)
+        .expect("renewal frame persisted with lease");
+    assert_eq!(claim.typed_frame().message(), &message);
+    let remote = RemoteTransportAdapter::<AcceptedWorkerFrames>::decode(claim.encoded_frame())
+        .expect("remote canonical frame");
+    assert_eq!(&remote, claim.typed_frame());
+    let mut local = AcceptedWorkerFrames::default();
+    claim
+        .deliver_local(&mut local)
+        .expect("local canonical frame");
+    assert_eq!(local.0, vec![message]);
+    outbound
+        .acknowledge(&authority, &renewal.message_id, &at(26))
+        .expect("ack renewal");
+    outbound
+        .acknowledge(&authority, &second.message_id, &at(26))
+        .expect("ack second renewal");
+    assert_eq!(
+        outbound
+            .renew_lease(&runtime, &renewal)
+            .expect("settled replay"),
+        earlier_authority
+    );
+    let remaining = outbound
+        .claim_pending(&authority, &at(27))
+        .expect("remaining approval");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].typed_frame().message(), &approval);
+    outbound.close().expect("close");
+    Box::new(storage).close().expect("close storage");
+}
+
+#[test]
+fn pending_approval_survives_renewal_without_extending_its_own_deadline() {
+    for decision_second in [21, 40] {
+        let (directory, mut storage, scope, runtime, revision) =
+            setup_input("renewed-pending-approval");
+        register_approval(&mut storage, &scope, &gate_authority(&runtime, revision));
+        let request = approval_request(&runtime);
+        ChatInteractionService::new(&mut storage)
+            .record_approval(&RecordApprovalInteractionCommand {
+                public_scope: public_scope(1),
+                request: request.clone(),
+            })
+            .expect("original pending approval");
+        let mut outbound = DurableWorkerInteractionOutbound::new(
+            SqliteStorage::open(&directory.0).expect("outbound connection"),
+            WorkerOutboundQueueConfig::default(),
+        )
+        .expect("outbound");
+        let mut lease = request.lease.clone();
+        lease.expires_at = at(58);
+        let renewal: LeaseRenewMessage = serde_json::from_value(json!({
+            "kind": "lease.renew", "lease": lease,
+            "messageId": id("xmsg", 930), "priorExpiresAt": at(50),
+            "requestId": id("req", 930), "schemaVersion": "winwincode/v1", "sentAt": at(20)
+        }))
+        .expect("renewal");
+        let current = outbound.renew_lease(&runtime, &renewal).expect("renew");
+        outbound.close().expect("close outbound");
+        Box::new(storage).close().expect("close storage");
+        let mut storage = SqliteStorage::open(&directory.0).expect("restart storage");
+        let mut outbound = DurableWorkerInteractionOutbound::new(
+            SqliteStorage::open(&directory.0).expect("restart outbound connection"),
+            WorkerOutboundQueueConfig::default(),
+        )
+        .expect("restart outbound");
+        let mut clock = FixtureClock(VecDeque::from([at(decision_second)]));
+        let result = ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+            .decide_approval(approval_decide_command(931, 1, 1, "renewed lease decision"));
+        if decision_second == 40 {
+            assert_eq!(
+                result
+                    .expect_err("original approval deadline remains final")
+                    .code(),
+                ChatInteractionServiceErrorCode::Expired
+            );
+            assert_pending(&mut storage, &scope);
+        } else {
+            result.expect("new approval decision after renewal");
+        }
+        let claims = outbound
+            .claim_pending(&current, &at(decision_second))
+            .expect("claim current lease");
+        assert_eq!(claims.len(), if decision_second == 40 { 1 } else { 2 });
+        assert!(matches!(
+            claims[0].typed_frame().message(),
+            ExecutionPortMessage::LeaseRenewMessage(_)
+        ));
+        if decision_second == 21 {
+            let ExecutionPortMessage::ApprovalDecisionMessage(decision) =
+                claims[1].typed_frame().message()
+            else {
+                panic!("approval decision follows renewal");
+            };
+            assert_eq!(
+                decision.lease, request.lease,
+                "original signed request identity is retained"
+            );
+            assert_eq!(decision.sent_at, at(21));
+            let original = claims[1].encoded_frame().to_vec();
+            let mut clock = FixtureClock(VecDeque::from([at(22)]));
+            ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+                .decide_approval(approval_decide_command(931, 1, 1, "renewed lease decision"))
+                .expect("exact decision replay");
+            let replay = outbound
+                .claim_pending(&current, &at(22))
+                .expect("replay batch");
+            assert_eq!(replay.len(), 2);
+            assert_eq!(replay[1].encoded_frame(), original);
+        }
+        outbound.close().expect("close outbound");
+        Box::new(storage).close().expect("close storage");
+    }
+}
+
+#[test]
+fn pending_input_uses_current_renewed_lease_after_original_expiry() {
+    let (directory, mut storage, _scope, runtime, revision) = setup_input("late-input-renewal");
+    let mut request = input_request(&runtime);
+    request.expires_at = at(59);
+    ChatInteractionService::new(&mut storage)
+        .record_input(&RecordInputInteractionCommand {
+            authority: input_authority(revision),
+            request: request.clone(),
+        })
+        .unwrap();
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).unwrap(),
+        WorkerOutboundQueueConfig::default(),
+    )
+    .unwrap();
+    let mut lease = request.lease.clone();
+    lease.expires_at = at(58);
+    let renewal: LeaseRenewMessage = serde_json::from_value(json!({
+        "kind": "lease.renew", "lease": lease,
+        "messageId": id("xmsg", 1940), "priorExpiresAt": at(50),
+        "requestId": id("req", 1940), "schemaVersion": "winwincode/v1", "sentAt": at(20)
+    }))
+    .unwrap();
+    let current = outbound.renew_lease(&runtime, &renewal).unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(55)]));
+    ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+        .respond_input(input_response_command("late but authorized input"))
+        .expect("old message period cannot shorten the current lease");
+    let claims = outbound.claim_pending(&current, &at(56)).unwrap();
+    assert!(
+        claims
+            .iter()
+            .any(|claim| matches!(claim.typed_frame().message(),
+        ExecutionPortMessage::InputResponseMessage(response) if response.lease == request.lease))
+    );
+    outbound.close().unwrap();
+    Box::new(storage).close().unwrap();
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "real public API input validation, durable response and exact restart replay share one authority"
+)]
+fn optional_other_public_api_retains_raw_unicode_and_replays_the_exact_worker_frame() {
+    let (directory, mut storage, _, runtime, session_revision) = setup_input("input-other-replay");
+    let mut request = input_request(&runtime);
+    request.mode = winwincode_domain::InteractiveInputMode::SingleChoice;
+    request.allow_other = Some(true);
+    request.choices = Some(
+        serde_json::from_value(json!([{
+            "id": id("ich", 1), "label":"continue", "value":"continue"
+        }]))
+        .unwrap(),
+    );
+    ChatInteractionService::new(&mut storage)
+        .record_input(&RecordInputInteractionCommand {
+            authority: input_authority(session_revision),
+            request,
+        })
+        .unwrap();
+    let raw = format!("  {}  ", "🦀".repeat(19_996));
+    assert_eq!(raw.chars().count(), 20_000);
+    let mut command = input_response_command(&raw);
+    command.payload.value.as_mut().unwrap().mode =
+        winwincode_domain::InteractiveInputMode::SingleChoice;
+    let mut outbound = CapturingOutbound::default();
+    for (index, value, mode) in [
+        (
+            0,
+            "🦀".repeat(20_001),
+            winwincode_domain::InteractiveInputMode::SingleChoice,
+        ),
+        (
+            1,
+            " \n\t ".into(),
+            winwincode_domain::InteractiveInputMode::SingleChoice,
+        ),
+        (
+            2,
+            "continue".into(),
+            winwincode_domain::InteractiveInputMode::Text,
+        ),
+    ] {
+        let mut invalid = command.clone();
+        invalid.request_id = RequestId(id("req", 210 + index));
+        let value_ref = invalid.payload.value.as_mut().unwrap();
+        value_ref.value = value;
+        value_ref.mode = mode;
+        let mut clock = FixtureClock(VecDeque::from([at(20)]));
+        assert_eq!(
+            ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+                .respond_input(invalid)
+                .unwrap_err()
+                .code(),
+            ChatInteractionServiceErrorCode::InvalidInput
+        );
+        assert!(outbound.frames.is_empty());
+    }
+    outbound.fail_next = true;
+    let mut clock = FixtureClock(VecDeque::from([at(20)]));
+    assert_eq!(
+        ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+            .respond_input(command.clone())
+            .unwrap_err()
+            .code(),
+        ChatInteractionServiceErrorCode::WorkerDelivery
+    );
+    assert_eq!(outbound.frames.len(), 1);
+    let frame: ExecutionPortMessage = serde_json::from_slice(&outbound.frames[0]).unwrap();
+    let ExecutionPortMessage::InputResponseMessage(response) = frame else {
+        panic!("actual CP input outbound frame");
+    };
+    assert_eq!(response.value.unwrap().value, raw);
+    drop(storage);
+    let mut reopened = SqliteStorage::open(&directory.0).unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(30)]));
+    ChatInteractionApiService::new(&mut reopened, &mut clock, &mut outbound)
+        .respond_input(command.clone())
+        .unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(31)]));
+    ChatInteractionApiService::new(&mut reopened, &mut clock, &mut outbound)
+        .respond_input(command)
+        .unwrap();
+    assert_eq!(outbound.frames.len(), 3);
+    assert!(
+        outbound
+            .frames
+            .iter()
+            .all(|frame| frame == &outbound.frames[0])
     );
 }

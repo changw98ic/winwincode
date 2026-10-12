@@ -1,38 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone Execution Worker lifecycle.
-//!
-//! This crate owns process and job orchestration only. The embedded Codex Core
-//! remains behind one injected [`CodexCoreAdapter`]. That adapter is also the
-//! only production assembly point for the existing Action Gateway, Capability
-//! Adapter, and Runtime `TraceOutbox`. Local and remote transports deliver the
-//! same generated `ExecutionPortMessage` values to [`WorkerMain`].
-
 pub mod action_enforcement;
 pub mod candidate_ref;
 pub mod change_batch_store;
 pub mod context_safety;
+pub mod control_driver;
 pub mod debug_experiment;
 pub mod debug_probe_context;
 mod device_model;
+mod drive_diagnostics;
+mod driver_clock;
+mod execution_effects;
 pub mod handoff_snapshot;
 pub mod managed_session;
+#[cfg(feature = "test-support")]
+pub mod mechanism_timing;
 mod probe_evidence;
 mod probe_process;
 pub mod probe_reducer;
 pub mod probe_scheduler;
 pub mod remote_transport;
+pub mod snapshot_worktree;
 pub mod stage_product;
 pub mod validation_artifact;
 pub mod validation_diagnostics;
+pub mod verification_isolation;
 pub mod workspace_runtime;
 
-/// Canonical types used by deployment adapters that compose this Worker.
-///
-/// The local launcher intentionally depends on the Worker, rather than on a
-/// second copy of the execution protocol. Re-exporting the existing generated
-/// messages and transport adapters keeps local and separated deployments on
-/// the same typed boundary.
 pub mod composition {
     pub use winwincode_domain as domain;
     pub use winwincode_domain::Instant;
@@ -61,8 +55,8 @@ pub use winwincode_codex::{
     CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
     DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
     DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
-    DurableExecutionDelivery, ObserverMode, RoleExecutionMode, WorkerExecutionPort,
-    secret_safe_runtime_summary,
+    DurableExecutionDelivery, ExecutionPortFailureKind, ObserverMode, RoleExecutionMode,
+    WorkerExecutionPort, secret_safe_runtime_summary,
 };
 use winwincode_domain::{
     AgentIdentityId, ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId,
@@ -97,7 +91,10 @@ use winwincode_execution_port::generated::{
 use winwincode_execution_port::{
     change_batch_identity::validate_change_batch_identity_derivation,
     change_batch_progress::ChangeBatchProgressLedger,
-    execution_identity::canonical_dispatch_session_identity,
+    execution_identity::{
+        canonical_dispatch_session_identity, lease_renewal_rejection,
+        retained_lease_matches_current, valid_lease_renewal,
+    },
     repair_loop_context::seal_repair_loop_context_pack,
 };
 
@@ -108,93 +105,61 @@ use workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
 
 pub mod workspace;
 
-/// Static Worker process identity and registration profile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerConfig {
-    /// Stable Worker identity.
     pub worker_id: WorkerId,
-    /// Unique identity for this process boot.
     pub worker_instance_id: WorkerInstanceId,
-    /// Exact process start time.
     pub started_at: Instant,
-    /// Capability profile registered before any job is accepted.
     pub capabilities: WorkerCapabilitySet,
 }
 
-/// Process-level lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerLifecycleState {
-    /// Constructed, but not registered.
     Booting,
-    /// Registration request sent; awaiting the matching result.
     Registering,
-    /// Registered and accepting work.
     Active,
-    /// Refusing new work while active jobs are cancelled and closed.
     Draining,
-    /// Clean shutdown completed.
     Stopped,
-    /// A process-level protocol invariant failed.
     Faulted,
 }
 
-/// State of one non-terminal execution attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveJobLifecycle {
-    /// One Codex thread and turn are active.
     Running,
-    /// One cooperative interrupt has been requested.
     Cancelling,
 }
 
-/// One exact active Job/lease/WorkerSession/CodexThread binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveJob {
-    /// Immutable dispatched job.
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub job: ExecutionJob,
-    /// Current exact lease and fencing authority.
     pub lease: ExecutionLeaseStamp,
-    /// Worker-owned execution session.
     pub worker_session_id: WorkerSessionId,
-    /// Four-part product, stage, Worker, and Codex binding.
     pub session_identity: SessionIdentity,
-    /// Only live Codex thread for this attempt.
     pub codex_thread_id: CodexThreadId,
-    /// Current local job lifecycle.
     pub lifecycle: ActiveJobLifecycle,
-    /// Highest runtime trace sequence forwarded for this attempt.
     pub last_event_sequence: ExecutionAckSequence,
 }
 
-/// Stable Worker lifecycle rejection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerErrorCode {
-    /// Operation does not fit the current process lifecycle.
     InvalidLifecycle,
-    /// Control Plane message is not accepted by this lifecycle module.
     UnexpectedMessage,
-    /// Registration result is for another Worker, process, or request.
     RegistrationMismatch,
-    /// Registration was rejected.
     RegistrationRejected,
-    /// Dispatch contains invalid or stale Worker/lease authority.
     InvalidDispatchAuthority,
-    /// A trace message does not match its exact active session.
     RuntimeTraceMismatch,
-    /// A delegated event does not match its exact active Job and session.
     DelegatedPollMismatch,
-    /// Canonical finite context exceeded its byte ceiling.
     DelegatedContextLimit,
-    /// A detached per-Job checkout could not be created, recovered, or removed.
     Workspace,
-    /// Candidate bytes or acknowledgement differ from the pending writer Job.
     CandidateArtifactMismatch,
-    /// Outbound `ExecutionPort` failed.
     ExecutionPort,
+    ExecutionBackpressure,
+    ModelStartDeferred,
+    ExecutionMessageRejected,
+    ExecutionTerminal,
 }
 
-/// Typed delegated event returned by Codex before an `ExecutionPort` transport
-/// envelope is defined for this family.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DelegatedPollOutcome {
     ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
@@ -203,12 +168,9 @@ pub enum DelegatedPollOutcome {
     RepairRequired(Box<RepairEnvelope>),
 }
 
-/// Secret-free Worker lifecycle error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerError {
-    /// Stable failure category.
     pub code: WorkerErrorCode,
-    /// Secret-free explanation.
     pub reason: String,
 }
 
@@ -220,17 +182,16 @@ impl fmt::Display for WorkerError {
 
 impl std::error::Error for WorkerError {}
 
-/// Deterministic graceful shutdown result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerShutdownReport {
-    /// Jobs for which a terminal cancellation outcome was emitted.
     pub cancelled_jobs: Vec<ExecutionJobId>,
-    /// Number of Codex interrupt/close/shutdown calls that failed.
     pub codex_failures: usize,
+    pub delivery_failures: Vec<WorkerErrorCode>,
 }
 
 #[derive(Debug, Clone)]
 struct DispatchRecord {
+    snapshot: Option<std::sync::Arc<winwincode_domain::Snapshot>>,
     run_key: CodexRunKey,
     job_digest: winwincode_domain::Sha256Digest,
     worker_session_id: WorkerSessionId,
@@ -246,7 +207,6 @@ struct PreparedDispatch {
     workspace_revision: winwincode_domain::WorkspaceRevision,
 }
 
-/// Test-only process stop around the adapter submission intent.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSubmissionFault {
@@ -254,7 +214,6 @@ pub enum WorkerSubmissionFault {
     AfterIntent,
 }
 
-/// Test-only process stops around the durable delegated freeze.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerFinalFreezeFault {
@@ -280,7 +239,7 @@ enum CandidateTerminalFact {
     },
     ReactCompletion {
         summary: String,
-        usage: ExecutionOutcomeUsage,
+        usage: Option<ExecutionOutcomeUsage>,
     },
     DelegatedFinalAccepted {
         seed: Box<DelegatedFinalFreezeSeed>,
@@ -325,8 +284,8 @@ struct DelegatedFinalFreezeSeed {
 impl CandidateTerminalFact {
     fn outcome(&self) -> (&str, Option<ExecutionOutcomeUsage>) {
         match self {
-            Self::ChatTerminal { summary, usage, .. } => (summary, usage.clone()),
-            Self::ReactCompletion { summary, usage } => (summary, Some(usage.clone())),
+            Self::ChatTerminal { summary, usage, .. }
+            | Self::ReactCompletion { summary, usage } => (summary, usage.clone()),
             Self::DelegatedFinalAccepted { .. } => {
                 ("final delegated ChangeBatch accepted and frozen", None)
             }
@@ -334,62 +293,40 @@ impl CandidateTerminalFact {
     }
 }
 
-/// Single semantic Worker core shared by local and remote `ExecutionPort` IO.
 pub struct WorkerMain<Port, Codex> {
     device_models: Option<device_model::DeviceModels>,
     intake_log_path: Option<std::path::PathBuf>,
+    drive_diagnostics: drive_diagnostics::DriveDiagnostics,
     config: WorkerConfig,
     port: Port,
     codex: Codex,
     workspaces: JobWorkspaceRuntime,
     lifecycle: WorkerLifecycleState,
     registration_request_id: Option<RequestId>,
-    /// Optional process-scoped namespace for an exact registration frame.
-    ///
-    /// The lightweight Worker fixtures intentionally keep their historical
-    /// sequence ids.  The local production launcher opts into this namespace
-    /// so a replacement process cannot collide with a predecessor's durable
-    /// `(worker_id, request_id)` registration receipt. Restarting the same
-    /// process identity reconstructs the exact request id, message id, and
-    /// timestamp for Registry replay.
     registration_request_namespace: Option<String>,
     heartbeat_interval_ms: Option<u64>,
     heartbeat_sequence: i64,
+    next_heartbeat_due: Option<std::time::Instant>,
     request_sequence: u64,
     message_sequence: u64,
     active: HashMap<String, ActiveJob>,
     dispatches: HashMap<String, DispatchRecord>,
     pending_candidates: HashMap<String, PendingCandidateCompletion>,
-    /// On a recovered run, let the resumed Core task recreate an interactive
-    /// request before replaying the durable transport frame.  A durable prompt
-    /// can otherwise be observed before Core has installed its pending-input
-    /// waiter, making a fast response a no-op.
-    defer_core_interactions: bool,
-    /// Delivery ids sent during the current Worker scheduling turn.  A
-    /// response batch can contain acknowledgements for several earlier
-    /// frames; suppressing an already-sent frame until the next poll avoids
-    /// sending it twice while still allowing a later poll to retry a lost
-    /// response.
+    pending_delegated_proposals: HashMap<String, ChangeBatchProposalEvent>,
+    delivery_failure: Option<WorkerErrorCode>,
+    driver_clock: driver_clock::DriverClock,
     sent_delivery_ids: HashSet<String>,
-    /// Interactive frames sent while a recovered Core turn is rebuilding its
-    /// in-memory waiter. The durable request remains visible to the Control
-    /// Plane, but the live Core event must not produce a second copy in the
-    /// same recovery turn.
+    outbox_flush_cursor: Option<String>,
     recovery_sent_delivery_ids: HashSet<String>,
     recovered_delegated_routes: HashSet<String>,
-    /// Recovered interactive requests stay behind the resumed Core event. A
-    /// replacement Worker must not let the Control Plane answer the durable
-    /// replay before Core has rebuilt its pending request in memory.
     deferred_core_interaction_jobs: HashSet<String>,
-    /// Job ids for interactive frames emitted by the current Core poll. This
-    /// clears the recovery deferral only after the exact resumed event has
-    /// been observed and forwarded.
     core_interaction_jobs: HashSet<String>,
     delegated_poll_outcomes: VecDeque<DelegatedPollOutcome>,
     delegated_progress_ledgers: HashMap<(String, ChangeBatchId), ChangeBatchProgressLedger>,
     observer_mode: ObserverMode,
     observation_model: Option<ObservationModelConfiguration>,
-    sent_observation_opens: HashSet<String>,
+    enqueued_observation_opens: HashSet<String>,
+    requested_model_deliveries: HashSet<String>,
     #[cfg(feature = "test-support")]
     submission_fault: Option<WorkerSubmissionFault>,
     #[cfg(feature = "test-support")]
@@ -401,11 +338,6 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Binds model execution to the launching Device's private Provider store.
-    /// Production launchers must set this before registering the Worker.
-    ///
-    /// # Errors
-    /// Rejects unavailable or unsafe device storage.
     pub fn with_device_providers(
         mut self,
         directory: &std::path::Path,
@@ -419,7 +351,6 @@ where
         Ok(self)
     }
 
-    /// Attaches a durable non-secret intake log for Device→Worker model frames.
     #[must_use]
     pub fn with_model_intake_log(mut self, path: &std::path::Path) -> Self {
         self.intake_log_path = Some(path.to_path_buf());
@@ -430,27 +361,23 @@ where
         self
     }
 
-    fn log_model_intake(
-        &self,
-        stage: &str,
-        code: &str,
-        chunk: &ModelChunkMessage,
-        detail: &str,
-    ) {
+    fn log_model_intake(&self, stage: &str, code: &str, chunk: &ModelChunkMessage, detail: &str) {
+        use std::io::Write as _;
+
         let exchange = chunk.model_exchange_id.0.as_str();
         let sequence = chunk.sequence.0;
         let worker_session_id = chunk.worker_session_id.0.as_str();
         let thread_id = chunk.session_identity.codex_thread_id.0.as_str();
         if let Some(models) = self.device_models.as_ref() {
-            models.log_intake(
+            models.log_intake(device_model::IntakeLogLine {
                 stage,
                 code,
-                exchange,
+                exchange_id: exchange,
                 sequence,
                 worker_session_id,
                 thread_id,
                 detail,
-            );
+            });
         }
         let Some(path) = self.intake_log_path.as_deref() else {
             return;
@@ -465,7 +392,6 @@ where
         else {
             return;
         };
-        use std::io::Write as _;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -476,7 +402,6 @@ where
         );
     }
 
-    /// Creates a booting Worker without starting IO or Codex services.
     #[must_use]
     pub fn new(
         config: WorkerConfig,
@@ -484,12 +409,19 @@ where
         mut codex: Codex,
         workspaces: JobWorkspaceRuntime,
     ) -> Self {
+        let driver_clock =
+            driver_clock::DriverClock::new(config.started_at.clone(), std::time::Instant::now());
+        let delivery_failure = codex
+            .has_rejected_terminal_delivery(&config.worker_id, &config.worker_instance_id)
+            .unwrap_or(true)
+            .then_some(WorkerErrorCode::ExecutionMessageRejected);
         let message_sequence = recover_message_sequence(&mut codex);
         let heartbeat_sequence =
             recover_heartbeat_sequence(&mut codex, &config.worker_id, &config.worker_instance_id);
         Self {
             device_models: None,
             intake_log_path: None,
+            drive_diagnostics: drive_diagnostics::DriveDiagnostics::default(),
             config,
             port,
             codex,
@@ -499,13 +431,17 @@ where
             registration_request_namespace: None,
             heartbeat_interval_ms: None,
             heartbeat_sequence,
+            next_heartbeat_due: None,
             request_sequence: 0,
             message_sequence,
             active: HashMap::new(),
             dispatches: HashMap::new(),
             pending_candidates: HashMap::new(),
-            defer_core_interactions: false,
+            pending_delegated_proposals: HashMap::new(),
+            delivery_failure,
+            driver_clock,
             sent_delivery_ids: HashSet::new(),
+            outbox_flush_cursor: None,
             recovery_sent_delivery_ids: HashSet::new(),
             recovered_delegated_routes: HashSet::new(),
             deferred_core_interaction_jobs: HashSet::new(),
@@ -514,7 +450,8 @@ where
             delegated_progress_ledgers: HashMap::new(),
             observer_mode: ObserverMode::Off,
             observation_model: None,
-            sent_observation_opens: HashSet::new(),
+            enqueued_observation_opens: HashSet::new(),
+            requested_model_deliveries: HashSet::new(),
             #[cfg(feature = "test-support")]
             submission_fault: None,
             #[cfg(feature = "test-support")]
@@ -522,27 +459,18 @@ where
         }
     }
 
-    /// Selects the one Observer runtime policy supported by this Worker.
     #[must_use]
     pub const fn with_observer_mode(mut self, mode: ObserverMode) -> Self {
         self.observer_mode = mode;
         self
     }
 
-    /// Installs the independent one-shot Observer route.
     #[must_use]
     pub fn with_observation_model(mut self, model: ObservationModelConfiguration) -> Self {
         self.observation_model = Some(model);
         self
     }
 
-    /// Uses the Worker process identity to namespace its registration request.
-    ///
-    /// A stable Worker id is deliberately reused across replacement boots,
-    /// while the process identity changes.  Registration receipts are keyed
-    /// by Worker id and request id, so production local composition must
-    /// derive a fresh request id from that process identity.  This opt-in
-    /// keeps direct Worker contract fixtures deterministic.
     #[must_use]
     pub fn with_registration_request_namespace(
         mut self,
@@ -554,31 +482,55 @@ where
         self
     }
 
-    /// Installs one test-only process stop around submission intent persistence.
     #[cfg(feature = "test-support")]
     pub fn inject_submission_fault(&mut self, fault: WorkerSubmissionFault) {
         self.submission_fault = Some(fault);
     }
 
-    /// Stops one delegated finalization after the canonical freeze is durable.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn inject_device_start_fault(&mut self) -> bool {
+        self.device_models.as_mut().is_some_and(|models| {
+            models.refuse_next_start();
+            true
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn inject_driver_clock(&mut self, wall_anchor: Instant, elapsed: std::time::Duration) {
+        self.driver_clock = driver_clock::DriverClock::new(
+            wall_anchor,
+            std::time::Instant::now()
+                .checked_sub(elapsed)
+                .expect("test clock elapsed fits the monotonic clock"),
+        );
+    }
+
     #[cfg(feature = "test-support")]
     pub fn inject_final_freeze_fault(&mut self, fault: WorkerFinalFreezeFault) {
         self.final_freeze_fault = Some(fault);
     }
 
-    /// Returns the current process lifecycle.
+    #[cfg(feature = "test-support")]
+    pub fn workspace_runtime_for_test(&mut self) -> &mut JobWorkspaceRuntime {
+        &mut self.workspaces
+    }
+
     #[must_use]
     pub const fn lifecycle(&self) -> WorkerLifecycleState {
         self.lifecycle
     }
 
-    /// Returns the negotiated heartbeat interval after registration.
+    #[must_use]
+    pub fn has_pending_workspace_validation(&self) -> bool {
+        !self.pending_delegated_proposals.is_empty()
+    }
+
     #[must_use]
     pub const fn heartbeat_interval_ms(&self) -> Option<u64> {
         self.heartbeat_interval_ms
     }
 
-    /// Returns active jobs sorted by Job id.
     #[must_use]
     pub fn active_jobs(&self) -> Vec<&ActiveJob> {
         let mut jobs = self.active.values().collect::<Vec<_>>();
@@ -586,7 +538,6 @@ where
         jobs
     }
 
-    /// True only after accepted work and every retained terminal delivery have drained.
     #[must_use]
     pub fn work_drained(&mut self) -> bool {
         !self.dispatches.is_empty()
@@ -599,16 +550,11 @@ where
                 .is_ok_and(|pending| pending.is_empty())
     }
 
-    /// True when the durable Worker→Control-Plane outbox still holds
-    /// verification/evidence frames that must reach the Server. Used by the
-    /// process entry to keep retrying after a Server restart instead of
-    /// exiting while `runtime.event` / `artifact.chunk` / `JobOutcome` remain
-    /// pending.
     #[must_use]
     pub fn has_pending_durable_evidence(&mut self) -> bool {
         self.codex
             .pending_execution_deliveries()
-            .map(|pending| {
+            .is_ok_and(|pending| {
                 pending.iter().any(|delivery| {
                     matches!(
                         delivery.message,
@@ -620,27 +566,37 @@ where
                     )
                 })
             })
-            .unwrap_or(false)
     }
 
-    /// Flushes every pending durable Worker→Server delivery on the existing
-    /// exchange protocol. Safe to call when the in-memory Job is already gone.
-    ///
-    /// # Errors
-    ///
-    /// Returns an outbound-port or Codex-store failure.
     pub async fn flush_durable_outbox(&mut self) -> Result<(), WorkerError> {
-        self.flush_durable_execution_deliveries().await
+        Box::pin(self.flush_durable_execution_deliveries()).await
     }
 
-    /// Builds a bounded recovery hint for one active task.
-    ///
-    /// The returned view is explicitly non-authoritative; only Controller
-    /// facts and accepted receipts may advance product state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an inactive Job or unavailable workspace/receipt/Git state.
+    pub async fn flush_durable_outbox_at(&mut self, now: Instant) -> Result<(), WorkerError> {
+        self.observe_driver_clock(now);
+        self.flush_durable_outbox().await
+    }
+
+    #[must_use]
+    pub fn transport_failure(&self) -> Option<WorkerError> {
+        (self.delivery_failure == Some(WorkerErrorCode::ExecutionTerminal)).then(|| {
+            worker_error(
+                WorkerErrorCode::ExecutionTerminal,
+                "bounded runtime projection cannot be delivered",
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn required_delivery_failure(&self) -> Option<WorkerError> {
+        (self.delivery_failure == Some(WorkerErrorCode::ExecutionMessageRejected)).then(|| {
+            worker_error(
+                WorkerErrorCode::ExecutionMessageRejected,
+                "required execution delivery was rejected",
+            )
+        })
+    }
+
     pub fn recovery_handoff_snapshot(
         &self,
         job_id: &ExecutionJobId,
@@ -663,28 +619,24 @@ where
             .map_err(|_| workspace_error())
     }
 
-    /// Returns every validated delegated event in Codex poll order.
-    ///
-    /// The events remain inside the Worker until this explicit read, so the
-    /// current lack of an `ExecutionPortMessage` variant cannot silently drop
-    /// them or disguise them as runtime trace records.
     pub fn take_delegated_poll_outcomes(&mut self) -> Vec<DelegatedPollOutcome> {
         self.delegated_poll_outcomes.drain(..).collect()
     }
 
-    /// Consumes the Worker and returns its injected ports for deterministic tests
-    /// or outer process composition.
     #[must_use]
     pub fn into_parts(self) -> (Port, Codex) {
         (self.port, self.codex)
     }
 
-    /// Starts the Worker by sending exactly one registration request.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn start(&mut self, now: Instant) -> Result<(), WorkerError> {
+        if matches!(
+            self.lifecycle,
+            WorkerLifecycleState::Booting | WorkerLifecycleState::Registering
+        ) {
+            self.codex
+                .observe_now(&now)
+                .map_err(|_| codex_model_error())?;
+        }
         if self.lifecycle == WorkerLifecycleState::Registering {
             return self.flush_durable_execution_deliveries().await;
         }
@@ -701,7 +653,7 @@ where
             };
             self.registration_request_id = Some(register.request_id.clone());
             self.lifecycle = WorkerLifecycleState::Registering;
-            return self.send_retained_delivery(delivery).await;
+            return self.dispatch_retained_effect(delivery).await;
         }
         let request_id = self.next_request_id();
         let (message_id, sent_at) =
@@ -714,6 +666,7 @@ where
                 (self.next_message_id(), now)
             };
         let message = WorkerRegisterMessage {
+            usage_accounting_version: 2,
             capabilities: self.config.capabilities.clone(),
             kind: WorkerRegisterMessageKind::WorkerRegister,
             message_id,
@@ -728,19 +681,92 @@ where
             self.retain_execution_message(&ExecutionPortMessage::WorkerRegisterMessage(message))?;
         self.registration_request_id = Some(request_id);
         self.lifecycle = WorkerLifecycleState::Registering;
-        self.send_retained_delivery(delivery).await
+        self.dispatch_retained_effect(delivery).await
     }
 
-    /// Applies one Control Plane message to the shared Worker lifecycle core.
-    ///
-    /// Local and remote adapters must decode into the same generated union
-    /// before calling this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable protocol, lifecycle, authority, Codex-start, or outbound
-    /// transport failure. Adapter error text is never copied into this error.
+    async fn accept_model_chunk_control(
+        &mut self,
+        chunk: &ModelChunkMessage,
+        message: &ExecutionPortMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        if self
+            .workspaces
+            .is_observation_model_exchange(&chunk.model_exchange_id)
+            .map_err(|_| workspace_error())?
+        {
+            return self.accept_observation_model_chunk(chunk, now).await;
+        }
+        self.codex
+            .accept_model_chunk(chunk, now)
+            .await
+            .map_err(|error| {
+                self.log_model_intake(
+                    "accept_chunk",
+                    "MODEL_CHUNK_ACCEPT_FAILED",
+                    chunk,
+                    "worker accept_model_chunk rejected Device frame",
+                );
+                let _ = error;
+                codex_model_error()
+            })?;
+        if chunk.sequence.0 == 1
+            && self.codex.accept_execution_delivery_ack(message).is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!(
+                "poll_codex ModelOpen compact best-effort failed exchange={}",
+                chunk.model_exchange_id.0
+            );
+        }
+        self.enqueue_codex_effects()
+    }
+
     pub async fn accept_control(
+        &mut self,
+        message: &ExecutionPortMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        self.observe_driver_clock(now);
+        let now = self.current_driver_time()?;
+        let renewal_predicate = match message {
+            ExecutionPortMessage::LeaseRenewMessage(renewal) => self
+                .active
+                .get(&renewal.lease.job_id.0)
+                .map_or(Some("job_not_active"), |active| {
+                    if active.lifecycle == ActiveJobLifecycle::Running {
+                        lease_renewal_rejection(&active.lease, renewal, &now)
+                    } else {
+                        Some("job_not_running")
+                    }
+                }),
+            _ => None,
+        };
+        let applied = Box::pin(self.apply_control(message, now.clone())).await;
+        if let ExecutionPortMessage::LeaseRenewMessage(renewal) = message {
+            let outcome = applied
+                .as_ref()
+                .map_or_else(|error| format!("{:?}", error.code), |()| "consumed".into());
+            eprintln!(
+                "component=worker stage=lease_renewal_consumed message_sha256={:x} processed_at={} prior_expires_at={} new_expires_at={} sent_at={} predicate={} outcome={outcome}",
+                Sha256::digest(renewal.message_id.0.as_bytes()),
+                now.0,
+                renewal.prior_expires_at.0,
+                renewal.lease.expires_at.0,
+                renewal.sent_at.0,
+                renewal_predicate.unwrap_or("valid")
+            );
+            #[cfg(feature = "test-support")]
+            mechanism_timing::record(
+                "lease_renewal_consumed",
+                &serde_json::json!({"jobId":renewal.lease.job_id.0,"leaseId":renewal.lease.lease_id.0,"workerId":renewal.lease.worker_id.0,"workerInstanceId":renewal.lease.worker_instance_id.0,"attempt":renewal.lease.attempt,"fencingToken":renewal.lease.fencing_token.0,"priorExpiresAt":renewal.prior_expires_at.0,"renewedExpiresAt":renewal.lease.expires_at.0,"processedAt":now.0,"accepted":applied.is_ok(),"predicate":renewal_predicate.unwrap_or("valid"),"outcome":outcome,"currentWorkerLeaseExpiresAt":self.active.get(&renewal.lease.job_id.0).map(|active|&active.lease.expires_at.0),"currentWorkspaceLeaseExpiresAt":self.workspaces.workspace_authorities().find(|provenance|provenance.execution_job_id==renewal.lease.job_id).map(|provenance|&provenance.lease_expires_at.0)}),
+            );
+        }
+        applied?;
+        self.enqueue_codex_effects()
+    }
+
+    async fn apply_control(
         &mut self,
         message: &ExecutionPortMessage,
         now: Instant,
@@ -751,112 +777,77 @@ where
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await
+                Ok(())
             }
             ExecutionPortMessage::JobDispatchMessage(dispatch) => {
-                // A recovered Core turn owns the re-emission of pending
-                // Approval/Input requests.  Do not expose a durable prompt
-                // before the resumed Core has rebuilt its in-memory waiter;
-                // otherwise an immediate response can be accepted into the
-                // ledger while the Core has nowhere to deliver it.
-                self.flush_durable_execution_deliveries_with_core_replay(true)
-                    .await?;
-                self.accept_dispatch(dispatch, now).await
+                Box::pin(self.accept_dispatch(dispatch, now)).await
             }
-            ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
+            ExecutionPortMessage::SnapshotFreezeRequestMessage(request) => {
+                Box::pin(self.accept_snapshot_freeze(request, now)).await
+            }
+            ExecutionPortMessage::SnapshotVerificationDispatchMessage(message) => {
+                Box::pin(self.accept_snapshot_dispatch(message, now)).await
+            }
+            ExecutionPortMessage::LeaseRenewMessage(renewal) => {
+                Box::pin(self.accept_lease_renewal_control(renewal, now)).await
+            }
+            ExecutionPortMessage::JobCancelMessage(cancel) => {
+                Box::pin(self.accept_cancel(cancel, now)).await
+            }
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
-                self.accept_candidate_artifact_ack(acknowledgement, now)
-                    .await
+                Box::pin(self.accept_candidate_artifact_ack(acknowledgement, now)).await
             }
             ExecutionPortMessage::ModelChunkMessage(chunk) => {
-                if self
-                    .workspaces
-                    .is_observation_model_exchange(&chunk.model_exchange_id)
-                    .map_err(|_| workspace_error())?
-                {
-                    return self.accept_observation_model_chunk(chunk, &now).await;
-                }
-                // The durable model-call frame ledger is written inside
-                // `accept_model_chunk`. Post-retain steps (ModelOpen compaction,
-                // outbox flush, Core runtime flush) must not fail this control
-                // path: a hard error here requeues the same frame at the front
-                // of the Device model queue and starves later contiguous
-                // Provider frames for an automatic second model call after
-                // tool_result.
-                self.codex
-                    .accept_model_chunk(chunk, &now)
+                Box::pin(self.accept_model_chunk_control(chunk, message, &now)).await
+            }
+            ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
+                Box::pin(self.codex.accept_action_receipt(receipt, &now))
                     .await
-                    .map_err(|error| {
-                        self.log_model_intake(
-                            "accept_chunk",
-                            "MODEL_CHUNK_ACCEPT_FAILED",
-                            chunk,
-                            "worker accept_model_chunk rejected Device frame",
-                        );
-                        let _ = error;
-                        codex_model_error()
-                    })?;
-                if chunk.sequence.0 == 1
-                    && self.codex.accept_execution_delivery_ack(message).is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                    .map_err(|_| codex_model_error())?;
+                self.codex
+                    .accept_execution_delivery_ack(message)
+                    .map_err(|_| codex_model_error())?;
+                Ok(())
+            }
+            ExecutionPortMessage::ApprovalDecisionMessage(decision) => {
+                Box::pin(self.accept_approval_decision(decision, &now)).await?;
+                Ok(())
+            }
+            ExecutionPortMessage::InputResponseMessage(response) => {
+                Box::pin(self.accept_input_response(response, &now)).await?;
+                Ok(())
+            }
+            ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) => {
+                self.codex
+                    .accept_execution_delivery_ack(message)
+                    .map_err(|_| codex_model_error())?;
+                if ack.status == winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+                    && ack.error.as_ref().is_some_and(|error| error.code == ExecutionPortErrorCode::SequenceGap && error.retryable)
                 {
-                    eprintln!(
-                        "poll_codex ModelOpen compact best-effort failed exchange={}",
-                        chunk.model_exchange_id.0
-                    );
-                }
-                if self.flush_durable_execution_deliveries().await.is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "poll_codex durable flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
-                    );
-                }
-                if self.flush_codex_execution_messages().await.is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "poll_codex core flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
-                    );
+                    let pending = self.codex.pending_execution_deliveries()
+                        .map_err(|_| codex_model_error())?;
+                    for delivery in pending {
+                        if matches!(&delivery.message, ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat)
+                            if heartbeat.worker_id == ack.worker_id && heartbeat.worker_instance_id == ack.worker_instance_id
+                                && heartbeat.heartbeat_sequence.0 <= ack.heartbeat_sequence.0)
+                        {
+                            self.enqueue_retained_effect(&delivery)?;
+                        }
+                    }
+                    self.outbox_flush_cursor = None;
                 }
                 Ok(())
             }
-            ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
-                self.codex
-                    .accept_action_receipt(receipt, &now)
-                    .await
-                    .map_err(|_| codex_model_error())?;
-                self.codex
-                    .accept_execution_delivery_ack(message)
-                    .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
-            }
-            ExecutionPortMessage::ApprovalDecisionMessage(decision) => {
-                self.accept_approval_decision(decision, &now).await?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
-            }
-            ExecutionPortMessage::InputResponseMessage(response) => {
-                self.accept_input_response(response, &now).await?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
-            }
             ExecutionPortMessage::ModelAckMessage(_)
             | ExecutionPortMessage::RuntimeAckMessage(_)
-            | ExecutionPortMessage::JobOutcomeAckMessage(_)
-            | ExecutionPortMessage::WorkerHeartbeatAckMessage(_) => {
+            | ExecutionPortMessage::JobOutcomeAckMessage(_) => {
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await
+                Ok(())
             }
             ExecutionPortMessage::RuntimeReplayRequestMessage(request) => {
-                self.replay_runtime(request).await
+                self.replay_runtime(request)
             }
             _ => Err(worker_error(
                 WorkerErrorCode::UnexpectedMessage,
@@ -865,35 +856,74 @@ where
         }
     }
 
-    /// Sends one explicit heartbeat with current capacity and lease progress.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-lifecycle or outbound-port failure.
+    async fn accept_lease_renewal_control(
+        &mut self,
+        renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        if self
+            .active
+            .get(&renewal.lease.job_id.0)
+            .is_some_and(|active| {
+                now.0 >= active.lease.expires_at.0
+                    && valid_lease_renewal(&active.lease, renewal, &renewal.sent_at)
+            })
+        {
+            let summary = format!(
+                "lease renewal expired before consumption: prior_expires_at={} new_expires_at={} sent_at={} processed_at={}",
+                renewal.prior_expires_at.0, renewal.lease.expires_at.0, renewal.sent_at.0, now.0
+            );
+            eprintln!("component=worker stage=lease_renewal code=LEASE_RENEWAL_EXPIRED {summary}");
+            return self
+                .finish_job(
+                    &renewal.lease.job_id.0,
+                    ExecutionOutcomeStatus::Failed,
+                    &summary,
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::LeaseExpired,
+                        &summary,
+                        false,
+                    )),
+                    now,
+                )
+                .await;
+        }
+        self.accept_lease_renewal(renewal, &now)
+    }
+
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
+        let started = std::time::Instant::now();
+        self.observe_driver_clock(now);
+        let now = self.current_driver_time()?;
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
                 "heartbeat requires an active registered Worker",
             ));
         }
-        self.flush_durable_execution_deliveries().await?;
         self.heartbeat_sequence = self.heartbeat_sequence.saturating_add(1);
         let mut active_leases = self
-            .active
-            .values()
-            .map(|job| ActiveLeaseSummary {
-                attempt: job.lease.attempt,
-                expires_at: job.lease.expires_at.clone(),
-                fencing_token: job.lease.fencing_token.clone(),
-                job_id: job.job.job_id.clone(),
-                last_event_sequence: job.last_event_sequence.clone(),
-                lease_id: job.lease.lease_id.clone(),
+            .workspaces
+            .workspace_authorities()
+            .map(|authority| ActiveLeaseSummary {
+                attempt: i64::try_from(authority.attempt).unwrap_or(i64::MAX),
+                expires_at: authority.lease_expires_at.clone(),
+                fencing_token: authority.fencing_token.clone(),
+                job_id: authority.execution_job_id.clone(),
+                last_event_sequence: self
+                    .active
+                    .get(&authority.execution_job_id.0)
+                    .map_or(ExecutionAckSequence(0), |active| {
+                        active.last_event_sequence.clone()
+                    }),
+                lease_id: authority.lease_id.clone(),
             })
             .collect::<Vec<_>>();
         active_leases.sort_by(|left, right| left.job_id.0.cmp(&right.job_id.0));
         let max = self.config.capabilities.max_concurrent_jobs;
-        let running = i64::try_from(self.active.len()).unwrap_or(i64::MAX);
+        let running = i64::try_from(active_leases.len()).unwrap_or(i64::MAX);
         let heartbeat = WorkerHeartbeatMessage {
             active_leases,
             capacity: WorkerCapacity {
@@ -909,41 +939,75 @@ where
             worker_id: self.config.worker_id.clone(),
             worker_instance_id: self.config.worker_instance_id.clone(),
         };
-        self.retain_and_send(ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat))
-            .await
+        let delivery = self
+            .retain_execution_message(&ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat))?;
+        self.next_heartbeat_due = self
+            .heartbeat_interval_ms
+            .and_then(|interval| started.checked_add(std::time::Duration::from_millis(interval)));
+        self.dispatch_retained_effect(delivery).await
     }
 
-    /// Polls each active Codex thread once, forwarding only exact retained trace
-    /// messages and deterministic terminal outcomes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an exact trace-identity or outbound-port failure. Codex polling
-    /// failures become infrastructure outcomes without exposing adapter text.
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
+        let mut stage = drive_diagnostics::DriveStage::Admission;
+        let result = Box::pin(self.poll_codex_at_stage(now, &mut stage)).await;
+        if let Err(error) = &result {
+            self.drive_diagnostics
+                .record(self.intake_log_path.as_deref(), stage, error.code);
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn poll_codex_at_stage(
+        &mut self,
+        now: Instant,
+        stage: &mut drive_diagnostics::DriveStage,
+    ) -> Result<(), WorkerError> {
+        use drive_diagnostics::DriveStage;
+        self.observe_driver_clock(now);
+        self.current_driver_time()?;
+        if self.port.has_pending_controls() {
+            return Ok(());
+        }
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
                 "Codex polling requires an active Worker",
             ));
         }
-        // Drain Core-queued ModelOpen/ModelAck before Device frame intake.
-        // An automatic second model call after tool_result can enqueue its
-        // Provider open while the Device chunk queue is still empty; if that
-        // open waits for a later job poll the Provider never runs and the
-        // durable model-call ledger stays at zero frames.
-        if self.flush_durable_execution_deliveries().await.is_err()
-            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-        {
-            eprintln!("poll_codex durable outbox pre-flush failed");
+        let rejected_jobs = self
+            .active
+            .values()
+            .filter_map(|active| {
+                self.codex
+                    .has_rejected_job_delivery(&active.lease)
+                    .map(|rejected| rejected.then(|| active.job.job_id.0.clone()))
+                    .map_err(|_| codex_model_error())
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for job_id in rejected_jobs {
+            Box::pin(self.finish_rejected_job(&job_id)).await?;
         }
-        if self.flush_codex_execution_messages().await.is_err()
-            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-        {
-            eprintln!("poll_codex pre-flush of Core execution messages failed");
+        self.sent_delivery_ids.clear();
+        *stage = DriveStage::CollectEffects;
+        self.enqueue_codex_effects()?;
+        *stage = DriveStage::FlushBeforePoll;
+        let dispatch_error = self.flush_durable_execution_deliveries().await.err();
+        if self.port.has_pending_controls() {
+            return dispatch_error.map_or(Ok(()), Err);
         }
-        loop {
+        let mut intake_error = None;
+        let intake_started = std::time::Instant::now();
+        let mut intake_frames = 0;
+        while intake_frames < 64 && intake_started.elapsed() < std::time::Duration::from_millis(25)
+        {
+            if self.port.has_pending_controls() {
+                break;
+            }
+            let now = self.current_driver_time()?;
+            *stage = DriveStage::DeviceRead;
             let chunk = match &mut self.device_models {
                 Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
                 None => None,
@@ -951,12 +1015,13 @@ where
             let Some(chunk) = chunk else {
                 break;
             };
+            *stage = DriveStage::DeviceIntake;
+            intake_frames += 1;
             let result = async {
                 if chunk.session_identity.work_run_id.is_none() {
                     let public = winwincode_provider::public_model_chunk(&chunk)
                         .map_err(|_| codex_model_error())?;
-                    self.retain_and_send(ExecutionPortMessage::ModelChunkMessage(public))
-                        .await?;
+                    self.enqueue_effect(&ExecutionPortMessage::ModelChunkMessage(public))?;
                 }
                 Box::pin(self.accept_control(
                     &ExecutionPortMessage::ModelChunkMessage(chunk.clone()),
@@ -965,6 +1030,13 @@ where
                 .await
             }
             .await;
+            #[cfg(feature = "test-support")]
+            if chunk.sequence.0 % 250 == 0 || chunk.is_final {
+                mechanism_timing::record(
+                    "frame_intake_checkpoint",
+                    &serde_json::json!({"jobId":chunk.lease.job_id.0,"leaseId":chunk.lease.lease_id.0,"workerSessionId":chunk.worker_session_id.0,"modelExchangeId":chunk.model_exchange_id.0,"workerId":chunk.lease.worker_id.0,"workerInstanceId":chunk.lease.worker_instance_id.0,"attempt":chunk.lease.attempt,"fencingToken":chunk.lease.fencing_token.0,"sequence":chunk.sequence.0,"isFinal":chunk.is_final,"suppliedDriverNow":now.0,"leaseExpiresAt":chunk.lease.expires_at.0,"currentWorkerLeaseExpiresAt":self.active.get(&chunk.lease.job_id.0).map(|active|&active.lease.expires_at.0),"accepted":result.is_ok()}),
+                );
+            }
             if let Err(error) = result {
                 let exchange = chunk.model_exchange_id.0.clone();
                 let sequence = chunk.sequence.0;
@@ -973,10 +1045,6 @@ where
                     .as_ref()
                     .is_some_and(|models| models.owns_exchange(&exchange));
                 if !owned {
-                    // Shared Device providers.sqlite3 holds every session's
-                    // exchanges. A foreign frame that fails authority must not
-                    // be retry-pinned at the queue front or this Worker's own
-                    // verification exchange never becomes durable.
                     self.log_model_intake(
                         "poll_codex",
                         "FOREIGN_OR_UNOWNED_EXCHANGE",
@@ -998,34 +1066,15 @@ where
                     models.retry_chunk(chunk);
                 }
                 if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                    eprintln!("poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}", error.code);
+                    eprintln!(
+                        "poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}",
+                        error.code
+                    );
                 }
-                return Err(error);
+                intake_error = Some(error);
+                break;
             }
         }
-        // A response can be delivered after the poll that sent its request,
-        // and the response batch may also contain an acknowledgement for a
-        // different frame.  Give each new poll a fresh retry window so a
-        // lost response is retried, while the current window does not resend
-        // the same frame between those acknowledgements.
-        //
-        // Durable flush here is best-effort: a Server restart / connection
-        // refused window must not prevent Core polls from retaining further
-        // verification evidence. Heartbeat and the process drive loop retry
-        // the flush on the same exchange protocol when the Server returns.
-        self.sent_delivery_ids.clear();
-        if self.deferred_core_interaction_jobs.is_empty() {
-            if self.flush_durable_execution_deliveries().await.is_err()
-                && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-            {
-                eprintln!("poll_codex durable flush failed; Core polls continue");
-            }
-        } else if self.flush_recovered_durable_execution_deliveries().await.is_err()
-            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-        {
-            eprintln!("poll_codex recovered durable flush failed; Core polls continue");
-        }
-        // A lost binding response must not strand a prepared Core turn.
         let pending = self
             .active
             .values()
@@ -1036,13 +1085,17 @@ where
             })
             .cloned()
             .collect::<Vec<_>>();
+        *stage = DriveStage::PreparedTurn;
         for active in pending {
-            self.start_bound_job(&active.job, &active.codex_thread_id, now.clone())
+            let now = self.current_driver_time()?;
+            self.start_bound_job(&active.job, &active.codex_thread_id, now)
                 .await?;
         }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
+        *stage = DriveStage::DelegatedState;
         for job_id in &job_ids {
+            let now = self.current_driver_time()?;
             let Some(thread_id) = self
                 .active
                 .get(job_id)
@@ -1104,8 +1157,19 @@ where
                 .await?;
             }
         }
-        self.flush_pending_observation_opens().await?;
+        *stage = DriveStage::ObservationOpen;
+        self.enqueue_pending_observation_opens().await?;
         for job_id in job_ids {
+            if self.port.has_pending_controls() {
+                break;
+            }
+            let now = self.current_driver_time()?;
+            if let Some(event) = self.pending_delegated_proposals.get(&job_id).cloned() {
+                self.execute_delegated_proposal(&job_id, event, &now)
+                    .await?;
+                continue;
+            }
+            *stage = DriveStage::DelegatedState;
             if !self.pending_candidates.contains_key(&job_id) {
                 let recovered_final = self.active.get(&job_id).cloned().and_then(|active| {
                     self.workspaces
@@ -1126,12 +1190,12 @@ where
                         })
                 });
                 if let Some((batch_id, Some(result_revision))) = recovered_final {
-                    self.complete_accepted_delegated_candidate(
+                    Box::pin(self.complete_accepted_delegated_candidate(
                         &job_id,
                         batch_id,
                         result_revision,
                         now.clone(),
-                    )
+                    ))
                     .await?;
                 }
             }
@@ -1179,18 +1243,52 @@ where
                     .await?;
                 continue;
             }
-            let Ok(polled) = self.codex.poll(&thread_id, &now).await else {
-                self.finish_unavailable_codex_job(&job_id, now.clone())
-                    .await?;
-                continue;
+            *stage = DriveStage::CorePoll;
+            let polled = match self.codex.poll(&thread_id, &now).await {
+                Ok(polled) => polled,
+                Err(error) => {
+                    self.drive_diagnostics
+                        .record_core_poll_failure(self.intake_log_path.as_deref());
+                    let diagnostic = self
+                        .codex
+                        .retained_failure_diagnostic(&thread_id)
+                        .or_else(|| self.codex.error_diagnostic(&error));
+                    self.finish_unavailable_codex_job(&job_id, diagnostic, now.clone())
+                        .await?;
+                    continue;
+                }
             };
-            self.flush_codex_execution_messages().await?;
-            if self.core_interaction_jobs.remove(&job_id) {
-                self.deferred_core_interaction_jobs.remove(&job_id);
+            let replayable = match &polled {
+                CodexPoll::ChangeBatchProposed(_) => Some(polled.clone()),
+                _ => None,
+            };
+            let delivery_result = async {
+                *stage = DriveStage::CollectPollEffects;
+                self.enqueue_codex_effects()?;
+                if self.core_interaction_jobs.remove(&job_id) {
+                    self.deferred_core_interaction_jobs.remove(&job_id);
+                }
+                *stage = DriveStage::CoreFact;
+                Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await
             }
-            self.handle_codex_poll(&job_id, polled, now.clone()).await?;
+            .await;
+            if let Err(error) = delivery_result {
+                if let Some(delivery) = replayable {
+                    self.codex
+                        .release_poll_delivery(&thread_id, &delivery)
+                        .map_err(|_| codex_model_error())?;
+                }
+                return Err(error);
+            }
         }
-        Ok(())
+        if let Some(error) = dispatch_error {
+            *stage = DriveStage::FlushBeforePoll;
+            return Err(error);
+        }
+        *stage = DriveStage::FlushAfterPoll;
+        self.flush_durable_execution_deliveries().await?;
+        *stage = DriveStage::DeviceIntake;
+        intake_error.map_or(Ok(()), Err)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1205,7 +1303,7 @@ where
         }
         match polled {
             CodexPoll::Pending => Ok(()),
-            CodexPoll::RuntimeTrace(message) => self.forward_runtime_trace(job_id, *message).await,
+            CodexPoll::RuntimeTrace(message) => self.enqueue_runtime_trace(job_id, *message),
             CodexPoll::ChangeBatchProposed(event) => {
                 self.execute_delegated_proposal(job_id, *event, &now).await
             }
@@ -1215,12 +1313,10 @@ where
                 DelegatedPollOutcome::RepairRequired(envelope),
             ),
             CodexPoll::Completed(completion) => {
-                self.complete_codex_job(job_id, completion, Vec::new(), now)
-                    .await
+                Box::pin(self.complete_codex_job(job_id, completion, Vec::new(), now)).await
             }
             CodexPoll::CompletedWithDiagnostics(completion, diagnostics) => {
-                self.complete_codex_job(job_id, completion, diagnostics, now)
-                    .await
+                Box::pin(self.complete_codex_job(job_id, completion, diagnostics, now)).await
             }
             CodexPoll::Inconclusive(summary) => {
                 self.finish_job(
@@ -1352,15 +1448,11 @@ where
                     "cancelled Codex result lost its active Job authority",
                 )
             })?;
-        // Cancellation owns the terminal decision once its acknowledgement
-        // is accepted. If the first Core interrupt failed, a late result must
-        // retry that fence rather than apply a patch, retain progress, or
-        // replace the cancelled outcome with another terminal state.
         self.codex
             .interrupt(&thread_id, now)
             .await
             .map_err(|_| codex_model_error())?;
-        self.flush_codex_execution_messages().await
+        self.enqueue_codex_effects()
     }
 
     fn retain_delegated_poll_outcome(
@@ -1388,8 +1480,9 @@ where
         &mut self,
         job_id: &str,
         event: ChangeBatchProposalEvent,
-        now: &Instant,
+        _now: &Instant,
     ) -> Result<(), WorkerError> {
+        let now = &self.current_driver_time()?;
         self.validate_delegated_proposal(job_id, &event)?;
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             worker_error(
@@ -1397,17 +1490,55 @@ where
                 "delegated ChangeBatch proposal has no active Job authority",
             )
         })?;
+        if active.lifecycle != ActiveJobLifecycle::Running || now.0 >= active.lease.expires_at.0 {
+            self.workspaces
+                .cancel_validation(&active.job.job_id, now)
+                .await
+                .map_err(|error| validation_cleanup_worker_error(&error))?;
+            self.pending_delegated_proposals.remove(job_id);
+            return self
+                .finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::InfrastructureError,
+                    "delegated execution lease expired before validation acceptance",
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::LeaseExpired,
+                        "delegated execution lease expired before validation acceptance",
+                        false,
+                    )),
+                    now.clone(),
+                )
+                .await;
+        }
         #[allow(clippy::large_futures)]
         let executed = self
             .workspaces
-            .execute_change_batch(&active, &event, now)
+            .poll_change_batch(&active, &event, now)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                if matches!(
+                    error.cause_code(),
+                    "VALIDATION_CLEANUP_UNCONFIRMED"
+                        | "VALIDATION_CLEANUP_RECORD_UNAVAILABLE"
+                        | "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE"
+                        | "VALIDATION_CLEANUP_PENDING_UNAVAILABLE"
+                ) {
+                    return validation_cleanup_worker_error(&error);
+                }
                 worker_error(
                     WorkerErrorCode::DelegatedPollMismatch,
                     "delegated ChangeBatch execution or replay was rejected",
                 )
             })?;
+        let Some(executed) = executed else {
+            self.pending_delegated_proposals
+                .insert(job_id.to_owned(), event);
+            return Ok(());
+        };
+        self.pending_delegated_proposals.remove(job_id);
+        let now = &self.current_driver_time()?;
         let accepted_final = event.proposal.disposition == ChangeBatchProposalDisposition::Final
             && executed
                 .progress
@@ -1484,15 +1615,15 @@ where
                 .await;
         }
         if let Some(open) = observation_open {
-            self.send_observation_open(open).await?;
+            self.enqueue_observation_open(open).await?;
         }
         if let Some(result_revision) = accepted_result_revision {
-            self.complete_accepted_delegated_candidate(
+            Box::pin(self.complete_accepted_delegated_candidate(
                 job_id,
                 accepted_batch_id,
                 result_revision,
                 now.clone(),
-            )
+            ))
             .await?;
         } else if let Some(
             state @ (ChangeBatchProgressState::Accepted
@@ -1815,14 +1946,14 @@ where
         let prepared = self
             .workspaces
             .prepare_candidate(&active, RoleExecutionMode::DelegatedBatch)
-            .map_err(|_| {
-                candidate_artifact_error("accepted delegated batch could not be frozen")
+            .map_err(|error| {
+                candidate_preparation_error(&error, "accepted delegated batch could not be frozen")
             })?;
         self.retain_candidate_artifact(&active.job.job_id, prepared, now)
             .await
     }
 
-    async fn flush_pending_observation_opens(&mut self) -> Result<(), WorkerError> {
+    async fn enqueue_pending_observation_opens(&mut self) -> Result<(), WorkerError> {
         let mut active = self.active.values().cloned().collect::<Vec<_>>();
         active.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
         for authority in active {
@@ -1831,18 +1962,18 @@ where
                 .pending_observation_model_open(&authority)
                 .map_err(|_| workspace_error())?
             {
-                self.send_observation_open(open).await?;
+                self.enqueue_observation_open(open).await?;
             }
         }
         Ok(())
     }
 
-    async fn send_observation_open(
+    async fn enqueue_observation_open(
         &mut self,
         open: winwincode_execution_port::generated::ModelOpenMessage,
     ) -> Result<(), WorkerError> {
         if self
-            .sent_observation_opens
+            .enqueued_observation_opens
             .contains(&open.model_exchange_id.0)
         {
             return Ok(());
@@ -1897,9 +2028,8 @@ where
                 .await;
         }
         let exchange = open.model_exchange_id.0.clone();
-        self.send_execution_message(ExecutionPortMessage::ModelOpenMessage(open))
-            .await?;
-        self.sent_observation_opens.insert(exchange);
+        self.enqueue_effect(&ExecutionPortMessage::ModelOpenMessage(open))?;
+        self.enqueued_observation_opens.insert(exchange);
         Ok(())
     }
 
@@ -2031,25 +2161,32 @@ where
         if let Some(receipt) = upgraded_receipt {
             self.delegated_poll_outcomes
                 .push_back(DelegatedPollOutcome::ChangeBatchReceipt(Box::new(receipt)));
-            self.sent_observation_opens
+            self.enqueued_observation_opens
                 .remove(&chunk.model_exchange_id.0);
         }
-        let acknowledgement = ModelAckMessage {
+        if chunk.sequence.0 == 1 && error.is_none() && replay_from.is_none() {
+            self.codex
+                .accept_execution_delivery_ack(&ExecutionPortMessage::ModelChunkMessage(
+                    chunk.clone(),
+                ))
+                .map_err(|_| codex_model_error())?;
+        }
+        let mut acknowledgement = ModelAckMessage {
             ack_sequence: ExecutionAckSequence(acknowledged),
             error,
             kind: ModelAckMessageKind::ModelAck,
             lease: chunk.lease.clone(),
-            message_id: observation_ack_message_id(chunk),
+            message_id: chunk.message_id.clone(),
             model_exchange_id: chunk.model_exchange_id.clone(),
             replay_from_sequence: replay_from,
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now.clone(),
+            sent_at: chunk.sent_at.clone(),
             session_identity: chunk.session_identity.clone(),
             status,
             worker_session_id: chunk.worker_session_id.clone(),
         };
-        self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
-            .await?;
+        acknowledgement.message_id = observation_ack_message_id(&acknowledgement)?;
+        self.enqueue_effect(&ExecutionPortMessage::ModelAckMessage(acknowledgement))?;
         if let Some((receipt, state)) = routed_terminal {
             self.route_delegated_terminal(&chunk.lease.job_id.0, receipt, state, now.clone())
                 .await?;
@@ -2239,13 +2376,21 @@ where
         }
         if !cancelling && (candidate_writer || verification_role) {
             if candidate_writer {
-                return self
-                    .complete_candidate_writer(job_id, completion, diagnostic_artifacts, now)
-                    .await;
-            }
-            return self
-                .complete_verification_job(job_id, completion, diagnostic_artifacts, now)
+                return Box::pin(self.complete_candidate_writer(
+                    job_id,
+                    completion,
+                    diagnostic_artifacts,
+                    now,
+                ))
                 .await;
+            }
+            return Box::pin(self.complete_verification_job(
+                job_id,
+                completion,
+                diagnostic_artifacts,
+                now,
+            ))
+            .await;
         }
         let (status, summary, error) = if cancelling {
             (
@@ -2264,7 +2409,7 @@ where
                 None,
             )
         };
-        let usage = (!cancelling).then_some(completion.usage);
+        let usage = if cancelling { None } else { completion.usage };
         let terminal_artifacts = if diagnostic_artifacts.is_empty() {
             completion.artifacts
         } else {
@@ -2289,6 +2434,7 @@ where
         diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let usage_for_failure = completion.usage.clone();
         let diagnostics_for_failure = diagnostic_artifacts.clone();
         if let Some(artifact) =
             self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
@@ -2298,26 +2444,45 @@ where
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             candidate_artifact_error("candidate completion has no active workspace authority")
         })?;
-        if let Ok(prepared) = self
+        let preparation_error = match self
             .workspaces
             .prepare_candidate(&active, RoleExecutionMode::React)
         {
-            return self
-                .retain_candidate_artifact(&active.job.job_id, prepared, now)
-                .await;
-        }
+            Ok(prepared) => {
+                return self
+                    .retain_candidate_artifact(&active.job.job_id, prepared, now)
+                    .await;
+            }
+            Err(error) => error,
+        };
+        let (code, summary) = if preparation_error.code()
+            == workspace_runtime::JobWorkspaceErrorCode::UnchangedCandidate
+            && active.job.execution_profile == "remediator"
+        {
+            (
+                ExecutionPortErrorCode::CandidateUnchanged,
+                "remediator completed with the original candidate tree",
+            )
+        } else {
+            (
+                ExecutionPortErrorCode::CandidatePreparationFailed,
+                "candidate preparation failed",
+            )
+        };
+        let diagnostic = format!(
+            "{summary}; stage={}; cause_code={}",
+            preparation_error.stage(),
+            preparation_error.cause_code()
+        );
+        eprintln!("component=worker code=CANDIDATE_PREPARATION_FAILED {diagnostic}");
         self.pending_candidates.remove(job_id);
         self.finish_job(
             job_id,
             ExecutionOutcomeStatus::Failed,
-            "writer completed without a valid candidate",
+            &diagnostic,
             diagnostics_for_failure,
-            None,
-            Some(port_error(
-                ExecutionPortErrorCode::ExecutionFailed,
-                "writer completed without a valid candidate",
-                false,
-            )),
+            usage_for_failure,
+            Some(port_error(code, &diagnostic, false)),
             now,
         )
         .await
@@ -2330,6 +2495,7 @@ where
         diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let usage_for_failure = completion.usage.clone();
         let diagnostics_for_failure = diagnostic_artifacts.clone();
         if let Some(artifact) =
             self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
@@ -2350,7 +2516,7 @@ where
             ExecutionOutcomeStatus::Failed,
             "verification completed without a valid candidate",
             diagnostics_for_failure,
-            None,
+            usage_for_failure,
             Some(port_error(
                 ExecutionPortErrorCode::ExecutionFailed,
                 "verification completed without a valid candidate",
@@ -2364,8 +2530,13 @@ where
     async fn finish_unavailable_codex_job(
         &mut self,
         job_id: &str,
+        diagnostic: Option<winwincode_codex::CodexFailureDiagnostic>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let message = diagnostic.map_or_else(
+            || "embedded Codex runtime became unavailable".to_owned(),
+            |diagnostic| diagnostic.append_to("embedded Codex runtime became unavailable"),
+        );
         self.finish_job(
             job_id,
             ExecutionOutcomeStatus::InfrastructureError,
@@ -2374,7 +2545,7 @@ where
             None,
             Some(port_error(
                 ExecutionPortErrorCode::InfrastructureError,
-                "embedded Codex runtime became unavailable",
+                &message,
                 true,
             )),
             now,
@@ -2382,16 +2553,6 @@ where
         .await
     }
 
-    /// Retains the verified detached writer candidate before its first upload.
-    ///
-    /// A successful Codex completion for an executor or remediator remains
-    /// non-terminal until this method retains the exact candidate and a final
-    /// matching `artifact.ack` is accepted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a foreign, cancelling, non-writer, or non-completed Job and any
-    /// candidate whose sealed authority differs from the active attempt.
     #[allow(clippy::too_many_lines)]
     pub async fn retain_candidate_artifact(
         &mut self,
@@ -2484,28 +2645,10 @@ where
                 .finish_candidate_job(&job_id.0, accepted, upload.created_at)
                 .await;
         }
-        if retained.deliveries.is_empty() {
-            return self.flush_durable_execution_deliveries().await;
-        }
-        for delivery in retained.deliveries {
-            if self
-                .codex
-                .candidate_artifact_delivery_allowed(&delivery.message)
-                .map_err(|_| codex_model_error())?
-            {
-                self.send_retained_delivery(delivery).await?;
-            }
-        }
+        self.outbox_flush_cursor = None;
         Ok(())
     }
 
-    /// Stops accepting work, interrupts every active turn, emits terminal
-    /// outcomes, closes threads, and shuts down the embedded Codex adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an outbound-port or durable candidate-cancellation failure. Codex
-    /// interrupt/shutdown failures are counted without leaking adapter text.
     pub async fn shutdown(&mut self, now: Instant) -> Result<WorkerShutdownReport, WorkerError> {
         if matches!(
             self.lifecycle,
@@ -2530,13 +2673,23 @@ where
                 .map_err(|_| codex_model_error())?;
         }
         self.pending_candidates.clear();
-        self.flush_durable_execution_deliveries().await?;
         self.lifecycle = WorkerLifecycleState::Draining;
+        let mut delivery_failures = Vec::new();
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
+        }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
         let mut codex_failures = 0;
         let mut cancelled_jobs = Vec::with_capacity(job_ids.len());
         for job_id in job_ids {
+            if let Some(active) = self.active.get(&job_id) {
+                self.workspaces
+                    .cancel_validation(&active.job.job_id, &now)
+                    .await
+                    .map_err(|error| validation_cleanup_worker_error(&error))?;
+            }
+            self.pending_delegated_proposals.remove(&job_id);
             let Some(thread_id) = self
                 .active
                 .get(&job_id)
@@ -2547,31 +2700,38 @@ where
             if self.codex.interrupt(&thread_id, &now).await.is_err() {
                 codex_failures += 1;
             } else {
-                // The interrupt retains the terminal Usage and Stopped
-                // traces. Forward them while the active Job still owns the
-                // runtime cursor so the shutdown outcome binds their final
-                // sequence instead of closing the Job first.
-                self.flush_codex_execution_messages().await?;
-                self.flush_durable_execution_deliveries().await?;
+                if let Err(error) = self.enqueue_codex_effects() {
+                    delivery_failures.push(error.code);
+                }
+                if let Err(error) = self.flush_durable_execution_deliveries().await {
+                    delivery_failures.push(error.code);
+                }
             }
             let Some(id) = self.active.get(&job_id).map(|job| job.job.job_id.clone()) else {
                 continue;
             };
-            self.finish_job(
-                &job_id,
-                ExecutionOutcomeStatus::Cancelled,
-                "Worker shutdown cancelled the active turn",
-                Vec::new(),
-                None,
-                Some(port_error(
-                    ExecutionPortErrorCode::Cancelled,
+            match self
+                .finish_job(
+                    &job_id,
+                    ExecutionOutcomeStatus::Cancelled,
                     "Worker shutdown cancelled the active turn",
-                    false,
-                )),
-                now.clone(),
-            )
-            .await?;
-            cancelled_jobs.push(id);
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::Cancelled,
+                        "Worker shutdown cancelled the active turn",
+                        false,
+                    )),
+                    now.clone(),
+                )
+                .await
+            {
+                Ok(()) => cancelled_jobs.push(id),
+                Err(error) => delivery_failures.push(error.code),
+            }
+        }
+        if let Err(error) = self.flush_durable_execution_deliveries().await {
+            delivery_failures.push(error.code);
         }
         if self.codex.shutdown().await.is_err() {
             codex_failures += 1;
@@ -2580,6 +2740,7 @@ where
         Ok(WorkerShutdownReport {
             cancelled_jobs,
             codex_failures,
+            delivery_failures,
         })
     }
 
@@ -2631,6 +2792,70 @@ where
         Ok(())
     }
 
+    async fn accept_snapshot_freeze(
+        &mut self,
+        request: &winwincode_execution_port::generated::SnapshotFreezeRequestMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        if self.lifecycle != WorkerLifecycleState::Active {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "freeze requires an active registered Worker",
+            ));
+        }
+        winwincode_execution_port::snapshot_freeze::validate_freeze_request(request)
+            .map_err(|reason| worker_error(WorkerErrorCode::InvalidDispatchAuthority, reason))?;
+        let dispatch = &request.dispatch;
+        if dispatch_authority_rejection(&self.config, dispatch, &now).is_some() {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "freeze lease is unavailable",
+            ));
+        }
+        if !self.workspaces.has_capacity_for(
+            &dispatch.job.job_id,
+            usize::try_from(self.config.capabilities.max_concurrent_jobs).unwrap_or(0),
+        ) {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "Snapshot freeze has no Worker capacity",
+            ));
+        }
+        let (product_session_id, work_run_id) = scope_identity(&dispatch.job.scope);
+        let prepared = self.prepare_dispatch_workspace(
+            dispatch,
+            &CodexRunKey::from_dispatch(dispatch),
+            product_session_id,
+            work_run_id,
+            &now,
+        )?;
+        let response = self
+            .workspaces
+            .freeze_snapshot(&prepared.active, request, &now)
+            .await
+            .map_err(|_| workspace_error())?;
+        self.enqueue_effect(&ExecutionPortMessage::SnapshotFreezeReceiptMessage(
+            response,
+        ))
+    }
+
+    fn dispatch_snapshot_is_bound(
+        &self,
+        dispatch: &JobDispatchMessage,
+        existing: Option<&DispatchRecord>,
+    ) -> Result<bool, WorkerError> {
+        if existing.is_some_and(|record| {
+            record.snapshot.as_ref().is_some_and(|snapshot| {
+                dispatch.snapshot_id.as_ref() == Some(&snapshot.snapshot_id)
+            })
+        }) {
+            return Ok(true);
+        }
+        self.workspaces
+            .snapshot_dispatch_is_bound(dispatch)
+            .map_err(|_| workspace_error())
+    }
+
     async fn accept_dispatch(
         &mut self,
         dispatch: &JobDispatchMessage,
@@ -2643,9 +2868,7 @@ where
             ));
         }
         if let Some((status, error)) = dispatch_authority_rejection(&self.config, dispatch, &now) {
-            self.send_dispatch_result(dispatch, status, None, Some(error), now)
-                .await?;
-            return Ok(());
+            return self.enqueue_dispatch_result(dispatch, status, None, Some(error), now);
         }
         let run_key = CodexRunKey::from_dispatch(dispatch);
         let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&dispatch.job)
@@ -2655,48 +2878,60 @@ where
                 "dispatch Job cannot be sealed for duplicate detection",
             )
         })?;
-        if let Some(record) = self.dispatches.get(&dispatch.job.job_id.0).cloned() {
-            let status = if record.run_key == run_key && record.job_digest == job_digest {
-                JobDispatchResultMessageStatus::Duplicate
-            } else {
-                JobDispatchResultMessageStatus::Conflict
-            };
-            self.send_dispatch_result(dispatch, status, Some(record.worker_session_id), None, now)
-                .await?;
-            return Ok(());
+        let existing = self.dispatches.get(&dispatch.job.job_id.0).cloned();
+        if let Some(record) = &existing
+            && (record.run_key != run_key || record.job_digest != job_digest)
+        {
+            return self.enqueue_dispatch_result(
+                dispatch,
+                JobDispatchResultMessageStatus::Conflict,
+                Some(record.worker_session_id.clone()),
+                None,
+                now,
+            );
         }
-        // Validate the complete WorkRun contract before creating a checkout or
-        // opening a Codex thread.  The input is Controller-sealed authority,
-        // not model prompt text; a scope/input mismatch must be rejected as a
-        // dispatch capability error rather than becoming an infrastructure
-        // failure after local resources have already been allocated.  Existing
-        // Job IDs are handled above so changed replays remain conflicts.
-        if winwincode_codex::stage_product::stage_product_prompt(&dispatch.job).is_err() {
-            self.send_dispatch_result(
+        if matches!(
+            dispatch.job.execution_profile.as_str(),
+            "reviewer" | "verifier" | "adversarial-verifier"
+        ) && !self.dispatch_snapshot_is_bound(dispatch, existing.as_ref())?
+        {
+            return self.reject_dispatch_failure(
                 dispatch,
                 JobDispatchResultMessageStatus::RejectedCapability,
-                None,
-                Some(port_error(
-                    ExecutionPortErrorCode::CapabilityMismatch,
-                    "dispatch WorkRun contract, workspace, or profile is invalid",
-                    false,
-                )),
+                ExecutionPortErrorCode::CapabilityMismatch,
+                "verification requires its committed Snapshot binding",
+                false,
                 now,
-            )
-            .await?;
-            return Ok(());
+            );
+        }
+        if let Some(record) = existing {
+            return self.enqueue_dispatch_result(
+                dispatch,
+                JobDispatchResultMessageStatus::Duplicate,
+                Some(record.worker_session_id),
+                None,
+                now,
+            );
+        }
+        if winwincode_codex::stage_product::stage_product_prompt(&dispatch.job).is_err() {
+            return self.reject_dispatch_failure(
+                dispatch,
+                JobDispatchResultMessageStatus::RejectedCapability,
+                ExecutionPortErrorCode::CapabilityMismatch,
+                "dispatch WorkRun contract, workspace, or profile is invalid",
+                false,
+                now,
+            );
         }
         let max = usize::try_from(self.config.capabilities.max_concurrent_jobs).unwrap_or(0);
-        if max == 0 || self.active.len() >= max {
-            self.send_dispatch_result(
+        if !self.workspaces.has_capacity_for(&dispatch.job.job_id, max) {
+            return self.enqueue_dispatch_result(
                 dispatch,
                 JobDispatchResultMessageStatus::RejectedCapacity,
                 None,
                 None,
                 now,
-            )
-            .await?;
-            return Ok(());
+            );
         }
         let (product_session_id, work_run_id) = scope_identity(&dispatch.job.scope);
         self.start_dispatch(
@@ -2708,6 +2943,67 @@ where
             now,
         )
         .await
+    }
+
+    async fn accept_snapshot_dispatch(
+        &mut self,
+        message: &winwincode_execution_port::generated::SnapshotVerificationDispatchMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let dispatch = &message.dispatch;
+        if self.lifecycle != WorkerLifecycleState::Active
+            || dispatch_authority_rejection(&self.config, dispatch, &now).is_some()
+            || !matches!(
+                dispatch.job.execution_profile.as_str(),
+                "reviewer" | "verifier" | "adversarial-verifier"
+            )
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "Snapshot dispatch authority is unavailable",
+            ));
+        }
+        if let Some(snapshot) = self
+            .dispatches
+            .get(&dispatch.job.job_id.0)
+            .and_then(|record| record.snapshot.as_ref())
+        {
+            if snapshot.as_ref() != &message.snapshot
+                || dispatch.snapshot_id.as_ref() != Some(&snapshot.snapshot_id)
+            {
+                return Err(worker_error(
+                    WorkerErrorCode::InvalidDispatchAuthority,
+                    "Snapshot replay changed its accepted product identity",
+                ));
+            }
+            return self.accept_dispatch(dispatch, now).await;
+        }
+        let (session, run) = scope_identity(&dispatch.job.scope);
+        let prepared = self.prepare_dispatch_workspace(
+            dispatch,
+            &CodexRunKey::from_dispatch(dispatch),
+            session,
+            run,
+            &now,
+        )?;
+        let request = self
+            .workspaces
+            .bind_snapshot_dispatch(message)
+            .map_err(|_| workspace_error())?;
+        self.workspaces
+            .freeze_snapshot(&prepared.active, &request, &now)
+            .await
+            .map_err(|_| workspace_error())?;
+        self.accept_dispatch(dispatch, now).await?;
+        let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&dispatch.job)
+            .map_err(|_| workspace_error())?;
+        if let Some(record) = self.dispatches.get_mut(&dispatch.job.job_id.0)
+            && record.run_key == CodexRunKey::from_dispatch(dispatch)
+            && record.job_digest == job_digest
+        {
+            record.snapshot = Some(std::sync::Arc::new(message.snapshot.clone()));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2736,14 +3032,14 @@ where
                     "detached Job workspace is unavailable",
                     true,
                     now,
-                )
-                .await?;
+                )?;
                 return Ok(());
             }
         };
         let thread_session = match self
             .codex
             .ensure_thread(CodexThreadStart {
+                snapshot_id: dispatch.snapshot_id.as_ref(),
                 run_key: &run_key,
                 worker_id: &self.config.worker_id,
                 job: &dispatch.job,
@@ -2755,7 +3051,11 @@ where
             .await
         {
             Ok(thread_session) => thread_session,
-            Err(_error) => {
+            Err(error) => {
+                let message = self.codex.error_diagnostic(&error).map_or_else(
+                    || "embedded Codex Core is unavailable".to_owned(),
+                    |diagnostic| diagnostic.append_to("embedded Codex Core is unavailable"),
+                );
                 let _ = self.workspaces.prepare_close_job(
                     &dispatch.job.job_id,
                     WorkspaceCloseReason::Failed,
@@ -2765,11 +3065,10 @@ where
                     dispatch,
                     JobDispatchResultMessageStatus::RejectedCapability,
                     ExecutionPortErrorCode::InfrastructureError,
-                    "embedded Codex Core is unavailable",
+                    &message,
                     true,
                     now,
-                )
-                .await?;
+                )?;
                 return Ok(());
             }
         };
@@ -2788,8 +3087,7 @@ where
                 "Codex thread is already bound to another Job",
                 false,
                 now,
-            )
-            .await?;
+            )?;
             return Ok(());
         }
         prepared.active.last_event_sequence =
@@ -2805,8 +3103,7 @@ where
                 &thread_session.agent_config,
             ),
             now.clone(),
-        )
-        .await?;
+        )?;
         self.start_bound_job(&dispatch.job, &thread_id, now).await
     }
 
@@ -2816,10 +3113,6 @@ where
         thread_id: &CodexThreadId,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        // Synchronize the adapter's trusted clock after the binding is
-        // installed but before replay or submission can cause a Provider
-        // request.  This closes the gap where a lease expires between
-        // dispatch validation and the first embedded Kernel model call.
         if let Err(_error) = self.codex.observe_now(&now) {
             return Err(codex_model_error());
         }
@@ -2827,23 +3120,17 @@ where
             self.deferred_core_interaction_jobs
                 .insert(job.job_id.0.clone());
         }
-        // A restart can leave response-bearing approval/input frames in the
-        // adapter outbox while the in-memory Worker has no active Job yet.
-        // Flush again after installing this dispatch so those exact retained
-        // frames are replayed before a recovered Core turn is submitted.
-        self.flush_recovered_durable_execution_deliveries().await?;
         if let Some(active) = self.active.get(&job.job_id.0).cloned()
             && let Some(open) = self
                 .workspaces
                 .pending_observation_model_open(&active)
                 .map_err(|_| workspace_error())?
         {
-            self.send_observation_open(open).await?;
+            self.enqueue_observation_open(open).await?;
             if !self.active.contains_key(&job.job_id.0) {
                 return Ok(());
             }
         }
-        self.defer_core_interactions = true;
         #[cfg(feature = "test-support")]
         let submission_fault = self.submission_fault.take();
         #[cfg(feature = "test-support")]
@@ -2853,17 +3140,27 @@ where
                 "test process stopped before submission intent",
             ));
         }
-        let submitted = match winwincode_codex::stage_product::stage_product_prompt(job) {
-            Ok(prompt) => match self.codex.submit_turn(thread_id, &prompt).await {
-                Ok(()) => true,
-                Err(_error) => false,
-            },
-            Err(_error) => false,
-        };
+        let snapshot_id = self
+            .active
+            .get(&job.job_id.0)
+            .and_then(|active| active.snapshot_id.as_ref());
+        let (submitted, diagnostic) =
+            match winwincode_codex::stage_product::snapshot_bound_prompt(job, snapshot_id) {
+                Ok(prompt) => match self.codex.submit_turn(thread_id, &prompt).await {
+                    Ok(()) => (true, None),
+                    Err(error) => (
+                        false,
+                        self.codex
+                            .retained_failure_diagnostic(thread_id)
+                            .or_else(|| self.codex.error_diagnostic(&error)),
+                    ),
+                },
+                Err(_error) => (false, None),
+            };
         if let Some(record) = self.dispatches.get_mut(&job.job_id.0) {
             record.submission_started = true;
         }
-        self.flush_codex_execution_messages().await?;
+        self.enqueue_codex_effects()?;
         if !submitted {
             #[cfg(feature = "test-support")]
             if submission_fault == Some(WorkerSubmissionFault::AfterIntent) {
@@ -2872,7 +3169,10 @@ where
                     "test process stopped after submission intent",
                 ));
             }
-            self.flush_durable_execution_deliveries().await?;
+            let message = diagnostic.map_or_else(
+                || "embedded Codex turn did not start".to_owned(),
+                |diagnostic| diagnostic.append_to("embedded Codex turn did not start"),
+            );
             self.finish_job(
                 &job.job_id.0,
                 ExecutionOutcomeStatus::InfrastructureError,
@@ -2881,7 +3181,7 @@ where
                 None,
                 Some(port_error(
                     ExecutionPortErrorCode::InfrastructureError,
-                    "embedded Codex turn did not start",
+                    &message,
                     true,
                 )),
                 now,
@@ -2916,6 +3216,7 @@ where
             .canonical_thread_id()
             .map_err(|_| workspace_error())?;
         let active = ActiveJob {
+            snapshot_id: dispatch.snapshot_id.clone(),
             job: dispatch.job.clone(),
             lease: dispatch.lease.clone(),
             worker_session_id: worker_session_id.clone(),
@@ -2944,7 +3245,7 @@ where
         })
     }
 
-    async fn reject_dispatch_failure(
+    fn reject_dispatch_failure(
         &mut self,
         dispatch: &JobDispatchMessage,
         status: JobDispatchResultMessageStatus,
@@ -2953,17 +3254,16 @@ where
         retryable: bool,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        self.send_dispatch_result(
+        self.enqueue_dispatch_result(
             dispatch,
             status,
             None,
             Some(port_error(code, message, retryable)),
             now,
         )
-        .await
     }
 
-    async fn install_dispatch_binding(
+    fn install_dispatch_binding(
         &mut self,
         dispatch: &JobDispatchMessage,
         run_key: CodexRunKey,
@@ -2981,6 +3281,7 @@ where
         self.dispatches.insert(
             dispatch.job.job_id.0.clone(),
             DispatchRecord {
+                snapshot: None,
                 run_key,
                 job_digest,
                 worker_session_id: worker_session_id.clone(),
@@ -2990,21 +3291,15 @@ where
                 submission_started: false,
             },
         );
-        let result = self
-            .send_dispatch_result(
-                dispatch,
-                JobDispatchResultMessageStatus::Accepted,
-                Some(worker_session_id.clone()),
-                None,
-                now.clone(),
-            )
-            .await;
-        if let Err(error) = result
-            && error.code != WorkerErrorCode::ExecutionPort
-        {
-            return Err(error);
-        }
+        self.enqueue_dispatch_result(
+            dispatch,
+            JobDispatchResultMessageStatus::Accepted,
+            Some(worker_session_id.clone()),
+            None,
+            now.clone(),
+        )?;
         let binding = SessionBindingMessage {
+            snapshot_id: dispatch.snapshot_id.clone(),
             attempt: dispatch.job.attempt,
             bound_at: now.clone(),
             codex_thread_id: thread_id.clone(),
@@ -3016,7 +3311,7 @@ where
             product_session_id,
             runtime_context,
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now.clone(),
+            sent_at: now,
             session_identity,
             source_identity: SessionBindingSourceIdentity {
                 kind: SessionBindingSourceIdentityKind::ExecutionWorker,
@@ -3029,8 +3324,7 @@ where
             worker_id: self.config.worker_id.clone(),
             worker_session_id,
         };
-        self.retain_and_send(ExecutionPortMessage::SessionBindingMessage(binding))
-            .await?;
+        self.enqueue_effect(&ExecutionPortMessage::SessionBindingMessage(binding))?;
         Ok(())
     }
 
@@ -3147,31 +3441,30 @@ where
             self.validate_candidate_ack_state(acknowledgement, accepted)?;
         }
         match outcome {
-            ArtifactAckOutcome::Pending => self.flush_durable_execution_deliveries().await,
+            ArtifactAckOutcome::Pending => Ok(()),
             ArtifactAckOutcome::Replay(deliveries) => {
-                if candidate_ack
-                    && self.active.contains_key(&job_id)
-                    && self.pending_candidates.contains_key(&job_id)
-                {
-                    for delivery in deliveries {
-                        if self
-                            .codex
-                            .candidate_artifact_delivery_allowed(&delivery.message)
-                            .map_err(|_| codex_model_error())?
-                        {
-                            self.send_retained_delivery(delivery).await?;
-                        }
-                    }
-                    return Ok(());
+                for delivery in deliveries {
+                    self.sent_delivery_ids.remove(&delivery.delivery_id);
+                    self.recovery_sent_delivery_ids
+                        .remove(&delivery.delivery_id);
                 }
-                self.flush_durable_execution_deliveries().await
+                self.outbox_flush_cursor = None;
+                Ok(())
             }
             ArtifactAckOutcome::Accepted(artifact) => {
                 if !candidate_ack
-                    || !self.active.contains_key(&job_id)
+                    || !self
+                        .active
+                        .get(&job_id)
+                        .is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Running)
                     || !self.pending_candidates.contains_key(&job_id)
                 {
-                    return self.flush_durable_execution_deliveries().await;
+                    return Ok(());
+                }
+                if acknowledgement.retained_artifact.as_ref() == Some(&artifact)
+                    && let Some(pending) = self.pending_candidates.get_mut(&job_id)
+                {
+                    pending.artifact = Some(artifact.clone());
                 }
                 self.finish_candidate_job(&job_id, artifact, now).await
             }
@@ -3196,18 +3489,19 @@ where
                 .get(job_id)
                 .and_then(|record| record.replacement_authority.clone()),
         )?;
-        let authority_matches = pending.authority == active_authority
-            || self
-                .dispatches
-                .get(job_id)
-                .and_then(|record| record.replacement_authority.as_ref())
-                .is_some_and(|replacement| {
-                    replacement_candidate_authority_matches(
-                        replacement,
-                        &pending.authority,
-                        &active_authority,
-                    )
-                });
+        let authority_matches =
+            candidate_authority_after_renewal_matches(&pending.authority, &active_authority)
+                || self
+                    .dispatches
+                    .get(job_id)
+                    .and_then(|record| record.replacement_authority.as_ref())
+                    .is_some_and(|replacement| {
+                        replacement_candidate_authority_matches(
+                            replacement,
+                            &pending.authority,
+                            &active_authority,
+                        )
+                    });
         let acknowledgement_matches_pending = acknowledgement.lease == pending.authority.lease
             && acknowledgement.worker_session_id == pending.authority.worker_session_id
             && acknowledgement.session_identity == pending.authority.session_identity;
@@ -3215,18 +3509,21 @@ where
             && acknowledgement.lease == active_authority.lease
             && acknowledgement.worker_session_id == active_authority.worker_session_id
             && acknowledgement.session_identity == active_authority.session_identity;
-        if active.lifecycle != ActiveJobLifecycle::Running
-            || !authority_matches
+        if !matches!(
+            active.lifecycle,
+            ActiveJobLifecycle::Running | ActiveJobLifecycle::Cancelling
+        ) || !authority_matches
             || (!acknowledgement_matches_pending && !acknowledgement_matches_successor)
             || pending
                 .artifact
                 .as_ref()
                 .is_some_and(|artifact| artifact.artifact_id != acknowledgement.artifact_id)
             || accepted.is_some_and(|artifact| {
-                pending
-                    .artifact
-                    .as_ref()
-                    .is_some_and(|expected| expected != artifact)
+                pending.artifact.as_ref().is_some_and(|expected| {
+                    expected != artifact
+                        && !(acknowledgement.retained_artifact.as_ref() == Some(artifact)
+                            && expected.digest == artifact.digest)
+                })
             })
         {
             return Err(candidate_artifact_error(
@@ -3236,10 +3533,6 @@ where
         Ok(())
     }
 
-    /// Rebinds a successor-authority ACK to the predecessor authority which
-    /// owns the retained candidate frames. A replacement receipt may expose a
-    /// successor Job to the Worker while the durable Artifact stream remains
-    /// byte- and session-identical to its predecessor.
     fn durable_candidate_ack(
         &self,
         acknowledgement: &ArtifactAckMessage,
@@ -3257,7 +3550,15 @@ where
                 .get(job_id)
                 .and_then(|record| record.replacement_authority.clone()),
         )?;
-        if pending.authority == active_authority {
+        if candidate_authority_after_renewal_matches(&pending.authority, &active_authority) {
+            if acknowledgement.lease == active_authority.lease
+                && acknowledgement.worker_session_id == pending.authority.worker_session_id
+                && acknowledgement.session_identity == pending.authority.session_identity
+            {
+                let mut durable = acknowledgement.clone();
+                durable.lease = pending.authority.lease.clone();
+                return Ok(durable);
+            }
             return Ok(acknowledgement.clone());
         }
         let Some(replacement) = self
@@ -3366,6 +3667,47 @@ where
         result
     }
 
+    fn accept_lease_renewal(
+        &mut self,
+        renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        let key = &renewal.lease.job_id.0;
+        let active = self
+            .active
+            .get(key)
+            .filter(|active| {
+                active.lifecycle == ActiveJobLifecycle::Running
+                    && valid_lease_renewal(&active.lease, renewal, now)
+            })
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::InvalidDispatchAuthority,
+                    "lease renewal authority is invalid",
+                )
+            })?;
+        if active.lease == renewal.lease {
+            return Ok(());
+        }
+        let mut renewed = active.clone();
+        renewed.lease = renewal.lease.clone();
+        if !self
+            .codex
+            .renew_lease(&active.codex_thread_id, renewal, now)
+            .map_err(|_| codex_model_error())?
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "Core lease renewal is unavailable",
+            ));
+        }
+        self.workspaces
+            .renew_lease(&renewed)
+            .map_err(|_| workspace_error())?;
+        self.active.insert(key.clone(), renewed);
+        Ok(())
+    }
+
     async fn accept_cancel(
         &mut self,
         cancel: &JobCancelMessage,
@@ -3387,9 +3729,6 @@ where
             {
                 (JobCancelAckMessageStatus::RejectedStaleFencingToken, None)
             }
-            Some(active) if now.0 >= active.lease.expires_at.0 => {
-                (JobCancelAckMessageStatus::RejectedExpiredLease, None)
-            }
             Some(active) if active.lifecycle == ActiveJobLifecycle::Cancelling => (
                 JobCancelAckMessageStatus::AlreadyCancelling,
                 self.pending_candidates
@@ -3405,45 +3744,34 @@ where
             }
             None => (JobCancelAckMessageStatus::AlreadyTerminal, None),
         };
-        if let Some(thread_id) = thread_id {
-            let candidate_authority = if let Some(authority) = self
-                .pending_candidates
-                .get(&key)
-                .map(|pending| pending.authority.clone())
+        if matches!(
+            status,
+            JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
+        ) && let Err(error) = self
+            .workspaces
+            .cancel_validation(&cancel.lease.job_id, &now)
+            .await
+        {
+            if status == JobCancelAckMessageStatus::Accepted
+                && let Some(thread_id) = thread_id.as_ref()
             {
-                Some(authority)
-            } else {
-                self.active
-                    .get(&key)
-                    .filter(|active| candidate_artifact_role(&active.job.execution_profile))
-                    .map(|active| {
-                        candidate_artifact_authority(
-                            active,
-                            self.dispatches
-                                .get(&key)
-                                .and_then(|record| record.replacement_authority.clone()),
-                        )
-                    })
-                    .transpose()?
-            };
-            if let Some(authority) = candidate_authority {
-                self.codex
-                    .begin_candidate_artifact_cancel(&authority)
-                    .map_err(|_| codex_model_error())?;
-                self.codex
-                    .cancel_candidate_artifact(&authority)
-                    .map_err(|_| codex_model_error())?;
-                self.pending_candidates.remove(&key);
+                let _ = self.codex.interrupt(thread_id, &now).await;
+                self.enqueue_codex_effects()?;
             }
+            return Err(validation_cleanup_worker_error(&error));
+        }
+        if let Some(thread_id) = thread_id {
+            self.pending_delegated_proposals.remove(&key);
+            self.cancel_pending_candidate_artifact(&key)?;
             let _ = self.codex.interrupt(&thread_id, &now).await;
-            self.flush_codex_execution_messages().await?;
+            self.enqueue_codex_effects()?;
         }
         if matches!(
             status,
             JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
         ) && let Some(active) = self.active.get(&key).cloned()
         {
-            self.cancel_observation_open(&active, &now).await?;
+            self.cancel_observation_open(&active, &now)?;
         }
         let ack = JobCancelAckMessage {
             error: None,
@@ -3457,11 +3785,43 @@ where
             status,
             worker_session_id: cancel.worker_session_id.clone(),
         };
-        self.retain_and_send(ExecutionPortMessage::JobCancelAckMessage(ack))
-            .await
+        self.enqueue_effect(&ExecutionPortMessage::JobCancelAckMessage(ack))
     }
 
-    async fn cancel_observation_open(
+    fn cancel_pending_candidate_artifact(&mut self, key: &str) -> Result<(), WorkerError> {
+        let candidate_authority = if let Some(authority) = self
+            .pending_candidates
+            .get(key)
+            .map(|pending| pending.authority.clone())
+        {
+            Some(authority)
+        } else {
+            self.active
+                .get(key)
+                .filter(|active| candidate_artifact_role(&active.job.execution_profile))
+                .map(|active| {
+                    candidate_artifact_authority(
+                        active,
+                        self.dispatches
+                            .get(key)
+                            .and_then(|record| record.replacement_authority.clone()),
+                    )
+                })
+                .transpose()?
+        };
+        if let Some(authority) = candidate_authority {
+            self.codex
+                .begin_candidate_artifact_cancel(&authority)
+                .map_err(|_| codex_model_error())?;
+            self.codex
+                .cancel_candidate_artifact(&authority)
+                .map_err(|_| codex_model_error())?;
+            self.pending_candidates.remove(key);
+        }
+        Ok(())
+    }
+
+    fn cancel_observation_open(
         &mut self,
         active: &ActiveJob,
         now: &Instant,
@@ -3473,8 +3833,26 @@ where
         else {
             return Ok(());
         };
-        self.sent_observation_opens
+        self.enqueued_observation_opens
             .remove(&open.model_exchange_id.0);
+        self.retain_execution_message(&ExecutionPortMessage::ModelOpenMessage(open.clone()))?;
+        let message_id = observation_cancel_message_id(&open.model_exchange_id);
+        if let Some(retained) = self
+            .codex
+            .pending_execution_deliveries()
+            .map_err(|_| codex_model_error())?
+            .into_iter()
+            .find(|delivery| {
+                matches!(&delivery.message, ExecutionPortMessage::ModelAckMessage(ack)
+                    if ack.message_id == message_id && ack.model_exchange_id == open.model_exchange_id)
+            })
+        {
+            self.enqueue_retained_effect(&retained)?;
+            return self
+                .codex
+                .accept_execution_delivery_ack(&retained.message)
+                .map_err(|_| codex_model_error());
+        }
         let acknowledgement = ModelAckMessage {
             ack_sequence: ExecutionAckSequence(0),
             error: Some(ExecutionPortError {
@@ -3484,7 +3862,7 @@ where
             }),
             kind: ModelAckMessageKind::ModelAck,
             lease: open.lease,
-            message_id: observation_cancel_message_id(&open.model_exchange_id),
+            message_id,
             model_exchange_id: open.model_exchange_id,
             replay_from_sequence: None,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -3493,34 +3871,27 @@ where
             status: LeaseWriteStatus::RejectedConflict,
             worker_session_id: open.worker_session_id,
         };
-        self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
-            .await
-            .map_err(|_| execution_port_error())
+        let effect = ExecutionPortMessage::ModelAckMessage(acknowledgement);
+        self.enqueue_effect(&effect.clone())?;
+        self.codex
+            .accept_execution_delivery_ack(&effect)
+            .map_err(|_| codex_model_error())
     }
 
-    async fn forward_runtime_trace(
+    fn enqueue_runtime_trace(
         &mut self,
         job_id: &str,
         message: RuntimeEventMessage,
     ) -> Result<(), WorkerError> {
         let Some(active) = self.active.get(job_id) else {
-            // finish_job (or a Server-restart recovery path) can drop the
-            // in-memory Job before every Core runtime frame reached the
-            // Control Plane. Retain and send on the durable outbox path so
-            // verification evidence is not stranded; Server validates the
-            // lease/fencing stamp.
             let delivery =
                 self.retain_execution_message(&ExecutionPortMessage::RuntimeEventMessage(message))?;
-            return self.send_retained_delivery(delivery).await;
+            return self.enqueue_retained_effect(&delivery);
         };
         let sequence = message.event.sequence.0;
         let last_sequence = active.last_event_sequence.0;
-        // A recovered adapter owns the durable runtime cursor. When every
-        // earlier frame was already acknowledged there is no pending frame
-        // from which WorkerMain can reconstruct that cursor, so the first
-        // canonical trace resumes at the adapter-provided sequence.
         let resumes_fully_acknowledged_cursor = last_sequence == 0 && sequence > 0;
-        if message.lease != active.lease
+        if !retained_lease_matches_current(&message.lease, &active.lease)
             || message.worker_session_id != active.worker_session_id
             || message.session_identity != active.session_identity
             || message.codex_thread_id != active.codex_thread_id
@@ -3528,16 +3899,18 @@ where
         {
             return Err(worker_error(
                 WorkerErrorCode::RuntimeTraceMismatch,
-                "runtime trace identity or sequence differs from the active Job",
+                &format!(
+                    "runtime trace differs from active Job: trace_next={} trace_observed={sequence} trace_lease={} trace_worker={} trace_session={} trace_thread={}",
+                    last_sequence.saturating_add(1),
+                    message.lease == active.lease,
+                    message.worker_session_id == active.worker_session_id,
+                    message.session_identity == active.session_identity,
+                    message.codex_thread_id == active.codex_thread_id,
+                ),
             ));
         }
         let delivery =
             self.retain_execution_message(&ExecutionPortMessage::RuntimeEventMessage(message))?;
-        // `install_active_run` queues unacknowledged original frames for
-        // direct adapter replay, while `flush_durable_execution_deliveries`
-        // may have sent the same frame before the adapter poll.  Retaining
-        // first still checks that a same-sequence frame is byte-identical;
-        // the already-forwarded copy then needs no second transport attempt.
         if sequence <= last_sequence {
             return Ok(());
         }
@@ -3550,7 +3923,7 @@ where
                 )
             })?
             .last_event_sequence = ExecutionAckSequence(sequence);
-        self.send_retained_delivery(delivery).await
+        self.enqueue_retained_effect(&delivery)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3564,7 +3937,14 @@ where
         error: Option<ExecutionPortError>,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        // Keep the terminal future bounded at every caller, including recovery.
+        if let Some(active) = self.active.get(job_id) {
+            self.workspaces
+                .cancel_validation(&active.job.job_id, &now)
+                .await
+                .map_err(|error| validation_cleanup_worker_error(&error))?;
+        }
+        self.pending_delegated_proposals.remove(job_id);
+
         Box::pin(async move {
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             worker_error(
@@ -3572,7 +3952,28 @@ where
                 "terminal result has no active Job",
             )
         })?;
-        if active.job.execution_profile == "codex-chat"
+        let error = if matches!(status, ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError) {
+            error.map(|mut error| {
+                if matches!(error.code, ExecutionPortErrorCode::InfrastructureError | ExecutionPortErrorCode::ExecutionFailed)
+                    && let Some(diagnostic) = self.codex.retained_failure_diagnostic(&active.codex_thread_id)
+                {
+                    error.message = diagnostic.append_to(&error.message);
+                }
+                error
+            })
+        } else {
+            error
+        };
+        let usage = if usage.is_none() {
+            self.codex.retained_outcome_usage(&active.codex_thread_id).ok().flatten()
+        } else {
+            usage
+        };
+        let rejected_delivery_failure = status == ExecutionOutcomeStatus::InfrastructureError
+            && (active.lifecycle == ActiveJobLifecycle::Cancelling
+                || self.codex.has_rejected_job_delivery(&active.lease).map_err(|_| codex_model_error())?);
+        if !rejected_delivery_failure
+            && active.job.execution_profile == "codex-chat"
             && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
         {
             if status == ExecutionOutcomeStatus::Cancelled {
@@ -3616,7 +4017,7 @@ where
                     let prepared = self
                         .workspaces
                         .prepare_candidate(&active, RoleExecutionMode::React)
-                        .map_err(|_| workspace_error())?;
+                        .map_err(|error| candidate_preparation_error(&error, "Chat candidate preparation failed"))?;
                     return Box::pin(self.retain_candidate_artifact(
                         &active.job.job_id,
                         prepared,
@@ -3641,7 +4042,11 @@ where
                 ));
             }
         }
-        self.cancel_observation_open(&active, &now).await?;
+        let usage = usage.or_else(|| {
+            (status == ExecutionOutcomeStatus::Succeeded)
+                .then(|| ExecutionOutcomeUsage::unknown(0, 0))
+        });
+        self.cancel_observation_open(&active, &now)?;
         let close_reason = match status {
             ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
             ExecutionOutcomeStatus::Cancelled => WorkspaceCloseReason::Cancelled,
@@ -3671,14 +4076,18 @@ where
         let delivery = self
             .codex
             .retain_job_outcome(&active.codex_thread_id, &outcome)
+            .await
             .map_err(|_| codex_model_error())?;
-        // Retain the terminal outcome before consuming the checkout.  If the
-        // process stops between these durable boundaries, the accepted
-        // candidate and the outcome remain discoverable and the original
-        // mutable workspace is still recoverable on the next dispatch.
-        self.workspaces
-            .prepare_close_job(&active.job.job_id, close_reason, &now)
-            .map_err(|_| workspace_error())?;
+        if let Some(progress) = self.workspaces
+            .prepare_terminal_job_close(&active, close_reason, &now)
+            .map_err(|_| workspace_error())?
+        {
+            eprintln!("WWC_TERMINAL_WORKSPACE_QUARANTINED job={} batch={}",
+                active.job.job_id.0, progress.identity.batch_id.0);
+            self.delegated_poll_outcomes.push_back(
+                DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress)),
+            );
+        }
         if let Some(record) = self.dispatches.get_mut(job_id) {
             record.terminal = true;
         }
@@ -3686,21 +4095,12 @@ where
         self.delegated_progress_ledgers
             .retain(|(ledger_job_id, _), _| ledger_job_id != job_id);
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
-        self.send_retained_delivery(delivery).await?;
-        // The in-memory Job is already gone. Durable runtime.event /
-        // diagnostic artifact.chunk frames retained beside this outcome must
-        // still flush on the same Worker→Server exchange; blocking them here
-        // strands verification evidence after a Server restart window.
-        if self.flush_durable_execution_deliveries().await.is_err()
-            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-        {
-            eprintln!("finish_job durable evidence flush failed job={job_id}");
-        }
-        self.flush_codex_execution_messages().await
+        self.enqueue_retained_effect(&delivery)?;
+        self.enqueue_codex_effects()
         }).await
     }
 
-    async fn send_dispatch_result(
+    fn enqueue_dispatch_result(
         &mut self,
         dispatch: &JobDispatchMessage,
         status: JobDispatchResultMessageStatus,
@@ -3721,8 +4121,7 @@ where
             status,
             worker_session_id,
         };
-        self.retain_and_send(ExecutionPortMessage::JobDispatchResultMessage(result))
-            .await
+        self.enqueue_effect(&ExecutionPortMessage::JobDispatchResultMessage(result))
     }
 
     fn next_message_id(&mut self) -> ExecutionMessageId {
@@ -3748,19 +4147,23 @@ where
     }
 
     fn worker_session_id(
-        &self,
+        &mut self,
         dispatch: &JobDispatchMessage,
         run_key: &CodexRunKey,
     ) -> Result<WorkerSessionId, WorkerError> {
+        if let Some(retained) = self
+            .codex
+            .recovered_worker_session_id(dispatch)
+            .map_err(|_| workspace_error())?
+        {
+            return Ok(retained);
+        }
         let (worker_session_id, _) = canonical_dispatch_session_identity(
             &self.config.worker_id,
             &self.config.worker_instance_id,
             dispatch,
         )
         .map_err(|_| workspace_error())?;
-        // The run key is already validated by the dispatch path. Keep the
-        // parameter in this private seam because callers use it to derive the
-        // Codex thread immediately beside the WorkerSession identity.
         debug_assert_eq!(run_key, &CodexRunKey::from_dispatch(dispatch));
         Ok(worker_session_id)
     }
@@ -3786,31 +4189,39 @@ where
         response: &InputResponseMessage,
         received_at: &Instant,
     ) -> Result<(), WorkerError> {
-        if let Err(_error) = self
+        if let Err(error) = self
             .codex
             .accept_input_response(response, received_at)
             .await
         {
-            return Err(codex_model_error());
+            return Err(codex_input_error(
+                "response_acceptance",
+                self.codex.error_diagnostic(&error),
+            ));
         }
         self.codex
             .accept_execution_delivery_ack(&ExecutionPortMessage::InputResponseMessage(
                 response.clone(),
             ))
-            .map_err(|_| codex_model_error())
+            .map_err(|error| {
+                codex_input_error(
+                    "response_acknowledgement",
+                    self.codex.error_diagnostic(&error),
+                )
+            })
     }
 
-    async fn replay_runtime(
-        &mut self,
-        request: &RuntimeReplayRequestMessage,
-    ) -> Result<(), WorkerError> {
+    fn replay_runtime(&mut self, request: &RuntimeReplayRequestMessage) -> Result<(), WorkerError> {
         let deliveries = self
             .codex
             .replay_execution_deliveries(request)
             .map_err(|_| codex_model_error())?;
         for delivery in deliveries {
-            self.send_retained_delivery(delivery).await?;
+            self.sent_delivery_ids.remove(&delivery.delivery_id);
+            self.recovery_sent_delivery_ids
+                .remove(&delivery.delivery_id);
         }
+        self.outbox_flush_cursor = None;
         Ok(())
     }
 
@@ -3842,12 +4253,6 @@ where
             }))
     }
 
-    /// Removes registration frames retained by a predecessor process before
-    /// creating this process's replacement registration.  Such frames cannot
-    /// be replayed: the Control Plane correctly answers with the predecessor
-    /// instance, which this Worker must reject.  Treating the frame as an
-    /// internal superseded receipt preserves the durable outbox invariant for
-    /// every other response-bearing frame.
     fn retire_stale_registration_deliveries(&mut self) -> Result<(), WorkerError> {
         let stale = self
             .codex
@@ -3928,182 +4333,15 @@ where
             }))
     }
 
-    async fn retain_and_send(&mut self, message: ExecutionPortMessage) -> Result<(), WorkerError> {
-        let delivery = self.retain_execution_message(&message)?;
-        // A recovered request can be present in the durable outbox before the
-        // embedded Core re-emits the same semantic event.  The first flush in
-        // this scheduling turn already sent the exact retained bytes; do not
-        // send that delivery a second time when the Core event is drained.
-        let recovery_duplicate = matches!(
-            &message,
-            ExecutionPortMessage::ApprovalRequestMessage(_)
-                | ExecutionPortMessage::InputRequestMessage(_)
-                | ExecutionPortMessage::ActionEnforcementRequestMessage(_)
-        ) && active_delivery_job_id(&message)
-            .is_some_and(|job_id| self.deferred_core_interaction_jobs.contains(job_id))
-            && self
-                .recovery_sent_delivery_ids
-                .contains(&delivery.delivery_id);
-        if self.sent_delivery_ids.contains(&delivery.delivery_id) || recovery_duplicate {
-            return Ok(());
-        }
-        self.send_retained_delivery(delivery).await
+    fn current_driver_time(&self) -> Result<Instant, WorkerError> {
+        self.driver_clock.timestamp().ok_or_else(codex_model_error)
     }
 
-    async fn send_execution_message(
-        &mut self,
-        message: ExecutionPortMessage,
-    ) -> Result<(), WorkerError> {
-        if let Some(models) = &mut self.device_models
-            && models.send(&message).map_err(|_| codex_model_error())?
-        {
-            return Ok(());
-        }
-        self.port
-            .send(message)
-            .await
-            .map_err(|_| execution_port_error())
+    fn observe_driver_clock(&mut self, now: Instant) {
+        self.driver_clock.observe(now, std::time::Instant::now());
     }
 
-    async fn send_retained_delivery(
-        &mut self,
-        delivery: DurableExecutionDelivery,
-    ) -> Result<(), WorkerError> {
-        self.send_execution_message(delivery.message).await?;
-        self.codex
-            .record_execution_delivery_sent(&delivery.delivery_id)
-            .map_err(|_| codex_model_error())?;
-        self.sent_delivery_ids.insert(delivery.delivery_id);
-        Ok(())
-    }
-
-    async fn flush_durable_execution_deliveries(&mut self) -> Result<(), WorkerError> {
-        self.flush_durable_execution_deliveries_with_core_replay(false)
-            .await
-    }
-
-    /// Flushes durable frames after binding a recovered run.  Interactive
-    /// requests are deliberately left for the resumed Core event: sending the
-    /// retained request here and then sending the same retained request again
-    /// when Core re-emits its blocking event would create two visible prompts
-    /// in one recovery turn.
-    async fn flush_recovered_durable_execution_deliveries(&mut self) -> Result<(), WorkerError> {
-        self.flush_durable_execution_deliveries_with_core_replay(true)
-            .await
-    }
-
-    async fn flush_durable_execution_deliveries_with_core_replay(
-        &mut self,
-        replay_core_interactions: bool,
-    ) -> Result<(), WorkerError> {
-        let deliveries = self
-            .codex
-            .pending_execution_deliveries()
-            .map_err(|_| codex_model_error())?;
-        let mut last_error = None;
-        for delivery in deliveries {
-            if self.sent_delivery_ids.contains(&delivery.delivery_id) {
-                continue;
-            }
-            if matches!(&delivery.message, ExecutionPortMessage::ModelOpenMessage(_)) {
-                continue;
-            }
-            let recovered_interaction = (replay_core_interactions || self.defer_core_interactions)
-                && matches!(
-                    &delivery.message,
-                    ExecutionPortMessage::ApprovalRequestMessage(_)
-                        | ExecutionPortMessage::InputRequestMessage(_)
-                        | ExecutionPortMessage::ActionEnforcementRequestMessage(_)
-                )
-                && active_delivery_job_id(&delivery.message)
-                    .is_some_and(|job_id| self.deferred_core_interaction_jobs.contains(job_id));
-            if recovered_interaction
-                && self
-                    .recovery_sent_delivery_ids
-                    .contains(&delivery.delivery_id)
-            {
-                continue;
-            }
-            if let Some(job_id) = active_delivery_job_id(&delivery.message)
-                && !self.active.contains_key(job_id)
-            {
-                match &delivery.message {
-                    // Durable Control Plane frames must still flush after the
-                    // Worker drops an in-memory Job. Blocking RuntimeEvent /
-                    // JobOutcome / diagnostic artifact frames here strands
-                    // verification evidence forever and leaves Delivery
-                    // verdict=null even when Core already produced
-                    // independent-verification-result. The frame lease is the
-                    // authority; Server validates fencing. Candidate uploads
-                    // remain gated by the pending-candidate checks below.
-                    ExecutionPortMessage::RuntimeEventMessage(_)
-                    | ExecutionPortMessage::ModelChunkMessage(_)
-                    | ExecutionPortMessage::JobOutcomeMessage(_)
-                    | ExecutionPortMessage::ArtifactChunkMessage(_)
-                    | ExecutionPortMessage::ArtifactOpenMessage(_) => {}
-                    ExecutionPortMessage::ApprovalRequestMessage(_)
-                    | ExecutionPortMessage::InputRequestMessage(_)
-                    | ExecutionPortMessage::ActionEnforcementRequestMessage(_) => {
-                        continue;
-                    }
-                    _ => continue,
-                }
-            }
-            if candidate_delivery_job_id(&delivery.message).is_some_and(|job_id| {
-                !self.pending_candidates.contains_key(job_id)
-                    || !self
-                        .active
-                        .get(job_id)
-                        .is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Running)
-            }) {
-                continue;
-            }
-            if candidate_delivery_job_id(&delivery.message).is_some()
-                && !self
-                    .codex
-                    .candidate_artifact_delivery_allowed(&delivery.message)
-                    .map_err(|_| codex_model_error())?
-            {
-                continue;
-            }
-            let runtime_cursor = match &delivery.message {
-                ExecutionPortMessage::RuntimeEventMessage(event) => {
-                    Some((event.lease.job_id.0.clone(), event.event.sequence.0))
-                }
-                _ => None,
-            };
-            let delivery_id = delivery.delivery_id.clone();
-            // One rejected/unreachable frame must not poison the rest of the
-            // durable evidence queue. Continue sending remaining pending
-            // frames (especially runtime.event beside a diagnostic chunk)
-            // and report the last transport error after the pass.
-            if let Err(error) = self.send_retained_delivery(delivery).await {
-                if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                    eprintln!(
-                        "flush_durable frame failed delivery={delivery_id}: {:?}",
-                        error.code
-                    );
-                }
-                last_error = Some(error);
-                continue;
-            }
-            if recovered_interaction {
-                self.recovery_sent_delivery_ids.insert(delivery_id);
-            }
-            if let Some((job_id, sequence)) = runtime_cursor
-                && let Some(active) = self.active.get_mut(&job_id)
-                && sequence > active.last_event_sequence.0
-            {
-                active.last_event_sequence = ExecutionAckSequence(sequence);
-            }
-        }
-        match last_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    async fn flush_codex_execution_messages(&mut self) -> Result<(), WorkerError> {
+    fn enqueue_codex_effects(&mut self) -> Result<(), WorkerError> {
         let messages = self
             .codex
             .take_execution_messages()
@@ -4122,7 +4360,7 @@ where
             }
             if let ExecutionPortMessage::RuntimeEventMessage(event) = message {
                 let job_id = event.lease.job_id.0.clone();
-                self.forward_runtime_trace(&job_id, event).await?;
+                self.enqueue_runtime_trace(&job_id, event)?;
                 continue;
             }
             let terminal_model_ack = matches!(
@@ -4140,7 +4378,7 @@ where
                 self.core_interaction_jobs.insert(job_id.to_owned());
             }
             let acknowledgement = terminal_model_ack.then(|| message.clone());
-            self.retain_and_send(message).await?;
+            self.enqueue_effect(&message)?;
             if let Some(acknowledgement) = acknowledgement {
                 self.codex
                     .accept_execution_delivery_ack(&acknowledgement)
@@ -4177,16 +4415,26 @@ fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
     ))
 }
 
-fn observation_ack_message_id(chunk: &ModelChunkMessage) -> ExecutionMessageId {
+fn observation_ack_message_id(ack: &ModelAckMessage) -> Result<ExecutionMessageId, WorkerError> {
+    let bytes = serde_json::to_vec(&(
+        &ack.ack_sequence,
+        &ack.error,
+        &ack.lease,
+        &ack.model_exchange_id,
+        &ack.replay_from_sequence,
+        &ack.sent_at,
+        &ack.session_identity,
+        &ack.status,
+        &ack.worker_session_id,
+    ))
+    .map_err(|_| codex_model_error())?;
     let mut digest = Sha256::new();
-    digest.update(b"winwincode.observation-model-ack.v1\0");
-    digest.update((chunk.model_exchange_id.0.len() as u64).to_be_bytes());
-    digest.update(chunk.model_exchange_id.0.as_bytes());
-    digest.update(chunk.sequence.0.to_be_bytes());
-    ExecutionMessageId(format!(
+    digest.update(b"winwincode.observation-model-ack.v2\0");
+    digest.update(bytes);
+    Ok(ExecutionMessageId(format!(
         "xmsg_{}",
         &format!("{:X}", digest.finalize())[..26]
-    ))
+    )))
 }
 
 fn observation_cancel_message_id(
@@ -4211,6 +4459,11 @@ fn active_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
         ExecutionPortMessage::ActionEnforcementRequestMessage(request) => Some(&request.job_id.0),
         ExecutionPortMessage::ApprovalRequestMessage(request) => Some(&request.lease.job_id.0),
         ExecutionPortMessage::InputRequestMessage(request) => Some(&request.lease.job_id.0),
+        ExecutionPortMessage::ArtifactOpenMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::ArtifactChunkMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::SessionBindingMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::JobDispatchResultMessage(frame) => Some(&frame.job_id.0),
+        ExecutionPortMessage::ModelAckMessage(frame) => Some(&frame.lease.job_id.0),
         _ => None,
     }
 }
@@ -4232,12 +4485,6 @@ fn candidate_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
     }
 }
 
-/// Resumes the numeric Worker message-id cursor from the durable adapter
-/// outbox.  Transport frames intentionally remain retained after a successful
-/// send, so a replacement Worker must not start at `xmsg_...01` and collide
-/// with an earlier frame that has a different timestamp or lifecycle status.
-/// Non-numeric ids belong to externally supplied protocol frames and do not
-/// participate in this local cursor.
 fn recover_message_sequence<Codex: CodexCoreAdapter>(codex: &mut Codex) -> u64 {
     codex.recovered_message_sequence().unwrap_or(0)
 }
@@ -4594,12 +4841,12 @@ const fn delegated_loop_budget() -> RepairLoopBudget {
     RepairLoopBudget {
         max_change_batches: 4,
         max_context_pack_bytes: 131_072,
-        max_observer_calls: 4,
-        max_primary_model_calls: 8,
+        max_observer_calls: None,
+        max_primary_model_calls: None,
         max_repair_rounds: 3,
-        max_total_cost_microunits: 9_007_199_254_740_991,
-        max_total_tokens: 10_000_000,
-        max_wall_time_millis: 3_600_000,
+        max_total_cost_microunits: None,
+        max_total_tokens: None,
+        max_wall_time_millis: None,
     }
 }
 
@@ -4751,6 +4998,7 @@ fn candidate_artifact_authority(
         candidate_artifact_error("writer logical Job cannot be sealed for candidate replay")
     })?;
     Ok(CandidateArtifactAuthority {
+        snapshot_id: active.snapshot_id.clone(),
         job_digest,
         logical_job_digest,
         execution_profile: active.job.execution_profile.clone(),
@@ -4760,6 +5008,18 @@ fn candidate_artifact_authority(
         worker_session_id: active.worker_session_id.clone(),
         session_identity: active.session_identity.clone(),
     })
+}
+
+fn candidate_authority_after_renewal_matches(
+    retained: &CandidateArtifactAuthority,
+    current: &CandidateArtifactAuthority,
+) -> bool {
+    if current.lease.expires_at.0 < retained.lease.expires_at.0 {
+        return false;
+    }
+    let mut original = current.clone();
+    original.lease.expires_at = retained.lease.expires_at.clone();
+    original == *retained
 }
 
 fn replacement_candidate_authority_matches(
@@ -4786,8 +5046,6 @@ fn replacement_candidate_authority_matches(
         })
 }
 
-/// Compare the immutable work identity while allowing the predecessor and
-/// successor to have distinct run/attempt identities.
 fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
     match (left, right) {
         (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
@@ -4824,11 +5082,6 @@ fn port_error(code: ExecutionPortErrorCode, message: &str, retryable: bool) -> E
     }
 }
 
-/// Validates the bounded canonical delivery patch carried by one proposal.
-///
-/// The patch content itself is bound to the batch identity by its canonical
-/// digest, which the durable store re-derives before any effect; this check
-/// rejects unbounded or off-format proposals before they become durable.
 fn validate_delegated_patch(patch: &str) -> Result<(), WorkerErrorCode> {
     const MAX_PATCH_BYTES: usize = 512 * 1024;
     if patch.is_empty()
@@ -4852,10 +5105,32 @@ fn candidate_artifact_error(reason: &str) -> WorkerError {
     worker_error(WorkerErrorCode::CandidateArtifactMismatch, reason)
 }
 
+fn candidate_preparation_error(
+    error: &workspace_runtime::JobWorkspaceError,
+    reason: &str,
+) -> WorkerError {
+    candidate_artifact_error(&format!(
+        "{reason}; stage={}; cause_code={}",
+        error.stage(),
+        error.cause_code()
+    ))
+}
+
 fn workspace_error() -> WorkerError {
     worker_error(
         WorkerErrorCode::Workspace,
         "detached Job workspace operation failed",
+    )
+}
+
+fn validation_cleanup_worker_error(error: &workspace_runtime::JobWorkspaceError) -> WorkerError {
+    worker_error(
+        WorkerErrorCode::Workspace,
+        &format!(
+            "validation cancellation cleanup is unconfirmed; stage={}; cause_code={}",
+            error.stage(),
+            error.cause_code()
+        ),
     )
 }
 
@@ -4866,6 +5141,15 @@ fn execution_port_error() -> WorkerError {
     )
 }
 
+fn codex_input_error(
+    operation: &'static str,
+    diagnostic: Option<winwincode_codex::CodexFailureDiagnostic>,
+) -> WorkerError {
+    let message = format!("embedded Codex rejected an input response at {operation}");
+    let reason = diagnostic.map_or(message.clone(), |value| value.append_to(&message));
+    worker_error(WorkerErrorCode::UnexpectedMessage, &reason)
+}
+
 fn codex_model_error() -> WorkerError {
     worker_error(
         WorkerErrorCode::UnexpectedMessage,
@@ -4873,24 +5157,16 @@ fn codex_model_error() -> WorkerError {
     )
 }
 
-/// Stable binary identity emitted by `winwincode-worker --check`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerBinaryIdentity {
-    /// Binary role.
     pub role: &'static str,
-    /// Canonical `ExecutionPort` schema version.
     pub execution_port: &'static str,
-    /// Execution authority implementation.
     pub execution_kernel: &'static str,
-    /// Whether a CLI or external-agent fallback exists.
     pub external_fallback: bool,
-    /// Whether this binary accepts `--managed-session <config-file>` (plan
-    /// §14.4) and reports the managed session identity surface.
     pub managed_session: bool,
 }
 
-/// Returns compile-time Worker role identity without starting runtime services.
 #[must_use]
 pub const fn binary_identity() -> WorkerBinaryIdentity {
     WorkerBinaryIdentity {
@@ -4902,8 +5178,6 @@ pub const fn binary_identity() -> WorkerBinaryIdentity {
     }
 }
 
-// Keep these exact canonical types reachable from this crate's public API so
-// workspace and integration modules never introduce parallel event identities.
 #[allow(dead_code)]
 fn canonical_runtime_identity_types(
     _event_id: ExecutionEventId,

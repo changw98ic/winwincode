@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Atomic Delivery-to-ExecutionPort dispatch composition.
-//!
-//! This module maps one Delivery-owned pending effect into generated public
-//! types. It neither schedules Codex work nor treats an uncommitted effect as
-//! HTTP success. The transaction adapter must commit Delivery journal state,
-//! request receipt, and the immutable job outbox intent together before the
-//! dispatcher is called.
-
 use std::{error::Error, fmt};
 
 #[cfg(test)]
@@ -30,10 +22,6 @@ use winwincode_execution_port::generated::{
     JobCancelAckMessageStatus, WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
 };
 
-/// Builds a WorkRun-shaped dispatch intent before a Worker lease exists.
-///
-/// # Errors
-/// Rejects stale identities, invalid role/workspace bindings or malformed request/job fields.
 #[allow(clippy::too_many_lines)]
 pub fn prepare_workrun_start(
     request_id: &RequestId,
@@ -160,6 +148,7 @@ pub fn prepare_workrun_start(
         payload_digest: config.payload_digest,
         scope: ExecutionScope::WorkRunExecutionScope(scope),
         work_input: Some(WorkRunInput {
+            work_plan: Some(aggregate.items.clone()),
             device_target: config.device_target,
             delivery_spec_id: spec.id.0.clone(),
             delivery_spec_revision: winwincode_domain::Revision(
@@ -171,6 +160,7 @@ pub fn prepare_workrun_start(
             ),
             candidate_ref: config.candidate_ref,
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             work_contract: aggregate.contract.clone(),
             work_item: item.clone(),
         }),
@@ -210,9 +200,6 @@ fn deterministic_workrun_id(
     format!("wrn_{value}")
 }
 
-/// Validates the canonical `WorkRun` execution shape before queue publication.
-/// `WorkRun` identity and its embedded contract/item are the sole dispatch
-/// authority for the new path.
 pub(crate) fn validate_workrun_execution_job(
     job: &ExecutionJob,
 ) -> Result<(), DeliveryExecutionError> {
@@ -272,6 +259,7 @@ pub(crate) fn validate_workrun_execution_job(
             "WorkRun execution profile and workspace write mode are incompatible".to_owned(),
         ));
     }
+    validate_workrun_plan(input)?;
     if scope.rework_authorization.is_some() != (job.execution_profile == "remediator") {
         return Err(DeliveryExecutionError::InvalidEffect(
             "rework authorization requires remediator profile".to_owned(),
@@ -289,14 +277,38 @@ pub(crate) fn validate_workrun_execution_job(
                     || target.evidence_ref_ids.is_empty()
             })
             || !sha256_digest(&authorization.authorization_digest.0)
-            || !authorization
-                .candidate_ref
-                .strip_prefix("git-candidate:sha256:")
-                .is_some_and(lowercase_sha256))
+            || authorization.candidate_ref
+                != format!(
+                    "refs/winwincode/candidates/{}",
+                    authorization.source_candidate_commit_id
+                ))
     {
         return Err(DeliveryExecutionError::InvalidEffect(
             "WorkRun rework authorization digest or candidate is invalid".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_workrun_plan(input: &WorkRunInput) -> Result<(), DeliveryExecutionError> {
+    if let Some(plan) = &input.work_plan {
+        if !plan.iter().any(|item| item == &input.work_item) {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "WorkRun input differs from its authoritative task plan".to_owned(),
+            ));
+        }
+        winwincode_delivery::application::workrun::WorkRunAggregate {
+            schema_version: input.schema_version.clone(),
+            contract: input.work_contract.clone(),
+            items: plan.clone(),
+            runs: Vec::new(),
+        }
+        .validate()
+        .map_err(|_| {
+            DeliveryExecutionError::InvalidEffect(
+                "WorkRun task plan has invalid contract or dependency bindings".to_owned(),
+            )
+        })?;
     }
     Ok(())
 }
@@ -319,16 +331,12 @@ pub struct DeliveryExecutionConfig {
     pub device_target: Option<winwincode_execution_port::generated::ExecutionDeviceTarget>,
     pub model_selection: Option<winwincode_execution_port::generated::ExecutionModelSelection>,
     pub payload_digest: Sha256Digest,
-    /// Exact frozen source candidate for verification and authorized rework Jobs.
     pub candidate_ref: Option<String>,
     pub workspace: ExecutionWorkspace,
     pub limits: ExecutionLimits,
-    /// Server-side managed-app facts sealed by the task authority. This is
-    /// intentionally absent when the confirmed task did not request an app.
     pub managed_app_run_config: Option<ManagedAppRunConfig>,
 }
 
-/// Delivery mutation and generated job waiting for one outer transaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingDeliveryExecution {
     request_id: RequestId,
@@ -405,41 +413,19 @@ impl fmt::Display for DeliveryExecutionPortError {
 
 impl Error for DeliveryExecutionPortError {}
 
-/// Adapter seam for the transaction completed by phase 2.3.1.
-///
-/// Implementations must atomically commit the Delivery journal publication,
-/// request receipt, and `job.dispatch` outbox intent. A replay receipt means
-/// the same request was already committed and must not append another intent.
 pub trait DeliveryExecutionTransaction {
-    /// Commits the pending Delivery and job intent as one authoritative change.
-    ///
-    /// # Errors
-    ///
-    /// Returns without dispatch when the outer transaction cannot commit.
     fn commit_delivery_and_job_intent(
         &mut self,
         pending: &PendingDeliveryExecution,
     ) -> Result<DeliveryExecutionCommitReceipt, DeliveryExecutionPortError>;
 
-    /// Marks the exact durable outbox event published after dispatch succeeds.
-    ///
-    /// # Errors
-    ///
-    /// Leaves the event pending for startup/outbox replay when acknowledgement
-    /// cannot be committed.
     fn mark_job_dispatched(
         &mut self,
         outbox_event_id: &str,
     ) -> Result<(), DeliveryExecutionPortError>;
 }
 
-/// `ExecutionPort` adapter called only after the outer transaction commits.
 pub trait ExecutionJobDispatcher: Send {
-    /// Sends or offers one immutable generated `ExecutionJob`.
-    ///
-    /// # Errors
-    ///
-    /// Leaves the committed outbox intent pending for replay.
     fn dispatch(&mut self, job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError>;
 }
 
@@ -521,13 +507,6 @@ impl fmt::Display for DeliveryExecutionError {
 
 impl Error for DeliveryExecutionError {}
 
-/// Commits state and outbox intent, then dispatches at most once for this call.
-///
-/// # Errors
-///
-/// Returns [`DeliveryExecutionError::Commit`] when nothing committed, or
-/// [`DeliveryExecutionError::DispatchAfterCommit`] when durable replay must
-/// finish publication.
 pub fn commit_and_dispatch(
     pending: &PendingDeliveryExecution,
     transaction: &mut dyn DeliveryExecutionTransaction,
@@ -583,10 +562,6 @@ fn validate_commit_receipt(
     Ok(())
 }
 
-/// Acknowledges the exact leased cancellation and returns its Delivery transition.
-///
-/// # Errors
-/// Rejects forged, stale or mismatched acknowledgements and lease identities.
 pub fn acknowledge_job_cancel(
     delivery: &Delivery,
     intent: &CancelIntent,
@@ -664,11 +639,17 @@ fn validate_job_fields(job: &ExecutionJob) -> Result<(), DeliveryExecutionError>
         ("executionJob.goal", bounded_length(&job.goal, 1, 20_000)),
         (
             "executionJob.limits.deadlineAt",
-            instant(&job.limits.deadline_at.0),
+            job.limits
+                .deadline_at
+                .as_ref()
+                .is_none_or(|deadline| instant(&deadline.0))
+                && job.limits.deadline_at.is_some() == job.limits.max_runtime_seconds.is_some(),
         ),
         (
             "executionJob.limits.maxRuntimeSeconds",
-            (1..=604_800).contains(&job.limits.max_runtime_seconds),
+            job.limits
+                .max_runtime_seconds
+                .is_none_or(|seconds| (1..=604_800).contains(&seconds)),
         ),
         (
             "executionJob.limits.maxArtifactBytes",
@@ -877,9 +858,11 @@ mod tests {
             goal: "fixture".into(),
             job_id: winwincode_domain::ExecutionJobId("job_00000000000000000000000001".into()),
             limits: ExecutionLimits {
-                deadline_at: winwincode_domain::Instant("2026-08-28T00:00:00.000Z".into()),
+                deadline_at: Some(winwincode_domain::Instant(
+                    "2026-08-28T00:00:00.000Z".into(),
+                )),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -896,11 +879,13 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".into()),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: Some(vec![item.clone()]),
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: winwincode_domain::Revision(2),
                 candidate_ref: None,
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),
@@ -923,6 +908,57 @@ mod tests {
         validate_workrun_execution_job(&workrun_job("executor")).unwrap();
     }
     #[test]
+    fn workrun_plan_rejects_changed_current_node_and_invalid_dependencies() {
+        let job = workrun_job("executor");
+        let mut dependent = job.work_input.as_ref().unwrap().work_item.clone();
+        dependent.id.0 = "wit_00000000000000000000000002".into();
+        dependent.depends_on = vec![job.work_input.as_ref().unwrap().work_item.id.clone()];
+        let mut valid = job;
+        valid
+            .work_input
+            .as_mut()
+            .unwrap()
+            .work_plan
+            .as_mut()
+            .unwrap()
+            .push(dependent);
+        validate_workrun_execution_job(&valid).unwrap();
+        for mutation in 0..4 {
+            let mut invalid = valid.clone();
+            let input = invalid.work_input.as_mut().unwrap();
+            let plan = input.work_plan.as_mut().unwrap();
+            match mutation {
+                0 => plan[0].goal.push_str(" changed"),
+                1 => plan[1].depends_on[0].0 = "wit_00000000000000000000000003".into(),
+                2 => plan.push(plan[1].clone()),
+                _ => {
+                    plan[0].depends_on = vec![plan[1].id.clone()];
+                    input.work_item = plan[0].clone();
+                }
+            }
+            assert!(validate_workrun_execution_job(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn workrun_runtime_policy_requires_a_complete_explicit_pair() {
+        let mut job = workrun_job("executor");
+        job.limits.deadline_at = None;
+        assert!(validate_workrun_execution_job(&job).is_err());
+        job.limits.max_runtime_seconds = None;
+        validate_workrun_execution_job(&job).expect("explicit unlimited");
+        let mut json = serde_json::to_value(&job).expect("encode");
+        json["limits"]
+            .as_object_mut()
+            .expect("limits")
+            .remove("maxRuntimeSeconds");
+        assert!(serde_json::from_value::<ExecutionJob>(json).is_err());
+        job.limits.deadline_at = Some(winwincode_domain::Instant(
+            "2026-08-28T00:00:00.000Z".into(),
+        ));
+        assert!(validate_workrun_execution_job(&job).is_err());
+    }
+
+    #[test]
     fn workrun_rejects_legacy_ids_and_invalid_limits_before_queue_publication() {
         let mut job = workrun_job("executor");
         if let ExecutionScope::WorkRunExecutionScope(scope) = &mut job.scope {
@@ -930,7 +966,7 @@ mod tests {
         }
         assert!(validate_workrun_execution_job(&job).is_err());
         let mut job = workrun_job("executor");
-        job.limits.max_runtime_seconds = 0;
+        job.limits.max_runtime_seconds = Some(0);
         assert!(validate_workrun_execution_job(&job).is_err());
         let mut job = workrun_job("executor");
         job.payload_digest.0 = "unsealed".into();

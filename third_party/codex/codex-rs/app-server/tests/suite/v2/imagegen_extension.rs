@@ -757,7 +757,19 @@ generatedImage(result);
             .as_str()
             .is_some_and(|text| text.contains("Generated images are saved"))
     );
-    assert_eq!(output["output"].as_array().map(Vec::len), Some(3));
+    assert_eq!(output["output"].as_array().map(Vec::len), Some(4));
+    let receipt_text = output["output"][3]["text"]
+        .as_str()
+        .expect("image generation should return Core receipt references");
+    let receipt_body = receipt_text
+        .strip_prefix("<core_tool_receipts>")
+        .and_then(|text| text.strip_suffix("</core_tool_receipts>"))
+        .expect("Core receipts should have complete fragment markers");
+    let receipts: serde_json::Value = serde_json::from_str(receipt_body)?;
+    assert_eq!(receipts["type"], "core_tool_receipts");
+    assert_eq!(receipts["schema_version"], 1);
+    assert_eq!(receipts["receipts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(receipts["receipts"][0]["execution"], "completed");
 
     Ok(())
 }
@@ -954,7 +966,9 @@ fn create_config_toml(
         .with_model_provider("openai-custom")
         .with_provider_name("OpenAI")
         .with_provider_base_url(&format!("{server_uri}/api/codex"))
-        .with_root_config(&format!("chatgpt_base_url = \"{server_uri}\""))
+        .with_root_config(&format!(
+            "chatgpt_base_url = \"{server_uri}\"\nweb_search = \"disabled\""
+        ))
         .with_provider_config("supports_websockets = false\nrequires_openai_auth = true");
     if matches!(mode, ImagegenTestMode::CodeModeOnly) {
         config = config.enable_feature(Feature::CodeModeOnly);

@@ -26,12 +26,6 @@ function readJson(path) {
 }
 
 function sqliteJson(database, query) {
-  // A cleanly checkpointed WAL database may retain the WAL header in the main
-  // file while having no sidecars. sqlite3 -readonly then tries to initialise
-  // WAL bookkeeping and fails with SQLITE_CANTOPEN. The fixture is sealed, so
-  // immutable mode is the exact read-only representation in that case. When a
-  // sidecar exists we must use the regular read-only path so its transactions
-  // remain part of the audit.
   const hasWalSidecars = existsSync(`${database}-wal`) || existsSync(`${database}-shm`)
   const arguments_ = hasWalSidecars
     ? ['-readonly', '-json', database, query]

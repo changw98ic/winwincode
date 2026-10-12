@@ -1179,7 +1179,10 @@ mod tests {
     #[tokio::test]
     async fn http_connect_accept_blocks_in_limited_mode() {
         let policy = {
-            let mut policy = NetworkProxyConfig::default();
+            let mut policy = NetworkProxyConfig {
+                allow_local_binding: true,
+                ..NetworkProxyConfig::default()
+            };
             policy.set_allowed_domains(vec!["example.com".to_string()]);
             policy
         };
@@ -1236,7 +1239,10 @@ mod tests {
 
     #[tokio::test]
     async fn http_connect_accept_passes_environment_id_to_decider() {
-        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig::default()));
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        }));
         let seen_environment_id = Arc::new(Mutex::new(None));
         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
             let seen_environment_id = seen_environment_id.clone();
@@ -1274,6 +1280,7 @@ mod tests {
     #[tokio::test]
     async fn http_connect_accept_defers_brokered_host_mitm_until_protocol_detection() {
         let mut policy = NetworkProxyConfig {
+            allow_local_binding: true,
             credential_broker: true,
             mitm: true,
             ..NetworkProxyConfig::default()
@@ -1367,6 +1374,7 @@ mod tests {
     #[tokio::test]
     async fn http_connect_accept_blocks_hooked_host_in_full_mode_without_mitm_state() {
         let mut policy = NetworkProxyConfig {
+            allow_local_binding: true,
             mitm: true,
             mitm_hooks: vec![crate::mitm_hook::MitmHookConfig {
                 host: "api.github.com".to_string(),

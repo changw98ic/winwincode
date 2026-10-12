@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded HTTPS client for the canonical remote Execution Port exchange.
-
+use sha2::Digest;
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
@@ -10,9 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls;
 use winwincode_codex::WorkerExecutionPort;
 use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
@@ -21,16 +17,37 @@ use winwincode_execution_port::transport::{
     FrameDirection, RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter,
     TypedFrame,
 };
+use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
 
-const MAX_HTTP_RESPONSE_BYTES: usize = 34 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES: usize =
+    winwincode_execution_port::transport::MAX_REMOTE_RESPONSE_BYTES;
 
-/// Secret-free separated Worker transport failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RemoteWorkerPortError;
+pub enum RemoteWorkerPortError {
+    Transport,
+    Network(NetworkFailure),
+    NetworkExhausted(NetworkFailure),
+    Backpressure,
+    Rejected,
+    Protocol,
+    TooLarge,
+    ResponseTooLarge,
+}
 
 impl fmt::Display for RemoteWorkerPortError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("remote Worker transport failed")
+        if let Self::Network(failure) | Self::NetworkExhausted(failure) = self {
+            return write!(formatter, "{failure}");
+        }
+        formatter.write_str(match self {
+            Self::Transport => "REMOTE_WORKER_TRANSPORT_UNAVAILABLE",
+            Self::Network(_) | Self::NetworkExhausted(_) => unreachable!(),
+            Self::Backpressure => "REMOTE_WORKER_BACKPRESSURE",
+            Self::Rejected => "REMOTE_WORKER_AUTHENTICATION_REJECTED",
+            Self::Protocol => "REMOTE_WORKER_PROTOCOL_INVALID",
+            Self::TooLarge => "REMOTE_WORKER_MESSAGE_TOO_LARGE",
+            Self::ResponseTooLarge => "REMOTE_WORKER_RESPONSE_TOO_LARGE",
+        })
     }
 }
 
@@ -46,172 +63,20 @@ struct SharedRemoteState {
     inbox: VecDeque<(ExecutionMessageId, ExecutionPortMessage)>,
     processing: Vec<ExecutionMessageId>,
     acknowledgements: Vec<ExecutionMessageId>,
+    terminal_error: Option<RemoteWorkerPortError>,
 }
 
-/// Cloneable Worker-side delivery handle. A delivery is confirmed only after
-/// [`WorkerMain`](crate::WorkerMain) accepts the exact generated message.
-#[derive(Clone)]
-pub struct RemoteWorkerTransportHandle {
-    state: Arc<Mutex<SharedRemoteState>>,
-}
-
-impl RemoteWorkerTransportHandle {
-    /// Takes the next validated Control Plane delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
-    pub fn next_control(
-        &self,
-    ) -> Result<Option<(ExecutionMessageId, ExecutionPortMessage)>, RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
-        let delivery = state.inbox.pop_front();
-        if let Some((id, _)) = &delivery
-            && !state.processing.contains(id)
-        {
-            state.processing.push(id.clone());
-        }
-        Ok(delivery)
-    }
-
-    /// Marks one delivery ready for confirmation on the next authenticated
-    /// exchange. Lost HTTP responses therefore replay the same delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
-    pub fn confirm(&self, id: ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
-        state.processing.retain(|processing| processing != &id);
-        if !state.acknowledgements.contains(&id) {
-            state.acknowledgements.push(id);
-        }
-        Ok(())
-    }
-
-    /// Releases an unaccepted delivery so the Server's next replay can put it
-    /// back in the process inbox.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable transport error if the process queue is unavailable.
-    pub fn retry(&self, id: &ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
-        state.processing.retain(|processing| processing != id);
-        Ok(())
-    }
-}
-
-/// Worker outbound port using a fresh authenticated TLS connection for each
-/// exchange so ordinary disconnects and Server restarts reconnect naturally.
-pub struct RemoteWorkerPort {
-    endpoint: Endpoint,
-    credential_path: PathBuf,
-    worker_id: WorkerId,
-    worker_instance_id: WorkerInstanceId,
-    tls: Arc<rustls::ClientConfig>,
-    timeout: Duration,
-    state: Arc<Mutex<SharedRemoteState>>,
-}
-
-impl RemoteWorkerPort {
-    /// Opens a TLS client from one DER trust root and a private credential
-    /// file. The only accepted origin form is `https://HOST:PORT`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed origins, trust roots, timeouts, and non-private
-    /// credential files before the Worker registers.
-    pub fn open(
-        origin: &str,
-        tls_root_der: &[u8],
-        credential_path: impl Into<PathBuf>,
-        worker_id: WorkerId,
-        worker_instance_id: WorkerInstanceId,
-        timeout: Duration,
-    ) -> Result<(Self, RemoteWorkerTransportHandle), RemoteWorkerPortError> {
-        if timeout.is_zero() || timeout > Duration::from_mins(1) {
-            return Err(RemoteWorkerPortError);
-        }
-        let endpoint = parse_origin(origin)?;
-        let credential_path = credential_path.into();
-        read_private_credential(&credential_path)?;
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(rustls::pki_types::CertificateDer::from(
-                tls_root_der.to_vec(),
-            ))
-            .map_err(|_| RemoteWorkerPortError)?;
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_safe_default_protocol_versions()
-            .map_err(|_| RemoteWorkerPortError)?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let state = Arc::new(Mutex::new(SharedRemoteState {
-            inbox: VecDeque::new(),
-            processing: Vec::new(),
-            acknowledgements: Vec::new(),
-        }));
-        Ok((
-            Self {
-                endpoint,
-                credential_path,
-                worker_id,
-                worker_instance_id,
-                tls: Arc::new(tls),
-                timeout,
-                state: Arc::clone(&state),
-            },
-            RemoteWorkerTransportHandle { state },
-        ))
-    }
-
-    async fn exchange(
+impl SharedRemoteState {
+    fn receive_response(
         &mut self,
-        message: ExecutionPortMessage,
+        response: &RemoteExchangeResponse,
+        acknowledgements: &[ExecutionMessageId],
     ) -> Result<(), RemoteWorkerPortError> {
-        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
-            .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
-            .map_err(|_| {
-                remote_transport_debug("outbound generated frame is invalid");
-                RemoteWorkerPortError
-            })?;
-        let acknowledgements = self
-            .state
-            .lock()
-            .map_err(|_| RemoteWorkerPortError)?
-            .acknowledgements
-            .clone();
-        let request = RemoteExchangeRequest::new(
-            self.worker_id.clone(),
-            self.worker_instance_id.clone(),
-            acknowledgements.clone(),
-            frame,
-        )
-        .and_then(|request| request.encode())
-        .map_err(|_| {
-            remote_transport_debug("outbound exchange request is invalid");
-            RemoteWorkerPortError
-        })?;
-        let credential = read_private_credential(&self.credential_path).inspect_err(|_| {
-            remote_transport_debug("credential file failed private-file validation");
-        })?;
-        let response = Box::pin(tokio::time::timeout(
-            self.timeout,
-            send_https_request(&self.endpoint, Arc::clone(&self.tls), &credential, &request),
-        ))
-        .await
-        .map_err(|_| {
-            remote_transport_debug("exchange timed out");
-            RemoteWorkerPortError
-        })?
-        .inspect_err(|_| remote_transport_debug("HTTPS request failed"))?;
-        let response = RemoteExchangeResponse::decode(&response).map_err(|_| {
-            remote_transport_debug("exchange response did not match the bounded canonical schema");
-            RemoteWorkerPortError
-        })?;
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
+        if !response.has_acceptance_receipt() {
+            return Err(RemoteWorkerPortError::Protocol);
+        }
+
+        let state = self;
         state
             .acknowledgements
             .retain(|id| !acknowledgements.contains(id));
@@ -226,17 +91,479 @@ impl RemoteWorkerPort {
                 continue;
             }
             let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
-                .map_err(|_| RemoteWorkerPortError)?;
+                .map_err(|_| RemoteWorkerPortError::Protocol)?;
+            if let ExecutionPortMessage::LeaseRenewMessage(renewal) = frame.message() {
+                eprintln!(
+                    "component=worker stage=lease_renewal_received message_sha256={:x} received_at_unix_ms={} prior_expires_at={} new_expires_at={} sent_at={}",
+                    sha2::Sha256::digest(renewal.message_id.0.as_bytes()),
+                    time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
+                    renewal.prior_expires_at.0,
+                    renewal.lease.expires_at.0,
+                    renewal.sent_at.0
+                );
+            }
             state
                 .inbox
                 .push_back((delivery.delivery_id.clone(), frame.message().clone()));
         }
+        if response.frame_accepted() {
+            Ok(())
+        } else {
+            Err(RemoteWorkerPortError::Backpressure)
+        }
+    }
+
+    fn acknowledgements_for_exchange(&self) -> Vec<ExecutionMessageId> {
+        self.acknowledgements
+            .iter()
+            .take(winwincode_execution_port::transport::MAX_REMOTE_ACKNOWLEDGEMENTS)
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteWorkerTransportHandle {
+    state: Arc<Mutex<SharedRemoteState>>,
+}
+
+impl RemoteWorkerTransportHandle {
+    #[must_use]
+    pub fn has_pending_controls(&self) -> bool {
+        self.state.lock().is_ok_and(|state| !state.inbox.is_empty())
+    }
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn empty_for_test() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SharedRemoteState {
+                inbox: VecDeque::new(),
+                processing: Vec::new(),
+                acknowledgements: Vec::new(),
+                terminal_error: None,
+            })),
+        }
+    }
+
+    #[must_use]
+    pub fn authority_rejected(&self) -> bool {
+        matches!(self.terminal_error(), Some(RemoteWorkerPortError::Rejected))
+            || matches!(self.terminal_error(), Some(RemoteWorkerPortError::NetworkExhausted(failure))
+                if matches!(failure.kind, ErrorKind::Authentication | ErrorKind::Authorization))
+    }
+
+    #[must_use]
+    pub fn terminal_error(&self) -> Option<RemoteWorkerPortError> {
+        self.state
+            .lock()
+            .map_or(Some(RemoteWorkerPortError::Transport), |state| {
+                state.terminal_error
+            })
+    }
+
+    pub fn next_control(
+        &self,
+    ) -> Result<Option<(ExecutionMessageId, ExecutionPortMessage)>, RemoteWorkerPortError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        let delivery = state.inbox.pop_front();
+        if let Some((id, _)) = &delivery
+            && !state.processing.contains(id)
+        {
+            state.processing.push(id.clone());
+        }
+        Ok(delivery)
+    }
+
+    pub fn confirm(&self, id: ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        state.processing.retain(|processing| processing != &id);
+        if !state.acknowledgements.contains(&id) {
+            state.acknowledgements.push(id);
+        }
         Ok(())
+    }
+
+    pub fn retry(&self, id: &ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        state.processing.retain(|processing| processing != id);
+        Ok(())
+    }
+}
+
+pub struct RemoteWorkerPort {
+    accounting_enabled: std::sync::atomic::AtomicBool,
+    accounting_wake: Arc<tokio::sync::Notify>,
+    accounting_epoch: Arc<std::sync::atomic::AtomicU64>,
+    accounting_progress: tokio::sync::watch::Sender<u64>,
+    endpoint: Endpoint,
+    credential_path: PathBuf,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    client: reqwest::Client,
+    timeout: Duration,
+    state: Arc<Mutex<SharedRemoteState>>,
+    network_journal: winwincode_network::journal::RequestJournal,
+}
+
+impl RemoteWorkerPort {
+    #[must_use]
+    pub fn spawn_accounting_reconciler(
+        &self,
+        provider_directory: PathBuf,
+        key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey,
+    ) -> tokio::task::JoinHandle<()> {
+        self.accounting_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        let client = self.client.clone();
+        let endpoint = self.endpoint.clone();
+        let timeout = self.timeout;
+        let wake = Arc::clone(&self.accounting_wake);
+        let epoch = Arc::clone(&self.accounting_epoch);
+        let progress = self.accounting_progress.clone();
+        let journal = self.network_journal.clone();
+        tokio::spawn(async move {
+            let token = key.accounting_query_token();
+            let url = format!(
+                "https://{}:{}/internal/v1/execution-port/accounting",
+                endpoint.host, endpoint.port
+            );
+            let mut offset = 0;
+            loop {
+                let requested = epoch.load(std::sync::atomic::Ordering::Acquire);
+                let query = async {
+                    let identity = format!(
+                        "accounting-query:{}:{}:{offset}",
+                        endpoint.host, endpoint.port
+                    );
+                    queued_http_attempt(
+                        &journal,
+                        identity.as_bytes(),
+                        timeout,
+                        || {
+                            client
+                                .get(&url)
+                                .bearer_auth(&token.0)
+                                .header("X-Accounting-Offset", offset.to_string())
+                                .send()
+                        },
+                        |bytes| {
+                            serde_json::from_slice::<
+                                winwincode_execution_port::accounting::PendingAccountingPage,
+                            >(bytes)
+                            .map_err(|_| RemoteWorkerPortError::Protocol)
+                        },
+                    )
+                    .await
+                };
+                if let Ok(page) = query.await {
+                    offset = page.next_offset.unwrap_or(0);
+                    for lease in page.leases {
+                        let directory = provider_directory.clone();
+                        let source_key = key.clone();
+                        let statement = tokio::task::spawn_blocking(move || {
+                            winwincode_provider::DeviceProviderStore::open(&directory)
+                                .and_then(|store| store.accounting_statement(&lease, &source_key))
+                        })
+                        .await;
+                        let Ok(Ok(Some(statement))) = statement else {
+                            continue;
+                        };
+                        let Ok(bytes) = statement.encode() else {
+                            continue;
+                        };
+                        let send = async {
+                            queued_http_attempt(
+                                &journal,
+                                &bytes,
+                                timeout,
+                                || {
+                                    client
+                                        .post(&url)
+                                        .bearer_auth(&token.0)
+                                        .header("Content-Type", "application/json")
+                                        .body(bytes.clone())
+                                        .send()
+                                },
+                                |_| Ok(()),
+                            )
+                            .await
+                        };
+                        if send.await.is_err() {
+                            remote_transport_debug("Provider accounting receipt remains pending");
+                        }
+                    }
+                } else {
+                    remote_transport_debug("Provider accounting query remains pending");
+                }
+                progress.send_replace(requested);
+                tokio::select! { () = tokio::time::sleep(Duration::from_secs(10)) => {}, () = wake.notified() => {} }
+            }
+        })
+    }
+    pub fn open(
+        origin: &str,
+        tls_root_der: &[u8],
+        credential_path: impl Into<PathBuf>,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        timeout: Duration,
+    ) -> Result<(Self, RemoteWorkerTransportHandle), RemoteWorkerPortError> {
+        if timeout.is_zero() || timeout > Duration::from_mins(1) {
+            return Err(RemoteWorkerPortError::Transport);
+        }
+        let endpoint = parse_origin(origin)?;
+        let credential_path = credential_path.into();
+        read_private_credential(&credential_path)?;
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                tls_root_der.to_vec(),
+            ))
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| RemoteWorkerPortError::Transport)?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(tls)
+            .http1_only()
+            .https_only(true)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| RemoteWorkerPortError::Protocol)?;
+        let network_journal = winwincode_network::journal::RequestJournal::open(
+            &credential_path
+                .parent()
+                .ok_or(RemoteWorkerPortError::Transport)?
+                .join("network-requests.sqlite3"),
+        )
+        .map_err(RemoteWorkerPortError::NetworkExhausted)?;
+        let state = Arc::new(Mutex::new(SharedRemoteState {
+            inbox: VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: Vec::new(),
+            terminal_error: None,
+        }));
+        Ok((
+            Self {
+                accounting_enabled: std::sync::atomic::AtomicBool::new(false),
+                accounting_wake: Arc::new(tokio::sync::Notify::new()),
+                accounting_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                accounting_progress: tokio::sync::watch::channel(0).0,
+                endpoint,
+                credential_path,
+                worker_id,
+                worker_instance_id,
+                client,
+                timeout,
+                state: Arc::clone(&state),
+                network_journal,
+            },
+            RemoteWorkerTransportHandle { state },
+        ))
+    }
+
+    async fn exchange(
+        &mut self,
+        message: ExecutionPortMessage,
+    ) -> Result<(), RemoteWorkerPortError> {
+        let terminal = matches!(&message, ExecutionPortMessage::JobOutcomeMessage(_));
+        let result = self.exchange_inner(message).await;
+        if terminal
+            && self
+                .accounting_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let requested = self
+                .accounting_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                + 1;
+            let mut progress = self.accounting_progress.subscribe();
+            self.accounting_wake.notify_one();
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                while *progress.borrow_and_update() < requested {
+                    if progress.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+        if let Err(
+            error @ (RemoteWorkerPortError::Rejected
+            | RemoteWorkerPortError::Protocol
+            | RemoteWorkerPortError::ResponseTooLarge
+            | RemoteWorkerPortError::NetworkExhausted(_)),
+        ) = result
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.terminal_error = Some(error);
+        }
+        result
+    }
+
+    async fn exchange_inner(
+        &mut self,
+        message: ExecutionPortMessage,
+    ) -> Result<(), RemoteWorkerPortError> {
+        let message_id = winwincode_execution_port::transport::execution_message_id(&message)
+            .map_err(remote_frame_error)?;
+        let key = format!(
+            "{}:{}:{}",
+            self.worker_id.0, self.worker_instance_id.0, message_id.0
+        );
+        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
+            .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
+            .map_err(|error| {
+                remote_transport_debug("outbound generated frame is invalid");
+                remote_frame_error(error)
+            })?;
+        let acknowledgements = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?
+            .acknowledgements_for_exchange();
+        let bound = self
+            .network_journal
+            .bind_envelope(
+                key.as_bytes(),
+                &winwincode_network::journal::EnvelopeCursor {
+                    ack_ids: acknowledgements.iter().map(|id| id.0.clone()).collect(),
+                    input_digest: Some(format!("{:x}", sha2::Sha256::digest(&frame))),
+                    ..Default::default()
+                },
+            )
+            .map_err(RemoteWorkerPortError::NetworkExhausted)?;
+        let acknowledgements: Vec<_> = bound.ack_ids.into_iter().map(ExecutionMessageId).collect();
+        let request = RemoteExchangeRequest::new(
+            self.worker_id.clone(),
+            self.worker_instance_id.clone(),
+            acknowledgements.clone(),
+            frame,
+        )
+        .and_then(|request| request.with_acceptance_receipt().encode())
+        .map_err(remote_frame_error)?;
+        let credential = read_private_credential(&self.credential_path).inspect_err(|_| {
+            remote_transport_debug("credential file failed private-file validation");
+        })?;
+        let sequence = match self
+            .network_journal
+            .prepare(
+                key.as_bytes(),
+                winwincode_network::Replay::ReplayExact,
+                winwincode_network::defaults().max_attempts,
+                winwincode_network::journal::now_millis(),
+            )
+            .map_err(RemoteWorkerPortError::NetworkExhausted)?
+        {
+            winwincode_network::journal::QueuePermit::Ready(sequence) => sequence,
+            winwincode_network::journal::QueuePermit::Waiting(_, failure) => {
+                return Err(RemoteWorkerPortError::Network(failure));
+            }
+            winwincode_network::journal::QueuePermit::Stopped(failure) => {
+                return Err(RemoteWorkerPortError::NetworkExhausted(failure));
+            }
+        };
+        let response = tokio::time::timeout(
+            self.timeout,
+            send_https_request(&self.endpoint, &self.client, &credential, &request),
+        )
+        .await
+        .map_err(|_| {
+            RemoteWorkerPortError::Network(NetworkFailure::new(
+                ErrorKind::Timeout,
+                Acceptance::Unknown,
+                Phase::ResponseHeaders,
+            ))
+        })
+        .and_then(std::convert::identity);
+        let result = response.and_then(|bytes| {
+            let response = decode_exchange_response(&bytes)?;
+            self.state
+                .lock()
+                .map_err(|_| RemoteWorkerPortError::Transport)?
+                .receive_response(&response, &acknowledgements)
+        });
+        let failure = exchange_failure(&result);
+        self.network_journal
+            .finish(
+                key.as_bytes(),
+                sequence,
+                failure,
+                winwincode_network::journal::now_millis(),
+            )
+            .map_err(RemoteWorkerPortError::NetworkExhausted)?;
+        result
+    }
+}
+
+fn decode_exchange_response(bytes: &[u8]) -> Result<RemoteExchangeResponse, RemoteWorkerPortError> {
+    RemoteExchangeResponse::decode(bytes).map_err(|_| {
+        RemoteWorkerPortError::NetworkExhausted(
+            NetworkFailure::new(
+                ErrorKind::ProtocolInvalid,
+                Acceptance::ResponseReceived,
+                Phase::Decode,
+            )
+            .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+                winwincode_network::DiagnosticCode::JsonSchema,
+            )),
+        )
+    })
+}
+
+fn exchange_failure(result: &Result<(), RemoteWorkerPortError>) -> Option<NetworkFailure> {
+    match result {
+        Ok(()) | Err(RemoteWorkerPortError::Backpressure) => None,
+        Err(
+            RemoteWorkerPortError::Network(failure)
+            | RemoteWorkerPortError::NetworkExhausted(failure),
+        ) => Some(*failure),
+        Err(error) => Some(NetworkFailure::new(
+            if matches!(error, RemoteWorkerPortError::Rejected) {
+                ErrorKind::Authorization
+            } else {
+                ErrorKind::ProtocolInvalid
+            },
+            Acceptance::ResponseReceived,
+            Phase::Decode,
+        )),
     }
 }
 
 impl WorkerExecutionPort for RemoteWorkerPort {
     type Error = RemoteWorkerPortError;
+
+    fn has_pending_controls(&self) -> bool {
+        self.state.lock().is_ok_and(|state| !state.inbox.is_empty())
+    }
+
+    fn failure_kind(error: &Self::Error) -> winwincode_codex::ExecutionPortFailureKind {
+        use winwincode_codex::ExecutionPortFailureKind;
+        match error {
+            RemoteWorkerPortError::Backpressure => ExecutionPortFailureKind::Backpressure,
+            RemoteWorkerPortError::Transport | RemoteWorkerPortError::Network(_) => {
+                ExecutionPortFailureKind::Unavailable
+            }
+            RemoteWorkerPortError::TooLarge => ExecutionPortFailureKind::MessageRejected,
+            RemoteWorkerPortError::NetworkExhausted(_)
+            | RemoteWorkerPortError::Rejected
+            | RemoteWorkerPortError::Protocol
+            | RemoteWorkerPortError::ResponseTooLarge => ExecutionPortFailureKind::Terminal,
+        }
+    }
 
     fn send(
         &mut self,
@@ -257,131 +584,182 @@ impl winwincode_execution_port::transport::ExecutionPortCore for NoopCore {
     }
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "owned error callback for Result::map_err"
+)]
+fn remote_frame_error(
+    error: winwincode_execution_port::transport::FrameError,
+) -> RemoteWorkerPortError {
+    match error {
+        winwincode_execution_port::transport::FrameError::TooLarge => {
+            RemoteWorkerPortError::TooLarge
+        }
+        _ => RemoteWorkerPortError::Protocol,
+    }
+}
+
 async fn send_https_request(
     endpoint: &Endpoint,
-    tls: Arc<rustls::ClientConfig>,
+    client: &reqwest::Client,
     credential: &[u8],
     body: &[u8],
 ) -> Result<Vec<u8>, RemoteWorkerPortError> {
-    let token = std::str::from_utf8(credential).map_err(|_| RemoteWorkerPortError)?;
+    let token = std::str::from_utf8(credential).map_err(|_| RemoteWorkerPortError::Rejected)?;
     if token.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Rejected);
     }
-    let stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
-        .await
-        .map_err(|_| {
-            remote_transport_debug("TCP connect failed");
-            RemoteWorkerPortError
-        })?;
-    let server_name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
-        .map_err(|_| RemoteWorkerPortError)?;
-    let mut stream = TlsConnector::from(tls)
-        .connect(server_name, stream)
-        .await
-        .map_err(|_| {
-            remote_transport_debug("TLS handshake failed");
-            RemoteWorkerPortError
-        })?;
-    let head = format!(
-        "POST /internal/v1/execution-port/exchange HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        endpoint.host,
-        endpoint.port,
-        token,
-        body.len()
+    let url = format!(
+        "https://{}:{}/internal/v1/execution-port/exchange",
+        endpoint.host, endpoint.port
     );
-    stream.write_all(head.as_bytes()).await.map_err(|_| {
-        remote_transport_debug("HTTPS header write failed");
-        RemoteWorkerPortError
-    })?;
-    stream.write_all(body).await.map_err(|_| {
-        remote_transport_debug("HTTPS body write failed");
-        RemoteWorkerPortError
-    })?;
-    stream.flush().await.map_err(|_| {
-        remote_transport_debug("HTTPS request flush failed");
-        RemoteWorkerPortError
-    })?;
-    let mut response = Vec::new();
-    let mut chunk = [0_u8; 16 * 1024];
-    while !http_response_complete(&response)? {
-        let read = stream.read(&mut chunk).await.map_err(|_| {
-            remote_transport_debug("HTTPS response read failed");
-            RemoteWorkerPortError
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|error| {
+            RemoteWorkerPortError::Network(winwincode_network::classify_reqwest(
+                &error,
+                Phase::ResponseHeaders,
+            ))
         })?;
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&chunk[..read]);
-        if response.len() > MAX_HTTP_RESPONSE_BYTES {
-            return Err(RemoteWorkerPortError);
-        }
-    }
-    parse_http_response(&response)
+    bounded_http_response(response).await
 }
 
-fn http_response_complete(response: &[u8]) -> Result<bool, RemoteWorkerPortError> {
-    let Some(split) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return Ok(false);
+async fn queued_http_attempt<T, F, Fut>(
+    journal: &winwincode_network::journal::RequestJournal,
+    identity: &[u8],
+    timeout: Duration,
+    send: F,
+    decode: impl FnOnce(&[u8]) -> Result<T, RemoteWorkerPortError>,
+) -> Result<T, RemoteWorkerPortError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    use winwincode_network::{
+        Acceptance, ErrorKind, NetworkFailure, Phase, Replay,
+        journal::{QueuePermit, now_millis},
     };
-    let head = std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError)?;
-    let content_length = head
-        .lines()
-        .skip(1)
-        .find_map(|line| {
-            line.split_once(':').and_then(|(name, value)| {
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-        })
-        .ok_or(RemoteWorkerPortError)?;
-    let expected = split
-        .checked_add(4)
-        .and_then(|value| value.checked_add(content_length))
-        .ok_or(RemoteWorkerPortError)?;
-    if response.len() > expected {
-        return Err(RemoteWorkerPortError);
-    }
-    Ok(response.len() == expected)
+    let sequence = match journal
+        .prepare(
+            identity,
+            Replay::ReplayExact,
+            winwincode_network::defaults().max_attempts,
+            now_millis(),
+        )
+        .map_err(RemoteWorkerPortError::NetworkExhausted)?
+    {
+        QueuePermit::Ready(sequence) => sequence,
+        QueuePermit::Waiting(_, failure) => return Err(RemoteWorkerPortError::Network(failure)),
+        QueuePermit::Stopped(failure) => {
+            return Err(RemoteWorkerPortError::NetworkExhausted(failure));
+        }
+    };
+    let result = tokio::time::timeout(timeout, async {
+        let response = send().await.map_err(|error| {
+            RemoteWorkerPortError::Network(winwincode_network::classify_reqwest(
+                &error,
+                Phase::ResponseHeaders,
+            ))
+        })?;
+        let bytes = bounded_http_response(response).await?;
+        decode(&bytes)
+    })
+    .await
+    .unwrap_or(Err(RemoteWorkerPortError::Network(NetworkFailure::new(
+        ErrorKind::Timeout,
+        Acceptance::Unknown,
+        Phase::ResponseBody,
+    ))));
+    let failure = match &result {
+        Ok(_) => None,
+        Err(
+            RemoteWorkerPortError::Network(failure)
+            | RemoteWorkerPortError::NetworkExhausted(failure),
+        ) => Some(*failure),
+        Err(error) => Some(NetworkFailure::new(
+            if *error == RemoteWorkerPortError::Rejected {
+                ErrorKind::Authorization
+            } else {
+                ErrorKind::ProtocolInvalid
+            },
+            Acceptance::ResponseReceived,
+            Phase::Decode,
+        )),
+    };
+    journal
+        .finish(identity, sequence, failure, now_millis())
+        .map_err(RemoteWorkerPortError::NetworkExhausted)?;
+    result
 }
 
-fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, RemoteWorkerPortError> {
-    let split = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| {
-            remote_transport_debug("HTTPS response has no header boundary");
-            RemoteWorkerPortError
-        })?;
-    let head = std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError)?;
-    if !head
-        .lines()
-        .next()
-        .is_some_and(|line| line == "HTTP/1.1 200 OK" || line == "HTTP/1.0 200 OK")
+async fn bounded_http_response(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, RemoteWorkerPortError> {
+    let status = response.status().as_u16();
+    if status != 200 {
+        let failure = NetworkFailure::http(
+            status,
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    winwincode_network::retry_after(value, std::time::SystemTime::now())
+                }),
+        );
+        return Err(if failure.retryable() {
+            RemoteWorkerPortError::Network(failure)
+        } else {
+            RemoteWorkerPortError::NetworkExhausted(failure)
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES as u64)
     {
-        remote_transport_debug("HTTPS response status is not 200");
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::NetworkExhausted(NetworkFailure {
+            http_status: Some(200),
+            ..NetworkFailure::new(
+                ErrorKind::ProtocolInvalid,
+                Acceptance::ResponseReceived,
+                Phase::ResponseBody,
+            )
+            .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+                winwincode_network::DiagnosticCode::BodyTooLarge,
+            ))
+        }));
     }
-    let content_length = head
-        .lines()
-        .skip(1)
-        .find_map(|line| {
-            line.split_once(':').and_then(|(name, value)| {
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-        })
-        .ok_or_else(|| {
-            remote_transport_debug("HTTPS response has no Content-Length");
-            RemoteWorkerPortError
-        })?;
-    let body = &response[split + 4..];
-    if body.len() != content_length {
-        remote_transport_debug("HTTPS response body length differs from Content-Length");
-        return Err(RemoteWorkerPortError);
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        let mut failure = winwincode_network::classify_reqwest(&error, Phase::ResponseBody);
+        failure.acceptance = Acceptance::ResponseReceived;
+        RemoteWorkerPortError::Network(failure)
+    })? {
+        if body
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|length| length > MAX_HTTP_RESPONSE_BYTES)
+        {
+            return Err(RemoteWorkerPortError::NetworkExhausted(NetworkFailure {
+                http_status: Some(200),
+                ..NetworkFailure::new(
+                    ErrorKind::ProtocolInvalid,
+                    Acceptance::ResponseReceived,
+                    Phase::ResponseBody,
+                )
+                .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+                    winwincode_network::DiagnosticCode::BodyTooLarge,
+                ))
+            }));
+        }
+        body.extend_from_slice(&chunk);
     }
-    Ok(body.to_vec())
+    Ok(body)
 }
 
 fn remote_transport_debug(message: &str) {
@@ -390,24 +768,26 @@ fn remote_transport_debug(message: &str) {
     }
 }
 
-/// The only accepted Worker origin form, `https://HOST:PORT`; shared by the
-/// `--remote` entry and the managed session config validator.
 pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortError> {
     let authority = origin
         .strip_prefix("https://")
         .filter(|value| !value.contains('/') && !value.contains('@'))
-        .ok_or(RemoteWorkerPortError)?;
-    let (host, port) = authority.rsplit_once(':').ok_or(RemoteWorkerPortError)?;
+        .ok_or(RemoteWorkerPortError::Transport)?;
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or(RemoteWorkerPortError::Transport)?;
     if host.is_empty()
         || host
             .chars()
             .any(|character| character.is_ascii_control() || character.is_whitespace())
     {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
-    let port = port.parse::<u16>().map_err(|_| RemoteWorkerPortError)?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| RemoteWorkerPortError::Transport)?;
     if port == 0 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(Endpoint {
         host: host.to_owned(),
@@ -419,20 +799,217 @@ pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortErr
 fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerPortError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let metadata = fs::metadata(path).map_err(|_| RemoteWorkerPortError)?;
+    let metadata = fs::metadata(path).map_err(|_| RemoteWorkerPortError::Transport)?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
-    let bytes = fs::read(path).map_err(|_| RemoteWorkerPortError)?;
+    let bytes = fs::read(path).map_err(|_| RemoteWorkerPortError::Transport)?;
     if bytes.is_empty() || bytes.len() > 16 * 1024 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_http_response, parse_origin};
+    use super::{RemoteWorkerPortError, bounded_http_response, parse_origin};
+    use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+
+    #[test]
+    fn outbound_size_rejection_is_scoped_to_one_message() {
+        use winwincode_codex::{ExecutionPortFailureKind, WorkerExecutionPort};
+        assert_eq!(
+            super::RemoteWorkerPort::failure_kind(&RemoteWorkerPortError::TooLarge),
+            ExecutionPortFailureKind::MessageRejected
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_outbound_exchange_leaves_the_connection_live_without_io() {
+        use super::*;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut message: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|frame| frame["kind"] == "runtime.event")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let ExecutionPortMessage::RuntimeEventMessage(event) = &mut message else {
+            unreachable!()
+        };
+        event.event.summary = "x".repeat(300 * 1024);
+        let journal_path = std::env::temp_dir().join(format!(
+            "worker-size-only-{}-{}.sqlite3",
+            std::process::id(),
+            winwincode_network::journal::now_millis()
+        ));
+        let network_journal =
+            winwincode_network::journal::RequestJournal::open(&journal_path).unwrap();
+        let state = Arc::new(Mutex::new(SharedRemoteState {
+            inbox: VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: Vec::new(),
+            terminal_error: None,
+        }));
+        let mut port = RemoteWorkerPort {
+            network_journal,
+            endpoint: parse_origin("https://localhost:1").unwrap(),
+            credential_path: PathBuf::from("/no-credential-for-local-size-check"),
+            worker_id: event.lease.worker_id.clone(),
+            worker_instance_id: event.lease.worker_instance_id.clone(),
+            timeout: Duration::from_secs(1),
+            client: reqwest::Client::new(),
+            state: Arc::clone(&state),
+            accounting_enabled: std::sync::atomic::AtomicBool::new(false),
+            accounting_wake: Arc::new(tokio::sync::Notify::new()),
+            accounting_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            accounting_progress: tokio::sync::watch::channel(0).0,
+        };
+        assert_eq!(
+            port.exchange(message).await,
+            Err(RemoteWorkerPortError::TooLarge)
+        );
+        assert!(state.lock().unwrap().terminal_error.is_none());
+    }
+
+    #[test]
+    fn backpressure_delivers_controls_and_acknowledges_the_sent_prefix_without_accepting_upstream()
+    {
+        use super::*;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "worker.heartbeat_ack")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let id = winwincode_execution_port::transport::execution_message_id(&message).unwrap();
+        let delivery = winwincode_execution_port::transport::RemoteExchangeDelivery {
+            delivery_id: id.clone(),
+            frame: RemoteTransportAdapter::<NoopCore>::encode(
+                &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message).unwrap(),
+            )
+            .unwrap(),
+        };
+        let sent = ExecutionMessageId("xmsg_00000000000000000000000011".into());
+        let suffix = ExecutionMessageId("xmsg_00000000000000000000000012".into());
+        let mut state = SharedRemoteState {
+            inbox: VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: vec![sent.clone(), suffix.clone()],
+            terminal_error: None,
+        };
+        let response = RemoteExchangeResponse::with_acceptance(vec![delivery], false).unwrap();
+        assert_eq!(
+            state.receive_response(&response, std::slice::from_ref(&sent)),
+            Err(RemoteWorkerPortError::Backpressure)
+        );
+        assert_eq!(state.acknowledgements, vec![suffix]);
+        assert_eq!(state.inbox.len(), 1);
+        assert!(state.terminal_error.is_none());
+        assert_eq!(
+            state.receive_response(&response, std::slice::from_ref(&sent)),
+            Err(RemoteWorkerPortError::Backpressure)
+        );
+        assert_eq!(
+            state.inbox.len(),
+            1,
+            "lost response replay deduplicates controls"
+        );
+        assert_eq!(
+            state.receive_response(
+                &RemoteExchangeResponse::with_acceptance(Vec::new(), true).unwrap(),
+                &[]
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            state.receive_response(&RemoteExchangeResponse::new(Vec::new()).unwrap(), &[]),
+            Err(RemoteWorkerPortError::Protocol)
+        );
+    }
+
+    #[test]
+    fn queued_confirmations_fit_one_exchange_and_keep_the_unsent_suffix() {
+        use super::SharedRemoteState;
+        use winwincode_domain::ExecutionMessageId;
+        let mut state = SharedRemoteState {
+            inbox: std::collections::VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: (0..129)
+                .map(|id| ExecutionMessageId(format!("xmsg_{id:026}")))
+                .collect(),
+            terminal_error: None,
+        };
+        let first = state.acknowledgements_for_exchange();
+        assert_eq!(first.len(), 128);
+        assert_eq!(
+            state.acknowledgements.len(),
+            129,
+            "a failed exchange keeps every confirmation"
+        );
+        state.acknowledgements.retain(|id| !first.contains(id));
+        assert_eq!(
+            state.acknowledgements_for_exchange(),
+            vec![ExecutionMessageId(format!("xmsg_{:026}", 128))]
+        );
+    }
+
+    #[tokio::test]
+    async fn close_delimited_body_is_bounded_without_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = stream
+                .write_all(&vec![b'x'; super::MAX_HTTP_RESPONSE_BYTES + 1])
+                .await;
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded_http_response(response).await,
+            Err(RemoteWorkerPortError::NetworkExhausted(NetworkFailure {
+                http_status: Some(200),
+                ..NetworkFailure::new(
+                    ErrorKind::ProtocolInvalid,
+                    Acceptance::ResponseReceived,
+                    Phase::ResponseBody
+                )
+                .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+                    winwincode_network::DiagnosticCode::BodyTooLarge
+                ))
+            }))
+        );
+        task.await.unwrap();
+    }
 
     #[test]
     fn origin_parser_accepts_only_a_host_and_nonzero_port() {
@@ -459,23 +1036,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn http_response_parser_requires_a_bounded_complete_success() {
-        let body = b"{}";
-        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
-        assert_eq!(
-            parse_http_response(response).expect("complete response"),
-            body
-        );
-        for response in [
-            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
-            b"HTTP/1.1 200 OK\r\n\r\n{}".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}".as_slice(),
+    #[tokio::test]
+    async fn http_status_and_body_framing_are_independent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (response, expected) in [
+            (
+                "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n",
+                Err(RemoteWorkerPortError::NetworkExhausted(
+                    NetworkFailure::http(401, None),
+                )),
+            ),
+            (
+                "HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                Err(RemoteWorkerPortError::NetworkExhausted(
+                    NetworkFailure::http(403, None),
+                )),
+            ),
+            (
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+                Err(RemoteWorkerPortError::NetworkExhausted(
+                    NetworkFailure::http(400, None),
+                )),
+            ),
+            (
+                "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n",
+                Err(RemoteWorkerPortError::NetworkExhausted(
+                    NetworkFailure::http(413, None),
+                )),
+            ),
+            (
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n",
+                Err(RemoteWorkerPortError::Network(NetworkFailure::http(
+                    503, None,
+                ))),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+                Ok(b"{}".to_vec()),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2;extension=yes\r\n{}\r\n0\r\nX-Test: done\r\n\r\n",
+                Ok(b"{}".to_vec()),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}",
+                Ok(b"{}".to_vec()),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n{}",
+                Err(RemoteWorkerPortError::Transport),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{}",
+                Err(RemoteWorkerPortError::Transport),
+            ),
         ] {
-            assert!(
-                parse_http_response(response).is_err(),
-                "response must be rejected"
-            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            let actual = bounded_http_response(response).await;
+            if expected == Err(RemoteWorkerPortError::Transport) {
+                assert!(
+                    matches!(actual, Err(RemoteWorkerPortError::Network(failure)) if failure.kind == ErrorKind::TransportInterrupted && failure.acceptance == Acceptance::ResponseReceived)
+                );
+            } else {
+                assert_eq!(actual, expected);
+            }
+            task.await.unwrap();
         }
     }
 }

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! FUSION-01 acceptance tests for the blind panel contract.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,6 +18,64 @@ use winwincode_fusion::FusionProviderRouter;
 use winwincode_fusion::FusionTokenUsage;
 use winwincode_fusion::MapFusionProviderRouter;
 use winwincode_fusion::run_blind_panel;
+use winwincode_fusion::validate_panel_result;
+
+#[tokio::test]
+async fn collected_panel_requires_every_exact_original_member_once() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(Barrier::new(3));
+    let input = sample_input();
+    let panel = run_blind_panel(
+        "retained",
+        input.clone(),
+        router(
+            &barrier,
+            &requests,
+            [
+                ("provider-a", Behavior::Answer("a")),
+                ("provider-b", Behavior::Fail("unavailable")),
+                ("provider-c", Behavior::Answer("c")),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    let bytes = serde_json::to_vec(&panel).unwrap();
+    let restored = serde_json::from_slice(&bytes).unwrap();
+    validate_panel_result("retained", &input, &restored).unwrap();
+    let original = serde_json::to_value(&panel).unwrap();
+    for pointer in [
+        "/panelId",
+        "/inputDigest",
+        "/candidates/0/audit/panelId",
+        "/candidates/0/audit/candidateId",
+        "/candidates/0/audit/requestId",
+        "/candidates/0/audit/inputDigest",
+        "/candidates/0/audit/requestPayloadDigest",
+        "/candidates/0/audit/provider",
+        "/candidates/0/audit/model",
+        "/failures/0/candidateId",
+        "/failures/0/requestPayloadDigest",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("foreign");
+        let changed = serde_json::from_value(changed).unwrap();
+        assert!(
+            validate_panel_result("retained", &input, &changed).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut missing = panel.clone();
+    missing.failures.clear();
+    assert!(validate_panel_result("retained", &input, &missing).is_err());
+    let mut duplicate = panel.clone();
+    duplicate.candidates.push(panel.candidates[0].clone());
+    assert!(validate_panel_result("retained", &input, &duplicate).is_err());
+    let mut changed = input;
+    changed.provider_candidates[0].reasoning_effort = Some("max".into());
+    assert!(validate_panel_result("retained", &changed, &panel).is_err());
+    assert_eq!(requests.lock().unwrap().len(), 3);
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Behavior {
@@ -98,8 +154,8 @@ fn sample_input() -> FusionInput {
             })
             .collect(),
         budget: FusionBudget {
-            candidate_timeout_millis: 200,
-            max_total_tokens: 1_000,
+            candidate_timeout_millis: Some(200),
+            max_total_tokens: Some(1_000),
         },
     }
 }
@@ -187,7 +243,7 @@ async fn three_providers_run_in_parallel_with_isolated_blind_contexts() {
                 "question",
             ]
         );
-        assert_eq!(request.max_total_tokens, 1_000);
+        assert_eq!(request.max_total_tokens, Some(1_000));
         assert_eq!(request.panel_id, "panel-1");
         assert_ne!(request.candidate_id, "");
     }
@@ -234,7 +290,7 @@ async fn timeout_and_provider_failure_do_not_kill_successful_siblings() {
     );
 
     let mut input = sample_input();
-    input.budget.candidate_timeout_millis = 80;
+    input.budget.candidate_timeout_millis = Some(80);
     let result = run_blind_panel("panel-2", input, panel_router)
         .await
         .expect("panel survives partial failure");

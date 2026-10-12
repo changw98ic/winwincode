@@ -133,9 +133,9 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
                     winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+                deadline_at: Some(Instant("2026-08-25T12:00:00.000Z".into())),
                 max_artifact_bytes: 10_000_000,
-                max_runtime_seconds: 3_600,
+                max_runtime_seconds: Some(3_600),
             },
             managed_app_run_config: None,
         },
@@ -214,9 +214,9 @@ fn pending_rework(
                     winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+                deadline_at: Some(Instant("2026-08-25T12:00:00.000Z".into())),
                 max_artifact_bytes: 10_000_000,
-                max_runtime_seconds,
+                max_runtime_seconds: Some(max_runtime_seconds),
             },
             managed_app_run_config: None,
         },
@@ -1538,7 +1538,7 @@ fn foreign_or_invalid_job_facts_are_rejected_before_any_dispatch_commit() {
             }
             "job" => job.job_id.0 = canonical_id("job", 902),
             "repository" => job.workspace.repository_id.0 = canonical_id("rep", 902),
-            "limits" => job.limits.max_runtime_seconds = 0,
+            "limits" => job.limits.max_runtime_seconds = Some(0),
             _ => unreachable!(),
         }
         let foreign = PendingDeliveryExecution::from_workrun(

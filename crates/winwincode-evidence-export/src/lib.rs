@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic local evidence export and offline verification.
-//!
-//! Inputs are explicit canonical summaries plus content-addressed files. The
-//! crate deliberately has no repository or chat discovery API.
-
 mod archive;
 mod export;
 mod model;

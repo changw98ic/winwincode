@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Public-output redaction for runtime and frozen-candidate projections.
-
 use std::{collections::HashSet, error::Error, fmt};
 
 use serde::Serialize;
@@ -42,8 +40,6 @@ impl fmt::Display for ProjectionRedactionError {
 
 impl Error for ProjectionRedactionError {}
 
-/// Secret-safe live Diff aggregate. Its shape deliberately has no path, hunk,
-/// or unified-Diff field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiffSummaryProjection {
@@ -81,8 +77,6 @@ impl RuntimeDiffSummaryProjection {
     }
 }
 
-// Phase 4 owns the production accepted-runtime adapter. Until then only the
-// feature-gated fixture adapter can mint this summary.
 #[allow(dead_code)]
 pub(crate) fn live_diff_summary(
     changed_file_count: u64,
@@ -222,8 +216,6 @@ fn redaction_error(
     }
 }
 
-/// Sealed Git-adapter detail fact for one already frozen candidate. Fields and
-/// construction stay closed until the real Git source adapter exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedFrozenCandidateDetails {
     candidate_ref: String,
@@ -234,8 +226,6 @@ pub struct AcceptedFrozenCandidateDetails {
     seal: Sha256Digest,
 }
 
-/// Capability proving one authenticated viewer may read the exact candidate.
-/// It is intentionally not deserializable and has no public constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrozenCandidateReviewGrant {
     delivery_id: DeliveryId,
@@ -257,13 +247,6 @@ pub struct FrozenCandidateDetailProjection {
     pub source_ref: String,
 }
 
-/// Produces the separately authorized path-and-hunk projection for one exact,
-/// current, settled frozen candidate.
-///
-/// # Errors
-///
-/// Rejects stale candidates, modified adapter details, changed Diff identity,
-/// incomplete path/hunk scope, and missing review permission.
 pub fn project_frozen_candidate_details(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -444,11 +427,6 @@ pub mod test_support {
         FrozenDeliveryCandidate, Sha256Digest, seal_candidate_details, seal_review_grant,
     };
 
-    /// Creates a sealed Git-adapter fixture for one frozen candidate.
-    ///
-    /// # Panics
-    ///
-    /// Panics only when the test fixture cannot be deterministically sealed.
     #[must_use]
     pub fn accepted_frozen_candidate_details(
         candidate: &FrozenDeliveryCandidate,
@@ -467,12 +445,6 @@ pub mod test_support {
         details
     }
 
-    /// Creates one sealed review-grant fixture. Production identity code does
-    /// not enable this feature and therefore cannot forge the capability.
-    ///
-    /// # Panics
-    ///
-    /// Panics only when the test fixture cannot be deterministically sealed.
     #[must_use]
     pub fn candidate_review_grant(
         candidate: &FrozenDeliveryCandidate,
@@ -634,6 +606,7 @@ mod tests {
         )
         .expect("accepted fixture binding");
         let activity = RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-safe".into(),
             activity_type: RuntimeActivityType::Command,
             command: Some("cargo check -p winwincode-delivery".into()),
@@ -669,6 +642,7 @@ mod tests {
         }
 
         let secret_bearing = RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-secret".into(),
             activity_type: RuntimeActivityType::Command,
             command: Some("curl --token TOP_SECRET https://example.invalid".into()),

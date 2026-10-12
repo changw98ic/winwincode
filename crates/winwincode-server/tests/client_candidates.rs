@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The user-facing Client candidate flows over real HTTP (GIT-100.7): the
-//! dual-authorized `GET /api/v1/clients/{clientId}/candidates` list and the
-//! three `POST /api/v1/clients/candidates/{branch,apply,discard}` routes
-//! wired to the real client exchange, covering the retained-frame projection
-//! driven by a fake device that reports `client.candidate.retained` over the
-//! exchange protocol and answers every `client.candidate.apply` command with
-//! a `client.candidate.apply_result` receipt, the full branch chain
-//! (HTTP → durable downlink → device settlement → `201` + ledger
-//! `branch_created`), the apply chain in its `applied` and `base_stale`
-//! outcomes with the repeated apply returning the original receipt, the
-//! fencing refusal of an apply ticket superseded by a higher token, the
-//! terminal discard, the unauthenticated `401`s, and the dual-authorization
-//! `403`s.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -67,15 +53,12 @@ use winwincode_storage::{
 const BOOTSTRAP_PROOF: &str = "client-candidate-test-bootstrap";
 const ORIGIN: &str = "https://client.example";
 const OWNER_PASSWORD: &str = "initial-owner-password";
-/// Placeholder client node id a fresh device sends before the server assigns
-/// the canonical `cnd_` identity.
 const FRESH_NODE: &str = "device-local-pending";
 const ENROLL_INSTANCE: &str = "cix_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const DEVICE_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const SCHEMA_VERSION: &str = "winwincode/v1";
 const VALID_UNTIL: &str = "2100-01-01T00:00:00.000Z";
 const T0: &str = "2026-09-04T12:00:00.000Z";
-/// The commit the fake device reports for a successful apply.
 const RESULTING_COMMIT: &str = "1234567890abcdef1234567890abcdef12345678";
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -108,7 +91,6 @@ fn fresh_binding_id() -> String {
     format!("rbd_{:026}", NEXT_CODE_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// One canonical ledger receipt id: `lcr_`/`lar_` + 26 Crockford digits.
 fn fresh_receipt_id(prefix: &str) -> String {
     format!(
         "{prefix}{:026}",
@@ -308,8 +290,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// Initializes the Owner with a password, then signs in; returns
-/// (cookie, userId).
 async fn initialize_and_login_owner(address: std::net::SocketAddr) -> (String, String) {
     let response = http_request(
         address,
@@ -337,8 +317,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
         .to_owned();
     (session_cookie_from_response(&response), user_id)
 }
-
-// ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
     address: std::net::SocketAddr,
@@ -400,8 +378,6 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-/// Enrolls a fresh device over the exchange; returns (nodeId, publicClientId,
-/// credential). The node stays `pending_enrollment`.
 async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
@@ -437,7 +413,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     (node, public_client_id, credential)
 }
 
-/// Walks the announcement hello so the node projects `online`.
 async fn walk_hello(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -469,8 +444,6 @@ async fn walk_hello(
     );
 }
 
-/// Enrolls and walks the takeover hello, then sends one heartbeat: the node
-/// is `online` under the device instance.
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -480,8 +453,6 @@ async fn enroll_online_device(
     (node, public_client_id, credential)
 }
 
-/// Publishes one connect code digest the way the Device Client would, and
-/// returns the 8-digit code.
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -502,8 +473,6 @@ fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String
     code.to_owned()
 }
 
-/// Consumes one published code directly, staging the active `use` grant a
-/// connected user would hold.
 fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -532,8 +501,6 @@ fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str)
         .expect("atomic consume and grant");
 }
 
-/// Stages one repository binding on the node plus the repository access
-/// grant that makes it visible to `user_id` (plan 13.4 dual authorization).
 fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> String {
     let binding_id = fresh_binding_id();
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -565,8 +532,6 @@ fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> St
     binding_id
 }
 
-/// Stages one repository binding without any repository access grant: the
-/// binding exists (retained frames can name it) but is invisible.
 fn stage_invisible_binding(data_directory: &Path, node: &str) -> String {
     let binding_id = fresh_binding_id();
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -588,8 +553,6 @@ fn stage_invisible_binding(data_directory: &Path, node: &str) -> String {
     binding_id
 }
 
-/// Claims occupancy directly and walks the lease to `occupied`; returns the
-/// (leaseId, fencingToken) stamp the device frames must carry.
 fn stage_occupied_lease(data_directory: &Path, node: &str, holder_user_id: &str) -> (String, u64) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut occupancy = ClientOccupancyService::new(&mut storage);
@@ -613,8 +576,6 @@ fn stage_occupied_lease(data_directory: &Path, node: &str, holder_user_id: &str)
     (occupied.occupancy_lease_id, occupied.fencing_token)
 }
 
-/// Releases one active lease directly (zero running sessions), the way the
-/// drain completion would.
 fn release_lease(data_directory: &Path, lease_id: &str, token: u64) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut occupancy = ClientOccupancyService::new(&mut storage);
@@ -653,11 +614,6 @@ fn downlink_ack_cursor(data_directory: &Path, node: &str) -> u64 {
     cursors.max(high_water)
 }
 
-// ---- fake device frames ----------------------------------------------------
-
-/// Sends one `client.candidate.retained` frame the way the Device Client's
-/// registry reports a frozen candidate: stamped `C + L` from the occupancy
-/// mirror.
 #[allow(clippy::too_many_arguments)]
 async fn send_retained(
     address: std::net::SocketAddr,
@@ -669,9 +625,14 @@ async fn send_retained(
     mirror_revision: u64,
     binding_id: &str,
     commit: &str,
-) {
+) -> ClientToServerMessage {
     let retained = ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
-        occupancy: occupancy_stamp(lease_id, token, mirror_revision),
+        occupancy: occupancy_stamp(
+            lease_id,
+            token,
+            mirror_revision,
+            &format!("candidate-retained-{commit}"),
+        ),
         worker_session_id: "wsn_000000000000000000000001".to_owned(),
         receipt: winwincode_client_port::domain::LocalCandidateReceipt {
             local_candidate_receipt_id: fresh_receipt_id("lcr_"),
@@ -688,17 +649,16 @@ async fn send_retained(
     let (status, _) = post_exchange(
         address,
         &exchange_request(
-            &[frame(node, DEVICE_INSTANCE, sequence, retained)],
+            &[frame(node, DEVICE_INSTANCE, sequence, retained.clone())],
             downlink_ack_cursor(data_directory, node),
         ),
         Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    retained
 }
 
-/// Sends one raw `client.candidate.apply_result` frame with an explicit
-/// occupancy stamp — the superseded-ticket probe.
 #[allow(clippy::too_many_arguments)]
 async fn send_apply_result(
     address: std::net::SocketAddr,
@@ -715,7 +675,12 @@ async fn send_apply_result(
 ) {
     let apply_result =
         ClientToServerMessage::CandidateApplyResult(ClientCandidateApplyResultPayload {
-            occupancy: occupancy_stamp(lease_id, token, 1),
+            occupancy: occupancy_stamp(
+                lease_id,
+                token,
+                1,
+                &format!("candidate-apply-result-{receipt_id}"),
+            ),
             receipt: winwincode_client_port::domain::LocalApplyReceipt {
                 local_apply_receipt_id: receipt_id.to_owned(),
                 candidate_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -743,33 +708,29 @@ async fn send_apply_result(
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
-fn occupancy_stamp(lease_id: &str, token: u64, mirror_revision: u64) -> OccupancyCommandContext {
+fn occupancy_stamp(
+    lease_id: &str,
+    token: u64,
+    mirror_revision: u64,
+    idempotency_key: &str,
+) -> OccupancyCommandContext {
     OccupancyCommandContext {
         command: CommandContext {
             expected_revision: mirror_revision,
-            idempotency_key: format!("idem_device_{token}"),
+            idempotency_key: idempotency_key.to_owned(),
         },
         occupancy_lease_id: lease_id.to_owned(),
         occupancy_fencing_token: token,
     }
 }
 
-/// How the fake device answers a `client.candidate.apply` command.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ApplyVerdict {
-    /// The branch engine created the branch.
     BranchCreated,
-    /// The apply engine reached the target branch.
     Applied,
-    /// The apply engine failed closed: the target base moved.
     BaseStale,
 }
 
-/// The fake device: polls the durable downlink outbox like the real daemon
-/// polls its inbox, acknowledges every frame, and answers every
-/// `client.candidate.apply` command with a `client.candidate.apply_result`
-/// receipt echoing the exact occupancy stamp and command facts under the
-/// requested verdict.
 fn spawn_candidate_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
@@ -837,7 +798,12 @@ fn spawn_candidate_responder(
                 let receipt_id = fresh_receipt_id("lar_");
                 let apply_result = ClientToServerMessage::CandidateApplyResult(
                     ClientCandidateApplyResultPayload {
-                        occupancy: occupancy_stamp(&lease_id, token, mirror),
+                        occupancy: occupancy_stamp(
+                            &lease_id,
+                            token,
+                            mirror,
+                            &format!("candidate-apply-result-{receipt_id}"),
+                        ),
                         receipt: winwincode_client_port::domain::LocalApplyReceipt {
                             local_apply_receipt_id: receipt_id,
                             candidate_ref,
@@ -874,8 +840,6 @@ fn spawn_candidate_responder(
     })
 }
 
-// ---- candidate HTTP helpers -------------------------------------------------
-
 fn branch_body(client_id: &str, candidate_ref: &str, binding_id: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -908,7 +872,6 @@ fn candidate_ref_of(commit: &str) -> String {
     format!("refs/winwincode/candidates/{commit}")
 }
 
-/// Reads the durable candidate row of one node directly from the ledger.
 fn candidate_state(data_directory: &Path, node: &str, candidate_ref: &str) -> Option<String> {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let ledger = storage.local_candidate_ledger().expect("ledger");
@@ -918,7 +881,6 @@ fn candidate_state(data_directory: &Path, node: &str, candidate_ref: &str) -> Op
         .map(|record| record.state.as_str().to_owned())
 }
 
-/// Counts the immutable apply receipts of one node's candidate.
 fn apply_history_len(data_directory: &Path, node: &str, candidate_ref: &str) -> usize {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let ledger = storage.local_candidate_ledger().expect("ledger");
@@ -932,8 +894,6 @@ fn apply_history_len(data_directory: &Path, node: &str, candidate_ref: &str) -> 
             .len()
     })
 }
-
-// ---- tests ------------------------------------------------------------------
 
 #[tokio::test]
 async fn candidate_routes_require_a_signed_in_session() {
@@ -1009,7 +969,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     let visible_binding = stage_visible_binding(&data_directory, &node, &owner_id);
     let invisible_binding = stage_invisible_binding(&data_directory, &node);
 
-    // No candidate is retained yet.
     let response = http_request(
         address,
         &cookie_get(
@@ -1021,11 +980,9 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     assert_eq!(status_of(&response), "200", "{response}");
     assert_eq!(response_body(&response)["candidates"], json!([]));
 
-    // The device freezes two candidates: one on the shared binding, one on
-    // the unshared binding.
     let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
     let hidden_commit = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
-    send_retained(
+    let retained = send_retained(
         address,
         &data_directory,
         &node,
@@ -1050,7 +1007,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     )
     .await;
 
-    // The holder sees exactly the visible candidate with the ledger facts.
     let response = http_request(
         address,
         &cookie_get(
@@ -1080,19 +1036,21 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
             .starts_with("lcr_")
     );
 
-    // The idempotent replay settles as the same retention: still one card.
-    send_retained(
+    let (status, _) = post_exchange(
         address,
-        &data_directory,
-        &node,
-        &credential,
-        "ocl_test",
-        1,
-        1,
-        &visible_binding,
-        commit,
+        &exchange_request(
+            &[frame(
+                &node,
+                DEVICE_INSTANCE,
+                next_client_sequence(&data_directory, &node),
+                retained,
+            )],
+            downlink_ack_cursor(&data_directory, &node),
+        ),
+        Some(&credential),
     )
     .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
     let response = http_request(
         address,
         &cookie_get(
@@ -1110,7 +1068,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
         "the replayed retention dedupes"
     );
 
-    // An unknown Client id is not a candidate source.
     let response = http_request(
         address,
         &cookie_get("/api/v1/clients/111222333/candidates", &owner_cookie),
@@ -1194,8 +1151,6 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
     assert_eq!(history[0]["strategy"], json!("create_branch"));
     assert_eq!(history[0]["targetBranch"], json!(branch_name));
 
-    // The device answered from the durable outbox: the command was durable
-    // before the Server responded, and the ledger carries the settlement.
     assert_eq!(
         candidate_state(&data_directory, &node, &candidate_ref_of(commit)).expect("candidate"),
         "branch_created"
@@ -1205,8 +1160,6 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
         1
     );
 
-    // The repeated request returns the original branch without a device
-    // round trip (the responder no longer runs).
     responder.abort();
     let response = http_request(
         address,
@@ -1225,7 +1178,6 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
         "the replay appended no second receipt"
     );
 
-    // An unknown candidate is a resource miss.
     let response = http_request(
         address,
         &cookie_post(
@@ -1292,7 +1244,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
     )
     .await;
 
-    // Applied outcome: the receipt settles with its resulting commit.
     let responder = spawn_candidate_responder(
         data_directory.clone(),
         address,
@@ -1331,7 +1282,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         "the applied result is terminal"
     );
 
-    // The repeated apply returns the original receipt — never a second one.
     responder.abort();
     let response = http_request(
         address,
@@ -1348,7 +1298,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         1
     );
 
-    // A different apply command on the terminal candidate is refused.
     let response = http_request(
         address,
         &cookie_post(
@@ -1367,8 +1316,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "WRONG_STATE");
 
-    // Base-stale outcome: the receipt settles fail-closed and the candidate
-    // stays retryable (`failed`).
     let responder = spawn_candidate_responder(
         data_directory.clone(),
         address,
@@ -1447,14 +1394,10 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
     )
     .await;
 
-    // The occupancy is released and re-claimed: the fresh lease mints a
-    // strictly higher fencing token, superseding every older ticket.
     release_lease(&data_directory, &first_lease, first_token);
     let (second_lease, second_token) = stage_occupied_lease(&data_directory, &node, &owner_id);
     assert!(second_token > first_token, "tokens are strictly monotonic");
 
-    // The device reports the result of its superseded ticket (stamped with
-    // the released lease): the exchange refuses it — no ledger settlement.
     send_apply_result(
         address,
         &data_directory,
@@ -1479,7 +1422,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         "retained"
     );
 
-    // A mismatching token under the current lease is refused the same way.
     send_apply_result(
         address,
         &data_directory,
@@ -1499,7 +1441,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         0
     );
 
-    // The ticket stamped with the current lease and token settles.
     send_apply_result(
         address,
         &data_directory,
@@ -1581,8 +1522,6 @@ async fn discard_settles_terminal_and_idempotent() {
         "discarded"
     );
 
-    // The repeated discard is an accepted idempotent replay: still one
-    // receipt, still terminal.
     let response = http_request(
         address,
         &cookie_post(
@@ -1602,7 +1541,6 @@ async fn discard_settles_terminal_and_idempotent() {
         1
     );
 
-    // Every further mutation refuses the terminal lifecycle.
     let response = http_request(
         address,
         &cookie_post(
@@ -1635,7 +1573,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
         &publish_connect_code(&data_directory, &node, "56565656"),
         &owner_id,
     );
-    // A binding the owner cannot see (no repository grant) and one they can.
     let invisible = stage_invisible_binding(&data_directory, &node);
     let visible = stage_visible_binding(&data_directory, &node, &owner_id);
     let (lease_id, token) = stage_occupied_lease(&data_directory, &node, &owner_id);
@@ -1666,8 +1603,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
     )
     .await;
 
-    // The holder without the repository grant fails the visibility half of
-    // the dual authorization.
     let response = http_request(
         address,
         &cookie_post(
@@ -1702,7 +1637,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
     assert_eq!(status_of(&response), "403", "{response}");
     assert_eq!(wire_code(&response), "ACCESS_DENIED");
 
-    // The invisible candidate is invisible in the list projection too.
     let response = http_request(
         address,
         &cookie_get(

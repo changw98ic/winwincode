@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Controller-owned `WorkItem` scheduling seam for the `WorkRun` cutover.
-//!
-//! Selection is deliberately independent of Delivery's former global stage. A
-//! Controller may start several ready items; each resulting run is settled by
-//! one durable terminal fact carrying its own attempt identity.
 use super::workrun_execution::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
 use std::collections::HashSet;
 use winwincode_domain::is_canonical_prefixed_id;
@@ -72,7 +67,6 @@ fn valid_created_at(value: &str) -> bool {
 }
 
 fn acyclic_items(items: &[WorkItem]) -> bool {
-    // ponytail: bounded to 1000 items; use an indegree index if that ceiling grows.
     let mut resolved = HashSet::new();
     loop {
         let before = resolved.len();
@@ -132,7 +126,6 @@ pub struct WorkRunAggregate {
 impl Eq for WorkRunAggregate {}
 
 impl WorkRunAggregate {
-    /// Returns one current summary state without consulting a retired global stage.
     #[must_use]
     pub fn summary_state(&self, has_open_attention: bool) -> WorkItemState {
         if has_open_attention
@@ -154,6 +147,9 @@ impl WorkRunAggregate {
             WorkItemState::InProgress,
         ] {
             if self.items.iter().any(|item| item.state == state) {
+                if state == WorkItemState::CandidateReady {
+                    return self.candidate_consumer_failure().unwrap_or(state);
+                }
                 return state;
             }
         }
@@ -198,11 +194,28 @@ impl WorkRunAggregate {
         WorkItemState::Cancelled
     }
 
-    /// Checks stored relationships before scheduling or accepting an appended run.
-    /// A generated Rust struct alone does not validate references or uniqueness.
-    ///
-    /// # Errors
-    /// Rejects invalid references, duplicate identities, cycles or out-of-range attempts.
+    fn candidate_consumer_failure(&self) -> Option<WorkItemState> {
+        for (run_state, item_state) in [
+            (WorkRunState::Failed, WorkItemState::Failed),
+            (WorkRunState::Cancelled, WorkItemState::Cancelled),
+        ] {
+            if self.items.iter().any(|item| {
+                item.state == WorkItemState::CandidateReady
+                    && self
+                        .runs
+                        .iter()
+                        .rev()
+                        .find(|run| {
+                            run.work_item_id == item.id && run.work_item_revision == item.revision
+                        })
+                        .is_some_and(|run| run.state == run_state)
+            }) {
+                return Some(item_state);
+            }
+        }
+        None
+    }
+
     pub fn validate(&self) -> Result<(), WorkRunSchedulingError> {
         let invalid = WorkRunSchedulingError::InvalidAggregate;
         if !valid_revision(self.contract.revision.0)
@@ -269,9 +282,6 @@ impl WorkRunAggregate {
             return Err(invalid);
         }
         let mut run_ids = HashSet::new();
-        // Attempts belong to one execution job. A candidate producer and its
-        // read-only consumer share a WorkItem, so WorkItem+attempt is not
-        // an identity key for the WorkRun aggregate.
         let mut attempts = HashSet::new();
         let mut active_items = HashSet::new();
         let mut candidate_items = HashSet::new();
@@ -306,14 +316,11 @@ impl WorkRunAggregate {
         Ok(())
     }
 
-    /// Returns the canonical item state after applying dependency truth.
-    /// Dependency readiness is derived, never stored as a second state.
     #[must_use]
     pub fn effective_item_state(&self, item: &WorkItem) -> WorkItemState {
         effective_work_item_state(item, &self.items)
     }
 
-    /// Returns incomplete direct dependencies in the `WorkItem`'s stable order.
     #[must_use]
     pub fn dependency_blockers(&self, item: &WorkItem) -> Vec<WorkItemId> {
         item.depends_on
@@ -344,7 +351,6 @@ impl WorkRunAggregate {
         Ok(())
     }
 
-    /// Applies the Controller completion gate to one explicitly approved candidate.
     pub(crate) fn complete_candidate(
         &mut self,
         work_run_id: &WorkRunId,
@@ -384,10 +390,6 @@ impl WorkRunAggregate {
         self.validate()
     }
 
-    /// Selects from persisted runs/items; callers cannot supply an active-ID list.
-    ///
-    /// # Errors
-    /// Rejects invalid snapshots, exhausted attempts or a graph with no runnable item.
     pub fn start_next(&self) -> Result<WorkRunStart, WorkRunSchedulingError> {
         self.validate()?;
         let active = self
@@ -411,10 +413,6 @@ impl WorkRunAggregate {
         self.start_item(&start.work_item.id)
     }
 
-    /// Selects one exact ready `WorkItem`, retaining dependency and active-run checks.
-    ///
-    /// # Errors
-    /// Rejects stale or invalid items, blocked dependencies, active runs and exhausted attempts.
     pub fn start_item(&self, id: &WorkItemId) -> Result<WorkRunStart, WorkRunSchedulingError> {
         self.validate()?;
         let item = self
@@ -434,18 +432,12 @@ impl WorkRunAggregate {
                     })
             })
             .ok_or(WorkRunSchedulingError::NoRunnableWorkItem)?;
-        // Selection creates a new execution job; scheduler retries retain that job.
         let attempt = 1;
         let mut work_item = item.clone();
         work_item.state = WorkItemState::InProgress;
         Ok(WorkRunStart { work_item, attempt })
     }
 
-    /// Selects an existing candidate item for a new, read-only execution job.
-    /// The candidate producer and the item's input revision are retained.
-    ///
-    /// # Errors
-    /// Rejects missing candidates, stale contracts, or an already running consumer.
     pub fn start_verification(
         &self,
         id: &WorkItemId,
@@ -480,10 +472,6 @@ impl WorkRunAggregate {
         self.append_run_mode(run, true)
     }
 
-    /// Adds one Controller-created `WorkRun` after checking its contract/item binding.
-    ///
-    /// # Errors
-    /// Rejects stale bindings, duplicate active runs or nonsequential attempts.
     pub fn append_run(&mut self, run: WorkRun) -> Result<(), WorkRunSchedulingError> {
         self.append_run_mode(run, false)
     }
@@ -700,10 +688,6 @@ fn work_item_transition_allowed(from: &WorkItemState, to: &WorkItemState) -> boo
     )
 }
 
-/// Select one unblocked item without requiring other items to be terminal.
-///
-/// # Errors
-/// Returns an error when no unblocked ready item matches the revision.
 fn start_next_work_run(
     items: &[WorkItem],
     input: &WorkRunAdvanceInput,
@@ -825,8 +809,6 @@ impl WorkRunAggregate {
         self.transition_item_state(&item_id, item_state)?;
         self.runs[run_index].state = run_state;
         self.runs[run_index].revision = Revision(next_run_revision);
-        // WorkItem revision identifies the accepted input, not execution status.
-        // Delivery and WorkRun revisions already sequence this state transition.
         Ok(())
     }
 }
@@ -945,6 +927,38 @@ mod aggregate_tests {
             .iter_mut()
             .for_each(|item| item.state = WorkItemState::Done);
         assert_eq!(value.summary_state(false), WorkItemState::Done);
+    }
+
+    #[test]
+    fn latest_candidate_consumer_failure_is_visible_and_retry_can_recover() {
+        let mut value = aggregate();
+        value.items.truncate(1);
+        value.items[0].state = WorkItemState::CandidateReady;
+        let mut producer = run(&value, 1);
+        producer.state = WorkRunState::CandidateReady;
+        let mut consumer = producer.clone();
+        consumer.id = WorkRunId("wrn_01J00000000000000000000001".into());
+        consumer.execution_job_id =
+            winwincode_domain::ExecutionJobId("job_01J00000000000000000000001".into());
+        consumer.state = WorkRunState::Failed;
+        value.runs = vec![producer.clone(), consumer];
+        value.validate().unwrap();
+        assert_eq!(value.summary_state(false), WorkItemState::Failed);
+        assert_eq!(value.summary_state(true), WorkItemState::WaitingHuman);
+        assert!(value.start_verification(&value.items[0].id).is_ok());
+        let mut retry = run(&value, 1);
+        retry.id = WorkRunId("wrn_01J00000000000000000000002".into());
+        retry.execution_job_id =
+            winwincode_domain::ExecutionJobId("job_01J00000000000000000000002".into());
+        value.append_verification_run(retry).unwrap();
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        value.runs[2].state = WorkRunState::Settled;
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        value.runs[2].state = WorkRunState::Cancelled;
+        assert_eq!(value.summary_state(false), WorkItemState::Cancelled);
+        value.items[0].revision = Revision(2);
+        assert_eq!(value.summary_state(false), WorkItemState::CandidateReady);
+        assert_eq!(value.runs[0], producer);
     }
 
     #[test]
@@ -1163,7 +1177,6 @@ mod aggregate_tests {
             value.append_run(duplicate.clone()),
             Err(WorkRunSchedulingError::InvalidAttempt)
         );
-        // A new job starts at one even after the old job exhausted its retries.
         value.runs[0].attempt = 1000;
         assert_eq!(value.start_next().unwrap().attempt, 1);
         duplicate.execution_job_id.0 = "job_01J00000000000000000000001".into();

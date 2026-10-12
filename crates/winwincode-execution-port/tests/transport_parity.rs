@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Contract tests for the business-neutral local/remote `ExecutionPort` seam.
-//!
-//! The tests freeze the seam: both adapters accept the same typed frame, the
-//! remote adapter uses one canonical JSON envelope, and neither adapter
-//! interprets lease, dedupe, or execution outcomes.
-
 use std::collections::VecDeque;
 
 use serde_json::{Value, json};
@@ -106,7 +100,7 @@ fn worker_frame() -> TypedFrame {
 #[test]
 fn all_canonical_fixture_messages_round_trip_through_remote_json() {
     let messages = fixture_messages();
-    assert_eq!(messages.len(), 28);
+    assert_eq!(messages.len(), 30);
 
     for (direction, message) in messages {
         let frame = TypedFrame::new(direction, message).expect("typed frame is valid");
@@ -116,6 +110,46 @@ fn all_canonical_fixture_messages_round_trip_through_remote_json() {
             .expect("canonical frame decoding");
         assert_eq!(decoded, frame);
     }
+}
+
+#[test]
+fn v2_exchange_requires_an_explicit_acceptance_receipt_and_keeps_v1_compatibility() {
+    let request = RemoteExchangeRequest::new(
+        winwincode_domain::WorkerId("wrk_00000000000000000000000001".into()),
+        winwincode_domain::WorkerInstanceId("wki_00000000000000000000000001".into()),
+        Vec::new(),
+        RemoteTransportAdapter::<ScriptedCore>::encode(&worker_frame()).unwrap(),
+    )
+    .unwrap()
+    .with_acceptance_receipt();
+    let decoded = RemoteExchangeRequest::decode(&request.encode().unwrap()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(decoded.supports_acceptance_receipt());
+    for accepted in [false, true] {
+        let response = RemoteExchangeResponse::with_acceptance(Vec::new(), accepted).unwrap();
+        assert_eq!(
+            RemoteExchangeResponse::decode(&response.encode().unwrap())
+                .unwrap()
+                .frame_accepted(),
+            accepted
+        );
+    }
+    assert!(
+        RemoteExchangeResponse::decode(
+            br#"{"schemaVersion":"execution-port.remote-exchange.v2","deliveries":[]}"#
+        )
+        .is_err()
+    );
+    assert!(RemoteExchangeResponse::decode(br#"{"schemaVersion":"execution-port.remote-exchange.v1","frameAccepted":false,"deliveries":[]}"#).is_err());
+    let legacy = RemoteExchangeResponse::decode(
+        &RemoteExchangeResponse::new(Vec::new())
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!legacy.has_acceptance_receipt());
+    assert!(legacy.frame_accepted());
 }
 
 #[test]
@@ -149,6 +183,83 @@ fn remote_exchange_round_trips_bounded_canonical_frames_and_exact_delivery_ids()
     let decoded = RemoteExchangeResponse::decode(&response.encode().expect("response encode"))
         .expect("response decode");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn maximum_inner_frame_round_trips_after_integer_array_expansion() {
+    use winwincode_execution_port::transport::{
+        MAX_REMOTE_ACKNOWLEDGEMENTS, MAX_REMOTE_FRAME_BYTES, MAX_REMOTE_REQUEST_BYTES,
+    };
+    let (_, message) = fixture_messages()
+        .into_iter()
+        .find(|(_, message)| matches!(message, ExecutionPortMessage::ArtifactChunkMessage(_)))
+        .unwrap();
+    let ExecutionPortMessage::ArtifactChunkMessage(mut chunk) = message else {
+        unreachable!()
+    };
+    chunk.payload.data_base64.clear();
+    let frame = TypedFrame::new(
+        FrameDirection::WorkerToControlPlane,
+        ExecutionPortMessage::ArtifactChunkMessage(chunk.clone()),
+    )
+    .unwrap();
+    let overhead = RemoteTransportAdapter::<ScriptedCore>::encode(&frame)
+        .unwrap()
+        .len();
+    chunk.payload.data_base64 = "z".repeat(MAX_REMOTE_FRAME_BYTES - overhead);
+    let frame = TypedFrame::new(
+        FrameDirection::WorkerToControlPlane,
+        ExecutionPortMessage::ArtifactChunkMessage(chunk),
+    )
+    .unwrap();
+    let bytes = RemoteTransportAdapter::<ScriptedCore>::encode(&frame).unwrap();
+    assert_eq!(bytes.len(), MAX_REMOTE_FRAME_BYTES);
+    let request = RemoteExchangeRequest::new(
+        winwincode_domain::WorkerId("wrk_00000000000000000000000001".into()),
+        winwincode_domain::WorkerInstanceId("wki_00000000000000000000000001".into()),
+        vec![
+            winwincode_domain::ExecutionMessageId("xmsg_00000000000000000000000001".into());
+            MAX_REMOTE_ACKNOWLEDGEMENTS
+        ],
+        bytes,
+    )
+    .unwrap();
+    let encoded = request.encode().unwrap();
+    assert!(encoded.len() > 320 * 1024);
+    assert!(encoded.len() <= MAX_REMOTE_REQUEST_BYTES);
+    assert_eq!(RemoteExchangeRequest::decode(&encoded).unwrap(), request);
+    assert_eq!(
+        RemoteExchangeRequest::decode(&vec![b' '; MAX_REMOTE_REQUEST_BYTES + 1]),
+        Err(FrameError::TooLarge)
+    );
+}
+
+#[test]
+fn response_constructor_enforces_encoded_page_bytes() {
+    let mut deliveries = Vec::new();
+    for seed in 1..=8 {
+        let fixture: Value = serde_json::from_str(VALID_FIXTURE).unwrap();
+        let mut message = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "worker.heartbeat_ack")
+            .unwrap()
+            .clone();
+        message["messageId"] = json!(format!("xmsg_{seed:026}"));
+        message["error"] =
+            json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(200*1024),"retryable":true});
+        let message: ExecutionPortMessage = serde_json::from_value(message).unwrap();
+        let frame = TypedFrame::new(FrameDirection::ControlPlaneToWorker, message.clone()).unwrap();
+        deliveries.push(RemoteExchangeDelivery {
+            delivery_id: execution_message_id(&message).unwrap(),
+            frame: RemoteTransportAdapter::<ScriptedCore>::encode(&frame).unwrap(),
+        });
+    }
+    assert_eq!(
+        RemoteExchangeResponse::new(deliveries),
+        Err(FrameError::TooLarge)
+    );
 }
 
 #[test]

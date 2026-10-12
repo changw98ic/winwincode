@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact, bounded Candidate file and diff reads over trusted Artifact/Git facts.
-
 use base64::{
     Engine as _, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
 };
@@ -507,8 +505,6 @@ fn content_media_type(path: &str, encoding: GitCandidateReviewFileEncoding) -> &
         Some("webp") => "image/webp",
         Some("avif") => "image/avif",
         Some("html" | "htm") => "text/html",
-        // SVG is executable document content; callers must use the isolated
-        // preview path and must never treat it as an inline image data URL.
         Some("svg") => "application/octet-stream",
         _ => match encoding {
             GitCandidateReviewFileEncoding::Utf8 => "text/plain",

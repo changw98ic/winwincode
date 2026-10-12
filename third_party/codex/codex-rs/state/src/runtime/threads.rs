@@ -1134,6 +1134,10 @@ ON CONFLICT(id) DO UPDATE SET
 
         let mut tx = self.pool.begin().await?;
         for thread_id_string in &thread_id_strings {
+            sqlx::query("DELETE FROM tool_requests WHERE thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("DELETE FROM thread_dynamic_tools WHERE thread_id = ?")
                 .bind(thread_id_string)
                 .execute(&mut *tx)

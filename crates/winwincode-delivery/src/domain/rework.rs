@@ -1,25 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Precise, bounded Delivery rework decisions.
-//!
-//! The values in this module are derived authorization facts. They are not an
-//! extra persisted Delivery object and they do not schedule Codex work.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::rework::ReworkAuthorization;
-//!
-//! let _caller_built_authorization = ReworkAuthorization {
-//!     previous_candidate: todo!(),
-//!     ..todo!()
-//! };
-//! ```
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::rework::ReworkAuthorization;
-//!
-//! let _: ReworkAuthorization = serde_json::from_str("{}").unwrap();
-//! ```
-
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -29,9 +9,9 @@ use winwincode_domain::{DeliveryId, EvidenceId, Sha256Digest, WorkItemId, WorkRu
 use super::{
     AcceptanceCriterionId, CriterionVerdict, Delivery, DeliverySnapshot, DeliveryStatus,
     DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictStatus,
-    FreezeCandidateFacts, FrozenDeliveryCandidate, ValidatedGitSnapshotFact,
+    FreezeCandidateFacts, FrozenDeliveryCandidate, SealedCandidateSource,
     assert_frozen_candidate_current, bounded_text,
-    candidate::{assert_validated_git_snapshot_fact, freeze_authorized_rework_candidate},
+    candidate::{assert_sealed_candidate_source, freeze_authorized_rework_candidate},
     portable_identifier, validation_error,
 };
 
@@ -66,7 +46,6 @@ impl ReworkTargetFact {
     }
 }
 
-/// The current candidate/diff projection resolved by the Control Plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentReworkScope {
     candidate_ref: String,
@@ -75,7 +54,6 @@ pub struct CurrentReworkScope {
 }
 
 impl CurrentReworkScope {
-    /// Returns the complete repair scope derived from the current failed evidence and Git hunks.
     #[must_use]
     pub fn annotations(&self) -> Vec<PreciseReworkAnnotation> {
         self.targets
@@ -90,11 +68,6 @@ impl CurrentReworkScope {
             })
             .collect()
     }
-    /// Derives allowed targets exclusively from the sealed current candidate
-    /// and the current failing Verdict, never from request-supplied paths.
-    ///
-    /// # Errors
-    /// Rejects stale candidates, missing failed evidence, invalid item bindings and oversized scopes.
     pub fn from_candidate(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -172,12 +145,6 @@ pub struct PreciseReworkAnnotation {
     pub evidence_ref_ids: Vec<EvidenceId>,
 }
 
-/// Append-only prior verdict history validated for one current `DeliverySpec`.
-///
-/// Fields and construction stay crate-private so transport callers cannot
-/// erase a prior failure by submitting an empty history. The Control Plane
-/// transaction derives this fact from journal snapshots before asking for a
-/// rework decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedReworkHistoryFact {
     delivery_id: DeliveryId,
@@ -209,8 +176,6 @@ pub enum ReworkClarificationReason {
     RepeatedCriterionFailure,
 }
 
-/// Constructor-derived proof that the current bounded rework policy requires
-/// human clarification instead of another remediator attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReworkClarification {
     delivery_id: DeliveryId,
@@ -323,7 +288,6 @@ impl ReworkAuthorization {
         self.next_attempt
     }
 
-    /// Initial attempt of the new execution job, independent of the rework budget.
     #[must_use]
     pub fn work_run_attempt(&self) -> i64 {
         self.work_run_attempt
@@ -344,11 +308,6 @@ impl ReworkAuthorization {
         true
     }
 
-    /// Derives the only aggregate change authorized by this precise rework:
-    /// retire the exact failed candidate producer and reopen its unchanged input.
-    ///
-    /// # Errors
-    /// Rejects stale authorization, active consumers, or a non-candidate source.
     pub fn dispatch_aggregate(
         &self,
         delivery: &Delivery,
@@ -386,12 +345,6 @@ impl ReworkAuthorization {
         Ok(aggregate)
     }
 
-    /// Revalidates this sealed decision immediately before dispatch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects state drift, an invalidated candidate, changed failure facts,
-    /// or a changed Delivery-wide attempt number.
     pub fn validate_for_dispatch(
         &self,
         delivery: &Delivery,
@@ -461,7 +414,7 @@ fn current_verdict_evidence(
     evidence.delivery_id == *delivery.id()
         && evidence.delivery_spec_id == delivery.snapshot().spec.id
         && evidence.delivery_spec_revision == delivery.snapshot().spec.revision
-        && evidence.candidate_ref == candidate.candidate_ref()
+        && evidence.candidate_id == *candidate.candidate_id()
 }
 
 fn page_annotation_evidence(
@@ -595,7 +548,6 @@ pub enum ReworkDecision {
     Clarify(ReworkClarification),
 }
 
-/// Blocking follow-up actions derived from all current Verdict Attention items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerdictAttentionAction {
     ClarifyDefinition,
@@ -603,9 +555,6 @@ pub(crate) enum VerdictAttentionAction {
     RetryVerification,
 }
 
-/// Reconstructs the derived Verdict action from one resolved current
-/// `AttentionItem`. The action itself is deliberately not persisted: the
-/// canonical item type and resolution are the authority.
 pub(crate) const fn resolved_verdict_attention_action(
     item_type: super::AttentionItemType,
     status: super::AttentionItemStatus,
@@ -628,10 +577,6 @@ pub(crate) const fn resolved_verdict_attention_action(
     }
 }
 
-/// Chooses the safest next state from the complete current action set.
-///
-/// Clarification always outranks code rework, which outranks a retry. The
-/// result therefore cannot change with Attention resolution order.
 pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) -> DeliveryStatus {
     if actions.contains(&VerdictAttentionAction::ClarifyDefinition) {
         DeliveryStatus::Clarifying
@@ -642,22 +587,20 @@ pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) ->
     }
 }
 
-/// Returns the next business rework number from accepted remediator bindings.
 pub(crate) fn next_rework_attempt(delivery: &Delivery) -> u64 {
-    delivery
-        .snapshot()
+    rework_dispatch_count(delivery.snapshot()).saturating_add(1)
+}
+
+pub(crate) fn rework_dispatch_count(snapshot: &DeliverySnapshot) -> u64 {
+    snapshot
         .session_bindings
         .iter()
         .filter(|binding| binding.execution_profile.as_deref() == Some("remediator"))
-        .count()
-        .saturating_add(1) as u64
+        .map(|binding| &binding.execution_job_id)
+        .collect::<HashSet<_>>()
+        .len() as u64
 }
 
-/// Derives sealed rework history from append-only Delivery journal snapshots.
-///
-/// The transaction may provide the full Delivery history. Only verdicts for
-/// the current Spec revision and an earlier candidate are included. Missing,
-/// reordered, duplicate, foreign, or insufficient history is rejected.
 pub(crate) fn derive_validated_rework_history(
     delivery: &Delivery,
     append_only_history: &[DeliverySnapshot],
@@ -665,7 +608,7 @@ pub(crate) fn derive_validated_rework_history(
     let mut previous_revision = None;
     let mut prior_candidate_refs = HashSet::new();
     let mut prior_failed_criterion_ids = HashSet::new();
-    let current_candidate_ref = delivery
+    let _current_candidate_ref = delivery
         .snapshot()
         .verdict
         .as_ref()
@@ -693,8 +636,10 @@ pub(crate) fn derive_validated_rework_history(
             continue;
         };
         if verdict.status != DeliveryVerdictStatus::Fail
-            || current_candidate_ref == Some(verdict.candidate_ref.as_str())
-            || !prior_candidate_refs.insert(verdict.candidate_ref.as_str())
+            || delivery.snapshot().verdict.as_ref().is_some_and(|current| {
+                current.id == verdict.id && current.candidate_ref == verdict.candidate_ref
+            })
+            || !prior_candidate_refs.insert((verdict.candidate_ref.as_str(), verdict.id.0.as_str()))
         {
             continue;
         }
@@ -707,10 +652,6 @@ pub(crate) fn derive_validated_rework_history(
         );
     }
 
-    // Rework is a business transition, not a WorkRun lease-attempt counter.
-    // The append-only candidate verdict chain is the authoritative history
-    // available at this seam; a missing prior verdict is rejected when the
-    // sealed fact is consumed by `decide_precise_rework`.
     let observed_rework_count = u64::try_from(prior_candidate_refs.len()).unwrap_or(u64::MAX);
     let mut prior_failed_criterion_ids = prior_failed_criterion_ids.into_iter().collect::<Vec<_>>();
     prior_failed_criterion_ids.sort_by(|left, right| left.0.cmp(&right.0));
@@ -749,25 +690,12 @@ fn seal_rework_history(
     )))
 }
 
-/// Removes prior candidate authorization when a remediator writer starts.
-///
-/// Historical records stay in the append-only journal, while the new current
-/// snapshot no longer exposes prior-candidate Evidence or Verdict as usable.
 pub(crate) fn invalidate_candidate_authorization_for_writer_start(snapshot: &mut DeliverySnapshot) {
+    snapshot.same_candidate_reverification = None;
     snapshot.evidence.clear();
     snapshot.verdict = None;
 }
 
-/// Chooses clarification or returns one exact remediator authorization.
-///
-/// The caller supplies current candidate annotations, but cannot supply the
-/// writer role or attempt number. All annotations must exactly equal a current
-/// Control Plane projection target and cite current candidate-bound Evidence.
-///
-/// # Errors
-///
-/// Rejects stale candidates, non-failing verdicts, expanded scope, foreign
-/// tasks/files/hunks, or missing/foreign Evidence references.
 pub fn decide_precise_rework(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -787,10 +715,6 @@ pub fn decide_precise_rework(
         ));
     }
 
-    // Rework is a business transition, not an execution attempt ordinal.
-    // The sealed append-only verdict history counts prior candidates, so a
-    // lease retry (including a retry on another WorkItem) cannot consume a
-    // Delivery rework slot.
     let rework_count = history.observed_rework_count;
     if history.delivery_id != *delivery.id()
         || history.delivery_spec_id != delivery.snapshot().spec.id
@@ -996,23 +920,13 @@ fn candidate_contains_hunk(
         .any(|hunk| hunk.file_path == file_path && hunk.hunk_sha256 == hunk_sha256)
 }
 
-/// Atomically freezes and authorizes one remediator replacement candidate.
-///
-/// This is the only production entry that can turn remediator output into a
-/// frozen candidate. The generic candidate freezer accepts executors only, so
-/// skipping the scope check cannot create a verification-eligible candidate.
-///
-/// # Errors
-///
-/// Rejects stale authorization, another writer or fenced Job, changed Spec
-/// lineage, and any old-to-new path or hunk outside the approved scope.
 pub fn freeze_rework_replacement_candidate(
     delivery: &Delivery,
     authorization: &ReworkAuthorization,
     replacement_facts: &FreezeCandidateFacts,
-    replacement_delta: &ValidatedGitSnapshotFact,
+    replacement_delta: &SealedCandidateSource,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    if !replacement_delta.has_same_terminal_workspace(replacement_facts.git_snapshot()) {
+    if !replacement_delta.has_same_terminal_workspace(replacement_facts.candidate_source()) {
         return Err(invalid_rework(
             "replacement delta and candidate snapshot must come from one exact terminal fenced workspace",
         ));
@@ -1028,19 +942,15 @@ pub fn freeze_rework_replacement_candidate(
     Ok(replacement_candidate)
 }
 
-/// Verifies a sealed old-to-new remediator snapshot after execution.
-///
-/// This check consumes the Git/Artifact adapter's opaque snapshot. Prompt text
-/// and caller-provided path lists are not result authority.
 fn assert_remediator_output_in_scope(
     delivery: &Delivery,
     authorization: &ReworkAuthorization,
     previous_candidate: &FrozenDeliveryCandidate,
     replacement_candidate: &FrozenDeliveryCandidate,
-    replacement_delta: &ValidatedGitSnapshotFact,
+    replacement_delta: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
     assert_frozen_candidate_current(delivery, replacement_candidate)?;
-    assert_validated_git_snapshot_fact(replacement_delta)?;
+    assert_sealed_candidate_source(replacement_delta)?;
     let producer = delivery
         .snapshot()
         .work_run_aggregate
@@ -1154,9 +1064,6 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
     )
 }
 
-/// Narrow sealed fixtures for cross-crate rework transaction tests. They are
-/// compiled only for tests and still pass through the production verdict,
-/// Attention, candidate, history, decision, and `WorkRun` application services.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
@@ -1211,14 +1118,6 @@ pub mod test_support {
         pub reason: ReworkClarificationReason,
     }
 
-    /// Freezes one authorization-bound remediator replacement through the
-    /// production candidate and rework seams.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the producer is not the current authorized remediator, its
-    /// binding is foreign, or the observable old-to-new Git/artifact values
-    /// exceed the exact authorized scope.
     #[must_use]
     pub fn freeze_rework_replacement_candidate_fixture(
         delivery: &Delivery,
@@ -1237,14 +1136,6 @@ pub mod test_support {
             .expect("rework fixture must match the current authorization and sealed observations")
     }
 
-    /// Derives one first-failure remediator authorization from the current
-    /// Delivery, its failed Evidence, and the exact first sealed candidate hunk.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the candidate is stale, the Delivery is not in `Reworking`,
-    /// the current verdict has no failed Evidence, or the candidate has no
-    /// sealed changed hunk.
     #[must_use]
     pub fn precise_rework_authorization_fixture(
         delivery: &Delivery,
@@ -1326,11 +1217,6 @@ pub mod test_support {
         Ok(*authorization)
     }
 
-    /// Builds one production-derived, sealed rework dispatch fixture.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the fixed test facts no longer form a valid rework transition.
     #[must_use]
     pub fn authorized_rework_dispatch(delivery_id: &DeliveryId) -> ReworkDispatchFixture {
         let (journal, source_delivery, candidate, decision, evidence_ref_ids) =
@@ -1370,11 +1256,6 @@ pub mod test_support {
         }
     }
 
-    /// Builds one production-sealed repeated-failure clarification fixture.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the fixed test facts no longer form a valid clarification transition.
     #[must_use]
     pub fn repeated_rework_clarification(delivery_id: &DeliveryId) -> ReworkClarificationFixture {
         let (journal, source_delivery, _candidate, _decision, _evidence_ref_ids) =
@@ -1515,8 +1396,8 @@ mod tests {
     };
     use crate::domain::candidate::CandidateHunkFact;
     use crate::domain::candidate::test_support::{
-        CandidateFixtureInput, freeze_facts, validated_git_snapshot,
-        validated_git_snapshot_between, with_changed_hunks, with_foreign_terminal_workspace,
+        CandidateFixtureInput, candidate_source_between, candidate_source_fixture, freeze_facts,
+        with_changed_hunks, with_foreign_terminal_workspace,
     };
     use crate::domain::{
         CandidatePathState, CriterionResult, DeliveryStatus, DeliveryVerdict, DeliveryVerdictId,
@@ -1565,7 +1446,7 @@ mod tests {
         snapshot.work_run_aggregate.items[0].state =
             winwincode_domain::WorkItemState::CandidateReady;
         let writer = Delivery::try_from_snapshot(snapshot).expect("writer");
-        let facts = validated_git_snapshot(
+        let facts = candidate_source_fixture(
             &writer,
             1_800_000_000_020,
             &SessionBindingId("writer-binding".into()),
@@ -1591,12 +1472,16 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: SessionBindingId("writer-binding".into()),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::Test,
             source_ref: "runtime_event:test-failure".into(),
             created_at_millis: 1_800_000_000_019,
         }];
         snapshot.verdict = Some(DeliveryVerdict {
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
+            candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+            candidate_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             schema_version: super::super::DELIVERY_SCHEMA_VERSION,
             id: DeliveryVerdictId("verdict-failure".into()),
             delivery_id: snapshot.id.clone(),
@@ -1755,7 +1640,7 @@ mod tests {
     fn precise_rework_authorization_fixture_rejects_candidate_without_changed_hunk() {
         let (delivery, candidate, _, _) = current_failure();
         let no_hunk_snapshot = with_changed_hunks(
-            validated_git_snapshot(
+            candidate_source_fixture(
                 &delivery,
                 1_800_000_000_020,
                 candidate.producer_session_binding_id(),
@@ -1773,7 +1658,7 @@ mod tests {
         .expect("candidate without hunk remains a valid frozen Git snapshot");
         let mut snapshot = delivery.into_snapshot();
         for evidence in &mut snapshot.evidence {
-            evidence.candidate_ref = no_hunk.candidate_ref().into();
+            evidence.candidate_id = no_hunk.candidate_id().clone();
         }
         let verdict = snapshot.verdict.as_mut().expect("failing verdict");
         verdict.candidate_ref = no_hunk.candidate_ref().into();
@@ -1794,9 +1679,9 @@ mod tests {
     }
 
     fn map_delta_to_authorized_hunk(
-        delta: ValidatedGitSnapshotFact,
+        delta: SealedCandidateSource,
         file_path: &str,
-    ) -> ValidatedGitSnapshotFact {
+    ) -> SealedCandidateSource {
         with_changed_hunks(
             delta,
             vec![CandidateHunkFact {
@@ -2011,7 +1896,8 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::ReviewFinding,
             source_ref: "page-annotation:annotation-current".into(),
             created_at_millis: snapshot.updated_at_millis,
@@ -2052,7 +1938,8 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::ReviewFinding,
             source_ref: "page-annotation:annotation/foreign".into(),
             created_at_millis: snapshot.updated_at_millis,
@@ -2204,7 +2091,7 @@ mod tests {
             "remediator-finished-binding",
             WorkRunState::Settled,
         );
-        let replacement_snapshot = validated_git_snapshot(
+        let replacement_snapshot = candidate_source_fixture(
             &remediated,
             remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-finished-binding".into()),
@@ -2219,7 +2106,7 @@ mod tests {
         );
         let replacement_facts = freeze_facts(&remediated, replacement_snapshot);
         let authorized_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2246,7 +2133,7 @@ mod tests {
         assert!(!replacement.producer_work_run_id().0.is_empty());
 
         let wrong_source_hunk_delta = with_changed_hunks(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2288,7 +2175,7 @@ mod tests {
         )
         .expect_err("replacement cannot coordinate a foreign authorization and delta source hunk");
 
-        let out_of_scope_snapshot = validated_git_snapshot(
+        let out_of_scope_snapshot = candidate_source_fixture(
             &remediated,
             remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-finished-binding".into()),
@@ -2303,7 +2190,7 @@ mod tests {
         );
         let out_of_scope_facts = freeze_facts(&remediated, out_of_scope_snapshot);
         let out_of_scope_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2340,7 +2227,7 @@ mod tests {
             "remediator-revised-spec-binding",
             WorkRunState::Settled,
         );
-        let changed_spec_candidate_snapshot = validated_git_snapshot(
+        let changed_spec_candidate_snapshot = candidate_source_fixture(
             &changed_spec_remediated,
             changed_spec_remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-revised-spec-binding".into()),
@@ -2356,7 +2243,7 @@ mod tests {
         let changed_spec_facts =
             freeze_facts(&changed_spec_remediated, changed_spec_candidate_snapshot);
         let changed_spec_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &changed_spec_remediated,
                 changed_spec_remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-revised-spec-binding".into()),
@@ -2400,7 +2287,7 @@ mod tests {
         let foreign_binding_delivery = Delivery::try_from_snapshot(foreign_binding_snapshot)
             .expect("foreign sealed delta fixture");
         let foreign_binding_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &foreign_binding_delivery,
                 foreign_binding_delivery.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-foreign-binding".into()),
@@ -2454,7 +2341,7 @@ mod tests {
         );
 
         let expanded_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2539,9 +2426,13 @@ mod tests {
             (&mut second, "prior-candidate-two"),
         ] {
             for evidence in &mut snapshot.evidence {
-                evidence.candidate_ref = candidate.into();
+                evidence.candidate_id = winwincode_domain::CandidateId(format!(
+                    "cnd_01J0000000000000000000000{}",
+                    if candidate.ends_with("one") { 2 } else { 3 }
+                ));
             }
             let verdict = snapshot.verdict.as_mut().expect("failed candidate");
+            verdict.candidate_id = snapshot.evidence[0].candidate_id.clone();
             verdict.candidate_ref = candidate.into();
             for result in &mut verdict.criteria {
                 result.candidate_ref = candidate.into();
@@ -2635,9 +2526,11 @@ mod tests {
         .into_snapshot();
         let repeated_candidate_ref = "candidate-after-rework";
         for evidence in &mut repeated_snapshot.evidence {
-            evidence.candidate_ref = repeated_candidate_ref.into();
+            evidence.candidate_id =
+                winwincode_domain::CandidateId("cnd_01J00000000000000000000002".into());
         }
         let verdict = repeated_snapshot.verdict.as_mut().expect("current verdict");
+        verdict.candidate_id = repeated_snapshot.evidence[0].candidate_id.clone();
         verdict.candidate_ref = repeated_candidate_ref.into();
         for result in &mut verdict.criteria {
             result.candidate_ref = repeated_candidate_ref.into();
@@ -2682,5 +2575,134 @@ mod tests {
             repeated.effect,
             WorkRunStartEffect::Clarify(ReworkClarificationReason::RepeatedCriterionFailure)
         ));
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn unchanged_remediation_restores_exact_candidate_and_requires_a_new_review_round() {
+        use crate::application::workrun_execution::{
+            DurableTerminalOutcomeInput, TerminalOutcomeStatus, apply_terminal_outcome,
+            reconcile_durable_terminal_outcome,
+        };
+        use crate::domain::same_candidate::{
+            selected_writer, verification_round_floor, verify_unchanged_rework_recovery,
+        };
+        use winwincode_domain::WorkItemState;
+        let (source, candidate, _, _) = current_failure();
+        let source_writer = selected_writer(source.snapshot())
+            .unwrap()
+            .work_run_id
+            .clone();
+        let current = append_remediator(
+            source.clone(),
+            source.snapshot().work_run_aggregate.items[0].id.clone(),
+            "unchanged-remediator",
+            WorkRunState::Running,
+        );
+        let mut snapshot = current.into_snapshot();
+        snapshot.work_run_aggregate.items[0].state = WorkItemState::InProgress;
+        snapshot.evidence.clear();
+        snapshot.verdict = None;
+        let current = Delivery::try_from_snapshot(snapshot).expect("active remediator");
+        let binding = current.snapshot().session_bindings.last().unwrap();
+        let run = current.snapshot().work_run_aggregate.runs.last().unwrap();
+        let issued = current.snapshot().updated_at_millis;
+        let instant = |millis: u64| {
+            winwincode_domain::Instant(
+                time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+                    .unwrap()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap(),
+            )
+        };
+        let facts = reconcile_durable_terminal_outcome(
+            &current,
+            DurableTerminalOutcomeInput {
+                execution_job_id: binding.execution_job_id.clone(),
+                attempt: binding.attempt,
+                lease_id: binding.lease_id.clone().unwrap(),
+                fencing_token: binding.fencing_token.clone().unwrap(),
+                worker_id: binding.worker_id.clone().unwrap(),
+                worker_instance_id: binding.worker_instance_id.clone().unwrap(),
+                worker_session_id: binding.worker_session_id.clone().unwrap(),
+                issued_at: instant(issued),
+                expires_at: instant(issued + 60000),
+                work_run_id: run.id.clone(),
+                status: TerminalOutcomeStatus::Failed,
+                codex_thread_id: binding.codex_thread_id.clone(),
+                finished_at_millis: issued + 1,
+                last_event_sequence: winwincode_domain::ExecutionAckSequence(0),
+                artifacts: vec![],
+            },
+        )
+        .expect("exact terminal");
+        let recovery = verify_unchanged_rework_recovery(
+            &current,
+            &source,
+            &facts,
+            &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            candidate.candidate_ref(),
+        )
+        .expect("recovery authority");
+        let verified = facts.verify_active(&current).unwrap();
+        let terminal = apply_terminal_outcome(
+            &current,
+            current.revision(),
+            facts.authority().active_lease(),
+            &verified,
+        )
+        .unwrap();
+        let restored = recovery
+            .apply(&current, &terminal)
+            .expect("atomic restoration");
+        assert_eq!(
+            selected_writer(restored.snapshot()).unwrap().work_run_id,
+            source_writer
+        );
+        assert_eq!(
+            restored.snapshot().work_run_aggregate.items[0].state,
+            WorkItemState::CandidateReady
+        );
+        assert_eq!(
+            restored
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .last()
+                .unwrap()
+                .state,
+            WorkRunState::Failed
+        );
+        assert_eq!(
+            verification_round_floor(restored.snapshot()),
+            restored.snapshot().session_bindings.len()
+        );
+        assert_frozen_candidate_current(&restored, &candidate)
+            .expect("same candidate remains current");
+        let decoded = Delivery::decode_json(&restored.encode_json().unwrap()).expect("restart");
+        assert_eq!(decoded, restored);
+        let mut tampered = restored.clone().into_snapshot();
+        tampered
+            .same_candidate_reverification
+            .as_mut()
+            .unwrap()
+            .producer_work_run_id = tampered.work_run_aggregate.runs.last().unwrap().id.clone();
+        assert!(Delivery::try_from_snapshot(tampered).is_err());
+        let mut next = restored.into_snapshot();
+        invalidate_candidate_authorization_for_writer_start(&mut next);
+        assert!(next.same_candidate_reverification.is_none());
+    }
+
+    #[test]
+    fn same_candidate_new_failed_verdict_consumes_one_business_rework_attempt() {
+        let (source, _, _, _) = current_failure();
+        let mut next = source.clone().into_snapshot();
+        next.revision += 1;
+        next.updated_at_millis += 1;
+        next.verdict.as_mut().unwrap().id = DeliveryVerdictId("same-candidate-next-verdict".into());
+        let next = Delivery::try_from_snapshot(next).expect("later failed verification");
+        let history =
+            derive_validated_rework_history(&next, &[source.into_snapshot()]).expect("history");
+        assert_eq!(history.observed_rework_count, 1);
+        assert!(!history.prior_failed_criterion_ids.is_empty());
     }
 }

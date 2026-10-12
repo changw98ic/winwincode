@@ -1,6 +1,6 @@
-//! Embedded Codex Core ownership boundary.
-
 mod model_port;
+#[cfg(test)]
+mod task_handoff_tests;
 
 pub use model_port::ModelPort;
 pub use model_port::ModelPortFailure;
@@ -68,6 +68,9 @@ use codex_protocol::protocol::EventMsg as CodexEventMsg;
 use codex_protocol::protocol::ReviewDecision as CodexReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+
+#[cfg(feature = "test-support")]
+mod mechanism_interaction_test_options;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -85,7 +88,11 @@ pub use winwincode_execution_port::generated::{
 
 use crate::model_port::KernelModelStreamTransport;
 
-/// Host-owned tool request observed before Codex Core enters the tool handler.
+mod result_read;
+mod tool_facts;
+pub use result_read::KernelToolResultReadRequest;
+pub use tool_facts::KernelToolRuntimeEvent;
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct KernelActionRequest {
     pub session_id: String,
@@ -96,9 +103,6 @@ pub struct KernelActionRequest {
     pub payload: KernelActionPayload,
 }
 
-/// Host receipt retained from admission through the final Core execution
-/// boundary. The optional executable is the only program identity a delegated
-/// read may launch.
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct KernelActionAuthorization {
     request_binding: String,
@@ -135,8 +139,6 @@ impl KernelActionAuthorization {
     }
 }
 
-/// Canonical absolute executable and opaque immutable identity selected by the
-/// host action authority.
 #[derive(Clone, Eq, PartialEq)]
 pub struct KernelExecutableAuthorization {
     canonical_absolute_path: String,
@@ -181,9 +183,11 @@ impl KernelExecutableAuthorization {
     }
 }
 
-/// Exact Codex tool payload retained only for in-process pre-action authorization.
 #[derive(Clone, Eq, PartialEq)]
 pub enum KernelActionPayload {
+    CoreControl {
+        input: String,
+    },
     Function {
         arguments: String,
     },
@@ -197,6 +201,19 @@ pub enum KernelActionPayload {
         program: String,
         args: Vec<String>,
         working_directory: String,
+    },
+    FileRead {
+        path: String,
+    },
+    McpResource {
+        server: String,
+        method: String,
+        arguments: String,
+    },
+    ProcessInteraction {
+        process_id: i32,
+        origin_call_id: String,
+        input: String,
     },
     Files {
         changes: Vec<KernelFileChange>,
@@ -245,17 +262,54 @@ impl fmt::Debug for KernelActionRequest {
 impl fmt::Debug for KernelActionPayload {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::CoreControl { .. } => "CoreControl(<private>)",
             Self::Function { .. } => "Function(<private>)",
             Self::ToolSearch { .. } => "ToolSearch(<private>)",
             Self::Custom { .. } => "Custom(<private>)",
             Self::Shell { .. } => "Shell(<private>)",
+            Self::FileRead { .. } => "FileRead(<private>)",
+            Self::McpResource { .. } => "McpResource(<private>)",
+            Self::ProcessInteraction { .. } => "ProcessInteraction(<private>)",
             Self::Files { .. } => "Files(<private>)",
         })
     }
 }
 
-/// Required host admission boundary for every embedded Codex tool call.
+pub use codex_core_api::ToolCallGatePayload as ToolInputGatePayload;
+pub use codex_core_api::ToolCallGateRequest as ToolInputGateRequest;
+pub use codex_core_api::{
+    ToolCoalescingPermission, ToolDependencySnapshot, ToolInputContext, ToolInputProof,
+    ToolInputProofRequest, ToolReusePermission,
+};
+
 pub trait KernelActionGate: Send + Sync {
+    fn freeze_tool_input(
+        &self,
+        _context: ToolInputContext,
+    ) -> BoxFuture<'static, Option<ToolDependencySnapshot>> {
+        Box::pin(async { None })
+    }
+    fn verify_tool_input(
+        &self,
+        _request: ToolInputProofRequest,
+    ) -> BoxFuture<'static, Option<ToolInputProof>> {
+        Box::pin(async { None })
+    }
+
+    fn authorize_result_read(
+        &self,
+        _request: KernelToolResultReadRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>> {
+        Box::pin(async { Err(KernelFailure::action_rejected()) })
+    }
+    fn revalidate_result_read(
+        &self,
+        _request: KernelToolResultReadRequest,
+        _authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>> {
+        Box::pin(async { Err(KernelFailure::action_rejected()) })
+    }
+
     fn authorize(
         &self,
         request: KernelActionRequest,
@@ -267,7 +321,6 @@ pub trait KernelActionGate: Send + Sync {
     ) -> BoxFuture<'static, KernelResult<()>>;
 }
 
-/// Explicit fail-closed gate for surfaces that have not installed an action authority.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RejectingKernelActionGate;
 
@@ -303,6 +356,55 @@ struct CoreToolCallGate {
 }
 
 impl ToolCallGate for CoreToolCallGate {
+    fn freeze_tool_input(
+        &self,
+        context: ToolInputContext,
+    ) -> BoxFuture<'static, Option<ToolDependencySnapshot>> {
+        self.host.freeze_tool_input(context)
+    }
+    fn verify_tool_input(
+        &self,
+        request: ToolInputProofRequest,
+    ) -> BoxFuture<'static, Option<ToolInputProof>> {
+        self.host.verify_tool_input(request)
+    }
+
+    fn authorize_result_read(
+        &self,
+        request: codex_core_api::ToolResultReadRequest,
+    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.authorize_result_read(request.into())
+                .await
+                .map(tool_call_gate_authorization)
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "RESULT_READ_DENIED",
+                        "current result read authority rejected recovery",
+                    )
+                })
+        })
+    }
+
+    fn revalidate_result_read(
+        &self,
+        request: codex_core_api::ToolResultReadRequest,
+        authorization: ToolCallGateAuthorization,
+    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.revalidate_result_read(request.into(), kernel_action_authorization(&authorization))
+                .await
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "RESULT_READ_STALE",
+                        "result read authority is no longer current",
+                    )
+                })
+        })
+    }
+
     fn authorize(
         &self,
         request: ToolCallGateRequest,
@@ -381,6 +483,9 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
         namespace: request.namespace,
         tool_name: request.tool_name,
         payload: match request.payload {
+            ToolCallGatePayload::CoreControl { input } => {
+                KernelActionPayload::CoreControl { input }
+            }
             ToolCallGatePayload::Function { arguments } => {
                 KernelActionPayload::Function { arguments }
             }
@@ -388,6 +493,25 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
                 KernelActionPayload::ToolSearch { arguments_json }
             }
             ToolCallGatePayload::Custom { input } => KernelActionPayload::Custom { input },
+            ToolCallGatePayload::FileRead { path } => KernelActionPayload::FileRead { path },
+            ToolCallGatePayload::McpResource {
+                server,
+                method,
+                arguments,
+            } => KernelActionPayload::McpResource {
+                server,
+                method,
+                arguments,
+            },
+            ToolCallGatePayload::ProcessInteraction {
+                process_id,
+                origin_call_id,
+                input,
+            } => KernelActionPayload::ProcessInteraction {
+                process_id,
+                origin_call_id,
+                input,
+            },
             ToolCallGatePayload::Shell {
                 program,
                 args,
@@ -415,13 +539,9 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
     }
 }
 
-/// Exact embedded Codex source commit.
 pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
-/// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
-/// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 9;
-/// Patches applied to the embedded source in deterministic order.
+pub const INTERFACE_VERSION: u32 = 12;
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
@@ -431,6 +551,101 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
     "upstream/patches/codex/0008-atomic-apply-patch.patch",
     "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+    "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+    "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+    "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
+    "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
+    "upstream/patches/codex/0014-code-mode-dispatch-catalog.patch",
+    "upstream/patches/codex/0015-code-mode-dispatch-portable-requests.patch",
+    "upstream/patches/codex/0016-code-mode-dispatch-authorization.patch",
+    "upstream/patches/codex/0017-code-mode-dispatch-hook-tests.patch",
+    "upstream/patches/codex/0018-code-mode-dispatch-cell-scope.patch",
+    "upstream/patches/codex/0019-code-mode-dispatch-continuations.patch",
+    "upstream/patches/codex/0020-code-mode-dispatch-terminal-boundaries.patch",
+    "upstream/patches/codex/0021-code-mode-dispatch-io-authorization.patch",
+    "upstream/patches/codex/0022-tool-execution-facts-schema.patch",
+    "upstream/patches/codex/0023-tool-execution-facts-store.patch",
+    "upstream/patches/codex/0024-tool-execution-facts-store-tests.patch",
+    "upstream/patches/codex/0025-tool-execution-facts-dispatch.patch",
+    "upstream/patches/codex/0026-tool-execution-facts-wiring.patch",
+    "upstream/patches/codex/0027-tool-execution-facts-tests.patch",
+    "upstream/patches/codex/0028-tool-execution-facts-catalog-tests.patch",
+    "upstream/patches/codex/0029-tool-runtime-recovery-relations-schema.patch",
+    "upstream/patches/codex/0030-tool-runtime-recovery-relations-store.patch",
+    "upstream/patches/codex/0031-tool-runtime-recovery-read-authority.patch",
+    "upstream/patches/codex/0032-tool-runtime-recovery-result-recovery.patch",
+    "upstream/patches/codex/0033-tool-runtime-recovery-recovery-tests.patch",
+    "upstream/patches/codex/0034-tool-runtime-recovery-cell-lifecycle.patch",
+    "upstream/patches/codex/0035-tool-runtime-reconciliation-state.patch",
+    "upstream/patches/codex/0036-tool-runtime-reconciliation-dispatch.patch",
+    "upstream/patches/codex/0037-tool-runtime-reconciliation-tests.patch",
+    "upstream/patches/codex/0038-tool-runtime-reconciliation-process-receipt.patch",
+    "upstream/patches/codex/0039-tool-diagnostics-schema.patch",
+    "upstream/patches/codex/0040-tool-diagnostics-queue.patch",
+    "upstream/patches/codex/0041-tool-diagnostics-responses.patch",
+    "upstream/patches/codex/0042-tool-diagnostics-queue-tests.patch",
+    "upstream/patches/codex/0043-tool-diagnostics-detector.patch",
+    "upstream/patches/codex/0044-tool-diagnostics-detector-tests.patch",
+    "upstream/patches/codex/0045-tool-diagnostics-feedback.patch",
+    "upstream/patches/codex/0046-tool-diagnostics-boundaries.patch",
+    "upstream/patches/codex/0047-tool-dependencies-schema.patch",
+    "upstream/patches/codex/0048-tool-dependencies-input-store.patch",
+    "upstream/patches/codex/0049-tool-dependencies-input-tests.patch",
+    "upstream/patches/codex/0050-tool-dependencies-sharing-store.patch",
+    "upstream/patches/codex/0051-tool-dependencies-sharing-store-tests.patch",
+    "upstream/patches/codex/0052-tool-dependencies-adapter-contract.patch",
+    "upstream/patches/codex/0053-tool-dependencies-dispatch.patch",
+    "upstream/patches/codex/0054-tool-dependencies-sharing-runtime.patch",
+    "upstream/patches/codex/0055-tool-dependencies-sharing-io.patch",
+    "upstream/patches/codex/0056-tool-dependencies-sharing-tests.patch",
+    "upstream/patches/codex/0057-tool-dependencies-responses.patch",
+    "upstream/patches/codex/0058-tool-dependencies-diagnostics.patch",
+    "upstream/patches/codex/0059-tool-receipts-state.patch",
+    "upstream/patches/codex/0060-tool-receipts-state-tests.patch",
+    "upstream/patches/codex/0061-tool-receipts-context.patch",
+    "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
+    "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
+    "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+    "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
+    "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
+    "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+    "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+    "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+    "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
+    "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
+    "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
+    "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+    "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+    "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
+    "upstream/patches/codex/0076-tool-review-tls.patch",
+    "upstream/patches/codex/0077-tool-review-memmap.patch",
+    "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
+    "upstream/patches/codex/0079-tool-review-optional-diagnostic-isolation.patch",
+    "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
+    "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch",
+    "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
+    "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
+    "upstream/patches/codex/0084-tool-review-tool-fact-shutdown-barrier.patch",
+    "upstream/patches/codex/0085-tool-review-app-client-timeout-phases.patch",
+    "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
+    "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
+    "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
+    "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+    "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+    "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+    "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+    "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+    "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+    "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+    "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+    "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
+    "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
+    "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+    "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+    "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+    "upstream/patches/codex/0102-exact-input-call-routing.patch",
+    "upstream/patches/codex/0103-private-input-recovery-store.patch",
+    "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -440,53 +655,33 @@ const MIN_EVENT_CAPACITY: usize = 16;
 const MAX_EVENT_CAPACITY: usize = 4096;
 const DEFAULT_SHUTDOWN_TIMEOUT_MILLIS: u64 = 5_000;
 
-/// Static identity of the single execution authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelDescriptor {
-    /// Stable kernel name.
     pub name: &'static str,
-    /// Execution authority count. `WinWinCode` deliberately has exactly one.
     pub execution_authorities: u8,
 }
 
-/// Runtime build identity exposed to TypeScript and release diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBuildInfo {
-    /// Native interface version.
     pub interface_version: u32,
-    /// Upstream release tag.
     pub codex_tag: &'static str,
-    /// Full upstream commit.
     pub codex_commit: &'static str,
-    /// Ordered applied patch paths.
     pub patch_set: Vec<&'static str>,
-    /// Configured bounded event capacity per session.
     pub event_capacity: u32,
 }
 
-/// Construction options for one embedded kernel instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelOptions {
-    /// Absolute data directory owned by `WinWinCode`.
     pub home: PathBuf,
-    /// Bundled helper executable used for sandbox and filesystem child operations.
     pub helper_executable: PathBuf,
-    /// Number of unconsumed ordered events retained per session.
     pub event_capacity: usize,
-    /// Maximum graceful shutdown time per thread.
     pub shutdown_timeout: Duration,
-    /// Optional bundled Linux sandbox helper.
     pub linux_sandbox_executable: Option<PathBuf>,
 }
 
 impl KernelOptions {
-    /// Create options with bounded defaults.
     #[must_use]
     pub fn new(home: PathBuf, helper_executable: PathBuf) -> Self {
-        // The bundled helper dispatches `codex-linux-sandbox` by argv0. Linux
-        // command execution must receive that sealed helper explicitly;
-        // otherwise Codex Core selects seccomp but has no executable with
-        // which to enter the sandbox.
         let linux_sandbox_executable = cfg!(target_os = "linux").then(|| helper_executable.clone());
         Self {
             home,
@@ -498,27 +693,15 @@ impl KernelOptions {
     }
 }
 
-/// Options shared by create, resume, and fork operations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionOptions {
-    /// Absolute workspace path.
     pub cwd: PathBuf,
-    /// Exact Kernel model provider route.
     pub provider: String,
-    /// Exact model identifier within the Kernel provider route.
     pub model: String,
-    /// Optional `StrongFlow` role policy applied through Codex Core before thread startup.
     pub role_policy: Option<RoleSessionPolicy>,
-    /// Immutable Agent identity and effective configuration for this Session.
     pub agent_config: AgentSessionConfigSnapshot,
 }
 
-/// Parses the generated canonical role envelope at the native boundary.
-///
-/// # Errors
-///
-/// Returns a typed failure when the JSON is invalid, incomplete, contains
-/// extra fields, or does not use the current role-policy schema version.
 pub fn parse_role_session_policy(value: &str) -> KernelResult<RoleSessionPolicy> {
     let policy: RoleSessionPolicy = serde_json::from_str(value).map_err(|error| {
         KernelFailure::new(
@@ -535,139 +718,86 @@ pub fn parse_role_session_policy(value: &str) -> KernelResult<RoleSessionPolicy>
     Ok(policy)
 }
 
-/// Optional configuration replacements applied while forking a live session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkOptions {
-    /// Optional replacement workspace path.
     pub cwd: Option<PathBuf>,
-    /// Optional replacement Kernel provider route. Must be supplied with `model`.
     pub provider: Option<String>,
-    /// Optional replacement model.
     pub model: Option<String>,
 }
 
-/// Codex approval callback family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalKind {
-    /// Command execution approval.
     Exec,
-    /// Patch application approval.
     Patch,
+    Mcp,
 }
 
-/// Human decision sent back to one suspended Codex operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
-    /// Permit this operation once.
     Approved,
-    /// Permit this operation and equivalent prompts for this session.
     ApprovedForSession,
-    /// Reject this operation while allowing the turn to continue.
-    Denied {
-        /// Human-readable reason returned to the model.
-        rejection: String,
-    },
-    /// Reject this operation and stop the active turn.
+    Denied { rejection: String },
     Abort,
 }
 
-/// Exact identity and decision for one pending Codex approval callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResponse {
-    /// Live kernel session that emitted the request.
     pub session_id: String,
-    /// Callback family selected by the source event.
     pub kind: ApprovalKind,
-    /// Effective approval id, never a UI-generated identity.
     pub operation_id: String,
-    /// Source turn for command approvals, when Codex supplied it.
     pub turn_id: Option<String>,
-    /// Human decision.
     pub decision: ApprovalDecision,
 }
 
-/// One registered Codex session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
-    /// Codex thread identifier.
     pub session_id: String,
-    /// Durable rollout path when persistence is available.
     pub rollout_path: Option<String>,
 }
 
-/// One bounded, ordered event returned to TypeScript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelEvent {
-    /// Monotonically increasing sequence within this session subscription.
     pub sequence: u64,
-    /// Stable Codex event kind.
     pub kind: String,
-    /// Lossless serialized Codex event envelope.
     pub payload_json: String,
 }
 
-/// Outcome of polling one session's ordered event stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventPoll {
-    /// One event was available before the deadline.
     Event(KernelEvent),
-    /// No event was available before the requested deadline.
     Timeout,
-    /// The producer ended and no later event can arrive.
     Closed,
 }
 
-/// Result of a start-or-steer submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionInfo {
-    /// `started`, `steered`, or `not_submitted`.
     pub status: &'static str,
-    /// Active turn identifier when accepted.
     pub turn_id: Option<String>,
-    /// Core-provided reason when not accepted.
     pub reason: Option<String>,
 }
 
-/// Immutable options that identify one submitted turn independently of its
-/// prompt text. Every Kernel submission entry point requires this value so a
-/// structured-output turn cannot be started or steered through an untyped
-/// fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSubmissionOptions {
-    /// Validated user images forwarded as native Codex image input.
     pub image_urls: Vec<String>,
-    /// Exact JSON Schema passed to Codex Core for the final model output.
-    /// Ordinary React turns use `None`.
     pub final_output_json_schema: Option<Value>,
-    /// Enable the terminal delegated `ChangeBatch` handoff tool.
     pub submit_change_batch: bool,
 }
 
-/// Typed result of reconciling one host-reserved turn against durable rollout state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExactTurnReconciliation {
-    /// Core accepted the exact turn identity for execution or recovery.
     Started { turn_id: String, recovered: bool },
-    /// Core remained idle because the exact turn could not be started now.
     NotSubmitted { reason: String },
-    /// The rollout already contains the original successful terminal facts.
     Completed(DurableTurnTerminal),
-    /// The rollout already contains the original unsuccessful terminal facts.
     Failed(DurableTurnTerminal),
 }
 
-/// Result of an all-session shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownInfo {
-    /// Threads that shut down and were removed.
     pub completed: Vec<String>,
-    /// Threads whose shutdown operation could not be submitted.
     pub submit_failed: Vec<String>,
-    /// Threads that exceeded the shutdown deadline.
     pub timed_out: Vec<String>,
 }
 
-/// Stable failure crossing the Rust/TypeScript boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelFailure {
     code: &'static str,
@@ -682,8 +812,6 @@ impl KernelFailure {
         }
     }
 
-    /// Creates the fixed failure returned when the host action authority does
-    /// not permit a tool call before its handler starts.
     #[must_use]
     pub fn action_rejected() -> Self {
         Self::new(
@@ -692,13 +820,11 @@ impl KernelFailure {
         )
     }
 
-    /// Stable machine-readable error code.
     #[must_use]
     pub const fn code(&self) -> &'static str {
         self.code
     }
 
-    /// Human-readable error detail.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -713,7 +839,6 @@ impl fmt::Display for KernelFailure {
 
 impl std::error::Error for KernelFailure {}
 
-/// Kernel-local result.
 pub type KernelResult<T> = Result<T, KernelFailure>;
 
 struct SessionRuntime {
@@ -806,22 +931,16 @@ const fn workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) -> &'static 
     }
 }
 
-/// Process-local embedded Codex kernel.
 pub struct Kernel {
     options: KernelOptions,
     model_port: Arc<dyn ModelPort>,
     action_gate: Arc<dyn KernelActionGate>,
+    host_action_approvals: bool,
     runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
 }
 
 impl Kernel {
-    /// Validate ownership options without starting background services.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the home path is not absolute, the shutdown timeout is zero,
-    /// the helper path is unusable, or the home directory cannot be created.
     pub fn new(
         mut options: KernelOptions,
         model_port: Arc<dyn ModelPort>,
@@ -896,12 +1015,18 @@ impl Kernel {
             options,
             model_port,
             action_gate,
+            host_action_approvals: false,
             runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
         })
     }
 
-    /// Return static and configured build identity.
+    #[must_use]
+    pub fn with_host_action_approvals(mut self, enabled: bool) -> Self {
+        self.host_action_approvals = enabled;
+        self
+    }
+
     #[must_use]
     pub fn build_info(&self) -> KernelBuildInfo {
         KernelBuildInfo {
@@ -913,20 +1038,11 @@ impl Kernel {
         }
     }
 
-    /// Return whether explicit shutdown has begun.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Re-applies the private runtime permissions after Core creates rollout,
-    /// state, or child-thread files.  This is intentionally explicit so the
-    /// Worker can invoke it at every externally visible turn boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `KernelFailure` when a runtime-owned path cannot be
-    /// restricted to the private permission policy.
     pub fn enforce_private_permissions(&self) -> KernelResult<()> {
         restrict_private_tree(&self.options.home).map_err(|_| {
             KernelFailure::new(
@@ -980,15 +1096,7 @@ impl Kernel {
             config.analytics_enabled = Some(false);
             config.feedback_enabled = false;
             config.check_for_update_on_startup = false;
-            // The Kernel exposes portable JSON-schema tools, not provider-native Responses web
-            // search.
-            // Search remains available through ordinary host/MCP function tools.
             config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
-            // The product ExecutionPort contract exposes RequestUserInput in
-            // the default collaboration mode.  Codex keeps this feature
-            // disabled by default, so the embedded Kernel must pin it on at
-            // runtime instead of allowing the model to receive an
-            // "unavailable" tool result with no CP interaction.
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
@@ -999,16 +1107,35 @@ impl Kernel {
                     )
                 })?;
             config.experimental_request_user_input_enabled = true;
+            config
+                .features
+                .enable(Feature::CodeModeOnly)
+                .map_err(|error| {
+                    KernelFailure::new(
+                        "CONFIG_FEATURE_FAILED",
+                        format!("Code Mode tool surface could not be enabled: {error}"),
+                    )
+                })?;
+            config
+                .features
+                .enable(Feature::CodeModeInterrupt)
+                .map_err(|error| {
+                    KernelFailure::new(
+                        "CONFIG_FEATURE_FAILED",
+                        format!("Code Mode interruption could not be enabled: {error}"),
+                    )
+                })?;
             config.codex_self_exe = Some(self.options.helper_executable.clone());
-            config.codex_linux_sandbox_exe = self.options.linux_sandbox_executable.clone();
+            config
+                .codex_linux_sandbox_exe
+                .clone_from(&self.options.linux_sandbox_executable);
 
             let state_db = init_state_db(&config).await;
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /* enable_codex_api_key_env */ false)
-                    .await
-                    .map_err(|error| {
-                        KernelFailure::new("AUTH_INITIALIZATION_FAILED", error.to_string())
-                    })?;
+            let auth_manager = AuthManager::shared_from_config(&config, false)
+                .await
+                .map_err(|error| {
+                    KernelFailure::new("AUTH_INITIALIZATION_FAILED", error.to_string())
+                })?;
             let runtime_paths = ExecServerRuntimePaths::new(
                 self.options.helper_executable.clone(),
                 self.options.linux_sandbox_executable.clone(),
@@ -1052,16 +1179,21 @@ impl Kernel {
                     environment_manager,
                     extensions.build().into(),
                     user_instructions_provider,
-                    /* analytics_events_client */ None,
+                    None,
                     Arc::clone(&thread_store),
                     local_agent_graph_store_from_state_db(state_db.as_ref()),
                     installation_id,
-                    /* attestation_provider */ None,
-                    /* external_time_provider */ None,
+                    None,
+                    None,
                 )
                 .with_model_stream_transport(Arc::new(KernelModelStreamTransport::new(Arc::clone(
                     &self.model_port,
                 ))))
+                .with_code_mode_session_provider(Arc::new(
+                    codex_code_mode::ProcessOwnedCodeModeSessionProvider::with_host_program(
+                        self.options.helper_executable.clone(),
+                    ),
+                ))
                 .with_tool_call_gate(Arc::new(CoreToolCallGate {
                     host: Arc::clone(&self.action_gate),
                 })),
@@ -1082,7 +1214,11 @@ impl Kernel {
         })
     }
 
-    async fn session_config(runtime: &Runtime, options: &SessionOptions) -> KernelResult<Config> {
+    async fn session_config(
+        runtime: &Runtime,
+        options: &SessionOptions,
+        host_action_approvals: bool,
+    ) -> KernelResult<Config> {
         validate_agent_session_config(&options.agent_config).map_err(|_| {
             KernelFailure::new(
                 "INVALID_AGENT_CONFIG",
@@ -1097,10 +1233,7 @@ impl Kernel {
             ));
         }
         let mut config = runtime.base_config.clone();
-        // A Worker outlives a chat task. Read the newly installed user layer for
-        // each session while retaining host-owned model and permission settings.
-        // Resolve from the private home, as at startup: candidate repository
-        // config must not redirect a Device-authorized MCP server.
+        Self::apply_task_state_compaction_policy(&mut config)?;
         let current = ConfigBuilder::default()
             .codex_home(config.codex_home.to_path_buf())
             .fallback_cwd(Some(config.codex_home.to_path_buf()))
@@ -1119,10 +1252,42 @@ impl Kernel {
         config.mcp_servers = current.mcp_servers;
         runtime.manager.skills_service().clear_cache();
         set_workspace(&mut config, &options.cwd)?;
+        let mut servers = config.mcp_servers.get().clone();
+        for server in servers.values_mut() {
+            if let codex_core_api::McpServerTransportConfig::Stdio { cwd, .. } =
+                &mut server.transport
+                && cwd.is_none()
+            {
+                *cwd = Some(
+                    serde_json::from_value(Value::String(
+                        options.cwd.to_string_lossy().into_owned(),
+                    ))
+                    .map_err(|_| {
+                        KernelFailure::new("INVALID_WORKSPACE", "Invalid MCP workspace")
+                    })?,
+                );
+            }
+        }
+        config.mcp_servers.set(servers).map_err(|_| {
+            KernelFailure::new(
+                "EXTENSION_CONFIG_UNAVAILABLE",
+                "MCP workspace configuration failed",
+            )
+        })?;
+
         let (provider, model) = model_route(&options.provider, &options.model)?;
         config.model_provider = kernel_provider_info(&provider);
         config.model_provider_id = provider;
         config.model = Some(model);
+        config.model_reasoning_effort = if settings.reasoning == "provider_default" {
+            None
+        } else {
+            Some(
+                serde_json::from_value(Value::String(settings.reasoning.clone())).map_err(
+                    |_| KernelFailure::new("INVALID_AGENT_CONFIG", "Invalid reasoning effort"),
+                )?,
+            )
+        };
         if let Some(policy) = &options.role_policy {
             if options.agent_config.identity.role != role_id_name(&policy.role_id)
                 || settings.sandbox != workspace_mode_name(&policy.workspace_mode)
@@ -1147,7 +1312,52 @@ impl Kernel {
             };
             Self::apply_workspace_permissions(&mut config, workspace_write)?;
         }
+        if host_action_approvals {
+            Self::apply_host_action_approvals(&mut config)?;
+        }
         Ok(config)
+    }
+
+    fn apply_task_state_compaction_policy(config: &mut Config) -> KernelResult<()> {
+        config.features.disable(Feature::TokenBudget).map_err(|_| {
+            KernelFailure::new(
+                "SESSION_POLICY_UNAVAILABLE",
+                "Task-state compaction policy could not be applied",
+            )
+        })?;
+        config.compact_prompt =
+            Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_COMPACT_PROMPT.to_owned());
+        config.compact_context_max_tokens =
+            Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_CONTEXT_MAX_TOKENS);
+        Ok(())
+    }
+
+    fn apply_host_action_approvals(config: &mut Config) -> KernelResult<()> {
+        let mut servers = config.mcp_servers.get().clone();
+        for server in servers.values_mut() {
+            let mode = serde_json::to_value(server.default_tools_approval_mode).map_err(|_| {
+                KernelFailure::new(
+                    "SESSION_POLICY_UNAVAILABLE",
+                    "Tool approval policy is invalid",
+                )
+            })?;
+            if mode.is_null() || mode == Value::String("auto".to_owned()) {
+                server.default_tools_approval_mode = Some(
+                    serde_json::from_value(Value::String("approve".to_owned())).map_err(|_| {
+                        KernelFailure::new(
+                            "SESSION_POLICY_UNAVAILABLE",
+                            "Host tool approval policy is invalid",
+                        )
+                    })?,
+                );
+            }
+        }
+        config.mcp_servers.set(servers).map_err(|_| {
+            KernelFailure::new(
+                "SESSION_POLICY_UNAVAILABLE",
+                "Host tool approval policy could not be installed",
+            )
+        })
     }
 
     fn validate_role_session_policy(
@@ -1198,7 +1408,6 @@ impl Kernel {
             Constrained::allow_only(if workspace_write {
                 AskForApproval::OnRequest
             } else {
-                // Read-only sessions must not escalate out of the frozen checkout.
                 AskForApproval::Never
             }),
             Constrained::allow_only(permission_profile),
@@ -1211,16 +1420,11 @@ impl Kernel {
         Ok(())
     }
 
-    /// Create and register a fresh Codex session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when runtime initialization, workspace validation, or Codex thread
-    /// creation fails.
     pub async fn create_session(&self, options: SessionOptions) -> KernelResult<SessionInfo> {
         Self::guard(async {
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options).await?;
+            let config =
+                Self::session_config(&runtime, &options, self.host_action_approvals).await?;
             let thread = runtime
                 .manager
                 .start_thread(StartThreadOptions::new(config.clone()))
@@ -1231,12 +1435,6 @@ impl Kernel {
         .await
     }
 
-    /// Resume a durable Codex rollout.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the rollout path or workspace is invalid, runtime
-    /// initialization fails, or Codex rejects the rollout.
     pub async fn resume_session(
         &self,
         rollout_path: PathBuf,
@@ -1250,12 +1448,13 @@ impl Kernel {
                 ));
             }
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options).await?;
+            let config =
+                Self::session_config(&runtime, &options, self.host_action_approvals).await?;
             let thread = Box::pin(runtime.manager.resume_thread_from_rollout(
                 config.clone(),
                 rollout_path,
                 Arc::clone(&runtime.auth_manager),
-                /* parent_trace */ None,
+                None,
                 ClientMcpExtensions::default(),
             ))
             .await
@@ -1265,12 +1464,6 @@ impl Kernel {
         .await
     }
 
-    /// Fork a live session from its current persisted boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the source session or rollout is unavailable, when workspace
-    /// validation fails, or when Codex cannot create the fork.
     pub async fn fork_session(
         &self,
         source_session_id: &str,
@@ -1314,8 +1507,8 @@ impl Kernel {
                 ForkSnapshot::Interrupted,
                 config.clone(),
                 rollout_path,
-                /* thread_source */ None,
-                /* parent_trace */ None,
+                None,
+                None,
             ))
             .await
             .map_err(|error| KernelFailure::new("SESSION_FORK_FAILED", error.to_string()))?;
@@ -1324,12 +1517,6 @@ impl Kernel {
         .await
     }
 
-    /// Start a turn when idle or steer the active turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for empty input, an unknown session, a closed kernel, or a Codex
-    /// submission failure.
     pub async fn submit_turn(
         &self,
         session_id: &str,
@@ -1357,15 +1544,6 @@ impl Kernel {
         .await
     }
 
-    /// Reconciles one host-reserved turn identity against durable rollout state.
-    /// The original user input is submitted only when the identity is absent;
-    /// an already-persisted interrupted turn resumes without a duplicate input.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when the session or durable history is
-    /// unavailable, the exact identity is invalid, or Codex Core rejects the
-    /// create-or-recover submission.
     pub async fn reconcile_turn_exact(
         &self,
         session_id: &str,
@@ -1409,7 +1587,7 @@ impl Kernel {
                                 turn_id,
                                 thread_settings: ThreadSettingsOverrides::default(),
                                 trace: None,
-                                submit_change_batch: options.submit_change_batch,
+                                start: turn_start_options(&options),
                             })
                             .await
                     } else {
@@ -1433,12 +1611,6 @@ impl Kernel {
         .await
     }
 
-    /// Steer only the expected active turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for empty input, an unknown session, a closed kernel, or a Codex
-    /// steering failure.
     pub async fn steer(
         &self,
         session_id: &str,
@@ -1467,12 +1639,6 @@ impl Kernel {
         .await
     }
 
-    /// Interrupt the active turn without destroying the session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session is unknown, the kernel is closed, or Codex rejects
-    /// the interrupt operation.
     pub async fn interrupt(&self, session_id: &str) -> KernelResult<String> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -1491,37 +1657,13 @@ impl Kernel {
         .await
     }
 
-    /// Resolve one pending command or patch approval by its source operation identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session or operation identity is invalid, the kernel is
-    /// closed, or Codex rejects the response submission.
     pub async fn resolve_approval(&self, response: ApprovalResponse) -> KernelResult<String> {
         Self::guard(async {
-            if response.operation_id.trim().is_empty() {
-                return Err(KernelFailure::new(
-                    "INVALID_APPROVAL_RESPONSE",
-                    "approval operation id must be non-empty",
-                ));
-            }
-            let decision = codex_review_decision(response.decision)?;
+            let session_id = response.session_id.clone();
+            let operation = codex_approval_operation(response)?;
             let runtime = self.runtime().await?;
-            let session = self.session(&runtime, &response.session_id).await?;
+            let session = self.session(&runtime, &session_id).await?;
             self.enforce_private_permissions()?;
-            let operation = match response.kind {
-                ApprovalKind::Exec => Op::ExecApproval {
-                    id: response.operation_id,
-                    turn_id: response
-                        .turn_id
-                        .filter(|turn_id| !turn_id.trim().is_empty()),
-                    decision,
-                },
-                ApprovalKind::Patch => Op::PatchApproval {
-                    id: response.operation_id,
-                    decision,
-                },
-            };
             session
                 .thread
                 .submit(operation)
@@ -1535,27 +1677,21 @@ impl Kernel {
         .await
     }
 
-    /// Resolve one pending Codex user-input request by its source turn identity.
-    ///
-    /// The response is submitted through the embedded thread rather than through a host-side
-    /// callback. This keeps the kernel as the sole owner of the live Codex session and makes the
-    /// operation safe to replay after a durable execution-port acknowledgement is lost.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session or request identity is invalid, the kernel is
-    /// closed, or Codex rejects the response submission.
     pub async fn resolve_user_input(
         &self,
         session_id: &str,
         turn_id: String,
+        call_id: String,
         response: RequestUserInputResponse,
     ) -> KernelResult<String> {
         Self::guard(async {
-            if session_id.trim().is_empty() || turn_id.trim().is_empty() {
+            if session_id.trim().is_empty()
+                || turn_id.trim().is_empty()
+                || call_id.trim().is_empty()
+            {
                 return Err(KernelFailure::new(
                     "INVALID_INPUT_RESPONSE",
-                    "input response session and turn identities must be non-empty",
+                    "input response session, turn and call identities must be non-empty",
                 ));
             }
             let runtime = self.runtime().await?;
@@ -1565,6 +1701,7 @@ impl Kernel {
                 .thread
                 .submit(Op::UserInputAnswer {
                     id: turn_id,
+                    call_id,
                     response,
                 })
                 .await
@@ -1582,12 +1719,6 @@ impl Kernel {
         .await
     }
 
-    /// Read the next ordered event and distinguish timeout from stream closure.
-    ///
-    /// # Errors
-    ///
-    /// A session that has already been unregistered is a closed stream. Returns a typed failure
-    /// only when the kernel itself is closed.
     pub async fn next_event(
         &self,
         session_id: &str,
@@ -1618,11 +1749,6 @@ impl Kernel {
         .await
     }
 
-    /// Return currently registered session identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the kernel is closed or runtime initialization fails.
     pub async fn list_sessions(&self) -> KernelResult<Vec<String>> {
         Self::guard(async {
             let runtime = self.runtime().await?;
@@ -1639,20 +1765,15 @@ impl Kernel {
         .await
     }
 
-    /// Gracefully close and unregister one session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session is unknown or does not shut down before the
-    /// configured deadline.
     pub async fn close_session(&self, session_id: &str) -> KernelResult<()> {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let session = runtime
                 .sessions
-                .write()
+                .read()
                 .await
-                .remove(session_id)
+                .get(session_id)
+                .cloned()
                 .ok_or_else(|| session_not_found(session_id))?;
             let _ = session.stop.send(true);
             tokio::time::timeout(
@@ -1667,6 +1788,7 @@ impl Kernel {
                 )
             })?
             .map_err(|error| KernelFailure::new("SESSION_SHUTDOWN_FAILED", error.to_string()))?;
+            runtime.sessions.write().await.remove(session_id);
             if let Ok(thread_id) = ThreadId::try_from(session_id) {
                 let _ = runtime.manager.remove_thread(&thread_id).await;
             }
@@ -1677,11 +1799,6 @@ impl Kernel {
         .await
     }
 
-    /// Shut down all sessions and reject later work.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed panic failure if the embedded shutdown path panics.
     pub async fn shutdown(&self) -> KernelResult<ShutdownInfo> {
         Self::guard(async {
             if self.closed.swap(true, Ordering::AcqRel) {
@@ -1833,7 +1950,6 @@ impl Kernel {
         })
     }
 
-    /// Best-effort shutdown used by the native object's finalizer.
     #[must_use]
     pub fn best_effort_shutdown(&self) -> Option<BoxFuture<'static, ()>> {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -1882,7 +1998,6 @@ fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
             restrict_private_tree(&entry?.path())?;
         }
     } else if metadata.is_file() {
-        // Imported skill scripts retain owner execution while remaining private.
         let mode = 0o600 | (metadata.permissions().mode() & 0o100);
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
     } else {
@@ -1896,7 +2011,6 @@ fn restrict_private_tree(_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Return the static kernel descriptor.
 #[must_use]
 pub const fn descriptor() -> KernelDescriptor {
     KernelDescriptor {
@@ -1914,11 +2028,18 @@ fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInput
         image_url: url.clone(),
         detail: None,
     }));
-    TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+    let request = TurnInputRequest::user_input(input).on_start(turn_start_options(options));
+    #[cfg(feature = "test-support")]
+    let request = mechanism_interaction_test_options::apply(request);
+    request
+}
+
+fn turn_start_options(options: &TurnSubmissionOptions) -> TurnStartOptions {
+    TurnStartOptions {
         final_output_json_schema: options.final_output_json_schema.clone(),
         submit_change_batch: options.submit_change_batch,
         ..TurnStartOptions::default()
-    })
+    }
 }
 
 fn submission_info(submission: TurnInputSubmission) -> SubmissionInfo {
@@ -2018,6 +2139,59 @@ fn model_route(provider: &str, model: &str) -> KernelResult<(String, String)> {
         ));
     }
     Ok((provider.to_string(), model.to_string()))
+}
+
+fn codex_approval_operation(response: ApprovalResponse) -> KernelResult<Op> {
+    if response.operation_id.trim().is_empty() {
+        return Err(KernelFailure::new(
+            "INVALID_APPROVAL_RESPONSE",
+            "approval id must be non-empty",
+        ));
+    }
+    if response.kind == ApprovalKind::Mcp {
+        use codex_protocol::approvals::ElicitationAction;
+        let (server_name, request_id): (String, codex_protocol::mcp::RequestId) =
+            serde_json::from_str(&response.operation_id).map_err(|_| {
+                KernelFailure::new("INVALID_APPROVAL_RESPONSE", "invalid MCP callback identity")
+            })?;
+        if server_name.trim().is_empty() {
+            return Err(KernelFailure::new(
+                "INVALID_APPROVAL_RESPONSE",
+                "MCP server is missing",
+            ));
+        }
+        let decision = match response.decision {
+            ApprovalDecision::Approved => ElicitationAction::Accept,
+            ApprovalDecision::Denied { .. } => ElicitationAction::Decline,
+            ApprovalDecision::Abort => ElicitationAction::Cancel,
+            ApprovalDecision::ApprovedForSession => {
+                return Err(KernelFailure::new(
+                    "INVALID_APPROVAL_RESPONSE",
+                    "MCP approvals must be single-use",
+                ));
+            }
+        };
+        return Ok(Op::ResolveElicitation {
+            server_name,
+            request_id,
+            decision,
+            content: None,
+            meta: None,
+        });
+    }
+    let decision = codex_review_decision(response.decision)?;
+    match response.kind {
+        ApprovalKind::Exec => Ok(Op::ExecApproval {
+            id: response.operation_id,
+            turn_id: response.turn_id.filter(|id| !id.trim().is_empty()),
+            decision,
+        }),
+        ApprovalKind::Patch => Ok(Op::PatchApproval {
+            id: response.operation_id,
+            decision,
+        }),
+        ApprovalKind::Mcp => unreachable!("MCP callback handled above"),
+    }
 }
 
 fn codex_review_decision(decision: ApprovalDecision) -> KernelResult<CodexReviewDecision> {
@@ -2140,6 +2314,8 @@ mod tests {
 
     use super::AbsolutePathBuf;
     use super::ApprovalDecision;
+    use super::ApprovalKind;
+    use super::ApprovalResponse;
     use super::CODEX_COMMIT;
     use super::CodexReviewDecision;
     use super::ConfigBuilder;
@@ -2164,6 +2340,7 @@ mod tests {
     use super::RoleSessionPolicyWorkspaceMode;
     use super::TurnSubmissionOptions;
     use super::canonical_role_policy;
+    use super::codex_approval_operation;
     use super::codex_review_decision;
     use super::descriptor;
     use super::kernel_provider_info;
@@ -2222,6 +2399,58 @@ mod tests {
                 ))
             })
         }
+    }
+
+    #[test]
+    fn mcp_approval_callback_preserves_typed_id_and_single_use_decision() {
+        for id in [serde_json::json!(42), serde_json::json!("42")] {
+            for (decision, expected) in [
+                (ApprovalDecision::Approved, "accept"),
+                (
+                    ApprovalDecision::Denied {
+                        rejection: "no".into(),
+                    },
+                    "decline",
+                ),
+                (ApprovalDecision::Abort, "cancel"),
+            ] {
+                let response = ApprovalResponse {
+                    session_id: "session".into(),
+                    kind: ApprovalKind::Mcp,
+                    operation_id: serde_json::to_string(&("server", &id)).expect("callback id"),
+                    turn_id: Some("turn".into()),
+                    decision,
+                };
+                let super::Op::ResolveElicitation {
+                    server_name,
+                    request_id,
+                    decision,
+                    content,
+                    meta,
+                } = codex_approval_operation(response).expect("MCP callback")
+                else {
+                    panic!("expected MCP callback");
+                };
+                assert_eq!(
+                    serde_json::to_value(request_id).expect("typed request id"),
+                    id
+                );
+                assert_eq!(server_name, "server");
+                assert_eq!(serde_json::to_value(decision).expect("decision"), expected);
+                assert!(content.is_none());
+                assert!(meta.is_none());
+            }
+        }
+        assert!(
+            codex_approval_operation(ApprovalResponse {
+                session_id: "session".into(),
+                kind: ApprovalKind::Mcp,
+                operation_id: "[\"server\",42]".into(),
+                turn_id: None,
+                decision: ApprovalDecision::ApprovedForSession,
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -2350,6 +2579,112 @@ mod tests {
         std::fs::remove_dir_all(home).expect("remove kernel home");
     }
 
+    const EXPECTED_CODEX_PATCH_SET: &[&str] = &[
+        "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
+        "upstream/patches/codex/0002-inject-model-stream-transport.patch",
+        "upstream/patches/codex/0003-export-config-builder.patch",
+        "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
+        "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
+        "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
+        "upstream/patches/codex/0008-atomic-apply-patch.patch",
+        "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+        "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+        "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+        "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
+        "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
+        "upstream/patches/codex/0014-code-mode-dispatch-catalog.patch",
+        "upstream/patches/codex/0015-code-mode-dispatch-portable-requests.patch",
+        "upstream/patches/codex/0016-code-mode-dispatch-authorization.patch",
+        "upstream/patches/codex/0017-code-mode-dispatch-hook-tests.patch",
+        "upstream/patches/codex/0018-code-mode-dispatch-cell-scope.patch",
+        "upstream/patches/codex/0019-code-mode-dispatch-continuations.patch",
+        "upstream/patches/codex/0020-code-mode-dispatch-terminal-boundaries.patch",
+        "upstream/patches/codex/0021-code-mode-dispatch-io-authorization.patch",
+        "upstream/patches/codex/0022-tool-execution-facts-schema.patch",
+        "upstream/patches/codex/0023-tool-execution-facts-store.patch",
+        "upstream/patches/codex/0024-tool-execution-facts-store-tests.patch",
+        "upstream/patches/codex/0025-tool-execution-facts-dispatch.patch",
+        "upstream/patches/codex/0026-tool-execution-facts-wiring.patch",
+        "upstream/patches/codex/0027-tool-execution-facts-tests.patch",
+        "upstream/patches/codex/0028-tool-execution-facts-catalog-tests.patch",
+        "upstream/patches/codex/0029-tool-runtime-recovery-relations-schema.patch",
+        "upstream/patches/codex/0030-tool-runtime-recovery-relations-store.patch",
+        "upstream/patches/codex/0031-tool-runtime-recovery-read-authority.patch",
+        "upstream/patches/codex/0032-tool-runtime-recovery-result-recovery.patch",
+        "upstream/patches/codex/0033-tool-runtime-recovery-recovery-tests.patch",
+        "upstream/patches/codex/0034-tool-runtime-recovery-cell-lifecycle.patch",
+        "upstream/patches/codex/0035-tool-runtime-reconciliation-state.patch",
+        "upstream/patches/codex/0036-tool-runtime-reconciliation-dispatch.patch",
+        "upstream/patches/codex/0037-tool-runtime-reconciliation-tests.patch",
+        "upstream/patches/codex/0038-tool-runtime-reconciliation-process-receipt.patch",
+        "upstream/patches/codex/0039-tool-diagnostics-schema.patch",
+        "upstream/patches/codex/0040-tool-diagnostics-queue.patch",
+        "upstream/patches/codex/0041-tool-diagnostics-responses.patch",
+        "upstream/patches/codex/0042-tool-diagnostics-queue-tests.patch",
+        "upstream/patches/codex/0043-tool-diagnostics-detector.patch",
+        "upstream/patches/codex/0044-tool-diagnostics-detector-tests.patch",
+        "upstream/patches/codex/0045-tool-diagnostics-feedback.patch",
+        "upstream/patches/codex/0046-tool-diagnostics-boundaries.patch",
+        "upstream/patches/codex/0047-tool-dependencies-schema.patch",
+        "upstream/patches/codex/0048-tool-dependencies-input-store.patch",
+        "upstream/patches/codex/0049-tool-dependencies-input-tests.patch",
+        "upstream/patches/codex/0050-tool-dependencies-sharing-store.patch",
+        "upstream/patches/codex/0051-tool-dependencies-sharing-store-tests.patch",
+        "upstream/patches/codex/0052-tool-dependencies-adapter-contract.patch",
+        "upstream/patches/codex/0053-tool-dependencies-dispatch.patch",
+        "upstream/patches/codex/0054-tool-dependencies-sharing-runtime.patch",
+        "upstream/patches/codex/0055-tool-dependencies-sharing-io.patch",
+        "upstream/patches/codex/0056-tool-dependencies-sharing-tests.patch",
+        "upstream/patches/codex/0057-tool-dependencies-responses.patch",
+        "upstream/patches/codex/0058-tool-dependencies-diagnostics.patch",
+        "upstream/patches/codex/0059-tool-receipts-state.patch",
+        "upstream/patches/codex/0060-tool-receipts-state-tests.patch",
+        "upstream/patches/codex/0061-tool-receipts-context.patch",
+        "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
+        "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
+        "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+        "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
+        "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
+        "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+        "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+        "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+        "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
+        "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
+        "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
+        "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+        "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+        "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
+        "upstream/patches/codex/0076-tool-review-tls.patch",
+        "upstream/patches/codex/0077-tool-review-memmap.patch",
+        "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
+        "upstream/patches/codex/0079-tool-review-optional-diagnostic-isolation.patch",
+        "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
+        "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch",
+        "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
+        "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
+        "upstream/patches/codex/0084-tool-review-tool-fact-shutdown-barrier.patch",
+        "upstream/patches/codex/0085-tool-review-app-client-timeout-phases.patch",
+        "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
+        "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
+        "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
+        "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+        "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+        "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+        "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+        "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
+        "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+        "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+        "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+        "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
+        "upstream/patches/codex/0098-mechanism-behavior-audit.patch",
+        "upstream/patches/codex/0099-task-state-compaction-budget.patch",
+        "upstream/patches/codex/0100-runtime-timer-and-pending-cost.patch",
+        "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
+        "upstream/patches/codex/0102-exact-input-call-routing.patch",
+        "upstream/patches/codex/0103-private-input-recovery-store.patch",
+        "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+    ];
+
     #[test]
     fn clamps_event_capacity_and_reports_exact_source() {
         let home =
@@ -2366,21 +2701,9 @@ mod tests {
         .expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 9);
+        assert_eq!(build.interface_version, 12);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
-        assert_eq!(
-            build.patch_set,
-            vec![
-                "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
-                "upstream/patches/codex/0002-inject-model-stream-transport.patch",
-                "upstream/patches/codex/0003-export-config-builder.patch",
-                "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
-                "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
-                "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
-                "upstream/patches/codex/0008-atomic-apply-patch.patch",
-                "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
-            ]
-        );
+        assert_eq!(build.patch_set, EXPECTED_CODEX_PATCH_SET);
         assert_eq!(build.event_capacity, 16);
         let _ = std::fs::remove_dir_all(home);
     }
@@ -2501,7 +2824,20 @@ mod tests {
         }
     }
 
+    fn prepare_chat_permission_workspace(workspace: &std::path::Path, home: &std::path::Path) {
+        std::fs::create_dir_all(workspace).expect("create workspace");
+        std::fs::create_dir_all(home).expect("create home");
+        std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
+        std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
+        std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
+            .expect("candidate config");
+    }
+
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Kernel instance covers workspace policy, compaction policy and live extension refresh"
+    )]
     async fn chat_session_applies_its_declared_workspace_permissions() {
         use winwincode_execution_port::agent_config::{
             AgentProfileSettings, resolve_agent_session_config,
@@ -2513,13 +2849,7 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         let home = root.join("home");
-        std::fs::create_dir_all(&workspace).expect("create workspace");
-        std::fs::create_dir_all(&home).expect("create home");
-        // Candidate-controlled config is outside the Device extension authority.
-        std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
-        std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
-        std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
-            .expect("candidate config");
+        prepare_chat_permission_workspace(&workspace, &home);
         let kernel = Kernel::new(
             KernelOptions::new(home, std::env::current_exe().expect("test executable")),
             Arc::new(UnusedModelPort),
@@ -2547,9 +2877,12 @@ mod tests {
                 &capabilities,
                 "codex-chat",
                 AgentProfileSettings {
+                    fusion: None,
+                    jev_judge: None,
+                    jev_context: None,
                     provider: "fixture-provider".into(),
                     model: "fixture-model".into(),
-                    reasoning: "provider_default".into(),
+                    reasoning: if writer { "max" } else { "provider_default" }.into(),
                     tools: vec!["worker:sandbox".into()],
                     sandbox: sandbox.into(),
                     instructions: None,
@@ -2563,7 +2896,6 @@ mod tests {
                 role_policy: None,
                 agent_config,
             };
-            // The same Kernel must pick up both adding and removing an MCP service.
             std::fs::write(
                 runtime.base_config.codex_home.join("config.toml"),
                 if writer {
@@ -2573,7 +2905,7 @@ mod tests {
                 },
             )
             .expect("change Device config between tasks");
-            let result = Kernel::session_config(&runtime, &options).await;
+            let result = Kernel::session_config(&runtime, &options, false).await;
             if sandbox == "unrestricted" {
                 assert_eq!(
                     result.expect_err("unknown sandbox").code(),
@@ -2582,6 +2914,19 @@ mod tests {
                 continue;
             }
             let config = result.expect("session config");
+            assert!(!config.features.enabled(super::Feature::TokenBudget));
+            assert_eq!(config.compact_context_max_tokens, Some(30_000));
+            assert_eq!(
+                config.compact_prompt.as_deref(),
+                Some(winwincode_execution_port::task_handoff::TASK_HANDOFF_COMPACT_PROMPT)
+            );
+            assert_eq!(
+                config
+                    .model_reasoning_effort
+                    .as_ref()
+                    .map(codex_protocol::openai_models::ReasoningEffort::as_str),
+                writer.then_some("max"),
+            );
             assert_eq!(config.mcp_servers.get().contains_key("live"), writer);
             let policy = config.permissions.file_system_sandbox_policy();
             assert_eq!(
@@ -2600,6 +2945,105 @@ mod tests {
         drop(runtime);
         kernel.shutdown().await.expect("shutdown kernel");
         std::fs::remove_dir_all(root).expect("remove chat fixture");
+    }
+
+    #[tokio::test]
+    async fn host_action_owner_preserves_explicit_modes_and_role_sandbox() {
+        use winwincode_execution_port::agent_config::{
+            AgentProfileSettings, resolve_agent_session_config,
+        };
+        let root =
+            std::env::temp_dir().join(format!("winwincode-host-owner-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        prepare_chat_permission_workspace(&workspace, &home);
+        std::fs::write(home.join("config.toml"), concat!(
+            "[mcp_servers.inherited]\ncommand = \"python3\"\n",
+            "[mcp_servers.automatic]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"auto\"\n",
+            "[mcp_servers.prompted]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"prompt\"\n",
+            "[mcp_servers.writes]\ncommand = \"python3\"\ndefault_tools_approval_mode = \"writes\"\n",
+        )).expect("write private installation policy");
+        let kernel = Kernel::new(
+            KernelOptions::new(home, std::env::current_exe().expect("test executable")),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct kernel");
+        let runtime = kernel.runtime().await.expect("initialize runtime");
+        let worker =
+            serde_json::from_value(serde_json::json!("wrk_host_fixture")).expect("worker id");
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "capabilityDigest": format!("sha256:{}", "a".repeat(64)),
+            "features": ["sandbox"], "maxConcurrentJobs": 1, "platform": "aarch64-apple-darwin"
+        }))
+        .expect("capabilities");
+        for sandbox in ["candidate", "read-only"] {
+            let options = super::SessionOptions {
+                cwd: workspace.clone(),
+                provider: "fixture-provider".into(),
+                model: "fixture-model".into(),
+                role_policy: None,
+                agent_config: resolve_agent_session_config(
+                    &worker,
+                    &capabilities,
+                    "codex-chat",
+                    AgentProfileSettings {
+                        fusion: None,
+                        jev_judge: None,
+                        jev_context: None,
+                        provider: "fixture-provider".into(),
+                        model: "fixture-model".into(),
+                        reasoning: "provider_default".into(),
+                        tools: vec!["worker:sandbox".into()],
+                        sandbox: sandbox.into(),
+                        instructions: None,
+                    },
+                )
+                .expect("agent configuration"),
+            };
+            let original = Kernel::session_config(&runtime, &options, false)
+                .await
+                .expect("core-owned config");
+            let hosted = Kernel::session_config(&runtime, &options, true)
+                .await
+                .expect("host-owned config");
+            assert_eq!(
+                original.permissions.permission_profile(),
+                hosted.permissions.permission_profile()
+            );
+            assert_eq!(
+                original.permissions.approval_policy.value(),
+                hosted.permissions.approval_policy.value()
+            );
+            let mode = |configuration: &codex_core_api::Config, name: &str| {
+                serde_json::to_value(
+                    configuration.mcp_servers.get()[name].default_tools_approval_mode,
+                )
+                .expect("mode")
+            };
+            assert_eq!(mode(&original, "inherited"), serde_json::Value::Null);
+            assert_eq!(mode(&original, "automatic"), "auto");
+            assert_eq!(mode(&hosted, "inherited"), "approve");
+            assert_eq!(mode(&hosted, "automatic"), "approve");
+            for name in ["prompted", "writes"] {
+                assert_eq!(mode(&hosted, name), mode(&original, name));
+            }
+            let policy = hosted.permissions.file_system_sandbox_policy();
+            assert_eq!(
+                policy.can_write_path_with_cwd(
+                    workspace.join("fixture.txt").as_path(),
+                    workspace.as_path()
+                ),
+                sandbox == "candidate"
+            );
+            assert!(!policy.can_write_path_with_cwd(
+                std::path::Path::new("/outside-project.txt"),
+                workspace.as_path()
+            ));
+        }
+        drop(runtime);
+        kernel.shutdown().await.expect("shutdown kernel");
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[tokio::test]

@@ -1,0 +1,346 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -279,6 +279,15 @@
+         }
+     }
+ 
++    /// Reads bounded, payload-free Core execution facts after a durable cursor.
++    pub async fn tool_runtime_events(
++        &self,
++        after: i64,
++        limit: u32,
++    ) -> anyhow::Result<Vec<codex_state::ToolRuntimeEvent>> {
++        crate::tools::ExecutionFacts::read_events(&self.session, after, limit).await
++    }
++
+     pub async fn submit(&self, op: Op) -> CodexResult<String> {
+         self.io.submit(op).await
+     }
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -407,8 +407,13 @@
+         .unified_exec_manager
+         .terminate_all_processes()
+         .await;
+-    if let Err(err) = sess.services.code_mode_service.shutdown().await {
+-        warn!("failed to shutdown code mode session: {err}");
++    match sess.services.code_mode_service.shutdown().await {
++        Err(err) => warn!("failed to shutdown code mode session: {err}"),
++        Ok(()) => {
++            if let Err(err) = crate::tools::ExecutionFacts::close_owned_cells(sess).await {
++                warn!("failed to retain closed code mode cells: {err}");
++            }
++        }
+     }
+     sess.stop_mcp_prewarm_worker().await;
+     {
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -894,7 +894,7 @@
+         {
+             self.services
+                 .code_mode_service
+-                .interrupt_active_cells()
++                .interrupt_active_cells(self)
+                 .await;
+         }
+         task.turn_context
+diff --git a/codex-rs/core/src/tools/cell_facts.rs b/codex-rs/core/src/tools/cell_facts.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/cell_facts.rs
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ExecutionFacts;
++use super::digest;
++use super::storage_error;
++use crate::function_tool::FunctionCallError;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use std::sync::Arc;
++
++impl ExecutionFacts {
++    pub(crate) async fn start_cell(
++        session: &Session,
++        turn: &TurnContext,
++        cell_id: &str,
++        call_id: &str,
++    ) -> Result<(), FunctionCallError> {
++        let facts = Self::for_session(session);
++        let store = facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("cell has no durable dispatch owner"))?;
++        let owner = facts
++            .owner_id
++            .get()
++            .ok_or_else(|| storage_error("cell owner is unavailable"))?;
++        let scope = digest(serde_json::json!([turn.sub_id, call_id]));
++        store
++            .open_tool_cell(
++                &session.thread_id.to_string(),
++                &format!("direct:{scope}"),
++                cell_id,
++                &scope,
++                owner,
++            )
++            .await
++            .map_err(storage_error)?;
++        facts.register_cell(cell_id.into(), call_id.into(), &turn.sub_id);
++        Ok(())
++    }
++
++    pub(crate) async fn close_cell(
++        session: &Session,
++        cell_id: &str,
++    ) -> Result<(), FunctionCallError> {
++        let facts = Self::for_session(session);
++        let Some((_, scope)) = facts.parent(cell_id) else {
++            return Ok(());
++        };
++        let store = facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("cell store is unavailable"))?;
++        let owner = facts
++            .owner_id
++            .get()
++            .ok_or_else(|| storage_error("cell owner is unavailable"))?;
++        store
++            .close_tool_cell(&session.thread_id.to_string(), cell_id, &scope, owner)
++            .await
++            .map_err(storage_error)
++    }
++
++    pub(crate) async fn close_owned_cells(session: &Session) -> Result<(), FunctionCallError> {
++        let facts = Self::for_session(session);
++        let ids: Vec<String> = facts
++            .cells
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .keys()
++            .cloned()
++            .collect();
++        for id in ids {
++            Self::close_cell(session, &id).await?;
++        }
++        Ok(())
++    }
++
++    pub(crate) async fn begin_cell_wait(
++        session: &Session,
++        turn: &TurnContext,
++        cell_id: &str,
++        call_id: &str,
++    ) -> Result<Option<ToolCellWait>, FunctionCallError> {
++        let facts = Self::for_session(session);
++        let Some((_, scope)) = facts.parent(cell_id) else {
++            if let Some(store) = facts.store.get()
++                && let Some(cell) = store
++                    .latest_tool_cell(&session.thread_id.to_string(), cell_id)
++                    .await
++                    .map_err(storage_error)?
++            {
++                let state = if cell.lifecycle == codex_state::ToolCellLifecycle::Closed {
++                    "cell_closed"
++                } else {
++                    "cell_owner_unverified"
++                };
++                return Err(FunctionCallError::RespondToModel(serde_json::json!({
++                    "type": "code_cell_recovery", "schema_version": 1, "state": state, "cell": cell,
++                }).to_string()));
++            }
++            return Ok(None);
++        };
++        let store = facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("cell store is unavailable"))?;
++        let owner = facts
++            .owner_id
++            .get()
++            .ok_or_else(|| storage_error("cell owner is unavailable"))?;
++        let logical = format!(
++            "direct:{}",
++            digest(serde_json::json!([turn.sub_id, call_id]))
++        );
++        let wait = store
++            .begin_tool_cell_wait(
++                &session.thread_id.to_string(),
++                &logical,
++                cell_id,
++                &scope,
++                owner,
++            )
++            .await
++            .map_err(storage_error)?;
++        let Some(wait) = wait else {
++            return Ok(None);
++        };
++        Ok(Some(ToolCellWait {
++            facts: Arc::clone(&facts),
++            thread_id: session.thread_id.to_string(),
++            sequence: wait.waiter_request_sequence,
++        }))
++    }
++}
++
++/// Dropping an interrupted waiter preserves its unresolved durable edge.
++pub(crate) struct ToolCellWait {
++    facts: Arc<ExecutionFacts>,
++    thread_id: String,
++    sequence: i64,
++}
++impl ToolCellWait {
++    pub(crate) async fn settle(self) -> Result<(), FunctionCallError> {
++        let store = self
++            .facts
++            .store
++            .get()
++            .ok_or_else(|| storage_error("wait store is unavailable"))?;
++        let owner = self
++            .facts
++            .owner_id
++            .get()
++            .ok_or_else(|| storage_error("wait owner is unavailable"))?;
++        store
++            .settle_tool_cell_wait(&self.thread_id, self.sequence, owner)
++            .await
++            .map_err(storage_error)
++    }
++}
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -73,11 +73,22 @@
+             .await
+             .map_err(FunctionCallError::RespondToModel)?;
+         let cell_id = started_cell.cell_id.clone();
+-        crate::tools::execution_facts::ExecutionFacts::for_session(&exec.session).register_cell(
+-            cell_id.to_string(),
+-            call_id.clone(),
+-            &exec.turn.sub_id,
+-        );
++        if let Err(error) = crate::tools::execution_facts::ExecutionFacts::start_cell(
++            &exec.session,
++            &exec.turn,
++            cell_id.as_str(),
++            &call_id,
++        )
++        .await
++        {
++            let _ = exec
++                .session
++                .services
++                .code_mode_service
++                .terminate(cell_id.clone())
++                .await;
++            return Err(error);
++        }
+         telemetry.cell_id = Some(cell_id.to_string());
+         exec.session
+             .services
+@@ -126,6 +137,11 @@
+         // Yielded cells keep running, so terminal lifecycle is only emitted
+         // here when the first response also ended the runtime.
+         if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
++            crate::tools::execution_facts::ExecutionFacts::close_cell(
++                &exec.session,
++                cell_id.as_str(),
++            )
++            .await?;
+             code_cell_trace.record_ended(&response);
+             exec.session
+                 .services
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -147,7 +147,7 @@
+         self.session().await?.terminate(cell_id).await
+     }
+ 
+-    pub(crate) async fn interrupt_active_cells(&self) {
++    pub(crate) async fn interrupt_active_cells(&self, owner: &Session) {
+         let Some(session) = self.session.get() else {
+             return;
+         };
+@@ -156,8 +156,14 @@
+                 .active_cell_ids()
+                 .into_iter()
+                 .map(|cell_id| async move {
+-                    if let Err(error) = session.terminate(cell_id.clone()).await {
+-                        tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell");
++                    match session.terminate(cell_id.clone()).await {
++                        Ok(_) => {
++                            if let Err(error) = crate::tools::ExecutionFacts::close_cell(owner, cell_id.as_str()).await {
++                                tracing::warn!(%cell_id, %error, "failed to retain interrupted code-mode cell fact");
++                            }
++                            self.finish_cell_dispatch(&cell_id);
++                        }
++                        Err(error) => tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell"),
+                     }
+                 }),
+         )
+diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+@@ -96,6 +96,13 @@
+                 let exec = ExecContext { session, turn };
+                 let started_at = std::time::Instant::now();
+                 let cell_id = codex_code_mode::CellId::new(args.cell_id);
++                let durable_wait = crate::tools::execution_facts::ExecutionFacts::begin_cell_wait(
++                    &exec.session,
++                    &exec.turn,
++                    cell_id.as_str(),
++                    &call_id,
++                )
++                .await?;
+                 let wait_future = async {
+                     if args.terminate {
+                         exec.session
+@@ -124,6 +131,9 @@
+                         telemetry.finish(/*success*/ false);
+                         FunctionCallError::RespondToModel(error)
+                     })?;
++                if let Some(durable_wait) = durable_wait {
++                    durable_wait.settle().await?;
++                }
+                 if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response {
+                     let runtime_cell_id = match response {
+                         codex_code_mode::RuntimeResponse::Yielded { cell_id, .. }
+@@ -137,6 +147,11 @@
+                         executed_tool_calls.register_cell(runtime_cell_id, &call_id);
+                     }
+                     if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
++                        crate::tools::execution_facts::ExecutionFacts::close_cell(
++                            &exec.session,
++                            runtime_cell_id.as_str(),
++                        )
++                        .await?;
+                         exec.session
+                             .services
+                             .rollout_thread_trace
+diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
+--- a/codex-rs/core/tests/suite/code_mode.rs
++++ b/codex-rs/core/tests/suite/code_mode.rs
+@@ -2192,6 +2192,17 @@
+     // SQLite commits use a real I/O worker. Pause virtual time only after
+     // dispatch reaches the actual handler, rather than the raw model response.
+     started_rx.await?;
++    // Wait for the durable edge as well: the handler commits it before entering
++    // the timed runtime wait. SQLite's real I/O must finish before virtual time.
++    tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            if test.codex.tool_runtime_events(0, 200).await.unwrap().iter().any(|event| {
++                matches!(&event.fact, codex_state::ToolRuntimeFact::Wait(wait) if wait.state == codex_state::ToolWaitState::Waiting)
++            }) { break; }
++            tokio::task::yield_now().await;
++        }
++    }).await?;
++    tokio::task::yield_now().await;
+     tokio::time::pause();
+     for _ in 0..130 {
+         tokio::time::advance(Duration::from_secs(1)).await;

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Isolated, short-lived preview access over an outbound Device Client tunnel.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
@@ -719,6 +717,22 @@ pub(crate) fn authorize_current_frozen_candidate(
                 && evidence.evidence_type == EvidenceRefType::Commit
         })
         .collect::<Vec<_>>();
+    let evidence = commits.first().ok_or_else(source_authority_conflict)?;
+    let snapshot_state = storage
+        .load_state(&format!("snapshot-product:v1:{}", evidence.snapshot_id.0))
+        .map_err(|_| unavailable())?
+        .ok_or_else(source_authority_conflict)?;
+    let snapshot: winwincode_domain::CanonicalSnapshot =
+        serde_json::from_slice(&snapshot_state.payload).map_err(|_| source_authority_conflict())?;
+    if snapshot.candidate_id() != &evidence.candidate_id
+        || snapshot.as_contract().work_run_id != writer.work_run_id
+    {
+        return Err(source_authority_conflict());
+    }
+    let candidate_ref = format!(
+        "refs/winwincode/candidates/{}",
+        snapshot.as_contract().candidate_commit_id.0
+    );
     let commit_ids = commits
         .iter()
         .filter_map(|evidence| evidence.source_ref.strip_prefix("git_commit:"))
@@ -732,9 +746,7 @@ pub(crate) fn authorize_current_frozen_candidate(
             .work_input
             .as_ref()
             .and_then(|input| input.candidate_ref.as_deref()),
-        commits
-            .first()
-            .map(|evidence| evidence.candidate_ref.as_str()),
+        Some(candidate_ref.as_str()),
         commits.len(),
         &commit_ids,
     )
@@ -1173,293 +1185,394 @@ mod tests {
         );
     }
 
-    /// Frozen preview authorize succeeds only when the Delivery carries exactly
-    /// one executor Commit Evidence sealed from the real frozen candidate.
-    #[test]
-    fn authorize_current_frozen_candidate_succeeds_with_sealed_commit_evidence() {
-        use winwincode_delivery::domain::{DELIVERY_SCHEMA_VERSION, Delivery};
-        use winwincode_domain::Sha256Digest;
-        use winwincode_execution_port::generated::ExecutionJob;
-        use winwincode_storage::{
-            NewOutboxEvent, ProductStateStorage as _, ReceiptActorKey, ReceiptIdentity,
-            ReceiptScopeKey, StateCommit,
-        };
-
-        fn canonical(prefix: &str, seed: &str) -> String {
-            let digest = Sha256::digest(seed.as_bytes());
-            let alphabet = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-            let mut suffix = [b'0'; 26];
-            let mut value = u128::from_be_bytes(digest[..16].try_into().expect("sha256"));
-            for slot in suffix.iter_mut().rev() {
-                *slot = alphabet[(value & 31) as usize];
-                value >>= 5;
-            }
-            format!("{prefix}{}", String::from_utf8_lossy(&suffix))
+    fn canonical(prefix: &str, seed: &str) -> String {
+        use sha2::Digest as _;
+        let digest = Sha256::digest(seed.as_bytes());
+        let alphabet = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        let mut suffix = [b'0'; 26];
+        let mut value = u128::from_be_bytes(digest[..16].try_into().expect("sha256"));
+        for slot in suffix.iter_mut().rev() {
+            *slot = alphabet[(value & 31) as usize];
+            value >>= 5;
         }
+        format!("{prefix}{}", String::from_utf8_lossy(&suffix))
+    }
 
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-preview-authorize-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("temp storage");
+    struct PreviewAuthorizeIds {
+        delivery_id: String,
+        executor_job: String,
+        verifier_job: String,
+        executor_run: String,
+        verifier_run: String,
+        executor_binding: String,
+        verifier_binding: String,
+        base_revision: String,
+        candidate_commit: String,
+        candidate_ref: String,
+        spec_id: String,
+        evidence_id: String,
+    }
 
-        let delivery_id = canonical("dlv_", "preview-authorize-delivery");
-        let executor_job = canonical("job_", "preview-authorize-executor-job");
-        let verifier_job = canonical("job_", "preview-authorize-verifier-job");
-        let executor_run = canonical("wrn_", "preview-authorize-executor-run");
-        let verifier_run = canonical("wrn_", "preview-authorize-verifier-run");
-        let executor_binding = canonical("bnd_", "preview-authorize-executor-binding");
-        let verifier_binding = canonical("bnd_", "preview-authorize-verifier-binding");
-        let base_revision = "b".repeat(40);
-        let candidate_commit = "a".repeat(40);
-        let candidate_ref =
-            "git-candidate:sha256:a71f11375d06a904ac3ed9faeffe28cddcc754e663b2f6b77029a84de6743e26";
-        let spec_id = canonical("dsp_", "preview-authorize-spec");
-        let evidence_id = canonical("evd_", "preview-authorize-commit-evidence");
+    impl PreviewAuthorizeIds {
+        fn new() -> Self {
+            Self {
+                delivery_id: canonical("dlv_", "preview-authorize-delivery"),
+                executor_job: canonical("job_", "preview-authorize-executor-job"),
+                verifier_job: canonical("job_", "preview-authorize-verifier-job"),
+                executor_run: canonical("wrn_", "preview-authorize-executor-run"),
+                verifier_run: canonical("wrn_", "preview-authorize-verifier-run"),
+                executor_binding: canonical("bnd_", "preview-authorize-executor-binding"),
+                verifier_binding: canonical("bnd_", "preview-authorize-verifier-binding"),
+                base_revision: "b".repeat(40),
+                candidate_commit: "a".repeat(40),
+                candidate_ref: format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+                spec_id: canonical("dsp_", "preview-authorize-spec"),
+                evidence_id: canonical("evd_", "preview-authorize-commit-evidence"),
+            }
+        }
+    }
 
-        let delivery_json = serde_json::json!({
+    fn preview_authorize_spec_json(ids: &PreviewAuthorizeIds) -> Value {
+        use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
+        let PreviewAuthorizeIds {
+            delivery_id,
+            spec_id,
+            base_revision,
+            ..
+        } = ids;
+        serde_json::json!({
             "schemaVersion": DELIVERY_SCHEMA_VERSION,
-            "id": delivery_id,
+            "id": spec_id,
+            "deliveryId": delivery_id,
             "revision": 1,
-            "status": "ready",
-            "spec": {
+            "title": "frozen preview authorize",
+            "goal": "authorize frozen preview with Commit evidence",
+            "scope": ["TASK.md"],
+            "outOfScope": [],
+            "constraints": [],
+            "acceptanceCriteria": [{
                 "schemaVersion": DELIVERY_SCHEMA_VERSION,
-                "id": spec_id,
+                "id": canonical("crt_", "preview-authorize-criterion"),
+                "description": "npm run verify passes",
+                "required": true,
+                "verificationMethod": "npm run verify"
+            }],
+            "sourceProductSessionId": canonical("psn_", "preview-authorize-source"),
+            "sourceRef": null,
+            "publicationTarget": null,
+            "repository": {
+                "schemaVersion": DELIVERY_SCHEMA_VERSION,
+                "kind": "local-git",
+                "locator": "devices/preview-authorize"
+            },
+            "baseRevision": base_revision,
+            "maxReworkAttempts": 3,
+            "createdAtMillis": 1_800_000_000_000_u64
+        })
+    }
+
+    fn preview_authorize_session_bindings_json(ids: &PreviewAuthorizeIds) -> Vec<Value> {
+        use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
+        let PreviewAuthorizeIds {
+            delivery_id,
+            executor_binding,
+            executor_run,
+            executor_job,
+            verifier_binding,
+            verifier_run,
+            verifier_job,
+            ..
+        } = ids;
+        vec![
+            serde_json::json!({
+                "schemaVersion": DELIVERY_SCHEMA_VERSION,
+                "id": executor_binding,
                 "deliveryId": delivery_id,
+                "workContractId": canonical("wct_", "preview-authorize-contract"),
+                "workContractRevision": 1,
+                "workItemId": canonical("wit_", "preview-authorize-item"),
+                "workItemRevision": 1,
+                "workRunId": executor_run,
+                "productSessionId": canonical("psn_", "preview-authorize-executor-psn"),
+                "executionJobId": executor_job,
+                "executionProfile": "executor",
+                "runtimeContext": {
+                    "agentIdentity": {
+                        "id": canonical("agt_", "preview-authorize-executor-agt"),
+                        "workerId": canonical("wrk_", "preview-authorize-executor-wrk"),
+                        "name": "Executor",
+                        "role": "executor"
+                    },
+                    "provider": "fixture-provider",
+                    "model": "fixture-model",
+                    "workspace": {
+                        "repositoryId": canonical("rep_", "preview-authorize"),
+                        "revision": format!("git-tree:{}", "c".repeat(64)),
+                        "writeMode": "candidate"
+                    }
+                },
+                "workerSessionId": canonical("wsn_", "preview-authorize-executor-wsn"),
+                "codexThreadId": canonical("cdx_", "preview-authorize-executor-cdx"),
+                "boundAtMillis": 1_800_000_000_011_u64,
+                "attempt": 1,
+                "workerId": canonical("wrk_", "preview-authorize-executor-wrk"),
+                "workerInstanceId": canonical("wki_", "preview-authorize-executor-wki"),
+                "leaseId": canonical("lse_", "preview-authorize-executor-lse"),
+                "fencingToken": "1",
+                "sourceProvenance": {
+                    "kind": "execution-port",
+                    "reference": canonical("msg_", "preview-authorize-executor-msg")
+                }
+            }),
+            serde_json::json!({
+                "schemaVersion": DELIVERY_SCHEMA_VERSION,
+                "id": verifier_binding,
+                "deliveryId": delivery_id,
+                "workContractId": canonical("wct_", "preview-authorize-contract"),
+                "workContractRevision": 1,
+                "workItemId": canonical("wit_", "preview-authorize-item"),
+                "workItemRevision": 1,
+                "workRunId": verifier_run,
+                "productSessionId": canonical("psn_", "preview-authorize-verifier-psn"),
+                "executionJobId": verifier_job,
+                "executionProfile": "verifier",
+                "runtimeContext": {
+                    "agentIdentity": {
+                        "id": canonical("agt_", "preview-authorize-verifier-agt"),
+                        "workerId": canonical("wrk_", "preview-authorize-verifier-wrk"),
+                        "name": "Verifier",
+                        "role": "verifier"
+                    },
+                    "provider": "fixture-provider",
+                    "model": "fixture-model",
+                    "workspace": {
+                        "repositoryId": canonical("rep_", "preview-authorize"),
+                        "revision": format!("git-tree:{}", "d".repeat(64)),
+                        "writeMode": "read-only"
+                    }
+                },
+                "workerSessionId": canonical("wsn_", "preview-authorize-verifier-wsn"),
+                "codexThreadId": canonical("cdx_", "preview-authorize-verifier-cdx"),
+                "boundAtMillis": 1_800_000_000_031_u64,
+                "attempt": 1,
+                "workerId": canonical("wrk_", "preview-authorize-verifier-wrk"),
+                "workerInstanceId": canonical("wki_", "preview-authorize-verifier-wki"),
+                "leaseId": canonical("lse_", "preview-authorize-verifier-lse"),
+                "fencingToken": "2",
+                "sourceProvenance": {
+                    "kind": "execution-port",
+                    "reference": canonical("msg_", "preview-authorize-verifier-msg")
+                }
+            }),
+        ]
+    }
+
+    fn preview_authorize_evidence_json(ids: &PreviewAuthorizeIds) -> Vec<Value> {
+        use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
+        let PreviewAuthorizeIds {
+            delivery_id,
+            spec_id,
+            evidence_id,
+            executor_run,
+            executor_binding,
+            candidate_commit,
+            ..
+        } = ids;
+        vec![serde_json::json!({
+            "schemaVersion": DELIVERY_SCHEMA_VERSION,
+            "id": evidence_id,
+            "deliveryId": delivery_id,
+            "deliverySpecId": spec_id,
+            "deliverySpecRevision": 1,
+            "workRunId": executor_run,
+            "sessionBindingId": executor_binding,
+            "snapshotId": canonical("snap_", "preview-authorize"),
+            "candidateId": canonical("cnd_", "preview-authorize"),
+            "type": "commit",
+            "sourceRef": format!("git_commit:{candidate_commit}"),
+            "createdAtMillis": 1_800_000_000_060_u64
+        })]
+    }
+
+    fn preview_authorize_work_run_aggregate_json(ids: &PreviewAuthorizeIds) -> Value {
+        let PreviewAuthorizeIds {
+            executor_run,
+            executor_job,
+            verifier_run,
+            verifier_job,
+            ..
+        } = ids;
+        serde_json::json!({
+            "schemaVersion": "winwincode/v1",
+            "contract": {
+                "schemaVersion": "winwincode/v1",
+                "id": canonical("wct_", "preview-authorize-contract"),
                 "revision": 1,
-                "title": "frozen preview authorize",
-                "goal": "authorize frozen preview with Commit evidence",
+                "objective": "frozen preview",
                 "scope": ["TASK.md"],
-                "outOfScope": [],
+                "protectedScope": [],
                 "constraints": [],
-                "acceptanceCriteria": [{
-                    "schemaVersion": DELIVERY_SCHEMA_VERSION,
+                "criteria": [{
                     "id": canonical("crt_", "preview-authorize-criterion"),
                     "description": "npm run verify passes",
                     "required": true,
+                    "requiredEvidenceClass": "machine",
                     "verificationMethod": "npm run verify"
                 }],
-                "sourceProductSessionId": canonical("psn_", "preview-authorize-source"),
-                "sourceRef": null,
-                "publicationTarget": null,
-                "repository": {
-                    "schemaVersion": DELIVERY_SCHEMA_VERSION,
-                    "kind": "local-git",
-                    "locator": "devices/preview-authorize"
-                },
-                "baseRevision": base_revision,
-                "maxReworkAttempts": 3,
-                "createdAtMillis": 1_800_000_000_000_u64
+                "requiredHumanAuthority": "none",
+                "createdAt": "2027-01-15T08:00:00.000Z"
             },
-            "sessionBindings": [
+            "items": [{
+                "schemaVersion": "winwincode/v1",
+                "id": canonical("wit_", "preview-authorize-item"),
+                "workContractId": canonical("wct_", "preview-authorize-contract"),
+                "workContractRevision": 1,
+                "title": "frozen preview",
+                "goal": "authorize frozen preview",
+                "state": "done",
+                "revision": 1,
+                "criterionIds": [canonical("crt_", "preview-authorize-criterion")],
+                "dependsOn": []
+            }],
+            "runs": [
                 {
-                    "schemaVersion": DELIVERY_SCHEMA_VERSION,
-                    "id": executor_binding,
-                    "deliveryId": delivery_id,
+                    "schemaVersion": "winwincode/v1",
+                    "id": executor_run,
                     "workContractId": canonical("wct_", "preview-authorize-contract"),
-                    "workContractRevision": 1,
+                    "contractRevision": 1,
                     "workItemId": canonical("wit_", "preview-authorize-item"),
                     "workItemRevision": 1,
-                    "workRunId": executor_run,
-                    "productSessionId": canonical("psn_", "preview-authorize-executor-psn"),
+                    "revision": 1,
+                    "state": "settled",
                     "executionJobId": executor_job,
-                    "executionProfile": "executor",
-                    "runtimeContext": {
-                        "agentIdentity": {
-                            "id": canonical("agt_", "preview-authorize-executor-agt"),
-                            "workerId": canonical("wrk_", "preview-authorize-executor-wrk"),
-                            "name": "Executor",
-                            "role": "executor"
-                        },
-                        "provider": "fixture-provider",
-                        "model": "fixture-model",
-                        "workspace": {
-                            "repositoryId": canonical("rep_", "preview-authorize"),
-                            "revision": format!("git-tree:{}", "c".repeat(64)),
-                            "writeMode": "candidate"
-                        }
-                    },
-                    "workerSessionId": canonical("wsn_", "preview-authorize-executor-wsn"),
-                    "codexThreadId": canonical("cdx_", "preview-authorize-executor-cdx"),
-                    "boundAtMillis": 1_800_000_000_011_u64,
                     "attempt": 1,
                     "workerId": canonical("wrk_", "preview-authorize-executor-wrk"),
                     "workerInstanceId": canonical("wki_", "preview-authorize-executor-wki"),
+                    "workerSessionId": canonical("wsn_", "preview-authorize-executor-wsn"),
                     "leaseId": canonical("lse_", "preview-authorize-executor-lse"),
                     "fencingToken": "1",
-                    "sourceProvenance": {
-                        "kind": "execution-port",
-                        "reference": canonical("msg_", "preview-authorize-executor-msg")
-                    }
+                    "productSessionId": canonical("psn_", "preview-authorize-executor-psn"),
+                    "codexThreadId": canonical("cdx_", "preview-authorize-executor-cdx")
                 },
                 {
-                    "schemaVersion": DELIVERY_SCHEMA_VERSION,
-                    "id": verifier_binding,
-                    "deliveryId": delivery_id,
+                    "schemaVersion": "winwincode/v1",
+                    "id": verifier_run,
                     "workContractId": canonical("wct_", "preview-authorize-contract"),
-                    "workContractRevision": 1,
+                    "contractRevision": 1,
                     "workItemId": canonical("wit_", "preview-authorize-item"),
                     "workItemRevision": 1,
-                    "workRunId": verifier_run,
-                    "productSessionId": canonical("psn_", "preview-authorize-verifier-psn"),
+                    "revision": 1,
+                    "state": "settled",
                     "executionJobId": verifier_job,
-                    "executionProfile": "verifier",
-                    "runtimeContext": {
-                        "agentIdentity": {
-                            "id": canonical("agt_", "preview-authorize-verifier-agt"),
-                            "workerId": canonical("wrk_", "preview-authorize-verifier-wrk"),
-                            "name": "Verifier",
-                            "role": "verifier"
-                        },
-                        "provider": "fixture-provider",
-                        "model": "fixture-model",
-                        "workspace": {
-                            "repositoryId": canonical("rep_", "preview-authorize"),
-                            "revision": format!("git-tree:{}", "d".repeat(64)),
-                            "writeMode": "read-only"
-                        }
-                    },
-                    "workerSessionId": canonical("wsn_", "preview-authorize-verifier-wsn"),
-                    "codexThreadId": canonical("cdx_", "preview-authorize-verifier-cdx"),
-                    "boundAtMillis": 1_800_000_000_031_u64,
                     "attempt": 1,
                     "workerId": canonical("wrk_", "preview-authorize-verifier-wrk"),
                     "workerInstanceId": canonical("wki_", "preview-authorize-verifier-wki"),
+                    "workerSessionId": canonical("wsn_", "preview-authorize-verifier-wsn"),
                     "leaseId": canonical("lse_", "preview-authorize-verifier-lse"),
                     "fencingToken": "2",
-                    "sourceProvenance": {
-                        "kind": "execution-port",
-                        "reference": canonical("msg_", "preview-authorize-verifier-msg")
-                    }
+                    "productSessionId": canonical("psn_", "preview-authorize-verifier-psn"),
+                    "codexThreadId": canonical("cdx_", "preview-authorize-verifier-cdx")
                 }
-            ],
+            ]
+        })
+    }
+
+    fn preview_authorize_delivery_json(ids: &PreviewAuthorizeIds) -> Value {
+        use winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION;
+        serde_json::json!({
+            "schemaVersion": DELIVERY_SCHEMA_VERSION,
+            "id": ids.delivery_id,
+            "revision": 1,
+            "status": "ready",
+            "spec": preview_authorize_spec_json(ids),
+            "sessionBindings": preview_authorize_session_bindings_json(ids),
             "attentionItems": [],
-            "evidence": [{
-                "schemaVersion": DELIVERY_SCHEMA_VERSION,
-                "id": evidence_id,
-                "deliveryId": delivery_id,
-                "deliverySpecId": spec_id,
-                "deliverySpecRevision": 1,
-                "workRunId": executor_run,
-                "sessionBindingId": executor_binding,
-                "candidateRef": candidate_ref,
-                "type": "commit",
-                "sourceRef": format!("git_commit:{candidate_commit}"),
-                "createdAtMillis": 1_800_000_000_060_u64
-            }],
+            "evidence": preview_authorize_evidence_json(ids),
             "verdict": null,
             "createdAtMillis": 1_800_000_000_000_u64,
             "updatedAtMillis": 1_800_000_000_070_u64,
-            "workRunAggregate": {
-                "schemaVersion": "winwincode/v1",
-                "contract": {
-                    "schemaVersion": "winwincode/v1",
-                    "id": canonical("wct_", "preview-authorize-contract"),
-                    "revision": 1,
-                    "objective": "frozen preview",
-                    "scope": ["TASK.md"],
-                    "protectedScope": [],
-                    "constraints": [],
-                    "criteria": [{
-                        "id": canonical("crt_", "preview-authorize-criterion"),
-                        "description": "npm run verify passes",
-                        "required": true,
-                        "requiredEvidenceClass": "machine",
-                        "verificationMethod": "npm run verify"
-                    }],
-                    "requiredHumanAuthority": "none",
-                    "createdAt": "2027-01-15T08:00:00.000Z"
-                },
-                "items": [{
-                    "schemaVersion": "winwincode/v1",
-                    "id": canonical("wit_", "preview-authorize-item"),
-                    "workContractId": canonical("wct_", "preview-authorize-contract"),
-                    "workContractRevision": 1,
-                    "title": "frozen preview",
-                    "goal": "authorize frozen preview",
-                    "state": "done",
-                    "revision": 1,
-                    "criterionIds": [canonical("crt_", "preview-authorize-criterion")],
-                    "dependsOn": []
-                }],
-                "runs": [
-                    {
-                        "schemaVersion": "winwincode/v1",
-                        "id": executor_run,
-                        "workContractId": canonical("wct_", "preview-authorize-contract"),
-                        "contractRevision": 1,
-                        "workItemId": canonical("wit_", "preview-authorize-item"),
-                        "workItemRevision": 1,
-                        "revision": 1,
-                        "state": "settled",
-                        "executionJobId": executor_job,
-                        "attempt": 1,
-                        "workerId": canonical("wrk_", "preview-authorize-executor-wrk"),
-                        "workerInstanceId": canonical("wki_", "preview-authorize-executor-wki"),
-                        "workerSessionId": canonical("wsn_", "preview-authorize-executor-wsn"),
-                        "leaseId": canonical("lse_", "preview-authorize-executor-lse"),
-                        "fencingToken": "1",
-                        "productSessionId": canonical("psn_", "preview-authorize-executor-psn"),
-                        "codexThreadId": canonical("cdx_", "preview-authorize-executor-cdx")
-                    },
-                    {
-                        "schemaVersion": "winwincode/v1",
-                        "id": verifier_run,
-                        "workContractId": canonical("wct_", "preview-authorize-contract"),
-                        "contractRevision": 1,
-                        "workItemId": canonical("wit_", "preview-authorize-item"),
-                        "workItemRevision": 1,
-                        "revision": 1,
-                        "state": "settled",
-                        "executionJobId": verifier_job,
-                        "attempt": 1,
-                        "workerId": canonical("wrk_", "preview-authorize-verifier-wrk"),
-                        "workerInstanceId": canonical("wki_", "preview-authorize-verifier-wki"),
-                        "workerSessionId": canonical("wsn_", "preview-authorize-verifier-wsn"),
-                        "leaseId": canonical("lse_", "preview-authorize-verifier-lse"),
-                        "fencingToken": "2",
-                        "productSessionId": canonical("psn_", "preview-authorize-verifier-psn"),
-                        "codexThreadId": canonical("cdx_", "preview-authorize-verifier-cdx")
-                    }
-                ]
-            }
-        });
-        let delivery_bytes = serde_json::to_vec(&delivery_json).expect("delivery JSON");
-        let delivery = Delivery::decode_json(&delivery_bytes)
-            .expect("canonical frozen Delivery with Commit evidence");
-        assert_eq!(delivery.snapshot().evidence.len(), 1);
-        assert_eq!(
-            delivery.snapshot().evidence[0].evidence_type,
-            EvidenceRefType::Commit
-        );
+            "workRunAggregate": preview_authorize_work_run_aggregate_json(ids),
+        })
+    }
 
-        let mut storage = SqliteStorage::open(&root).expect("preview storage");
+    fn seed_preview_authorize_storage(
+        root: &std::path::Path,
+        ids: &PreviewAuthorizeIds,
+        delivery: &Delivery,
+    ) -> SqliteStorage {
+        use winwincode_domain::{CanonicalSnapshot, Sha256Digest, Snapshot, seal_snapshot};
+        use winwincode_storage::{
+            NewOutboxEvent, ProductStateStorage as _, ReceiptActorKey, ReceiptIdentity,
+            ReceiptScopeKey, StateCommit, StateMutation,
+        };
+        let mut snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "winwincode/v1",
+            "snapshotId": canonical("snap_", "preview-authorize"),
+            "candidateId": canonical("cnd_", "preview-authorize"),
+            "workRunId": ids.executor_run,
+            "repositoryId": canonical("rep_", "preview-authorize"),
+            "baseCommitId": ids.base_revision,
+            "baseTreeId": "b".repeat(40),
+            "candidateCommitId": ids.candidate_commit,
+            "candidateTreeId": "c".repeat(40),
+            "diffSha256": format!("sha256:{}", "d".repeat(64)),
+            "contentDigest": format!("sha256:{}", "e".repeat(64)),
+            "createdAtMillis": 1_800_000_000_060_u64,
+            "immutable": true,
+            "validationSeal": format!("sha256:{}", "0".repeat(64))
+        }))
+        .expect("Snapshot contract");
+        snapshot.validation_seal = seal_snapshot(&snapshot);
+        let snapshot = CanonicalSnapshot::try_from(snapshot).expect("sealed Snapshot");
+        let mut storage = SqliteStorage::open(root).expect("preview storage");
         let scope = ReceiptScopeKey::from_encoded(b"preview-authorize-fixture".to_vec())
             .expect("receipt scope");
         storage
-            .commit(&StateCommit::new(
-                ReceiptIdentity::new(
-                    ReceiptActorKey::from_encoded(b"preview-authorize-actor".to_vec())
-                        .expect("actor"),
-                    scope,
-                    winwincode_domain::RequestId(canonical("req_", "preview-authorize")),
+            .commit(
+                &StateCommit::new(
+                    ReceiptIdentity::new(
+                        ReceiptActorKey::from_encoded(b"preview-authorize-actor".to_vec())
+                            .expect("actor"),
+                        scope,
+                        winwincode_domain::RequestId(canonical("req_", "preview-authorize")),
+                    )
+                    .expect("receipt identity"),
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"preview-authorize"))),
+                    format!("delivery:{}", ids.delivery_id),
+                    0,
+                    delivery.encode_json().expect("Delivery payload"),
+                    vec![NewOutboxEvent::internal(
+                        "preview-authorize-seed",
+                        "fixture.seed.internal",
+                        b"{}".to_vec(),
+                    )],
                 )
-                .expect("receipt identity"),
-                Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"preview-authorize"))),
-                format!("delivery:{delivery_id}"),
-                0,
-                delivery.encode_json().expect("Delivery payload"),
-                vec![NewOutboxEvent::internal(
-                    "preview-authorize-seed",
-                    "fixture.seed.internal",
-                    b"{}".to_vec(),
-                )],
-            ))
-            .expect("seed Delivery state");
+                .with_state_mutation(
+                    StateMutation::new(
+                        format!("snapshot-product:v1:{}", snapshot.snapshot_id().0),
+                        0,
+                        serde_json::to_vec(&snapshot).expect("Snapshot payload"),
+                    )
+                    .expect("Snapshot state"),
+                ),
+            )
+            .expect("seed Delivery and Snapshot state");
+        storage
+    }
 
-        let job = winwincode_storage::ExecutionJobRecord {
-            scope: winwincode_storage::ExecutionQueueScope {
+    fn preview_authorize_job_record(
+        ids: &PreviewAuthorizeIds,
+    ) -> winwincode_storage::ExecutionJobRecord {
+        use winwincode_domain::Sha256Digest;
+        use winwincode_storage::{ExecutionJobState, ExecutionQueueScope};
+        let PreviewAuthorizeIds {
+            delivery_id,
+            verifier_job,
+            verifier_run,
+            ..
+        } = ids;
+        winwincode_storage::ExecutionJobRecord {
+            scope: ExecutionQueueScope {
                 organization_id: winwincode_domain::OrganizationId(canonical(
                     "org_",
                     "preview-authorize",
@@ -1494,22 +1607,22 @@ mod tests {
             submitted_at: winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
             updated_at: winwincode_domain::Instant("2027-01-15T08:01:00.000Z".into()),
             cancellation: None,
-        };
+        }
+    }
 
-        let mut source = source(&verifier_job, &verifier_run);
-        source.mode = PreviewSourceMode::FrozenCandidate;
-        source.candidate_commit = Some(candidate_commit.clone());
-        source.repository_binding_id = canonical("rbd_", "preview-authorize");
-
-        let mut config = managed_config(&source);
-        config.mode = ManagedAppMode::FrozenCandidate;
-        config.candidate_commit = Some(candidate_commit.clone());
-
-        let dispatch: ExecutionJob = serde_json::from_value(serde_json::json!({
+    fn preview_authorize_dispatch_job(ids: &PreviewAuthorizeIds) -> ExecutionJob {
+        let PreviewAuthorizeIds {
+            verifier_run,
+            candidate_ref,
+            candidate_commit,
+            spec_id,
+            ..
+        } = ids;
+        serde_json::from_value(serde_json::json!({
             "attempt": 1,
             "executionProfile": "verifier",
             "goal": "verify frozen candidate",
-            "jobId": verifier_job,
+            "jobId": ids.verifier_job,
             "limits": {
                 "deadlineAt": "2027-01-15T08:05:00.000Z",
                 "maxArtifactBytes": 1_000_000,
@@ -1569,19 +1682,19 @@ mod tests {
                 "writeMode": "read-only"
             }
         }))
-        .expect("frozen verifier ExecutionJob");
+        .expect("frozen verifier ExecutionJob")
+    }
 
-        authorize_current_frozen_candidate(
-            &storage,
-            &job,
-            &WorkRunId(verifier_run.clone()),
-            &source,
-            &config,
-            &dispatch,
-        )
-        .expect("frozen preview authorize accepts sealed executor Commit evidence");
-
-        // Fail closed when the sealed Commit evidence is absent.
+    fn overwrite_without_commit_evidence(
+        storage: &mut SqliteStorage,
+        ids: &PreviewAuthorizeIds,
+        delivery: &Delivery,
+    ) {
+        use winwincode_domain::Sha256Digest;
+        use winwincode_storage::{
+            NewOutboxEvent, ProductStateStorage as _, ReceiptActorKey, ReceiptIdentity,
+            ReceiptScopeKey, StateCommit,
+        };
         let mut missing = delivery.clone().into_snapshot();
         missing.evidence.clear();
         missing.revision = 2;
@@ -1601,7 +1714,7 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"preview-authorize-missing")
                 )),
-                format!("delivery:{delivery_id}"),
+                format!("delivery:{}", ids.delivery_id),
                 1,
                 missing.encode_json().expect("missing Commit payload"),
                 vec![NewOutboxEvent::internal(
@@ -1611,10 +1724,67 @@ mod tests {
                 )],
             ))
             .expect("overwrite Delivery without Commit evidence");
+    }
+
+    #[test]
+    fn authorize_current_frozen_candidate_succeeds_with_sealed_commit_evidence() {
+        use winwincode_delivery::domain::Delivery;
+
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-preview-authorize-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp storage");
+
+        let ids = PreviewAuthorizeIds::new();
+        let PreviewAuthorizeIds {
+            verifier_job,
+            verifier_run,
+            candidate_commit,
+            ..
+        } = &ids;
+
+        let delivery_json = preview_authorize_delivery_json(&ids);
+        let delivery_bytes = serde_json::to_vec(&delivery_json).expect("delivery JSON");
+        let delivery = Delivery::decode_json(&delivery_bytes)
+            .expect("canonical frozen Delivery with Commit evidence");
+        assert_eq!(delivery.snapshot().evidence.len(), 1);
+        assert_eq!(
+            delivery.snapshot().evidence[0].evidence_type,
+            EvidenceRefType::Commit
+        );
+
+        let mut storage = seed_preview_authorize_storage(&root, &ids, &delivery);
+
+        let job = preview_authorize_job_record(&ids);
+
+        let mut source = source(verifier_job, verifier_run);
+        source.mode = PreviewSourceMode::FrozenCandidate;
+        source.candidate_commit = Some(candidate_commit.clone());
+        source.repository_binding_id = canonical("rbd_", "preview-authorize");
+
+        let mut config = managed_config(&source);
+        config.mode = ManagedAppMode::FrozenCandidate;
+        config.candidate_commit = Some(candidate_commit.clone());
+
+        let dispatch = preview_authorize_dispatch_job(&ids);
+
+        authorize_current_frozen_candidate(
+            &storage,
+            &job,
+            &WorkRunId(verifier_run.clone()),
+            &source,
+            &config,
+            &dispatch,
+        )
+        .expect("frozen preview authorize accepts sealed executor Commit evidence");
+
+        overwrite_without_commit_evidence(&mut storage, &ids, &delivery);
         let error = authorize_current_frozen_candidate(
             &storage,
             &job,
-            &WorkRunId(verifier_run),
+            &WorkRunId(verifier_run.clone()),
             &source,
             &config,
             &dispatch,

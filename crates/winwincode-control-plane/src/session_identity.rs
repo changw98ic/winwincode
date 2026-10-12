@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control Plane seam for accepting the generated `session.binding` message.
-
 use winwincode_delivery::application::{
     session_binding::SessionBindingIdentity as DeliverySessionBindingIdentity,
     workrun_execution::SessionBindingAuthority,
@@ -13,7 +11,6 @@ use winwincode_session::{
     SessionBindingIdentity,
 };
 
-/// A validated message/authority pair ready for canonical session and Delivery writes.
 #[derive(Debug)]
 pub struct SessionBindingAcceptance<'a> {
     binding: SessionBinding,
@@ -22,7 +19,6 @@ pub struct SessionBindingAcceptance<'a> {
     authority: &'a SessionBindingAuthority,
 }
 
-/// Failure at the generated-message/session identity seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionIdentityAdapterError {
     InvalidMessage(&'static str),
@@ -61,25 +57,28 @@ impl From<SessionBindingError> for SessionIdentityAdapterError {
     }
 }
 
-/// Accept one generated `session.binding` only when it matches the scheduler-owned authority and
-/// the durable Delivery execution scope. The scope is supplied separately because the
-/// `session.binding` wire message carries `workRunId` and `ProductSessionId`; the durable
-/// `WorkRun` scope supplies the complete contract/item identity and revisions.
-///
-/// # Errors
-///
-/// Returns a typed error when the message discriminator, identity joins, lease window, scheduler
-/// authority, or durable Delivery scope is not exact.
 pub fn validate_session_binding<'a>(
     message: &'a SessionBindingMessage,
     authority: &'a SessionBindingAuthority,
     scope: &WorkRunExecutionScope,
     delivery_id: &winwincode_domain::DeliveryId,
 ) -> Result<SessionBindingAcceptance<'a>, SessionIdentityAdapterError> {
+    let accepted_window = authority.issued_at() == &message.lease.issued_at
+        && authority.expires_at() == &message.lease.expires_at;
+    validate_session_binding_for_period(message, authority, scope, delivery_id, accepted_window)
+}
+
+pub(crate) fn validate_session_binding_for_period<'a>(
+    message: &'a SessionBindingMessage,
+    authority: &'a SessionBindingAuthority,
+    scope: &WorkRunExecutionScope,
+    delivery_id: &winwincode_domain::DeliveryId,
+    accepted_window: bool,
+) -> Result<SessionBindingAcceptance<'a>, SessionIdentityAdapterError> {
     validate_message_discriminator(message)?;
     validate_message_identifiers(message)?;
     validate_message_authority_fields(message)?;
-    validate_message_lease_window(message, authority)?;
+    validate_message_lease_window(message, authority, accepted_window)?;
     validate_scheduler_authority(message, authority)?;
     validate_delivery_scope(message, authority, scope)?;
 
@@ -234,23 +233,21 @@ fn validate_message_authority_fields(
 fn validate_message_lease_window(
     message: &SessionBindingMessage,
     authority: &SessionBindingAuthority,
+    accepted_window: bool,
 ) -> Result<(), SessionIdentityAdapterError> {
     validate_instant(&message.lease.issued_at, "issuedAt")?;
     validate_instant(&message.bound_at, "boundAt")?;
     validate_instant(&message.sent_at, "sentAt")?;
     validate_instant(&message.lease.expires_at, "expiresAt")?;
     if message.lease.issued_at.0 > message.bound_at.0
-        || message.bound_at.0 >= message.lease.expires_at.0
+        || message.bound_at.0 >= authority.expires_at().0
         || message.sent_at.0 < message.bound_at.0
-        || message.sent_at.0 > message.lease.expires_at.0
     {
         return Err(SessionIdentityAdapterError::InvalidLeaseWindow(
             "message timestamp is outside lease",
         ));
     }
-    if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
-    {
+    if !accepted_window {
         return Err(SessionIdentityAdapterError::InvalidLeaseWindow(
             "message changed scheduler-owned lease window",
         ));
@@ -378,25 +375,21 @@ fn validate_revision(
 }
 
 impl SessionBindingAcceptance<'_> {
-    /// Returns the canonical session binding value.
     #[must_use]
     pub const fn binding(&self) -> &SessionBinding {
         &self.binding
     }
 
-    /// Returns the Delivery identity required by its canonical write methods.
     #[must_use]
     pub const fn delivery_identity(&self) -> &DeliverySessionBindingIdentity {
         &self.delivery_identity
     }
 
-    /// Returns the generated message retained for Delivery provenance.
     #[must_use]
     pub const fn message(&self) -> &SessionBindingMessage {
         self.message
     }
 
-    /// Returns the one scheduler-owned authority used for acceptance.
     #[must_use]
     pub const fn authority(&self) -> &SessionBindingAuthority {
         self.authority
@@ -465,6 +458,7 @@ mod tests {
             expires_at.clone(),
         );
         let message = SessionBindingMessage {
+            snapshot_id: None,
             attempt: 1,
             bound_at,
             codex_thread_id: CodexThreadId(id("cdx", seed)),

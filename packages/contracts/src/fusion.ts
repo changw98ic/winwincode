@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Fusion blind-panel wire contract (community.5.1 / FUSION-01).
- *
- * Authoritative Rust types: `crates/winwincode-fusion`. This module is the
- * TypeScript projection for host surfaces. Field names are camelCase and must
- * stay aligned with the Rust serde contract.
- *
- * Track boundary: Fusion is Blind Independent Reasoning over the same
- * canonical question and context. It is not a multi-agent role split, does
- * not block Community P0 work, and is not part of the E13 execution epic.
- * This contract intentionally does not import Kernel, Jev, or StrongFlow role
- * types so the Fusion epic can version independently.
- */
-
 export const MIN_FUSION_PROVIDER_COUNT = 3
 export const MAX_FUSION_PROVIDER_COUNT = 16
 
@@ -25,8 +11,8 @@ export interface FusionProviderCandidate {
 }
 
 export interface FusionBudget {
-  readonly candidateTimeoutMillis: number
-  readonly maxTotalTokens: number
+  readonly candidateTimeoutMillis: number | null
+  readonly maxTotalTokens: number | null
 }
 
 export interface FusionInput {
@@ -59,7 +45,7 @@ export interface FusionProviderRequest {
   readonly model: string
   readonly reasoningEffort?: string | null
   readonly prompt: FusionBlindPrompt
-  readonly maxTotalTokens: number
+  readonly maxTotalTokens: number | null
 }
 
 export interface FusionProviderAnswer {
@@ -115,7 +101,6 @@ export type FusionPanelErrorCode =
   | 'Fusion text is empty or exceeds the bound'
   | 'Fusion constraints exceed the bound'
 
-/** Canonical validation mirroring the Rust panel gate. */
 export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | null {
   if (!input.question.trim()) {
     return 'Fusion text is empty or exceeds the bound'
@@ -128,8 +113,8 @@ export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | 
     return 'Fusion expected output schema must be an object'
   }
   if (
-    input.budget.candidateTimeoutMillis <= 0
-    || input.budget.maxTotalTokens <= 0
+    !validOptionalLimit(input.budget.candidateTimeoutMillis)
+    || !validOptionalLimit(input.budget.maxTotalTokens)
   ) {
     return 'Fusion budget limits must be positive'
   }
@@ -157,10 +142,10 @@ export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | 
   return null
 }
 
-/**
- * Builds the isolated prompt each Provider receives. Sibling candidates are
- * never included.
- */
+function validOptionalLimit(value: number | null): boolean {
+  return value === null || (Number.isSafeInteger(value) && (value as number) > 0)
+}
+
 export function fusionBlindPrompt(input: FusionInput): FusionBlindPrompt {
   return {
     question: input.question,

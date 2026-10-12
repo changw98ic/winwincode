@@ -146,7 +146,6 @@ fn run_repo(
     }
 }
 
-/// Runs the local-attachment `wwc repo attach` flow.
 fn run_repo_attach(
     arguments: &[String],
     launcher: &dyn LocalLauncherPort,
@@ -164,9 +163,6 @@ fn run_repo_attach(
     ))
 }
 
-/// Runs one Device Client repository registry command
-/// (`wwc repo add|list|remove`, plan §13.1) against the Device Client local
-/// data directory.
 fn run_repo_registry(action: &str, arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     let parsed = parse(arguments, &["init", "json"])?;
     reject_unknown(&parsed, &["data-dir"], &["init", "json"])?;
@@ -327,8 +323,6 @@ fn run_doctor(
     }
 }
 
-/// Parses and runs one `wwc device ...` command against the Device Client
-/// local data directory (plan 16.8: the CLI is the no-desktop fallback).
 fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     let Some(action) = arguments.first().map(String::as_str) else {
         return Err(UsageError(

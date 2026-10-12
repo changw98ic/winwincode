@@ -541,7 +541,6 @@ function startBlock(chunk, requestId) {
             return bridgeError('UNSUPPORTED_CONTENT', `DSH stream block type "${chunk.blockType}" is not supported by Codex`);
     }
 }
-/** Direct, credential-free adapter from the embedded Codex kernel to `ctx.llm`. */
 export class DshModelPort {
     #llm;
     constructor(llm) {

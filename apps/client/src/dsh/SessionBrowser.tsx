@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness ui-workspace tree.ts / rows/Rows.tsx
-// Copyright (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
-
 import { useState } from 'react'
 import type { ProductSessionProjection } from '../generated/contracts.js'
 import { repositoryDisplayName } from '../display-labels.js'
@@ -21,7 +18,6 @@ const projectLabel = (session: ProductSessionProjection, browser: Window | null)
   session.deviceContext?.repositoryName ?? '', session.deviceContext?.repositoryBindingId, browser,
 )
 
-/** DSH title/workspace substring matching and newest-first ordering. */
 export function visibleSessions(sessions: readonly ProductSessionProjection[], query: string, project: string, archived: boolean): ProductSessionProjection[] {
   const q = query.trim().toLowerCase()
   return sessions.filter(session => Boolean(session.archived) === archived
@@ -30,7 +26,6 @@ export function visibleSessions(sessions: readonly ProductSessionProjection[], q
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
 }
 
-/** DSH row actions and selection, connected to the product's durable sessions. */
 export function SessionBrowser(props: SessionBrowserProps) {
   const browser = typeof window === 'undefined' ? null : window
   const [query, setQuery] = useState('')

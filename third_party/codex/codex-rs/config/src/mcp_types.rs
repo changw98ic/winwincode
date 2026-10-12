@@ -218,7 +218,7 @@ pub struct McpServerConfig {
     )]
     pub startup_timeout_sec: Option<Duration>,
 
-    /// Default timeout for MCP tool calls initiated via this server.
+    /// Default timeout for MCP tool calls initiated via this server. Zero disables the deadline.
     #[serde(default, with = "option_duration_secs")]
     pub tool_timeout_sec: Option<Duration>,
 

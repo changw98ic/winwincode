@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ExecutionPortErrorCode } from '../generated/contracts.js'
+
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -69,6 +71,7 @@ export interface ConnectionMonitor {
 }
 
 const PUBLIC_CODES = new Set([
+  ...Object.values(ExecutionPortErrorCode).filter(code => code.startsWith('DEVICE_')),
   'APPROVAL_DENIED',
   'APPROVALS_ROUTE_FAILURE',
   'ARTIFACT_DIGEST_MISMATCH',
@@ -129,8 +132,6 @@ const PUBLIC_CODES = new Set([
 ])
 const SAFE_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/u
 const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
-// Protocol scope-key vocabulary for diagnostics only. Community product identity
-// is LocalDefaultScope; these kinds are not multi-tenant admin product surface.
 const PUBLIC_SCOPE_KINDS = new Set(['organization', 'workspace', 'project', 'repository'])
 
 function safeCode(value: unknown, fallback: string): string {
@@ -391,7 +392,6 @@ export interface ObserveControlPlaneClientOptions {
   readonly client: ControlPlaneClient
   readonly monitor: ConnectionMonitor
   readonly online: () => boolean
-  /** Called after the feature has handled and closed its revoked subscription. */
   readonly onAuthorizationRevoked?: (
     frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
   ) => Promise<void> | void
@@ -431,8 +431,6 @@ export function observeControlPlaneClient(
       return observe(options.client.changePassword(change, requestOptions))
     },
     initializationStatus(requestOptions) {
-      // A missing pre-auth initialization probe is presentation state for the
-      // sign-in page, never a connection-health signal for mounted features.
       return options.client.initializationStatus(requestOptions)
     },
     logout(requestOptions) {

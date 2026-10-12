@@ -81,7 +81,7 @@ fn execution_config() -> ProductSessionExecutionConfig {
         scope(),
         "0123456789abcdef0123456789abcdef01234567",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")

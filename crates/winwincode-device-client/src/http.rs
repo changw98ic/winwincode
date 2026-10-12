@@ -1,24 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded HTTP(S) transport for the client exchange endpoint.
-
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::daemon::{ExchangeTransport, ExchangeTransportError};
 
-/// Largest response body accepted from the endpoint (bounded batches of
-/// bounded frames; far above the largest legal exchange response).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-/// Default total request timeout.
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Blocking HTTP(S) implementation of [`ExchangeTransport`].
-///
-/// Redirects and environment proxies are disabled so the bearer credential
-/// is sent only to the configured Server origin. TLS uses the WebPKI roots
-/// provided by `ureq`'s Rustls backend.
 #[derive(Debug)]
 pub struct HttpExchangeTransport {
     endpoint: Mutex<String>,
@@ -27,7 +17,6 @@ pub struct HttpExchangeTransport {
 }
 
 impl HttpExchangeTransport {
-    /// Creates the transport for one absolute HTTP(S) exchange endpoint.
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
@@ -37,35 +26,23 @@ impl HttpExchangeTransport {
         }
     }
 
-    /// Trusts one explicit DER-encoded Server root instead of the WebPKI set.
     #[must_use]
     pub fn with_tls_root_der(mut self, tls_root_der: Vec<u8>) -> Self {
         self.tls_root_der = Some(tls_root_der);
         self
     }
 
-    /// Overrides the total request timeout.
     #[must_use]
     pub fn with_io_timeout(mut self, io_timeout: Duration) -> Self {
         self.io_timeout = io_timeout;
         self
     }
 
-    /// The currently configured endpoint URL.
-    ///
-    /// # Panics
-    ///
-    /// Only when the endpoint mutex is poisoned.
     #[must_use]
     pub fn endpoint(&self) -> String {
         self.endpoint.lock().expect("endpoint mutex").clone()
     }
 
-    /// Re-points the transport at a new endpoint URL.
-    ///
-    /// # Panics
-    ///
-    /// Only when the endpoint mutex is poisoned.
     pub fn set_endpoint(&self, endpoint: impl Into<String>) {
         *self.endpoint.lock().expect("endpoint mutex") = endpoint.into();
     }
@@ -83,6 +60,22 @@ impl ExchangeTransport for HttpExchangeTransport {
             request_bytes,
             self.io_timeout,
             self.tls_root_der.as_deref(),
+            &|| true,
+        )
+    }
+    fn exchange_authorized(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        post_json(
+            &self.endpoint(),
+            credential,
+            request_bytes,
+            self.io_timeout,
+            self.tls_root_der.as_deref(),
+            can_start,
         )
     }
 }
@@ -93,6 +86,7 @@ fn post_json(
     body: &[u8],
     io_timeout: Duration,
     tls_root_der: Option<&[u8]>,
+    can_start: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<u8>, ExchangeTransportError> {
     validate_endpoint(endpoint)?;
     let root_certs = tls_root_der.map_or(ureq::tls::RootCerts::WebPki, |value| {
@@ -104,44 +98,55 @@ fn post_json(
         .use_sni(true)
         .disable_verification(false)
         .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
         .proxy(None)
         .timeout_global(Some(io_timeout))
         .tls_config(tls)
-        .build()
-        .into();
-    let mut request = agent
-        .post(endpoint)
-        .header("Content-Type", "application/json");
-    if let Some(credential) = credential {
-        request = request.header("Authorization", &format!("Bearer {credential}"));
-    }
-    let mut response = request
-        .send(body)
-        .map_err(|error| ExchangeTransportError::new(format!("exchange request: {error}")))?;
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let response = winwincode_network::http::execute_http_once(
+        &agent,
+        |agent| {
+            let mut request = agent
+                .post(endpoint)
+                .header("Content-Type", "application/json");
+            if let Some(credential) = credential {
+                request = request.header("Authorization", &format!("Bearer {credential}"));
+            }
+            request.send(body)
+        },
+        MAX_RESPONSE_BYTES as u64,
+        io_timeout,
+        can_start,
+    )
+    .map_err(ExchangeTransportError::from_network)?;
     if response.status().as_u16() != 200 {
-        return Err(ExchangeTransportError::new(format!(
-            "endpoint answered HTTP {}",
-            response.status().as_u16()
-        )));
+        let delay = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| winwincode_network::retry_after(value, std::time::SystemTime::now()));
+        return Err(ExchangeTransportError::from_network(
+            winwincode_network::NetworkFailure::http(response.status().as_u16(), delay),
+        ));
     }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES as u64)
-        .read_to_vec()
-        .map_err(|error| ExchangeTransportError::new(format!("response read: {error}")))
+    Ok(response.into_body())
+}
+
+fn invalid_endpoint() -> ExchangeTransportError {
+    ExchangeTransportError::from_network(winwincode_network::NetworkFailure::new(
+        winwincode_network::ErrorKind::RequestInvalid,
+        winwincode_network::Acceptance::NotSent,
+        winwincode_network::Phase::Connect,
+    ))
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<(), ExchangeTransportError> {
-    let uri = http::Uri::from_str(endpoint)
-        .map_err(|_| ExchangeTransportError::new("exchange endpoint is not a valid URI"))?;
+    let uri = http::Uri::from_str(endpoint).map_err(|_| invalid_endpoint())?;
     if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
-        return Err(ExchangeTransportError::new(
-            "exchange endpoint must be an absolute http:// or https:// URI",
-        ));
+        return Err(invalid_endpoint());
     }
     Ok(())
 }

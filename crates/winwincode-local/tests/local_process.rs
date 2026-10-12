@@ -19,12 +19,13 @@ use winwincode_worker::composition::domain::{
 use winwincode_worker::composition::generated::{
     ArtifactAckMessage, ArtifactReference, ExecutionEventCategory, ExecutionEventRecord,
     ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeUsage,
-    ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-    JobDispatchMessage, JobDispatchMessageKind, JobOutcomeAckMessage, JobOutcomeAckMessageKind,
-    JobOutcomeAckMessageStatus, LeaseWriteStatus, RuntimeAckMessage, RuntimeAckMessageKind,
-    RuntimeEventMessage, RuntimeEventMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
-    WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
-    WorkerRegisterMessage, WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
+    ExecutionOutcomeUsageAccountingStatus, ExecutionPortMessage, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobDispatchMessage, JobDispatchMessageKind,
+    JobOutcomeAckMessage, JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus, LeaseWriteStatus,
+    RuntimeAckMessage, RuntimeAckMessageKind, RuntimeEventMessage, RuntimeEventMessageKind,
+    WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput, WorkerCapabilityFeature,
+    WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegisterMessage,
+    WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
     WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
 use winwincode_worker::composition::{
@@ -166,9 +167,9 @@ fn dispatch() -> JobDispatchMessage {
             goal: goal.clone(),
             job_id: lease.job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2032-01-02T03:08:05.000Z".to_owned()),
+                deadline_at: Some(Instant("2032-01-02T03:08:05.000Z".to_owned())),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 180,
+                max_runtime_seconds: Some(180),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -183,11 +184,13 @@ fn dispatch() -> JobDispatchMessage {
                 work_run_id: WorkRunId(id("wrn", 'L')),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 candidate_ref: None,
                 delivery_spec_id: "spec-local-fixture".to_owned(),
                 delivery_spec_revision: Revision(1),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),
@@ -203,6 +206,7 @@ fn dispatch() -> JobDispatchMessage {
         replacement_authority: None,
         request_id: RequestId(id("req", 'D')),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: now(),
     }
 }
@@ -323,11 +327,13 @@ impl FixtureCodex {
                 CodexTurnCompletion {
                     summary: secret_safe_runtime_summary("local fixture completed").unwrap(),
                     artifacts: Vec::new(),
-                    usage: ExecutionOutcomeUsage {
+                    usage: Some(ExecutionOutcomeUsage {
                         runtime_millis: 17,
-                        tokens: 23,
-                        cost_microunits: 29,
-                    },
+                        tokens: Some(23),
+                        known_tokens: 23,
+                        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+                        cost_microunits: Some(29),
+                    }),
                 },
             )));
         codex
@@ -476,6 +482,9 @@ impl CodexCoreAdapter for FixtureCodex {
             &worker_config().capabilities,
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".into(),
                 model: "fixture-model".into(),
                 reasoning: "provider_default".into(),
@@ -713,7 +722,7 @@ impl CodexCoreAdapter for FixtureCodex {
         Ok(Vec::new())
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &winwincode_worker::composition::generated::JobOutcomeMessage,
@@ -787,7 +796,9 @@ async fn run_local(label: &str) -> (Vec<u8>, Vec<String>) {
         .enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch()))
         .unwrap();
     assert_eq!(Box::pin(launcher.drive(now())).await.unwrap(), 1);
-    launcher.heartbeat(now()).await.unwrap();
+    let heartbeat = launcher.heartbeat(now());
+    assert!(size_of_val(&heartbeat) < 16 * 1024);
+    heartbeat.await.unwrap();
     Box::pin(launcher.poll_codex(now())).await.unwrap();
     assert_eq!(launcher.active_job_count(), 0);
     assert_eq!(
@@ -1008,11 +1019,11 @@ async fn run_remote() -> Vec<u8> {
     let registration_started_at = config.started_at.clone();
     let mut worker = WorkerMain::new(config, port, FixtureCodex::completed(), workspaces)
         .with_registration_request_namespace(&registration_instance, &registration_started_at);
-    worker.start(now()).await.unwrap();
+    Box::pin(worker.start(now())).await.unwrap();
     Box::pin(drain_remote(&mut worker, &handle)).await;
     handle.route_control(ExecutionPortMessage::JobDispatchMessage(dispatch()));
     Box::pin(drain_remote(&mut worker, &handle)).await;
-    worker.heartbeat(now()).await.unwrap();
+    Box::pin(worker.heartbeat(now())).await.unwrap();
     Box::pin(worker.poll_codex(now())).await.unwrap();
     Box::pin(drain_remote(&mut worker, &handle)).await;
     Box::pin(worker.shutdown(now())).await.unwrap();

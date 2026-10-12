@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable, receipt-first ownership for the `DebugProbe` hypothesis Ledger.
-//!
-//! The Control Plane stores one alternating `Prepared`/`Committed` stream and
-//! one append-only aggregate journal. A first preparation includes the pure
-//! initialization event in the same guarded transaction, so no initialized
-//! Ledger is externally visible without its exact first-round context.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -52,7 +45,6 @@ const EVENT_ID_DOMAIN: &[u8] = b"winwincode.debug-hypothesis-ledger.event.v1\0";
 const RECORD_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-hypothesis-ledger.journal-record.v1\0";
 const COMMAND_DIGEST_DOMAIN: &[u8] = b"winwincode.debug-hypothesis-ledger.command.v1\0";
 
-/// Stable failure categories for the durable Ledger transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DebugHypothesisLedgerTransactionErrorKind {
     InvalidInput,
@@ -63,7 +55,6 @@ pub enum DebugHypothesisLedgerTransactionErrorKind {
     Storage,
 }
 
-/// A bounded failure that never includes context or model text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DebugHypothesisLedgerTransactionError {
     kind: DebugHypothesisLedgerTransactionErrorKind,
@@ -90,7 +81,6 @@ impl fmt::Display for DebugHypothesisLedgerTransactionError {
 
 impl std::error::Error for DebugHypothesisLedgerTransactionError {}
 
-/// Exact durable result of one round preparation.
 #[derive(Clone, Debug)]
 pub struct PreparedDebugHypothesisRound {
     context_bytes: Vec<u8>,
@@ -121,7 +111,6 @@ impl PreparedDebugHypothesisRound {
     }
 }
 
-/// Exact durable result of one initialized or applied Ledger projection.
 #[derive(Clone, Debug)]
 pub struct CommittedDebugHypothesisRound {
     event: DebugHypothesisLedgerEvent,
@@ -152,8 +141,6 @@ impl CommittedDebugHypothesisRound {
     }
 }
 
-/// Recovered current state. Prepared bytes are returned exactly as committed;
-/// committed projections are rebuilt through the pure Ledger reducer.
 #[derive(Clone, Debug)]
 pub enum RecoveredDebugHypothesisLedger {
     Prepared {
@@ -168,7 +155,6 @@ pub enum RecoveredDebugHypothesisLedger {
     },
 }
 
-/// Unique durable owner of one debug session's hypothesis Ledger.
 pub struct DebugHypothesisLedgerService<'storage> {
     storage: &'storage mut dyn ProductStateStorage,
 }
@@ -179,16 +165,6 @@ impl<'storage> DebugHypothesisLedgerService<'storage> {
         Self { storage }
     }
 
-    /// Persists one exact model context intent before the model may be called.
-    ///
-    /// `seed` is required only when the session has no durable state. Its
-    /// canonical initialization event and projection are committed atomically
-    /// with the first `Prepared` record.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed receipt bodies, stale execution authority, invalid
-    /// context/evidence bindings, or an inconsistent durable journal.
     #[allow(clippy::too_many_lines)]
     pub fn prepare_round(
         &mut self,
@@ -368,13 +344,6 @@ impl<'storage> DebugHypothesisLedgerService<'storage> {
         self.replay_prepared(receipt)
     }
 
-    /// Applies one exact model update to the prepared round and atomically
-    /// publishes the resulting generated Ledger projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/foreign Prepared intent, changed receipt bodies,
-    /// stale execution authority, invalid model updates, or storage failure.
     #[allow(clippy::too_many_lines)]
     pub fn commit_round(
         &mut self,
@@ -503,13 +472,6 @@ impl<'storage> DebugHypothesisLedgerService<'storage> {
         self.replay_committed(receipt)
     }
 
-    /// Rebuilds the current state from exact journal bytes without creating a
-    /// new receipt, event, projection, or model request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing journal halves, changed digests, invalid canonical
-    /// bytes, or an event chain that does not reproduce the stored projection.
     pub fn recover(
         &self,
         debug_session_id: &DebugSessionId,

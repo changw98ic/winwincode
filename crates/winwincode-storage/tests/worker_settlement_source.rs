@@ -59,9 +59,9 @@ fn configure(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 20,
         max_queued: 20,
-        token_budget: 20_000,
-        cost_budget_microunits: 200_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(20_000),
+        cost_budget_microunits: Some(200_000),
+        max_runtime_millis: Some(60_000),
     };
     let mut boundaries = vec![
         ExecutionAdmissionBoundary::Organization {
@@ -105,9 +105,9 @@ fn reservation(seed: u64, scope: &ExecutionQueueScope) -> ExecutionReservationRe
         job_id: ExecutionJobId(id("job", seed)),
         request_id: RequestId(id("req", 100 + seed)),
         repository_access: ExecutionRepositoryAccess::ReadOnly,
-        reserved_tokens: 100,
-        reserved_cost_microunits: 1_000,
-        runtime_limit_millis: 30_000,
+        reserved_tokens: Some(100),
+        reserved_cost_microunits: Some(1_000),
+        runtime_limit_millis: Some(30_000),
         submitted_at: at(1),
     }
 }
@@ -131,7 +131,7 @@ fn settlement(request: &ExecutionReservationRequest) -> ExecutionReservationSett
         request_id: RequestId(id("req", 300 + id_seed(&request.job_id.0))),
         expected_revision: 2,
         actual_tokens: 40,
-        actual_cost_microunits: 400,
+        actual_cost_microunits: Some(400),
         actual_runtime_millis: 4_000,
         completed_at: at(3),
     }

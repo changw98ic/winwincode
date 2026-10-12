@@ -1,13 +1,3 @@
-// Community-UI demo fixture: mounts the one browser shell over a deterministic
-// Control Plane facade whose sample data matches the design mockups
-// (docs/design/community-ui-geometric).  The 执行设备/项目 pages read the real
-// `/api/v1/clients` and `/api/v1/repositories` endpoints, which the local demo
-// server serves with the same design sample devices and repositories.
-//
-// Determinism: the shell receives a fixed clock, every served timestamp and
-// identifier is a literal, the font stack is pinned, and transitions,
-// animations, and scrollbars are switched off.
-
 import { mountWinWinCodeClient } from '/module/application.js'
 import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 
@@ -47,9 +37,7 @@ function canonicalId(prefix, value) {
   return `${prefix}_${String(value).padStart(26, '0')}`
 }
 
-/** 设计稿 03a 空对话:load-time hash 里带 chat-empty 时,不提供任何会话。 */
 const emptyChat = location.hash.includes('chat-empty')
-/** 设计稿 01 登录页:URL 带 mode=login 时不恢复会话,展示登录页。 */
 const loginMode = location.search.includes('mode=login')
 
 function page() {
@@ -86,9 +74,7 @@ function deliverySummary(index, overrides = {}) {
   }
 }
 
-// 设计稿 04 任务看板:两列实时卡片 + 折叠的 未开始/已完成 历史行。
 const deliveries = [
-  // 设计稿 04:待我处理两卡的来源(审批 + 交付注意点)。
   deliverySummary(1, {
     title: '修复登录回跳',
     status: 'validating',
@@ -101,7 +87,6 @@ const deliveries = [
     openAttentionCount: 1,
     workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 3, backlog: 0, inProgress: 0, waitingDependency: 0, validating: 1, done: 2, failed: 0 },
   }),
-  // 设计稿 04:正在运行两卡。
   deliverySummary(3, {
     title: '配置迁移',
     status: 'validating',
@@ -121,7 +106,6 @@ const deliveries = [
   })),
 ]
 
-// 设计稿 04:待我处理列 = 修复登录回跳(审核方案)+ 导出筛选结果(验收交付)。
 function approval(index) {
   return {
     id: canonicalId('apr', index),
@@ -289,7 +273,6 @@ function deliveryDetail(delivery) {
   }
 }
 
-/** Every query a failing route needs in order to fail. */
 function serve(request) {
   const result = () => {
     if (request.query === 'delivery.list') {
@@ -435,8 +418,6 @@ const controlPlane = {
     throw new Error(`unexpected command: ${String(request.command)}`)
   },
   async query(request) {
-    // serve() already applies the response envelope; wrapping again would hide
-    // `result.items` behind a second envelope and fail every model read.
     return serve(request)
   },
   subscribe() {
@@ -445,8 +426,6 @@ const controlPlane = {
   close() {},
 }
 
-// Determinism controls are installed through CSSOM because the harness serves a
-// `style-src 'self'` policy, and the clock is pinned on the shell itself.
 const determinism = new CSSStyleSheet()
 determinism.replaceSync(DETERMINISM_CSS)
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, determinism]
@@ -456,17 +435,14 @@ for (const token of ['--wwc-font-family', '--wwc-font-family-mono']) {
   ))
 }
 
-// 设计稿侧栏「最近对话」: seeded browser-local titles (登录问题讨论 / 架构调整讨论).
 try {
   globalThis.localStorage?.setItem('winwincode.recentChats.v1', JSON.stringify([
     { sessionKey: 'psn_00000000000000000000000001', title: '登录问题讨论', at: 1_787_000_000_000 },
     { sessionKey: 'demo-arch-chat', title: '架构调整讨论', at: 1_786_900_000_000 },
   ]))
 } catch {
-  /* best-effort seeding only */
 }
 
-// 设计稿 05 任务详情的演示锚点(假优先任务端口种子)。
 mountWinWinCodeClient({
   root: document.querySelector('[data-winwincode-client-root]'),
   serverUrl: controlPlane.serverUrl,

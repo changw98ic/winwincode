@@ -1,32 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-local candidate registry (GIT-100.2, plan 7.9/15.2).
-//!
-//! One place that manages the durable `candidate_local_refs` table: it
-//! records the retention of a frozen Worker candidate (repository binding,
-//! frozen commit, worker session, lifecycle state, retention stamp), reports
-//! the retention upstream as a durable `client.candidate.retained` frame
-//! stamped with the occupancy lease (`C + L`: command context plus the lease
-//! and fencing token taken from the durable occupancy mirror), lists the
-//! retained candidates after a restart for recovery, and reconciles the
-//! retained set against the actual Git refs inside the bound repository
-//! checkout so a missing or drifted ref is an explicit verdict instead of a
-//! silent failure.
-//!
-//! Identity convention (the GIT-100.1 freeze precedent): the candidate id is
-//! exactly the frozen candidate commit id, and the stable local ref is
-//! `refs/winwincode/candidates/<candidate-commit>`. The registry derives both
-//! from the retention's commit, so a repeated retention of the same candidate
-//! re-encounters the same primary key and every derived wire fact (receipt
-//! id, idempotency key, receipt payload) is deterministic — the same
-//! candidate reported twice is the idempotent re-report the Control Plane's
-//! ledger dedupes, never a second candidate.
-//!
-//! Local-data boundary: the reconciliation reads absolute paths from the
-//! local `repository_path_mapping` to run Git, but no path ever enters the
-//! registry rows, the retained frame, or any error the uplink returns. Only
-//! the stable identities ride the wire.
-
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -40,34 +13,21 @@ use winwincode_client_port::messages::{
 use crate::daemon::DeviceDaemon;
 use crate::store::{DeviceStore, DeviceStoreError};
 
-/// Ref namespace prefix of every frozen Worker candidate; also the canonical
-/// spelling of the product-level candidate reference the Control Plane's
-/// ledger keys on.
 pub const CANDIDATE_REF_PREFIX: &str = "refs/winwincode/candidates/";
 
-/// Wire/storage spelling of the retained lifecycle state — the only state a
-/// retention records and the only state a `client.candidate.retained` frame
-/// reports.
 const STATE_RETAINED: &str = "retained";
 
 const MAX_ID_BYTES: usize = 200;
 const MAX_REF_BYTES: usize = 200;
 
-/// Bounded candidate-registry failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateRegistryErrorKind {
-    /// A retention, record, or report input violated the frozen shapes.
     InvalidInput,
-    /// The candidate is already retained with different facts.
     Conflict,
-    /// The device holds no occupancy mirror, so the retain uplink cannot
-    /// stamp its lease (fail closed; nothing was reported).
     NoOccupancyMirror,
-    /// The durable store or the Git reconciliation failed.
     Store,
 }
 
-/// Candidate-registry failure with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRegistryError {
     kind: CandidateRegistryErrorKind,
@@ -96,7 +56,6 @@ impl CandidateRegistryError {
         }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> CandidateRegistryErrorKind {
         self.kind
@@ -122,116 +81,54 @@ impl From<DeviceStoreError> for CandidateRegistryError {
     }
 }
 
-/// The facts of one candidate retention, as produced by the Worker freeze
-/// path (the stable ref receipt) plus the owning identities.
-///
-/// `candidate_commit` is the frozen candidate commit; the candidate id and
-/// the product-level candidate reference derive from it, so this input can
-/// never describe two different candidates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRetention {
-    /// Frozen candidate commit (full lowercase Git object id).
     pub candidate_commit: String,
-    /// Repository binding the candidate was produced against.
     pub repository_binding_id: String,
-    /// Worker session that froze the candidate.
     pub worker_session_id: String,
-    /// Stable local Git ref holding the candidate,
-    /// `refs/winwincode/candidates/<candidate-commit>`.
     pub local_git_ref: String,
-    /// RFC 3339 stamp of the retention fact (the freeze).
     pub retained_at: String,
 }
 
-/// One durable registry row (`candidate_local_refs`).
-///
-/// LOCAL ONLY: `local_git_ref` names a ref inside the local checkout and no
-/// path ever joins the row; the server-visible facts are the stable
-/// candidate identity, the binding id, and the lifecycle state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateLocalRefRecord {
-    /// Stable candidate identity — exactly the frozen candidate commit id.
     pub candidate_id: String,
-    /// Worker session that froze the candidate.
     pub worker_session_id: String,
-    /// Repository binding the candidate was produced against.
     pub repository_binding_id: String,
-    /// Stable local Git ref inside the bound checkout.
     pub local_git_ref: String,
-    /// Plan 15 lifecycle state (`retained` until a later lane progresses it).
     pub local_state: LocalCandidateState,
-    /// RFC 3339 stamp of the first recording.
     pub created_at: String,
-    /// Product-level candidate reference (`refs/winwincode/candidates/<id>`);
-    /// the identity the Control Plane's ledger keys on.
     pub candidate_ref: String,
-    /// Frozen candidate commit (full lowercase Git object id).
     pub candidate_commit: String,
-    /// RFC 3339 stamp of the retention fact the wire receipt reports.
     pub retained_at: String,
 }
 
-/// Outcome of one retention recording.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CandidateRetentionOutcome {
-    /// A new registry row was persisted.
     Recorded(CandidateLocalRefRecord),
-    /// The same candidate was already retained (an idempotent re-report);
-    /// the stored row is returned unchanged — original stamps and state —
-    /// and no second row exists.
     Duplicate(CandidateLocalRefRecord),
 }
 
-/// The result of one full retain vertical (record plus uplink).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRetainReport {
-    /// Whether this call recorded the row or met it as a duplicate.
     pub outcome: CandidateRetentionOutcome,
-    /// Outbox sequence of the `client.candidate.retained` frame.
     pub frame_sequence: u64,
 }
 
-/// Verdict of one reconciliation against the actual Git refs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateRefVerdict {
-    /// The ref resolves to the recorded frozen commit.
     Verified,
-    /// The ref is absent (or its binding no longer maps to a local
-    /// checkout): the candidate is no longer resolvable locally.
     Missing,
-    /// The ref resolves to a different commit than the recorded one.
     Drifted,
 }
 
-/// One reconciliation row: the retained record plus what Git actually
-/// resolves today.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateReconciliation {
     pub record: CandidateLocalRefRecord,
     pub verdict: CandidateRefVerdict,
-    /// The commit the ref resolves to now (`None` while missing).
     pub observed_commit: Option<String>,
 }
 
-/// Records one candidate retention (idempotent by the candidate identity).
-///
-/// The candidate commit is validated as a full lowercase Git object id and
-/// the local ref as the canonical
-/// `refs/winwincode/candidates/<candidate-commit>` name, so the derived
-/// candidate id and candidate reference are pinned to the commit. When the
-/// candidate is already retained, the stored row is returned unchanged
-/// ([`CandidateRetentionOutcome::Duplicate`]) as long as every identity fact
-/// (worker session, binding, ref, commit) matches; a diverging fact fails
-/// closed with [`CandidateRegistryErrorKind::Conflict`]. Retention stamps are
-/// never compared or rewritten: the first retention's stamps stay durable, a
-/// replay may carry a freshly derived stamp.
-///
-/// # Errors
-///
-/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for a shape
-/// violation, [`CandidateRegistryErrorKind::Conflict`] for a diverging
-/// re-report, and a store failure when the write fails or the store is
-/// closed.
 pub fn record_candidate_retention(
     store: &mut DeviceStore,
     retention: &CandidateRetention,
@@ -274,12 +171,6 @@ pub fn record_candidate_retention(
     Ok(CandidateRetentionOutcome::Recorded(record))
 }
 
-/// Loads one registry row by candidate id, whatever its lifecycle state.
-///
-/// # Errors
-///
-/// Returns a store failure when the read fails, the store is closed, or a
-/// stored row disagrees with its schema vocabulary.
 pub fn candidate_local_ref(
     store: &DeviceStore,
     candidate_id: &str,
@@ -303,14 +194,6 @@ pub fn candidate_local_ref(
         .map_err(CandidateRegistryError::from)
 }
 
-/// Lists every registry row in the `retained` state, in candidate-id order —
-/// the recovery surface: after a restart this is the set of candidates the
-/// device still holds for delivery.
-///
-/// # Errors
-///
-/// Returns a store failure when the read fails, the store is closed, or a
-/// stored row disagrees with its schema vocabulary.
 pub fn retained_candidates(
     store: &DeviceStore,
 ) -> Result<Vec<CandidateLocalRefRecord>, CandidateRegistryError> {
@@ -331,26 +214,6 @@ pub fn retained_candidates(
         .map_err(CandidateRegistryError::from)
 }
 
-/// Records the retention and reports it upstream as one vertical.
-///
-/// The recording is durable and idempotent (see
-/// [`record_candidate_retention`]); then — replay or not — the
-/// `client.candidate.retained` frame is enqueued into the durable outbox,
-/// stamped `C + L` from the durable occupancy mirror: `expectedRevision` is
-/// the mirror revision, the idempotency key is deterministic per candidate
-/// reference, and the lease id plus fencing token are exactly the mirrored
-/// lease. Re-reporting the same candidate therefore produces the identical
-/// receipt under the identical idempotency key, which the Control Plane's
-/// ledger settles as the same retention. Without an occupancy mirror the
-/// uplink fails closed *after* the durable recording — the local retention
-/// fact survives, and re-invoking the vertical once occupancy is mirrored
-/// completes the report.
-///
-/// # Errors
-///
-/// Returns the recording failures of [`record_candidate_retention`],
-/// [`CandidateRegistryErrorKind::NoOccupancyMirror`] when the device holds
-/// no occupancy mirror, and a store failure when the outbox append fails.
 pub fn retain_candidate(
     daemon: &mut DeviceDaemon,
     retention: &CandidateRetention,
@@ -367,8 +230,6 @@ pub fn retain_candidate(
     })
 }
 
-/// Reconciles frozen Git refs with the process that produced their sealed commit.
-/// Called after process exit and replayed on Device restart.
 pub(crate) fn retain_worker_candidates(
     daemon: &mut DeviceDaemon,
     worker: &crate::store::WorkerProcessRecord,
@@ -430,7 +291,6 @@ pub(crate) fn retain_worker_candidates(
     Ok(())
 }
 
-/// Builds the deterministic canonical `lcr_` receipt id for a candidate.
 fn deterministic_lcr_id(candidate_id: &str) -> String {
     let hex: String = candidate_id
         .chars()
@@ -441,14 +301,6 @@ fn deterministic_lcr_id(candidate_id: &str) -> String {
     format!("lcr_{hex}G")
 }
 
-/// Enqueues the durable `client.candidate.retained` frame for a retained row.
-///
-/// # Errors
-///
-/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for invalid or
-/// non-retained rows, [`CandidateRegistryErrorKind::NoOccupancyMirror`] when
-/// no occupancy mirror is held, or a store error when appending the frame
-/// fails.
 pub fn enqueue_candidate_retained(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -501,25 +353,6 @@ pub fn enqueue_candidate_retained(
         })
 }
 
-/// Reconciles every retained candidate against the actual Git refs of its
-/// bound checkout — the post-restart audit the plan asks for.
-///
-/// For each retained row the bound repository's canonical local path (the
-/// local `repository_path_mapping`, never uploaded) is resolved and the row's
-/// ref is read through Git exactly as the worker reads it: a ref resolving to
-/// the recorded commit is [`CandidateRefVerdict::Verified`], an absent ref —
-/// including a binding that no longer maps to a local checkout — is
-/// [`CandidateRefVerdict::Missing`], and a ref resolving to a different
-/// commit is [`CandidateRefVerdict::Drifted`]. The scan is read-only: it
-/// reports explicit verdicts instead of rewriting lifecycle facts, so a
-/// transiently unmounted volume can never flip a candidate to a terminal
-/// state as a side effect. A Git execution failure (anything other than a
-/// clean missing-ref answer) is a store-kind error, never silently a verdict.
-///
-/// # Errors
-///
-/// Returns a store failure when a read fails, the store is closed, a stored
-/// row disagrees with its schema vocabulary, or a Git invocation fails.
 pub fn reconcile_retained_candidates(
     store: &DeviceStore,
 ) -> Result<Vec<CandidateReconciliation>, CandidateRegistryError> {
@@ -542,28 +375,6 @@ pub fn reconcile_retained_candidates(
     Ok(reconciliations)
 }
 
-/// Progresses one candidate's lifecycle state along the device-local
-/// contract 6 transition table (`docs/contracts/client-control-state-machines.md`).
-///
-/// The legal moves are `retained -> {branch_created, applied, discarded,
-/// failed}`, `branch_created -> {applied, discarded, failed}`, and
-/// `failed -> {applied, branch_created, discarded}`; a move onto the state a
-/// row already holds is an accepted no-op so replays stay idempotent.
-/// Terminal rows (`applied`, `discarded`) refuse every move. The compare-
-/// and-swap on the stored state keeps a concurrent progression from being
-/// silently lost.
-///
-/// This is the shared primitive the local delivery engines (branch creation
-/// here, target-branch apply in the later lane) use to write back their
-/// lifecycle facts.
-///
-/// # Errors
-///
-/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for an empty
-/// candidate id or an id this device never retained,
-/// [`CandidateRegistryErrorKind::Conflict`] for a terminal row or an illegal
-/// transition, and a store failure when the write fails or the store is
-/// closed.
 pub fn progress_candidate_lifecycle(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -634,8 +445,6 @@ pub fn progress_candidate_lifecycle(
     })
 }
 
-/// The wire/storage spelling of one plan 15 lifecycle state, matching the
-/// vocabulary [`parse_local_state`] reads back.
 fn lifecycle_wire_name(state: LocalCandidateState) -> &'static str {
     match state {
         LocalCandidateState::Retained => STATE_RETAINED,
@@ -646,10 +455,6 @@ fn lifecycle_wire_name(state: LocalCandidateState) -> &'static str {
     }
 }
 
-/// Reads one candidate's ref through Git in its bound checkout.
-///
-/// `None` is the explicit missing-ref answer: either the binding no longer
-/// maps to a local checkout or Git reports the ref absent.
 fn read_candidate_ref_through_git(
     store: &DeviceStore,
     record: &CandidateLocalRefRecord,
@@ -663,10 +468,6 @@ fn read_candidate_ref_through_git(
     read_git_ref(&mapping.canonical_path, &record.local_git_ref)
 }
 
-/// Runs `git rev-parse --verify --quiet` for one ref, mirroring the worker
-/// freeze path's reading discipline: a status of 1 is the missing-ref
-/// answer, success must yield exactly one identity, anything else is an
-/// error.
 fn read_git_ref(
     repository_path: &str,
     ref_name: &str,
@@ -706,7 +507,6 @@ fn read_git_ref(
     )))
 }
 
-/// Validates one retention input before any write.
 fn validate_retention(retention: &CandidateRetention) -> Result<(), CandidateRegistryError> {
     validate_commit_sha(&retention.candidate_commit, "candidate commit")?;
     require_non_empty(
@@ -723,7 +523,6 @@ fn validate_retention(retention: &CandidateRetention) -> Result<(), CandidateReg
     validate_candidate_git_ref(&retention.local_git_ref, &retention.candidate_commit)
 }
 
-/// Validates one registry row before it is read back or reported.
 fn validate_record(record: &CandidateLocalRefRecord) -> Result<(), CandidateRegistryError> {
     require_non_empty(&record.candidate_id, "candidate id", MAX_ID_BYTES)?;
     require_non_empty(&record.worker_session_id, "worker session id", MAX_ID_BYTES)?;
@@ -751,9 +550,6 @@ fn validate_record(record: &CandidateLocalRefRecord) -> Result<(), CandidateRegi
     Ok(())
 }
 
-/// A replayed (or duplicate) retention must describe the same candidate
-/// facts; stamps and lifecycle state are deliberately not compared, matching
-/// the Control Plane ledger's retention identity.
 fn ensure_same_candidate_facts(
     existing: &CandidateLocalRefRecord,
     retention: &CandidateRetention,
@@ -803,7 +599,6 @@ fn row_to_candidate_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Candidat
     })
 }
 
-/// Parses one stored lifecycle value, fail-closing on an unknown vocabulary.
 fn parse_local_state(value: &str) -> rusqlite::Result<LocalCandidateState> {
     match value {
         "retained" => Ok(LocalCandidateState::Retained),
@@ -819,8 +614,6 @@ fn parse_local_state(value: &str) -> rusqlite::Result<LocalCandidateState> {
     }
 }
 
-/// Validates the frozen Git commit shape: full SHA-1 or SHA-256, lowercase
-/// hex — the same shape the worker freeze and the server ledger enforce.
 fn validate_commit_sha(value: &str, label: &str) -> Result<(), CandidateRegistryError> {
     let valid = (value.len() == 40 || value.len() == 64)
         && value
@@ -835,10 +628,6 @@ fn validate_commit_sha(value: &str, label: &str) -> Result<(), CandidateRegistry
     }
 }
 
-/// Validates the canonical stable candidate ref:
-/// `refs/winwincode/candidates/<candidate-commit>` — the suffix must be
-/// exactly the frozen commit, so the ref, the id, and the product reference
-/// can never disagree inside one registry row.
 fn validate_candidate_git_ref(
     local_git_ref: &str,
     candidate_commit: &str,

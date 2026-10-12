@@ -146,6 +146,20 @@ test('HTTP and WebSocket activity feed the same connection monitor', async () =>
   monitor.close()
 })
 
+test('provider failure codes remain available in safe client diagnostics', () => {
+  const requestId = 'req_00000000000000000000000001'
+  for (const code of ['DEVICE_PROVIDER_SSE_FRAMING_INVALID', 'DEVICE_PROVIDER_SSE_EVENT_INVALID',
+    'DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID', 'DEVICE_PROVIDER_RESPONSE_INCOMPLETE']) {
+    const failure = classifyClientFailure(error('protocol', code, requestId), 'CLIENT_ROUTE_FAILURE', true)
+    assert.equal(failure.code, code)
+    const diagnostic = createSafeDiagnostic({
+      connection: { status: 'connected', code, requestId, lastSuccessfulAt: null }, failure,
+    })
+    assert.ok(diagnostic.includes(code))
+    assert.equal(diagnostic.includes('SECRET'), false)
+  }
+})
+
 test('failure classification and copied diagnostics keep only allowlisted fields', () => {
   const requestId = 'req_00000000000000000000000001'
   const failure = classifyClientFailure(

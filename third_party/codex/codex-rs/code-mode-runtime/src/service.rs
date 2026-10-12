@@ -306,6 +306,8 @@ fn runtime_request(request: ExecuteRequest) -> runtime::CreateCellRequest {
                     CodeModeToolKind::Function => runtime::ToolKind::Function,
                     CodeModeToolKind::Freeform => runtime::ToolKind::Freeform,
                 },
+                input_schema: definition.input_schema,
+                output_schema: definition.output_schema,
             })
             .collect(),
         source: request.source,

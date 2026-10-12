@@ -5,6 +5,7 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 pub const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 
@@ -105,12 +106,43 @@ pub fn request_user_input_unavailable_message(
 pub(crate) fn normalize_request_user_input_tool_args(
     mut args: RequestUserInputToolArgs,
 ) -> Result<RequestUserInputToolArgs, String> {
+    if !(1..=3).contains(&args.questions.len()) {
+        return Err("request_user_input requires one to three questions".to_string());
+    }
+    let mut ids = HashSet::new();
+    if args
+        .questions
+        .iter()
+        .any(|question| question.id.trim().is_empty() || !ids.insert(question.id.as_str()))
+    {
+        return Err(
+            "request_user_input requires a unique non-empty id for every question".to_string(),
+        );
+    }
+    if args.questions.iter().any(|question| {
+        question.question.trim().is_empty() || question.question.chars().count() > 4_000
+    }) {
+        return Err("request_user_input requires a non-empty prompt of at most 4000 characters for every question".to_string());
+    }
     let missing_options = args
         .questions
         .iter()
         .any(|question| question.options.as_ref().is_none_or(Vec::is_empty));
     if missing_options {
         return Err("request_user_input requires non-empty options for every question".to_string());
+    }
+    for question in &args.questions {
+        let mut options = HashSet::new();
+        if question.options.as_ref().is_some_and(|values| {
+            values.len() > 100
+                || values.iter().any(|option| {
+                    option.label.trim().is_empty()
+                        || option.label.chars().count() > 200
+                        || !options.insert((option.label.as_str(), option.description.as_str()))
+                })
+        }) {
+            return Err("request_user_input requires at most 100 distinct options per question, with non-empty labels of at most 200 characters".to_string());
+        }
     }
 
     for question in &mut args.questions {

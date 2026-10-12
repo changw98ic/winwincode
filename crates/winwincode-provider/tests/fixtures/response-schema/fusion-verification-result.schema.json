@@ -1,0 +1,116 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_ref": {
+      "type": "string"
+    },
+    "delivery_spec_id": {
+      "type": "string"
+    },
+    "delivery_spec_revision": {
+      "type": "integer"
+    },
+    "findings": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": {
+            "type": "string"
+          },
+          "evidence_sources": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "finding_id": {
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "pass",
+              "fail"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "criterion_id",
+          "verdict",
+          "explanation",
+          "evidence_sources"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "fusion_investigations": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_key": {
+            "type": "string"
+          },
+          "evidence_sources": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source_id"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "investigated",
+              "unresolved"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_key",
+          "status",
+          "evidence_sources"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "protocol": {
+      "enum": [
+        "winwincode.independent-verification-result.v1"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol",
+    "delivery_spec_id",
+    "delivery_spec_revision",
+    "candidate_ref",
+    "findings",
+    "fusion_investigations"
+  ],
+  "type": "object"
+}

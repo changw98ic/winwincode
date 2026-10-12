@@ -2,15 +2,9 @@
 
 import type { ReviewSnippet } from './strongflow-review-view-model.js'
 
-/**
- * VER-11 review-side retention state. `released` is the only observable
- * availability change: the Candidate retention authority released the pin, so
- * the evidence behind a historical conclusion is no longer retrievable.
- */
 export type ReviewRetentionState = 'available' | 'released'
 
 export interface ReviewPinReference {
-  /** Stable view key: `candidate:<ref>` / `evidence:<id>` / `file:<path>`. */
   readonly key: string
   readonly kind: 'candidate' | 'evidence' | 'file' | 'artifact'
   readonly label: string
@@ -20,7 +14,6 @@ export interface ReviewPinReference {
 export interface ReviewPin {
   readonly reference: ReviewPinReference
   readonly pinnedAt: string
-  /** True once a pinned item's retention changed after pinning. */
   readonly availabilityChanged: boolean
 }
 
@@ -34,7 +27,6 @@ export interface ReviewSnippetAnnotation {
 export interface StrongFlowReviewAnnotationsState {
   readonly pins: readonly ReviewPin[]
   readonly snippets: readonly ReviewSnippetAnnotation[]
-  /** Set while an attach failed because no open Attention was selected. */
   readonly lastAttachError: string | null
 }
 
@@ -43,7 +35,6 @@ export interface StrongFlowReviewAttentionAnchor {
   readonly title: string
 }
 
-/** Bounded view memory; pins and citations never grow without limit. */
 export const REVIEW_PIN_LIMIT = 20
 export const REVIEW_SNIPPET_LIMIT = 50
 
@@ -60,7 +51,6 @@ export interface StrongFlowReviewAnnotations {
   unpin(key: string): void
   togglePin(reference: ReviewPinReference): void
   isPinned(key: string): boolean
-  /** Refreshes one pinned item's retention; a change stays flagged. */
   setPinRetention(key: string, retention: ReviewRetentionState): void
   attachSnippet(
     attention: StrongFlowReviewAttentionAnchor | null,
@@ -70,12 +60,6 @@ export interface StrongFlowReviewAnnotations {
   close(): void
 }
 
-/**
- * VER-11 view-level retention memory for the review panel. This is presentation
- * state only: it pins which projections a reviewer marked important and keeps
- * their retention labels current. It never mutates Delivery, Candidate, or
- * Evidence facts and is not a second source of truth for them.
- */
 export function createStrongFlowReviewAnnotations(): StrongFlowReviewAnnotations {
   const listeners = new Set<(state: StrongFlowReviewAnnotationsState) => void>()
   let pins: ReviewPin[] = []
@@ -205,7 +189,6 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-/** Renders pinned review artifacts and Attention-linked error citations. */
 export function mountStrongFlowReviewAnnotations(
   options: StrongFlowReviewAnnotationsPanelOptions,
 ): StrongFlowReviewAnnotationsPanel {

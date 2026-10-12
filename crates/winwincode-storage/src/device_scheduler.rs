@@ -1,26 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device scheduler slot-reservation ledger over the sole product-state
-//! `SQLite` authority (plan FLOW-100.2).
-//!
-//! The two-phase scheduler reserves one free worker-session slot of a client
-//! node durably before any Worker request is issued, and the live
-//! `WorkerLaunchGrant` takes the slot accounting over once it exists. The
-//! durable capacity view therefore stays one number:
-//! `pending reservations + non-terminal launch grants` may never exceed the
-//! client's `max_concurrent_worker_sessions`, judged inside one immediate
-//! transaction so concurrent schedulers can never oversell.
-//!
-//! Every reservation is keyed by the caller's canonical `req_` request
-//! identity. A repeated request with a byte-identical command replays the
-//! stored outcome without a second row; a reused request identity with a
-//! different body is refused with `RequestConflict`. The fixed
-//! compare-and-swap rules make every transition at-most-once idempotent:
-//! `reserved -> granted` stamps exactly one launch grant, and
-//! `reserved -> released` frees the slot for the failure paths (launch
-//! failure, timeout rollback, and the stale-reservation sweep that reclaims
-//! reservations a crashed scheduler never settled).
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -64,7 +43,6 @@ CREATE INDEX IF NOT EXISTS device_scheduler_reservations_by_session
     ON device_scheduler_reservations (worker_session_id, state);
 ";
 
-/// Expected column layout used to refuse an incompatible existing schema.
 const DEVICE_SCHEDULER_COLUMNS: [&str; 15] = [
     "device_scheduler_reservation_id",
     "request_id",
@@ -83,16 +61,11 @@ const DEVICE_SCHEDULER_COLUMNS: [&str; 15] = [
     "revision",
 ];
 
-/// Lifecycle state of one scheduler slot reservation (plan FLOW-100.2).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceSchedulerReservationState {
-    /// Phase one committed; the slot is held until the Worker request is
-    /// issued or the reservation is released.
     Reserved,
-    /// Phase two issued its launch grant; the grant ledger owns the slot.
     Granted,
-    /// Terminal: the reservation was released before any grant existed.
     Released,
 }
 
@@ -119,15 +92,11 @@ impl DeviceSchedulerReservationState {
     }
 }
 
-/// Why a `reserved` slot was freed without a launch grant.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceSchedulerReleaseReason {
-    /// Phase two refused the Worker request; the slot is freed immediately.
     LaunchFailed,
-    /// The holder or the bounded launch flow rolled the attempt back.
     RolledBack,
-    /// The stale-reservation sweep reclaimed a never-settled reservation.
     Expired,
 }
 
@@ -154,8 +123,6 @@ impl DeviceSchedulerReleaseReason {
     }
 }
 
-/// Validated phase-one command: atomically reserve one free worker-session
-/// slot of a client node (plan FLOW-100.2).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceSchedulerReservationRequest {
     device_scheduler_reservation_id: String,
@@ -169,12 +136,6 @@ pub struct DeviceSchedulerReservationRequest {
 }
 
 impl DeviceSchedulerReservationRequest {
-    /// Builds one validated reservation command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or a fencing token outside the
-    /// durable range.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         device_scheduler_reservation_id: impl Into<String>,
@@ -231,8 +192,6 @@ impl DeviceSchedulerReservationRequest {
     }
 }
 
-/// Validated phase-two settlement: stamp the launch grant that took the
-/// reserved slot over (`reserved -> granted`).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceSchedulerReservationGrant {
     device_scheduler_reservation_id: String,
@@ -241,11 +200,6 @@ pub struct DeviceSchedulerReservationGrant {
 }
 
 impl DeviceSchedulerReservationGrant {
-    /// Builds one validated grant settlement command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or an out-of-range revision.
     pub fn try_new(
         device_scheduler_reservation_id: impl Into<String>,
         launch_grant_id: impl Into<String>,
@@ -267,8 +221,6 @@ impl DeviceSchedulerReservationGrant {
     }
 }
 
-/// Validated release command: free a `reserved` slot without a grant
-/// (`reserved -> released`).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceSchedulerReservationRelease {
     device_scheduler_reservation_id: String,
@@ -277,11 +229,6 @@ pub struct DeviceSchedulerReservationRelease {
 }
 
 impl DeviceSchedulerReservationRelease {
-    /// Builds one validated release command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities or an out-of-range revision.
     pub fn try_new(
         device_scheduler_reservation_id: impl Into<String>,
         expected_revision: u64,
@@ -302,7 +249,6 @@ impl DeviceSchedulerReservationRelease {
     }
 }
 
-/// Complete durable reservation record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceSchedulerReservationRecord {
     pub device_scheduler_reservation_id: String,
@@ -321,40 +267,25 @@ pub struct DeviceSchedulerReservationRecord {
     pub revision: u64,
 }
 
-/// Outcome of one phase-one reserve command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceSchedulerReserveOutcome {
-    /// A new `reserved` row committed; the slot is held for this scheduler.
     Reserved(Box<DeviceSchedulerReservationRecord>),
-    /// The same request identity replayed with a byte-identical command; the
-    /// stored reservation is returned unchanged and idempotently.
     Replayed(Box<DeviceSchedulerReservationRecord>),
 }
 
-/// Stable device scheduler ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceSchedulerStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// The client node has no free worker-session slot.
     CapacityExhausted,
-    /// No reservation matches the requested identity.
     UnknownReservation,
-    /// A request identity was reused with a different body.
     RequestConflict,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free device scheduler ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceSchedulerStoreError {
     kind: DeviceSchedulerStoreErrorKind,
@@ -376,19 +307,11 @@ impl fmt::Display for DeviceSchedulerStoreError {
 
 impl std::error::Error for DeviceSchedulerStoreError {}
 
-/// Device scheduler reservation ledger borrowing the sole product-state
-/// `SQLite` authority.
 pub struct DeviceSchedulerLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable device scheduler reservation ledger on this same
-    /// product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn device_scheduler_reservation_ledger(
         &mut self,
     ) -> Result<DeviceSchedulerLedger<'_>, DeviceSchedulerStoreError> {
@@ -408,20 +331,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Atomically reserves one free worker-session slot of a client node
-    /// (plan FLOW-100.2 phase one).
-    ///
-    /// Inside one immediate transaction the gate reuses the durable capacity
-    /// facts: the client node must exist, and its pending scheduler
-    /// reservations plus its non-terminal launch grants (reconciled with the
-    /// device-reported running count) must stay below
-    /// `max_concurrent_worker_sessions`. The request identity replays a
-    /// stored reservation byte-identically and refuses a different body.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown client node, an exhausted capacity, a reused
-    /// request identity with a different body, or storage failure.
     pub fn reserve(
         &mut self,
         command: &DeviceSchedulerReservationRequest,
@@ -479,15 +388,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(DeviceSchedulerReserveOutcome::Reserved(Box::new(record)))
     }
 
-    /// Stamps the launch grant that took the reserved slot over
-    /// (`reserved -> granted`, plan FLOW-100.2 phase two). Re-stamping the
-    /// same grant id is an idempotent no-op so a retried settlement after a
-    /// crash cannot fork the slot accounting.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown reservation, a lost revision race, a different
-    /// grant already stamped, or storage failure.
     pub fn settle_granted(
         &mut self,
         command: &DeviceSchedulerReservationGrant,
@@ -535,14 +435,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(record)
     }
 
-    /// Frees a `reserved` slot without a grant (`reserved -> released`,
-    /// plan FLOW-100.2 failure paths). Re-releasing with the same reason is
-    /// an idempotent no-op.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown reservation, a lost revision race, a `granted`
-    /// reservation, a conflicting terminal release, or storage failure.
     pub fn release(
         &mut self,
         command: &DeviceSchedulerReservationRelease,
@@ -590,14 +482,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(record)
     }
 
-    /// Reclaims every `reserved` row created before `cutoff` (plan FLOW-100.2
-    /// crash safety): a scheduler that died between the reservation and the
-    /// Worker request must not hold the slot forever. Returns the released
-    /// reservation ids.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire_stale(
         &mut self,
         cutoff: &Instant,
@@ -641,11 +525,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(released)
     }
 
-    /// Returns one durable reservation by its own identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical reservation identity or storage failure.
     pub fn snapshot(
         &mut self,
         device_scheduler_reservation_id: &str,
@@ -660,11 +539,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(stored.map(|stored| stored.record))
     }
 
-    /// Returns the durable reservation of one request identity, if any.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical request identity or storage failure.
     pub fn snapshot_by_request(
         &mut self,
         request_id: &str,
@@ -675,13 +549,6 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
         Ok(stored.map(|stored| stored.record))
     }
 
-    /// Counts the pending (`reserved`) slot reservations of one client node;
-    /// the durable number the capacity CAS is judged against alongside the
-    /// non-terminal launch grants.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn pending_count_for_node(
         &mut self,
         client_node_id: &str,
@@ -714,15 +581,12 @@ impl<'storage> DeviceSchedulerLedger<'storage> {
     }
 }
 
-/// Internal projection with the request digest the replay gate compares and
-/// the parsed terminal release reason the idempotent re-release gate checks.
 struct StoredReservation {
     record: DeviceSchedulerReservationRecord,
     request_digest: String,
     terminal_release_reason: Option<DeviceSchedulerReleaseReason>,
 }
 
-/// Authoritative reservation projection the ledger loads and replays.
 const RESERVATION_SELECT: &str = "SELECT device_scheduler_reservation_id, request_id,
         request_digest, client_node_id, holder_user_id, occupancy_lease_id,
         occupancy_fencing_token, repository_binding_id, worker_session_id,
@@ -833,10 +697,6 @@ fn complete_stored_reservation(
     })
 }
 
-/// The request semantics the replay digest fingerprints. The internal
-/// reservation identity is deliberately excluded: it is derived from the
-/// request identity, so a replayed request must fingerprint identically no
-/// matter which caller minted the reservation row.
 #[derive(Deserialize, Serialize)]
 struct RequestFingerprint<'command> {
     request_id: &'command str,
@@ -862,10 +722,6 @@ impl DeviceSchedulerReservationRequest {
     }
 }
 
-/// The one durable capacity gate of phase one: pending scheduler
-/// reservations plus the non-terminal launch grant count (reconciled with
-/// the device-reported running count) must stay below the client's
-/// `max_concurrent_worker_sessions`.
 fn ensure_free_capacity(
     transaction: &Connection,
     client_node_id: &str,

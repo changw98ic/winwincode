@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Short-lived Worker session credential lifecycle acceptance tests
-//! (WORKER-200.2): the server stores only the `sha256:` digest, expiry and
-//! revocation take effect immediately, rotation replaces the material
-//! atomically, the sweep retires due credentials, the status query resolves
-//! by `workerSessionId`, and every failed authentication folds into one
-//! uniform rejection that never leaks a credential's existence.
-
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -24,7 +17,6 @@ use winwincode_storage::SqliteStorage;
 use winwincode_storage::WorkerSessionCredentialRecord;
 use winwincode_storage::WorkerSessionCredentialState;
 
-/// The canonical instant the tests share as "now".
 const T0: &str = "2026-09-04T12:00:00.000Z";
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -49,8 +41,6 @@ fn now_instant() -> Instant {
     Instant(T0.to_owned())
 }
 
-/// One canonical instant `millis` after `T0` (all offsets stay inside the
-/// same day, so the hour never rolls over).
 fn instant_after(millis: i64) -> Instant {
     let total_seconds = 12 * 3600 + millis.div_euclid(1000);
     let rest = millis.rem_euclid(1000);
@@ -100,8 +90,6 @@ fn short_policy() -> WorkerSessionCredentialPolicy {
     }
 }
 
-/// Runs one flow against a freshly opened ledger on `storage`, the way the
-/// server flows open and close their storage per operation.
 fn with_service<R>(
     storage: &mut SqliteStorage,
     policy: WorkerSessionCredentialPolicy,
@@ -118,8 +106,6 @@ fn default_service<R>(
     with_service(storage, WorkerSessionCredentialPolicy::default(), run)
 }
 
-/// Issues one credential for `seed`'s worker session and returns the durable
-/// record plus the one-time material.
 fn issue_for_session(
     service: &mut WorkerSessionCredentialService<'_>,
     seed: u64,
@@ -148,8 +134,6 @@ fn issue_records_only_the_digest_and_conflicts_on_a_second_active() {
         issue_for_session(service, 11, &now_instant())
     });
 
-    // The material is 64 lowercase hex characters (32 bytes); the durable
-    // record carries its `sha256:` digest and nothing else.
     assert_eq!(material.len(), 64);
     assert!(
         material
@@ -180,7 +164,6 @@ fn issue_records_only_the_digest_and_conflicts_on_a_second_active() {
     assert_eq!(record.worker_instance_id, worker_instance_id(11));
     assert_eq!(record.worker_launch_grant_id, launch_grant_id(11));
 
-    // One worker session carries at most one active credential.
     default_service(&mut storage, |service| {
         let conflict = service
             .issue_for_launch(
@@ -197,7 +180,6 @@ fn issue_records_only_the_digest_and_conflicts_on_a_second_active() {
             WorkerSessionCredentialErrorKind::CredentialConflict
         );
 
-        // The digest is durable: a fresh storage connection sees the same row.
         let status = service
             .status_for_session(&session_id(11))
             .expect("status query")
@@ -213,7 +195,6 @@ fn verification_is_uniform_for_every_failure_and_open_only_for_live_material() {
     default_service(&mut storage, |service| {
         let (record, material) = issue_for_session(service, 21, &now_instant());
 
-        // The live material authenticates to its record.
         let verified = service
             .verify_credential(material.as_bytes(), &now_instant())
             .expect("live material authenticates");
@@ -222,9 +203,6 @@ fn verification_is_uniform_for_every_failure_and_open_only_for_live_material() {
             record.worker_session_credential_id
         );
 
-        // Every failure — unknown material, malformed proofs, a deadline
-        // that just passed — is the same rejection with the same message, so
-        // no response distinguishes existing from non-existing credentials.
         let failures = vec![
             service
                 .verify_credential(b"counterfeit-proof-bytes", &now_instant())
@@ -249,8 +227,6 @@ fn verification_is_uniform_for_every_failure_and_open_only_for_live_material() {
             "rejection diagnostics never vary: {messages:?}"
         );
 
-        // Just before the deadline the material is still accepted: expiry
-        // takes effect at the exact stored instant without any sweep.
         service
             .verify_credential(material.as_bytes(), &instant_after(30 * 60 * 1000 - 1))
             .expect("still live one millisecond before the deadline");
@@ -286,9 +262,6 @@ fn revocation_is_immediate_and_indistinguishable_from_unknown() {
             Some(T0)
         );
 
-        // The same material that authenticated one call ago is now rejected
-        // with exactly the category an unknown material gets: revocation is
-        // immediate and leaks no existence.
         let rejected = service
             .verify_credential(material.as_bytes(), &now_instant())
             .expect_err("revoked material is dead");
@@ -307,7 +280,6 @@ fn revocation_is_immediate_and_indistinguishable_from_unknown() {
             "no live credential remains for the session"
         );
 
-        // The audit trail records the issuance and the attributed revocation.
         let trail = service
             .audit_trail_for_credential(&record.worker_session_credential_id)
             .expect("audit trail");
@@ -322,7 +294,6 @@ fn revocation_is_immediate_and_indistinguishable_from_unknown() {
         assert_eq!(trail[1].actor_user_id, actor);
         assert_eq!(trail[1].reason.as_deref(), Some("stop requested"));
 
-        // A second revocation finds no live credential.
         let again = service
             .revoke_for_session(&session_id(31), &actor, None, &now_instant())
             .expect_err("nothing left to revoke");
@@ -349,16 +320,12 @@ fn expiry_sweep_and_verification_agree_on_the_deadline() {
     );
 
     with_service(&mut storage, short_policy(), |service| {
-        // Nothing is due yet.
         let swept = service.expire_before(&now_instant()).expect("expiry sweep");
         assert!(
             swept.is_empty(),
             "no credential is due at the issuance instant"
         );
 
-        // Verification refuses the due credential at its deadline with no
-        // sweep in between: expiry is effective immediately, the sweep only
-        // makes the durable rows agree.
         let expired = service
             .verify_credential(due_material.as_bytes(), &instant_after(2_000))
             .expect_err("deadline passed");
@@ -372,7 +339,6 @@ fn expiry_sweep_and_verification_agree_on_the_deadline() {
             .expect("expiry sweep");
         assert_eq!(swept, vec![due.worker_session_credential_id.clone()]);
 
-        // The sweep is idempotent and the expired credential is audited.
         let again = service
             .expire_before(&instant_after(2_000))
             .expect("expiry sweep");
@@ -394,7 +360,6 @@ fn expiry_sweep_and_verification_agree_on_the_deadline() {
         assert_eq!(trail[1].reason.as_deref(), Some("expiry deadline passed"));
     });
 
-    // The untouched credential is unaffected and still authenticates.
     default_service(&mut storage, |service| {
         let still_active = service
             .verify_credential(kept_material.as_bytes(), &instant_after(2_000))
@@ -417,9 +382,6 @@ fn rotation_replaces_material_atomically_and_inherits_identities() {
             .rotate_session_credential(&session_id(51), Some("scheduled rotation"), &now_instant())
             .expect("rotation");
 
-        // The replacement is a different credential with fresh material, but
-        // the same worker identities and the same launch grant. The rotation
-        // retires exactly the credential the launch issued.
         assert_eq!(
             receipt.retired_id, record.worker_session_credential_id,
             "the rotation retires exactly the issued credential"
@@ -438,8 +400,6 @@ fn rotation_replaces_material_atomically_and_inherits_identities() {
         );
         assert_eq!(receipt.issued.state, WorkerSessionCredentialState::Active);
 
-        // The new material authenticates; the old material is dead at the
-        // same instant, with the uniform rejection.
         let rotated_instant = instant_after(1);
         let fresh = service
             .verify_credential(receipt.material.material().as_bytes(), &rotated_instant)
@@ -456,8 +416,6 @@ fn rotation_replaces_material_atomically_and_inherits_identities() {
             WorkerSessionCredentialErrorKind::AuthenticationRejected
         );
 
-        // Exactly one active credential remains, and the retired row is
-        // terminal `rotated` with both transitions audited.
         let status = service
             .status_for_session(&session_id(51))
             .expect("status query")
@@ -487,7 +445,6 @@ fn rotation_replaces_material_atomically_and_inherits_identities() {
             ]
         );
 
-        // Rotating a session without a live credential finds nothing.
         let missing = service
             .rotate_session_credential(&session_id(99), None, &now_instant())
             .expect_err("no active credential to rotate");
@@ -535,7 +492,6 @@ fn status_query_reports_the_live_credential_by_worker_session() {
             "an unknown credential id has no row"
         );
 
-        // The retry flow sees the session lose its credential on revocation.
         service
             .revoke_for_session(&session_id(61), &actor_user_id(7), None, &now_instant())
             .expect("revocation");
@@ -555,7 +511,6 @@ fn bound_verification_refuses_claimed_foreign_identities() {
     default_service(&mut storage, |service| {
         let (_record, material) = issue_for_session(service, 71, &now_instant());
 
-        // The exact bound triple authenticates.
         let bound = service
             .verify_bound_credential(
                 material.as_bytes(),
@@ -567,9 +522,6 @@ fn bound_verification_refuses_claimed_foreign_identities() {
             .expect("the bound identities authenticate");
         assert_eq!(bound.worker_session_id, session_id(71));
 
-        // Any other claimed identity — another session, worker, instance, or
-        // a non-canonical shape — folds into the same uniform rejection as
-        // an unknown material.
         let forgeries = vec![
             service
                 .verify_bound_credential(

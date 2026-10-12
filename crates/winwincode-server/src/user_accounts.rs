@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `UserAccountService`: the single canonical authority for durable
-//! local Owner account used by browser login.
-//!
-//! The service is a thin secret-free boundary over the storage crate's
-//! `UserAccountLedger`: it owns username normalization, Argon2id password
-//! hashing, and the first-Owner initialization rule. It never stores or
-//! returns a plaintext password; the Argon2id PHC string is the only durable
-//! password form.
-
 use std::fmt;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -19,30 +10,21 @@ use winwincode_storage::UserAccountStoreErrorKind;
 
 use crate::password_hash::{hash_password, verify_password};
 
-/// Crockford-style identifier alphabet shared with the canonical `usr_`
-/// identifier rules in the domain model (no `I`, `L`, `O`, or `U`).
 const USER_ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const USER_ID_SUFFIX_BYTES: usize = 13;
 const MAX_USERNAME_BYTES: usize = 96;
 const PASSWORD_MIN_BYTES: usize = 8;
 const PASSWORD_MAX_BYTES: usize = 256;
 
-/// Stable failure categories exposed by the account authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserAccountServiceErrorKind {
-    /// Rejected input, such as a malformed username or password length.
     InvalidInput,
-    /// The server already has its first Owner account.
     AlreadyInitialized,
-    /// No account matches the requested identity.
     NotFound,
-    /// The account changed after the supplied revision expectation.
     RevisionConflict,
-    /// The storage operation itself failed.
     Storage,
 }
 
-/// Secret-free account authority failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserAccountServiceError {
     kind: UserAccountServiceErrorKind,
@@ -64,26 +46,17 @@ impl fmt::Display for UserAccountServiceError {
 
 impl std::error::Error for UserAccountServiceError {}
 
-/// One login attempt outcome for a known account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialRejection {
-    /// No account carries the requested normalized username.
     UnknownAccount,
-    /// The password does not verify against the stored Argon2id hash.
     BadPassword,
 }
 
-/// The single canonical authority over the durable local Owner account.
 pub struct UserAccountService {
     storage: Mutex<SqliteStorage>,
 }
 
 impl UserAccountService {
-    /// Opens the account authority on the canonical product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Reports unavailable durable storage.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, UserAccountServiceError> {
         let directory = data_directory.as_ref();
         std::fs::create_dir_all(directory).map_err(|_| storage_unavailable())?;
@@ -93,20 +66,10 @@ impl UserAccountService {
         })
     }
 
-    /// Loads the Owner by exact user identity.
-    ///
-    /// # Errors
-    ///
-    /// Reports storage failure.
     pub fn find(&self, user_id: &UserId) -> Result<Option<UserAccount>, UserAccountServiceError> {
         self.with_ledger(|ledger| ledger.find(user_id).map_err(|store| storage_error(&store)))
     }
 
-    /// Loads the durable local Owner identity, if initialization has completed.
-    ///
-    /// # Errors
-    ///
-    /// Reports an unavailable store.
     pub fn owner_id(&self) -> Result<Option<UserId>, UserAccountServiceError> {
         self.with_ledger(|ledger| {
             ledger
@@ -116,14 +79,6 @@ impl UserAccountService {
         })
     }
 
-    /// Normalizes one raw username: trim first, then lowercase; the
-    /// normalized form must not contain any whitespace. The raw username is
-    /// stored exactly as supplied.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, overlong, control-bearing, or whitespace-carrying
-    /// normalized names.
     pub fn normalize_username(raw: &str) -> Result<String, UserAccountServiceError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.len() > MAX_USERNAME_BYTES {
@@ -145,18 +100,11 @@ impl UserAccountService {
         Ok(normalized)
     }
 
-    /// Returns the username as stored: trimmed, original case preserved. The
-    /// domain model rejects padding, so callers must store this form.
     #[must_use]
     pub fn stored_username(raw: &str) -> &str {
         raw.trim()
     }
 
-    /// Validates one plaintext password length bound.
-    ///
-    /// # Errors
-    ///
-    /// Rejects passwords outside the accepted length window.
     pub fn validate_password(password: &str) -> Result<(), UserAccountServiceError> {
         if password.len() < PASSWORD_MIN_BYTES || password.len() > PASSWORD_MAX_BYTES {
             return Err(error(
@@ -176,14 +124,6 @@ impl UserAccountService {
         Ok(())
     }
 
-    /// Creates the first Owner account with a fresh canonical `usr_` id.
-    ///
-    /// The `SQLite` singleton constraint and the session manager's durable marker
-    /// both close this path after the first successful initialization.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an existing Owner, invalid input, and storage failure.
     pub fn initialize_owner(
         &self,
         username: &str,
@@ -221,12 +161,6 @@ impl UserAccountService {
         })
     }
 
-    /// Verifies one username/password pair for login.
-    ///
-    /// # Errors
-    ///
-    /// Reports storage failure; credential mismatch is returned as a rejection
-    /// value rather than an error so callers can apply rate limiting.
     pub fn verify_credentials(
         &self,
         username: &str,
@@ -239,8 +173,6 @@ impl UserAccountService {
                 .map_err(|store| storage_error(&store))
         })?;
         let Some(account) = found else {
-            // Burn one real Argon2id verification so unknown accounts cost the
-            // same as a wrong password on a live account.
             let _ = verify_password(password, dummy_hash());
             return Ok(Err(CredentialRejection::UnknownAccount));
         };
@@ -250,12 +182,6 @@ impl UserAccountService {
         Ok(Ok(account))
     }
 
-    /// Replaces the Owner password under an exact revision expectation.
-    ///
-    /// # Errors
-    ///
-    /// Reports invalid input, a stale revision expectation, or storage
-    /// failure.
     pub fn set_password(
         &self,
         user_id: &UserId,
@@ -286,9 +212,6 @@ impl UserAccountService {
     }
 }
 
-/// One stored Argon2id hash of an unknown random password, generated once.
-/// Verifying unknown accounts against it keeps timing uniform with real
-/// account lookups.
 fn dummy_hash() -> &'static str {
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| {
@@ -334,7 +257,6 @@ fn account(
     })
 }
 
-/// Generates one fresh canonical `usr_` identifier.
 fn generate_user_id() -> Result<String, UserAccountServiceError> {
     let mut random = [0_u8; USER_ID_SUFFIX_BYTES];
     getrandom::fill(&mut random).map_err(|_| storage_unavailable())?;
@@ -427,9 +349,6 @@ mod tests {
         assert_eq!(owner.user_id.0.len(), 30);
         assert!(owner.password_hash.starts_with("$argon2id$v=19$"));
 
-        // A repeated normalized username cannot create a second account; the
-        // per-Server one-shot initialization gate lives in the session
-        // manager's durable marker (see auth_session tests).
         let conflict = service
             .initialize_owner("WEN", "third-owner-password", &now())
             .expect_err("same username initialization");

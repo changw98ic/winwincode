@@ -1,0 +1,393 @@
+diff --git a/codex-rs/core/src/tools/code_mode/terminal_tests.rs b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+index b71a419a..7745d404 100644
+--- a/codex-rs/core/src/tools/code_mode/terminal_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+@@ -31,3 +31,388 @@ fn a_cancelled_or_closed_cell_cannot_resurrect_a_host_handoff() {
+     handoffs.close_cell(&next);
+     assert!(handoffs.publish(next, proposal).is_err());
+ }
++
++use crate::tools::registry::CoreToolRuntime;
++
++struct HandoffReadGate;
++
++impl crate::ToolCallGate for HandoffReadGate {
++    fn authorize(
++        &self,
++        _: crate::ToolCallGateRequest,
++    ) -> futures::future::BoxFuture<
++        'static,
++        Result<crate::ToolCallGateAuthorization, crate::ToolCallGateRejection>,
++    > {
++        Box::pin(async { Ok(crate::ToolCallGateAuthorization::default()) })
++    }
++
++    fn revalidate(
++        &self,
++        _: crate::ToolCallGateRequest,
++        _: crate::ToolCallGateAuthorization,
++    ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
++        Box::pin(async { Ok(()) })
++    }
++
++    fn authorize_result_read(
++        &self,
++        _: crate::ToolResultReadRequest,
++    ) -> futures::future::BoxFuture<
++        'static,
++        Result<crate::ToolCallGateAuthorization, crate::ToolCallGateRejection>,
++    > {
++        Box::pin(async { Ok(crate::ToolCallGateAuthorization::default()) })
++    }
++
++    fn revalidate_result_read(
++        &self,
++        _: crate::ToolResultReadRequest,
++        _: crate::ToolCallGateAuthorization,
++    ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
++        Box::pin(async { Ok(()) })
++    }
++}
++
++struct DiagnosticHandoffTool {
++    effects: std::sync::atomic::AtomicUsize,
++    accepted: std::sync::atomic::AtomicUsize,
++}
++
++impl crate::tools::registry::ToolExecutor<crate::tools::context::ToolInvocation>
++    for DiagnosticHandoffTool
++{
++    fn tool_name(&self) -> codex_tools::ToolName {
++        crate::tools::handlers::SubmitChangeBatchHandler.tool_name()
++    }
++
++    fn spec(&self) -> codex_tools::ToolSpec {
++        crate::tools::handlers::SubmitChangeBatchHandler.spec()
++    }
++
++    fn handle(
++        &self,
++        invocation: crate::tools::context::ToolInvocation,
++    ) -> codex_tools::ToolExecutorFuture<'_> {
++        Box::pin(async move {
++            self.handle_core(invocation)
++                .await
++                .map(|result| result.output)
++        })
++    }
++}
++
++impl crate::tools::registry::CoreToolRuntime for DiagnosticHandoffTool {
++    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
++        crate::tools::authorization::AuthorizationPolicy::CoreControl
++    }
++
++    fn matches_kind(&self, payload: &crate::tools::context::ToolPayload) -> bool {
++        matches!(payload, crate::tools::context::ToolPayload::Custom { .. })
++    }
++
++    fn supports_result_replay(&self) -> bool {
++        // Exercise the stricter stored-continuation check even if an adapter
++        // opts into historical replay. The production submit handler does not.
++        true
++    }
++
++    fn handle_core(
++        &self,
++        invocation: crate::tools::context::ToolInvocation,
++    ) -> futures::future::BoxFuture<
++        '_,
++        Result<crate::tools::registry::CoreToolOutput, crate::function_tool::FunctionCallError>,
++    > {
++        use crate::tools::execution_facts::ExecutionFacts;
++        use crate::tools::execution_facts::nested_identity;
++        use crate::tools::execution_facts::storage_error;
++        Box::pin(async move {
++            let facts = ExecutionFacts::for_session(&invocation.session);
++            let store = facts.store.get().expect("registry initialized State");
++            let crate::tools::context::ToolCallSource::CodeMode {
++                cell_id,
++                runtime_tool_call_id,
++            } = &invocation.source
++            else {
++                panic!("registered Code Mode source");
++            };
++            let (_, scope) = facts.parent(cell_id).expect("registered owner");
++            let logical = nested_identity(cell_id, runtime_tool_call_id, &scope);
++            let boundary = store
++                .tool_request_fact(&invocation.session.thread_id.to_string(), &logical)
++                .await
++                .map_err(storage_error)?
++                .expect("running handoff request");
++            let diagnostic = codex_state::ToolDiagnostic {
++                schema_version: 1,
++                diagnostic_id: "handoff-offer-diagnosis".into(),
++                thread_id: invocation.session.thread_id.to_string(),
++                kind: codex_state::ToolDiagnosticKind::RepeatedOperation,
++                evidence_version: boundary.request_sequence,
++                progress_source_sequence: None,
++                evidence: vec![codex_state::ToolDiagnosticCall {
++                    request_sequence: boundary.request_sequence,
++                    logical_id: logical.clone(),
++                    tool_name: invocation.tool_name.to_string(),
++                    operation_digest: boundary.attempt.as_ref().unwrap().operation_digest.clone(),
++                    parent_call_id: boundary.request.parent_call_id.clone(),
++                    cell_id: boundary.request.cell_id.clone(),
++                }],
++                question: "What can advance the task?".into(),
++            };
++            store
++                .enqueue_tool_diagnostic(&diagnostic)
++                .await
++                .map_err(storage_error)?;
++            assert_eq!(
++                store
++                    .stage_tool_diagnostic_feedback(&diagnostic.thread_id, &logical)
++                    .await
++                    .map_err(storage_error)?,
++                vec![diagnostic]
++            );
++            self.effects
++                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            crate::tools::handlers::SubmitChangeBatchHandler
++                .handle_core(invocation)
++                .await
++        })
++    }
++
++    fn on_tool_result_accepted(
++        &self,
++        _: &crate::tools::context::ToolInvocation,
++        _: &dyn codex_tools::ToolOutput,
++    ) {
++        self.accepted
++            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    }
++}
++
++fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHandoff {
++    let cells = handoffs.cells.lock().unwrap();
++    let Some(ToolContinuation::YieldToHost(handoff)) = cells.get(cell).unwrap().borrow().clone()
++    else {
++        panic!("original typed handoff must remain latched");
++    };
++    handoff
++}
++
++#[tokio::test]
++async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_on_replay() {
++    use crate::tools::context::ToolCallSource;
++    use crate::tools::context::ToolInvocation;
++    use crate::tools::context::ToolPayload;
++    use crate::tools::registry::ToolRegistry;
++    use std::sync::Arc;
++    use std::sync::atomic::AtomicUsize;
++    use std::sync::atomic::Ordering;
++
++    let (session, mut turn) = crate::session::tests::make_session_and_context().await;
++    turn.submit_change_batch = true;
++    session
++        .services
++        .thread_extension_data
++        .insert(crate::ToolCallGateAttachment::new(Arc::new(
++            HandoffReadGate,
++        )));
++    let turn = Arc::new(turn);
++    let session = Arc::new(session);
++    let cell = CellId::new("diagnostic-handoff-cell".to_string());
++    session
++        .services
++        .code_mode_service
++        .terminal_handoffs
++        .register(&cell);
++    crate::tools::execution_facts::ExecutionFacts::for_session(&session).register_cell(
++        cell.as_str().into(),
++        "outer-exec".into(),
++        &turn.sub_id,
++    );
++    let invocation = ToolInvocation {
++        session: session.clone(),
++        turn: turn.clone(),
++        step_context: crate::session::step_context::StepContext::for_test(turn.clone()),
++        cancellation_token: tokio_util::sync::CancellationToken::new(),
++        tracker: Arc::new(tokio::sync::Mutex::new(
++            crate::turn_diff_tracker::TurnDiffTracker::new(),
++        )),
++        call_id: "proposal-call".into(),
++        tool_name: codex_tools::ToolName::plain("submit_change_batch").with_default_namespace(),
++        source: ToolCallSource::CodeMode {
++            cell_id: cell.as_str().into(),
++            runtime_tool_call_id: "runtime-proposal".into(),
++        },
++        payload: ToolPayload::Custom {
++            input: "original fixture proposal".into(),
++        },
++    };
++    let expected = ChangeBatchHandoff {
++        call_id: invocation.call_id.clone(),
++        proposal: "original fixture proposal".into(),
++    };
++    let store = codex_state::StateRuntime::init(turn.config.sqlite_config().clone(), "test".into())
++        .await
++        .unwrap();
++    let pool = store
++        .sqlite()
++        .open_read_write_pool(&store.sqlite().state_db_path())
++        .await
++        .unwrap();
++    sqlx::query(
++        "CREATE TRIGGER fail_handoff_diagnostic_offer BEFORE INSERT ON tool_fact_events
++        WHEN json_extract(NEW.fact_json,'$.kind')='diagnostic'
++            AND json_extract(NEW.fact_json,'$.fact.delivery')='offered'
++        BEGIN SELECT RAISE(ROLLBACK,'handoff diagnostic offer fixture'); END",
++    )
++    .execute(&pool)
++    .await
++    .unwrap();
++    let tool = Arc::new(DiagnosticHandoffTool {
++        effects: AtomicUsize::new(0),
++        accepted: AtomicUsize::new(0),
++    });
++    let registry = ToolRegistry::with_handler_for_test(tool.clone());
++    let first = registry
++        .dispatch_any_with_terminal_outcome(
++            invocation.clone(),
++            /*terminal_outcome_reached*/ None,
++        )
++        .await
++        .unwrap();
++    let Some(ToolContinuation::YieldToHost(handoff)) = &first.continuation else {
++        panic!("the first accepted output must retain its typed continuation");
++    };
++    assert_eq!(handoff, &expected);
++    let original_response = first.into_response();
++    assert!(
++        serde_json::to_string(&original_response)
++            .unwrap()
++            .contains("ChangeBatch proposal handed to host")
++    );
++    assert!(
++        session
++            .services
++            .code_mode_service
++            .terminal_handoffs
++            .is_pending(&cell)
++    );
++    assert_eq!(
++        latched_handoff(&session.services.code_mode_service.terminal_handoffs, &cell),
++        expected
++    );
++    assert_eq!(
++        (
++            tool.effects.load(Ordering::SeqCst),
++            tool.accepted.load(Ordering::SeqCst)
++        ),
++        (1, 1)
++    );
++    let events = store
++        .list_tool_fact_events(
++            &session.thread_id.to_string(),
++            /*after*/ 0,
++            /*limit*/ 200,
++        )
++        .await
++        .unwrap();
++    let required = &events.last().unwrap().fact;
++    let boundary = required.request_sequence;
++    let attempt = required.attempt.as_ref().unwrap().clone();
++    assert_eq!(attempt.delivery, codex_state::ToolOutputDelivery::Offered);
++    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_diagnostic_feedback WHERE boundary_request_sequence=? AND offered=0")
++        .bind(boundary).fetch_one(&pool).await.unwrap();
++    assert_eq!(pending, 1);
++    let retained = store.read_tool_results(boundary).await.unwrap();
++    let effective: serde_json::Value = serde_json::from_str(&retained.effective_input).unwrap();
++    let original_stored = retained.accepted.unwrap();
++    let stored: serde_json::Value = serde_json::from_str(&original_stored).unwrap();
++    assert_eq!(stored["schema_version"], 1);
++    assert_eq!(stored["effective_input"], effective);
++    assert_eq!(
++        effective,
++        crate::tools::execution_facts::payload_value(&invocation.payload)
++    );
++    assert_eq!(
++        crate::tools::execution_facts::operation_digest(&invocation, tool.as_ref()),
++        attempt.operation_digest,
++    );
++    assert_eq!(
++        stored["response"],
++        serde_json::to_value(&original_response).unwrap()
++    );
++    let ToolContinuation::YieldToHost(stored_handoff) =
++        serde_json::from_value(stored["continuation"].clone()).unwrap();
++    assert_eq!(stored_handoff, expected);
++    sqlx::query("DROP TRIGGER fail_handoff_diagnostic_offer")
++        .execute(&pool)
++        .await
++        .unwrap();
++    // Retry only the optional accounting through the original idempotent offer.
++    // This never re-enters handler, accepted callback or continuation publication.
++    for _ in 0..2 {
++        store
++            .offer_tool_output(boundary, &attempt.attempt_id, &attempt.owner_id)
++            .await
++            .unwrap();
++        let error = registry
++            .dispatch_any_with_terminal_outcome(
++                invocation.clone(),
++                /*terminal_outcome_reached*/ None,
++            )
++            .await
++            .err()
++            .expect("typed continuation is not self-contained replay");
++        let crate::function_tool::FunctionCallError::RespondToModel(message) = error else {
++            panic!("expected the existing stored-continuation replay guard");
++        };
++        assert_eq!(
++            serde_json::from_str::<serde_json::Value>(&message).unwrap(),
++            serde_json::json!({
++                "type":"tool_recovery", "schema_version":1, "state":"stored_result_scope_expired"
++            })
++        );
++        assert_eq!(
++            (
++                tool.effects.load(Ordering::SeqCst),
++                tool.accepted.load(Ordering::SeqCst)
++            ),
++            (1, 1)
++        );
++        assert!(
++            session
++                .services
++                .code_mode_service
++                .terminal_handoffs
++                .is_pending(&cell)
++        );
++        assert_eq!(
++            latched_handoff(&session.services.code_mode_service.terminal_handoffs, &cell),
++            expected
++        );
++        assert_eq!(
++            store
++                .read_tool_results(boundary)
++                .await
++                .unwrap()
++                .accepted
++                .as_deref(),
++            Some(original_stored.as_str())
++        );
++    }
++    let (required_count, diagnostic_count): (i64, i64) = sqlx::query_as(
++        "SELECT
++        COALESCE(SUM(json_extract(fact_json,'$.kind')='request'
++            AND json_extract(fact_json,'$.fact.attempt.delivery')='offered'),0),
++        COALESCE(SUM(json_extract(fact_json,'$.kind')='diagnostic'
++            AND json_extract(fact_json,'$.fact.delivery')='offered'),0)
++        FROM tool_fact_events WHERE request_sequence=?",
++    )
++    .bind(boundary)
++    .fetch_one(&pool)
++    .await
++    .unwrap();
++    assert_eq!((required_count, diagnostic_count), (1, 1));
++    pool.close().await;
++}

@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Unique Worker `ModelPort` runtime over the durable Provider Gateway.
-//!
-//! Local and remote execution-port adapters invoke the same typed core. The
-//! runtime writes an opening tombstone before any Credential or Provider side
-//! effect, persists only secret-free authority and retry context, restores an
-//! accepted exchange without reopening the Provider, and joins all chunks and
-//! acknowledgements through the one flow-control coordinator.
-
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -77,7 +69,6 @@ struct PoolReadinessState<'scope> {
     scope: &'scope ProjectScope,
 }
 
-/// Stable production runtime failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelExecutionRuntimeErrorKind {
     InvalidInput,
@@ -93,7 +84,6 @@ pub enum ModelExecutionRuntimeErrorKind {
     Storage,
 }
 
-/// Bounded error that never retains model payload or Provider diagnostics.
 #[derive(Debug)]
 pub struct ModelExecutionRuntimeError {
     kind: ModelExecutionRuntimeErrorKind,
@@ -147,18 +137,12 @@ impl From<ModelStreamFlowError> for ModelExecutionRuntimeError {
     }
 }
 
-/// Durable exchange store and canonical retry-settlement context source.
 pub struct DurableModelExchangeAuthority {
     storage: Mutex<SqliteStorage>,
     database_path: PathBuf,
 }
 
 impl DurableModelExchangeAuthority {
-    /// Opens the internal exchange authority over the product database.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the database or restricted table cannot be opened.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, ModelExecutionRuntimeError> {
         let mut storage = SqliteStorage::open(data_directory).map_err(|_| {
             ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
@@ -171,17 +155,11 @@ impl DurableModelExchangeAuthority {
         })
     }
 
-    /// Returns the exact canonical database path for composition checks.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
 
-    /// Deterministically checkpoints and closes the owned database connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable storage failure if the mutex is poisoned or close fails.
     pub fn close(self) -> Result<(), ModelExecutionRuntimeError> {
         let storage = self.storage.into_inner().map_err(|_| {
             ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
@@ -348,6 +326,17 @@ impl DurableModelExchangeAuthority {
         storage
             .provider_exchange_store()?
             .load_final_ack(model_exchange_id)
+            .map_err(Into::into)
+    }
+
+    fn retain_final_ack_semantics(
+        &self,
+        original: &ProviderExchangeFinalAck,
+        semantic_digest: &Sha256Digest,
+    ) -> Result<(), ModelExecutionRuntimeError> {
+        self.lock()?
+            .provider_exchange_store()?
+            .retain_final_ack_semantics(original, semantic_digest)
             .map_err(Into::into)
     }
 
@@ -552,7 +541,6 @@ impl fmt::Debug for DurableModelExchangeAuthority {
     }
 }
 
-/// Result of one `ModelOpen` through the durable production path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelExecutionOpenReceipt {
     Queued {
@@ -567,7 +555,6 @@ pub enum ModelExecutionOpenReceipt {
     },
 }
 
-/// Result of one Provider batch and the generated Worker chunks.
 #[derive(Debug)]
 pub struct ModelExecutionBatchReceipt {
     pub chunks: Vec<ModelChunkMessage>,
@@ -593,13 +580,6 @@ impl ModelExecutionBatchReceipt {
     }
 }
 
-/// Rebuilds terminal Worker batches which are durable in the Provider pool but
-/// have not necessarily crossed the `ProductSession` projection boundary yet.
-///
-/// # Errors
-///
-/// Fails closed when the pool authority, exchange authority, or frozen Worker
-/// binding disagree.
 pub(crate) fn recover_terminal_model_execution_batches(
     storage: &mut SqliteStorage,
     config: ModelRequestPoolConfig,
@@ -704,22 +684,18 @@ const fn terminal_outcomes_match(
     )
 }
 
-/// Result of one Worker acknowledgement.
 #[derive(Debug)]
 pub enum ModelExecutionAckReceipt {
     Acknowledged(ModelStreamFlowAckReceipt),
     Cancelled(ModelStreamFlowCancellationReceipt),
 }
 
-/// Shared typed execution-port result used by local and remote adapters.
 #[derive(Debug)]
 pub enum ModelExecutionPortReceipt {
     Opened(ModelExecutionOpenReceipt),
     Acknowledged(ModelExecutionAckReceipt),
 }
 
-/// Unique production runtime joining durable exchange authority, Gateway, and
-/// stream flow control. It owns no second Provider or retry ledger.
 pub struct ModelExecutionRuntime<'a, 'storage> {
     exchanges: &'a DurableModelExchangeAuthority,
     planner: &'a mut dyn ModelRetryPreOpenPlannerPort,
@@ -752,12 +728,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         }
     }
 
-    /// Accepts one Worker model-open message using its durable retry plan.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for missing/corrupt context, changed input, interrupted
-    /// opening, Gateway failure, or pool failure.
     #[allow(clippy::too_many_lines)]
     pub fn open(
         &mut self,
@@ -920,13 +890,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         })
     }
 
-    /// Converts one Provider batch, applies flow control, and produces the
-    /// canonical Control Plane-to-Worker model-chunk messages.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown/terminal exchanges, inconsistent terminal facts, or
-    /// flow/storage failures.
     pub fn offer_provider_batch(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -964,12 +927,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         seal_batch_receipt(chunks, flow)
     }
 
-    /// Applies a Worker acknowledgement to the same Gateway/flow instance.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, unknown exchanges, invalid sequence, or
-    /// flow/storage failure.
     pub fn acknowledge(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1021,6 +978,53 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         }
     }
 
+    fn replay_final_ack(
+        &self,
+        acknowledgement: &ModelAckMessage,
+        stored: &ProviderExchangeFinalAck,
+    ) -> Result<ModelExecutionAckReceipt, ModelExecutionRuntimeError> {
+        let mut receipt = decode_final_ack_receipt(stored.receipt_json())?;
+        if stored.ack_sequence != acknowledgement.ack_sequence.0
+            || receipt.pool.model_exchange_id != stored.model_exchange_id
+            || i64::try_from(receipt.pool.acknowledged_sequence).ok() != Some(stored.ack_sequence)
+        {
+            return Err(ModelExecutionRuntimeError::new(
+                ModelExecutionRuntimeErrorKind::ExchangeConflict,
+            ));
+        }
+        let snapshot = self
+            .exchanges
+            .snapshot(&stored.model_exchange_id)?
+            .ok_or_else(|| {
+                ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+            })?;
+        let durable = durable_gateway_exchange(&snapshot)?;
+        let original = ModelAckMessage {
+            kind: winwincode_execution_port::generated::ModelAckMessageKind::ModelAck,
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            model_exchange_id: stored.model_exchange_id.clone(),
+            ack_sequence: winwincode_domain::ExecutionAckSequence(stored.ack_sequence),
+            lease: durable.lease().clone(),
+            worker_session_id: durable.worker_session_id().clone(),
+            session_identity: durable.session_identity().clone(),
+            status: winwincode_execution_port::generated::LeaseWriteStatus::Accepted,
+            error: None,
+            replay_from_sequence: None,
+            message_id: snapshot.message_id,
+            sent_at: stored.acked_at.clone(),
+        };
+        let semantic = final_ack_semantic_digest(acknowledgement)?;
+        if semantic != final_ack_semantic_digest(&original)? {
+            return Err(ModelExecutionRuntimeError::new(
+                ModelExecutionRuntimeErrorKind::ExchangeConflict,
+            ));
+        }
+        self.exchanges
+            .retain_final_ack_semantics(stored, &semantic)?;
+        receipt.pool.replayed = true;
+        Ok(ModelExecutionAckReceipt::Acknowledged(receipt))
+    }
+
     fn acknowledge_terminal(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1030,16 +1034,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             .exchanges
             .final_ack(&acknowledgement.model_exchange_id)?
         {
-            if stored.ack_digest != ack_digest
-                || stored.ack_sequence != acknowledgement.ack_sequence.0
-            {
-                return Err(ModelExecutionRuntimeError::new(
-                    ModelExecutionRuntimeErrorKind::ExchangeConflict,
-                ));
-            }
-            let mut receipt = decode_final_ack_receipt(stored.receipt_json())?;
-            receipt.pool.replayed = true;
-            return Ok(ModelExecutionAckReceipt::Acknowledged(receipt));
+            return self.replay_final_ack(acknowledgement, &stored);
         }
         self.restore_pool_if_needed(
             &self
@@ -1819,6 +1814,27 @@ fn model_ack_digest(
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
+fn final_ack_semantic_digest(
+    acknowledgement: &ModelAckMessage,
+) -> Result<Sha256Digest, ModelExecutionRuntimeError> {
+    let mut value = serde_json::to_value(acknowledgement).map_err(|_| {
+        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+    })?;
+    object.remove("messageId");
+    object.remove("sentAt");
+    if acknowledgement.status == winwincode_execution_port::generated::LeaseWriteStatus::Duplicate {
+        object.insert("status".into(), serde_json::json!("accepted"));
+    }
+    let bytes =
+        serde_json::to_vec(&("winwincode.final-ack-semantics.v1", value)).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+        })?;
+    Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
+}
+
 fn terminal_digest(
     command: ProviderGatewayTerminal,
 ) -> Result<Sha256Digest, ModelExecutionRuntimeError> {
@@ -1874,6 +1890,15 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::AdapterRateLimited => "adapter_rate_limited",
         ProviderGatewayErrorKind::AdapterUnavailable => "adapter_unavailable",
         ProviderGatewayErrorKind::AdapterProtocol => "adapter_protocol",
+        ProviderGatewayErrorKind::AdapterRequestInvalid => "adapter_request_invalid",
+        ProviderGatewayErrorKind::AdapterRequestTranslation => "adapter_request_translation_failed",
+        ProviderGatewayErrorKind::AdapterRequestSizeLimit => "adapter_request_too_large",
+        ProviderGatewayErrorKind::AdapterResponseContentType => {
+            "adapter_response_content_type_invalid"
+        }
+        ProviderGatewayErrorKind::AdapterConnection => "adapter_connection_failed",
+        ProviderGatewayErrorKind::AdapterUpstream => "adapter_upstream_failed",
+        ProviderGatewayErrorKind::AdapterIdentityConflict => "adapter_identity_conflict",
         ProviderGatewayErrorKind::ExchangeConflict => "exchange_conflict",
         ProviderGatewayErrorKind::ExchangeNotFound => "exchange_not_found",
         ProviderGatewayErrorKind::TerminalConflict => "terminal_conflict",

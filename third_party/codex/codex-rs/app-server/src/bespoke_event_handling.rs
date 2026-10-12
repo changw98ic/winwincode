@@ -767,12 +767,14 @@ pub(crate) async fn apply_bespoke_event_handling(
                 is_blocking: request.is_blocking,
                 auto_resolution_ms: request.auto_resolution_ms,
             };
+            let input_call_id = params.item_id.clone();
             let (pending_request_id, rx) = outgoing
                 .send_request(ServerRequestPayload::ToolRequestUserInput(params))
                 .await;
             tokio::spawn(async move {
                 on_request_user_input_response(
                     event_turn_id,
+                    input_call_id,
                     pending_request_id,
                     rx,
                     conversation,
@@ -1649,6 +1651,7 @@ async fn handle_error_notification(
 
 async fn on_request_user_input_response(
     event_turn_id: String,
+    input_call_id: String,
     pending_request_id: RequestId,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
@@ -1669,6 +1672,7 @@ async fn on_request_user_input_response(
             if let Err(err) = conversation
                 .submit(Op::UserInputAnswer {
                     id: event_turn_id,
+                    call_id: input_call_id,
                     response: empty,
                 })
                 .await
@@ -1685,6 +1689,7 @@ async fn on_request_user_input_response(
             if let Err(err) = conversation
                 .submit(Op::UserInputAnswer {
                     id: event_turn_id,
+                    call_id: input_call_id,
                     response: empty,
                 })
                 .await
@@ -1720,6 +1725,7 @@ async fn on_request_user_input_response(
     if let Err(err) = conversation
         .submit(Op::UserInputAnswer {
             id: event_turn_id,
+            call_id: input_call_id,
             response,
         })
         .await

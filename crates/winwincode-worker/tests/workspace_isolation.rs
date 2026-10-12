@@ -91,6 +91,40 @@ fn one_bound_repository_can_be_the_source_root() {
 }
 
 #[test]
+fn verification_preserves_the_exact_source_commit_and_rejects_new_commits() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let mut active = active_job(&fixture.repository_id, "verification", 1);
+    active.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+    let workspace = manager
+        .create(&active)
+        .expect("create verification checkout");
+    let frozen = workspace
+        .freeze_verification()
+        .expect("freeze unchanged source");
+    workspace
+        .verify_candidate(&frozen)
+        .expect("verify the same commit, including root commits");
+    fs::write(workspace.layout().checkout().join("base.txt"), b"changed\n").unwrap();
+    assert!(workspace.freeze_verification().is_err());
+    git(workspace.layout().checkout(), &["add", "base.txt"]);
+    git(
+        workspace.layout().checkout(),
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@winwincode.invalid",
+            "commit",
+            "-m",
+            "foreign change",
+        ],
+    );
+    assert!(workspace.freeze_verification().is_err());
+    workspace.close(WorkspaceCloseReason::Completed).unwrap();
+}
+
+#[test]
 fn parallel_jobs_have_isolated_candidates_and_artifact_provenance() {
     let fixture = Fixture::new();
     let manager = fixture.manager();
@@ -116,24 +150,20 @@ fn parallel_jobs_have_isolated_candidates_and_artifact_provenance() {
         .write_artifact("logs/result.txt", b"artifact B")
         .expect("write artifact B");
 
-    let snapshot_a = workspace_a
-        .snapshot_candidate()
-        .expect("snapshot candidate A");
-    let snapshot_b = workspace_b
-        .snapshot_candidate()
-        .expect("snapshot candidate B");
+    let freeze_a = workspace_a.freeze_candidate().expect("freeze candidate A");
+    let freeze_b = workspace_b.freeze_candidate().expect("freeze candidate B");
     workspace_a
-        .verify_candidate(&snapshot_a)
+        .verify_candidate(&freeze_a)
         .expect("verify candidate A");
     workspace_b
-        .verify_candidate(&snapshot_b)
+        .verify_candidate(&freeze_b)
         .expect("verify candidate B");
-    assert_ne!(snapshot_a.content_digest, snapshot_b.content_digest);
-    assert_ne!(snapshot_a.provenance, snapshot_b.provenance);
+    assert_ne!(freeze_a.content_digest(), freeze_b.content_digest());
+    assert_ne!(freeze_a.provenance(), freeze_b.provenance());
     assert!(
-        std::str::from_utf8(snapshot_a.manifest_bytes())
+        std::str::from_utf8(freeze_a.manifest_bytes())
             .expect("candidate manifest UTF-8")
-            .contains(&snapshot_a.candidate_commit_id)
+            .contains(freeze_a.candidate_commit_id())
     );
 
     let artifacts_a = workspace_a
@@ -258,6 +288,60 @@ fn cancellation_removes_private_files_while_restart_preserves_active_checkout() 
 }
 
 #[test]
+fn lease_extension_preserves_workspace_and_recovers_exact_authority() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let mut active = active_job(&fixture.repository_id, "renew", 1);
+    let original = active.clone();
+    let mut workspace = manager.create(&active).expect("create workspace");
+    let origin = workspace.origin_provenance().clone();
+    let checkout = workspace.layout().checkout().to_path_buf();
+    active.lease.expires_at = Instant("2030-01-02T00:00:00.000Z".to_owned());
+    let manifest_path = workspace.layout().root().join(".winwincode-workspace.json");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+    let current_start = manifest
+        .find("\"currentProvenance\"")
+        .expect("current provenance");
+    let expiry_start = current_start
+        + manifest[current_start..]
+            .find(&original.lease.expires_at.0)
+            .expect("current expiry");
+    manifest.replace_range(
+        expiry_start..expiry_start + original.lease.expires_at.0.len(),
+        &active.lease.expires_at.0,
+    );
+    fs::write(&manifest_path, manifest).expect("inject canonical installed renewal");
+    workspace
+        .renew_lease(&active)
+        .expect("recover installed renewal");
+    workspace.renew_lease(&active).expect("replay renewal");
+    assert_eq!(workspace.origin_provenance(), &origin);
+    assert_eq!(
+        workspace.provenance().lease_expires_at,
+        active.lease.expires_at
+    );
+    assert!(workspace.renew_lease(&original).is_err());
+    let mut foreign = active.clone();
+    foreign.lease.worker_instance_id = WorkerInstanceId("wki_foreign".to_owned());
+    assert!(workspace.renew_lease(&foreign).is_err());
+    drop(workspace);
+    assert!(manager.create_or_recover(&original, None).is_err());
+    let recovered = manager
+        .create_or_recover(&active, None)
+        .expect("recover renewal");
+    assert_eq!(recovered.layout().checkout(), checkout);
+    assert_eq!(recovered.origin_provenance(), &origin);
+    assert_eq!(
+        recovered.provenance().lease_expires_at,
+        active.lease.expires_at
+    );
+    recovered
+        .close(WorkspaceCloseReason::Failed)
+        .expect("cleanup renewed workspace");
+    assert!(!checkout.exists());
+}
+
+#[test]
 fn artifact_snapshot_detects_byte_changes() {
     let fixture = Fixture::new();
     let manager = fixture.manager();
@@ -295,6 +379,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
         worker_instance_id: WorkerInstanceId("wki_workspace".to_owned()),
     };
     ActiveJob {
+        snapshot_id: None,
         job: ExecutionJob {
             attachments: None,
             model_selection: None,
@@ -303,9 +388,9 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
             goal: "verify isolated workspace".to_owned(),
             job_id,
             limits: ExecutionLimits {
-                deadline_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2030-01-01T00:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest("a".repeat(64)),
             scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {

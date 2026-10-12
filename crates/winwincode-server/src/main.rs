@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![recursion_limit = "256"]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
 use std::env;
@@ -81,13 +80,11 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         repository_scope.clone(),
         required_environment("WWC_SERVER_CHECKOUT_REVISION")?,
         required_environment_or("WWC_SERVER_EXECUTION_PROFILE", "codex-chat")?,
-        optional_i64("WWC_SERVER_MAX_RUNTIME_SECONDS", 3_600)?,
+        execution_runtime_seconds()?,
         optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     )?;
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
     let auth_bootstrap = AuthSessionBootstrap::new(bootstrap_proof)?;
-    // Community local loopback defaults to unlocked access; password auth is
-    // required for lock mode or any non-loopback listener.
     let local_open = match env::var("WWC_SERVER_AUTH_MODE") {
         Ok(mode) if mode == "local-open" => true,
         Ok(mode) if mode == "password" => false,
@@ -111,8 +108,6 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
     })
 }
 
-/// Opens the durable account authority, session manager, and resolves the
-/// first Owner account behind the initialization marker.
 type OpenedAccountsAuthority = (Arc<SqliteAuthSessionManager>, Option<UserAccount>);
 
 #[allow(clippy::type_complexity)]
@@ -137,11 +132,6 @@ fn open_accounts_authority(
     ))
 }
 
-/// The local Server exposes one configured repository, but the browser's
-/// post-login shell also reads the canonical organization, project, and
-/// request-pool streams for that repository. Keep those exact ancestor
-/// scopes in the session authority so every generated request and
-/// subscription is authorized by the same initialized Owner session.
 fn local_session_authority(repository: &RepositoryScope) -> Vec<Scope> {
     vec![
         Scope::OrganizationScope(OrganizationScope {
@@ -191,9 +181,6 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    // Worker artifact.open/chunk must settle on the Control Plane Artifact
-    // store. start_local leaves artifact_store unset; install the production
-    // catalog before any Device Worker exchange can arrive.
     let mut control_plane = control_plane;
     let execution_artifact_objects =
         LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
@@ -257,7 +244,6 @@ fn open_production_application(
     })
 }
 
-/// Resolves the durable first Owner account behind the initialization marker.
 fn resolved_owner(
     auth_sessions: &SqliteAuthSessionManager,
     accounts: &UserAccountService,
@@ -272,6 +258,7 @@ fn resolved_owner(
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = configured_action_signing_key()?;
     let startup = load_production_startup()?;
     let composition = open_production_application(startup)?;
     Box::pin(run_composed_server(composition)).await
@@ -293,15 +280,17 @@ async fn run_composed_server(
         DeviceModelBoundary,
         ActionEnforcementIssuer::new(action_signing_key.clone()),
     );
-    let execution_port =
-        ServerExecutionPortCore::from_application(&application, repository_scope.clone(), delegate);
+    let lease_duration = optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 900)?;
+    let execution_port = ServerExecutionPortCore::from_application(
+        &application,
+        repository_scope.clone(),
+        delegate,
+        lease_duration,
+    )?;
     let worker_id = WorkerId(required_environment_or(
         "WWC_SERVER_WORKER_ID",
         "wrk_00000000000000000000000001",
     )?);
-    // A process restart must enter the scheduler as a new Worker instance and
-    // generation. Stable defaults would make a restarted process look like
-    // the predecessor and would suppress the repository replacement path.
     let worker_instance_id =
         WorkerInstanceId(runtime_identity("WWC_SERVER_WORKER_INSTANCE_ID", "wki_")?);
     let scheduler_generation = runtime_identity("WWC_SERVER_SCHEDULER_GENERATION", "gen_")?;
@@ -315,9 +304,7 @@ async fn run_composed_server(
         worker_id.clone(),
         worker_instance_id.clone(),
         scheduler_generation,
-        // ponytail: execution leases have a fixed deadline; tasks over 15 minutes
-        // need an explicit longer lease until protocol-level renewal is implemented.
-        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 900)?,
+        lease_duration,
     )?
     .with_admission_identity(
         owner.as_ref().map(|owner| owner.user_id.clone()),
@@ -334,7 +321,6 @@ async fn run_composed_server(
     .await
 }
 
-/// Model payloads and Provider credentials stay in the Device process.
 struct DeviceModelBoundary;
 impl winwincode_control_plane::DurableExecutionPortDelegate for DeviceModelBoundary {
     fn accept(
@@ -382,13 +368,15 @@ where
         remote_worker_scope,
     );
     let remote_authenticator = Arc::new(session_authenticator);
-    let exchange: Arc<dyn RemoteWorkerExchangePort> =
-        Arc::new(ProductionRemoteWorkerExchange::new(
+    let exchange: Arc<dyn RemoteWorkerExchangePort> = Arc::new(
+        ProductionRemoteWorkerExchange::new(
             config.data_directory(),
             remote_authenticator,
             scheduler,
             execution_port,
-        ));
+        )
+        .with_accounting_key(configured_action_signing_key()?),
+    );
     let client_exchange: Arc<dyn ClientExchangePort> = Arc::new(
         ClientExchangeApplication::open(config.data_directory(), &ClientExchangeConfig::default())
             .map_err(|error| error.to_string())?,
@@ -430,13 +418,23 @@ async fn serve_remote_runtime(
 
 fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dyn std::error::Error>>
 {
+    let value = env::var("WWC_SERVER_ACTION_SIGNING_KEY_HEX").ok();
+    action_signing_key_from(value.as_deref())
+}
+
+fn action_signing_key_from(
+    value: Option<&str>,
+) -> Result<ActionEnforcementSigningKey, Box<dyn std::error::Error>> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX is required")?;
     Ok(ActionEnforcementSigningKey::from_bytes(parse_hex_key(
-        &required_environment_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX", &"1f".repeat(32))?,
+        value,
     )?)?)
 }
 
 fn parse_hex_key(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    if value.len() != 64 {
+    if value.len() != 64 || !value.is_ascii() {
         return Err("WWC_SERVER_ACTION_SIGNING_KEY_HEX must contain 32 bytes".into());
     }
     let mut result = [0_u8; 32];
@@ -483,10 +481,10 @@ fn compose_production_application(
     )?));
     let artifact_objects =
         LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
-    // Collaboration inbox keeps its own catalog handle; the execution-port
-    // Control Plane owns the canonical artifact-catalog installed above.
     let artifact_store = ArtifactStore::open(
-        config.data_directory().join("artifact-catalog-collaboration"),
+        config
+            .data_directory()
+            .join("artifact-catalog-collaboration"),
         Box::new(artifact_objects),
     )?;
     let page_annotations = Arc::new(Mutex::new(
@@ -533,6 +531,10 @@ fn local_production_configs() -> Result<
     let delivery = LocalDeliveryAdapterConfig::new(
         PathBuf::from(required_environment("WWC_SERVER_REPOSITORY_ROOT")?),
         scope.clone(),
+    )
+    .with_execution_limits(
+        execution_runtime_seconds()?,
+        optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     );
     let requester_ids = comma_separated_environment("PUBLICATION_REQUESTERS")?;
     let approvers = comma_separated_environment("PUBLICATION_APPROVERS")?
@@ -605,6 +607,22 @@ fn required_environment_or(
     }
 }
 
+fn execution_runtime_seconds() -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let value = required_environment_or("WWC_SERVER_MAX_RUNTIME_SECONDS", "3600")?;
+    parse_execution_runtime_seconds(&value)
+}
+
+fn parse_execution_runtime_seconds(value: &str) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    if value == "unlimited" {
+        return Ok(None);
+    }
+    let seconds: i64 = value.parse()?;
+    if !(1..=604_800).contains(&seconds) {
+        return Err("WWC_SERVER_MAX_RUNTIME_SECONDS must be 1..604800 or unlimited".into());
+    }
+    Ok(Some(seconds))
+}
+
 fn optional_i64(name: &str, default: i64) -> Result<i64, Box<dyn std::error::Error>> {
     match env::var(name) {
         Ok(value) => Ok(value.parse()?),
@@ -636,4 +654,32 @@ fn optional_duration_seconds(
         Err(error) => return Err(error.into()),
     };
     Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(test)]
+mod execution_runtime_tests {
+    use super::parse_execution_runtime_seconds;
+
+    #[test]
+    fn action_signing_authority_requires_an_explicit_key() {
+        for value in [
+            None,
+            Some(""),
+            Some("1f"),
+            Some("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+            Some("éééééééééééééééééééééééééééééééé"),
+        ] {
+            assert!(super::action_signing_key_from(value).is_err());
+        }
+        assert!(super::action_signing_key_from(Some(&"af".repeat(32))).is_ok());
+    }
+
+    #[test]
+    fn runtime_policy_requires_an_explicit_finite_value_or_unlimited() {
+        assert_eq!(parse_execution_runtime_seconds("unlimited").unwrap(), None);
+        assert_eq!(parse_execution_runtime_seconds("3600").unwrap(), Some(3600));
+        for value in ["", "0", "-1", "604801", "null", "UNLIMITED"] {
+            assert!(parse_execution_runtime_seconds(value).is_err(), "{value}");
+        }
+    }
 }

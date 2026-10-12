@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
+import { execFileSync } from 'node:child_process'
+import { DatabaseSync } from 'node:sqlite'
 
 import {
   DEVICE_ONLY_PREREQUISITES,
@@ -17,6 +19,8 @@ import {
   deviceProviderSecretBundle,
 } from '../scripts/run-api-production-vertical.mjs'
 import {
+  runtimeChildEnvironment,
+  resolveDeviceTaskApprovals,
   DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER,
   DETERMINISTIC_VERIFICATION_CALL_ID,
   DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
@@ -24,6 +28,9 @@ import {
   deterministicVerificationProduct,
   parseProcessExitCode,
   resolveVerificationObservation,
+  observeToolProcess,
+  deviceConnectCodePublished,
+  deviceHelloAcknowledged,
   workInputFromRequest,
 } from '../scripts/device-production-fixture.mjs'
 
@@ -32,6 +39,22 @@ const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const deviceTaskPath = resolve(root, 'scripts/run-device-task-vertical.mjs')
 const glmPath = resolve(root, 'scripts/run-glm-ui-rework.mjs')
 const fixturePath = resolve(root, 'scripts/device-production-fixture.mjs')
+
+test('reopening waits for the new daemon instance hello acknowledgement', () => {
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec(`CREATE TABLE device_identity (current_instance_id TEXT);
+      CREATE TABLE client_outbox (kind TEXT, published INTEGER, client_instance_id TEXT);
+      INSERT INTO device_identity VALUES ('old');
+      INSERT INTO client_outbox VALUES ('client.hello', 1, 'old')`)
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    assert.equal(deviceHelloAcknowledged(database, null), true)
+    database.exec("UPDATE device_identity SET current_instance_id = 'new'; INSERT INTO client_outbox VALUES ('client.hello', 0, 'new')")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    database.exec("UPDATE client_outbox SET published = 1 WHERE client_instance_id = 'new'")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), true)
+  } finally { database.close() }
+})
 
 test('Device-only prerequisite list covers the production acceptance path', () => {
   assert.deepEqual([...DEVICE_ONLY_PREREQUISITES], [
@@ -246,5 +269,220 @@ test('Device fixture does not invent fail when verification exit code is still u
     }],
   })
   assert.equal(sealed.exitCode, 0)
-  assert.equal(sealed.evidenceSourceId, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
+  assert.equal(sealed.evidenceSourceId, DETERMINISTIC_VERIFICATION_CALL_ID)
+})
+
+test('Device fixture polls the existing executor process until its actual exit', () => {
+  const messages = [{ type: 'tool_result', tool_use_id: 'loopback-executor-change', content: 'Process running with session ID 42\n' }]
+  let observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.sessionId, 42)
+  assert.equal(observed.exitCode, null)
+  messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: 'Process running with session ID 42\n' })
+  observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.nextCallId, 'loopback-executor-change-poll-2')
+  messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: 'Process exited with code 1\n' })
+  observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.sessionId, null)
+  assert.equal(observed.exitCode, 1)
+})
+
+test('device connection waits for the exact code publication acknowledgement', () => {
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec('CREATE TABLE client_outbox (kind TEXT, published INTEGER, payload BLOB)')
+    database.prepare('INSERT INTO client_outbox VALUES (?, ?, ?)').run(
+      'client.connect_code.published', 0,
+      Buffer.from(JSON.stringify({ payload: { connectCodeId: 'current-code' } })),
+    )
+    assert.equal(deviceConnectCodePublished(database, 'current-code'), false)
+    database.exec('UPDATE client_outbox SET published = 1')
+    assert.equal(deviceConnectCodePublished(database, 'other-code'), false)
+    assert.equal(deviceConnectCodePublished(database, 'current-code'), true)
+  } finally {
+    database.close()
+  }
+})
+
+
+test('runtime children do not inherit orchestration credentials or injected startup code', () => {
+  const environment = runtimeChildEnvironment({
+    PATH: '/usr/bin:/bin', HOME: '/tmp/isolated-benchmark-home', LANG: 'C',
+    ZHIPU_API_KEY: 'synthetic-provider-secret', OPENCODE_SESSION_VALUE: 'synthetic-session',
+    GH_TOKEN: 'synthetic-publisher-secret', PRIVATE_GRADER_CREDENTIAL: 'synthetic-grader-secret',
+    WWC_DEVICE_PROVIDER_API_KEY: 'synthetic-device-secret',
+    WWC_DEVICE_PROVIDER_HTTPS_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
+    HTTP_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
+    HTTPS_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
+    NODE_OPTIONS: '--eval=throw new Error("injected")',
+    DYLD_INSERT_LIBRARIES: '/tmp/untrusted.dylib',
+  })
+  const actual = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
+    'process.stdout.write(JSON.stringify(process.env))'], { env: environment, encoding: 'utf8' }))
+  delete actual.__CF_USER_TEXT_ENCODING
+  assert.deepEqual(actual, { PATH: '/usr/bin:/bin', HOME: '/tmp/isolated-benchmark-home', LANG: 'C' })
+})
+
+
+test('Device task approves only installed public smoke once with an exact current WorkRun binding', async () => {
+  const run = {
+    id: 'run', state: 'running', productSessionId: 'product', codexThreadId: 'core',
+    workerSessionId: 'worker', executionJobId: 'job',
+  }
+  const original = {
+    id: 'approval', revision: 3, state: 'pending', decisionEnabled: true,
+    category: 'mcp', effectiveDecisionScope: 'once',
+    binding: {
+      executionJobId: 'job', productSessionId: 'product', workerSessionId: 'worker',
+      sessionIdentity: { workRunId: 'run', codexThreadId: 'core', productSessionId: 'product', workerSessionId: 'worker' },
+    },
+    sanitizedDetail: {
+      kind: 'available', operation: 'execute', reasonCode: 'mcp_permission',
+      targetCount: 1, targetSummaries: ['server:benchmark_public_smoke'],
+    },
+  }
+  const cases = [
+    ['approve', () => {}],
+    ['reject', a => { a.category = 'exec' }],
+    ['reject', a => { a.category = 'patch' }],
+    ['reject', a => { a.effectiveDecisionScope = 'session' }],
+    ['reject', a => { a.sanitizedDetail.reasonCode = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.kind = 'unavailable' }],
+    ['reject', a => { a.sanitizedDetail.operation = 'write' }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries = ['server:other'] }],
+    ['reject', a => { a.sanitizedDetail.targetCount = 2 }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries.push('server:other') }],
+    [null, a => { a.state = 'resolved' }],
+    [null, a => { a.decisionEnabled = false }],
+    ...['executionJobId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding[key] = 'foreign' }]),
+    ...['workRunId', 'codexThreadId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding.sessionIdentity[key] = 'foreign' }]),
+  ]
+  for (const [expected, mutate] of cases) {
+    const approval = structuredClone(original)
+    mutate(approval)
+    const decisions = []
+    const receipts = []
+    const api = {
+      query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : approval }),
+      command: async (name, revision, payload) => {
+        assert.equal(name, 'approval.decide')
+        assert.equal(revision, 3)
+        assert.deepEqual(payload.binding, approval.binding)
+        decisions.push(payload.decision)
+        return { outcome: 'completed' }
+      },
+    }
+    await resolveDeviceTaskApprovals({ api, runs: [run], publicSmokeId: 'benchmark_public_smoke', onDecision: receipt => receipts.push(receipt) })
+    assert.deepEqual(decisions, expected === null ? [] : [expected])
+    assert.equal(receipts.length, decisions.length)
+    if (receipts.length) assert.equal(receipts[0].decision, expected)
+  }
+  const api = {
+    query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : original }),
+    command: async (_name, _revision, payload) => {
+      assert.equal(payload.decision, 'reject', 'uninstalled public smoke cannot be approved')
+      return { outcome: 'completed' }
+    },
+  }
+  await resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} })
+  api.command = async () => { throw Object.assign(new Error('changed'), { code: 'REVISION_CONFLICT' }) }
+  await resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => assert.fail('no receipt for failed command') })
+  api.command = async () => { throw new Error('transport lost') }
+  await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /transport lost/u)
+  api.query = async () => ({ page: { hasMore: true }, result: { items: [original] } })
+  await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /must be complete/u)
+})
+
+test('authorized task Sessions automatically approve actions while preserving current authority checks', async () => {
+  const run = { id: 'run', state: 'running', productSessionId: 'product', codexThreadId: 'core',
+    workerSessionId: 'worker', executionJobId: 'job' }
+  const original = {
+    id: 'approval', revision: 3, state: 'pending', decisionEnabled: true,
+    category: 'shell', effectiveDecisionScope: 'once',
+    binding: { executionJobId: 'job', productSessionId: 'product', workerSessionId: 'worker',
+      sessionIdentity: { workRunId: 'run', codexThreadId: 'core', productSessionId: 'product', workerSessionId: 'worker' } },
+    sanitizedDetail: { kind: 'available', operation: 'execute', reasonCode: 'sandbox_escalation',
+      workingDirectory: 'workspace', riskLevel: 'high', targetCount: 1,
+      targetSummaries: ['program:zsh;argument_count:2'] },
+  }
+  const cases = [
+    ['approve', () => {}],
+    ['approve', a => { a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'network'; a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'filesystem_write'; Object.assign(a.sanitizedDetail,
+      { operation: 'modify', reasonCode: 'filesystem_write', workingDirectory: null }) }],
+    ['reject', a => { a.category = 'mcp'; a.sanitizedDetail.reasonCode = 'mcp_permission' }],
+    ['reject', a => { a.sanitizedDetail.kind = 'unavailable' }],
+    ['reject', a => { a.sanitizedDetail.reasonCode = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.workingDirectory = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.targetCount = 0 }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries = [] }],
+    ['reject', a => { a.effectiveDecisionScope = 'session' }],
+    [null, a => { a.state = 'expired' }],
+    [null, a => { a.decisionEnabled = false }],
+    ...['executionJobId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding[key] = 'foreign' }]),
+    ...['workRunId', 'codexThreadId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding.sessionIdentity[key] = 'foreign' }]),
+  ]
+  for (const [expected, mutate] of cases) {
+    const approval = structuredClone(original)
+    mutate(approval)
+    const decisions = []
+    const api = {
+      query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : approval }),
+      command: async (name, revision, payload) => {
+        assert.equal(name, 'approval.decide'); assert.equal(revision, approval.revision)
+        assert.deepEqual(payload.binding, approval.binding)
+        decisions.push(payload.decision)
+        return { outcome: 'completed' }
+      },
+    }
+    await resolveDeviceTaskApprovals({ api, runs: [run], automaticTaskActions: true, onDecision: () => {} })
+    assert.deepEqual(decisions, expected === null ? [] : [expected])
+  }
+  const api = { query: async name => ({ page: { hasMore: false },
+    result: name === 'approval.list' ? { items: [original] } : original }),
+  command: async () => assert.fail('terminal WorkRun cannot approve') }
+  await resolveDeviceTaskApprovals({ api, runs: [{ ...run, state: 'cancelled' }],
+    automaticTaskActions: true, onDecision: () => {} })
+})
+
+test('Code Mode verification cites the original command receipt across process polling', () => {
+  const original = `code-mode:${'a'.repeat(64)}`
+  const observation = resolveVerificationObservation({ messages: [{
+    type: 'function_call_output', call_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+    output: `Process running with session ID 123\n<core_tool_receipts>${JSON.stringify({ receipts: [{ tool: 'functions.exec_command', source_id: original }] })}</core_tool_receipts>`,
+  }, {
+    type: 'function_call_output', call_id: DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
+    output: 'Exit code: 0\n',
+  }] })
+  assert.equal(observation.exitCode, 0)
+  assert.equal(observation.evidenceSourceId, original)
+})
+
+test('Device verification follows yielded cells and processes until the command exits', () => {
+  const sourceId = `code-mode:${'b'.repeat(64)}`
+  const receipt = `<core_tool_receipts>${JSON.stringify({ receipts: [
+    { tool: 'exec_command', source_id: sourceId },
+  ] })}</core_tool_receipts>`
+  for (const receiptAtStart of [false, true]) {
+    const messages = [{ type: 'tool_result', tool_use_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+      content: [{ type: 'text', text: `Script running with cell ID 17\nOutput:\n${receiptAtStart ? receipt : ''}` }] }]
+    let observed = resolveVerificationObservation({ messages })
+    assert.equal(observed.cellId, '17')
+    assert.equal(observed.sessionId, null)
+    assert.equal(observed.exitCode, null)
+    for (const output of ['Script running with cell ID 17\n',
+      `Process running with session ID 42\n${receipt}`, 'Script running with cell ID 18\n', 'Exit code: 0\n']) {
+      messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: output })
+      observed = resolveVerificationObservation({ messages })
+    }
+    assert.equal(observed.cellId, null)
+    assert.equal(observed.sessionId, null)
+    assert.equal(observed.exitCode, 0)
+    assert.equal(observed.evidenceSourceId, sourceId)
+    assert.equal(observed.nextCallId, `${DETERMINISTIC_VERIFICATION_CALL_ID}-poll-5`)
+  }
 })

@@ -144,8 +144,8 @@ impl QueuedInterrupt {
                     if ev.call_id == id.as_str())
             }
             QueuedInterrupt::RequestUserInput(ev) => {
-                matches!(request, ResolvedAppServerRequest::UserInput { call_id }
-                    if ev.item_id == call_id.as_str())
+                matches!(request, ResolvedAppServerRequest::UserInput { thread_id, turn_id, call_id }
+                    if ev.thread_id == *thread_id && ev.turn_id == *turn_id && ev.item_id == *call_id)
             }
             QueuedInterrupt::ItemStarted(_) | QueuedInterrupt::ItemCompleted(_) => false,
         }
@@ -217,6 +217,8 @@ mod tests {
 
         assert!(
             manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 call_id: "call-b".to_string(),
             })
         );
@@ -229,10 +231,49 @@ mod tests {
         assert_eq!(remaining.item_id, "call-a");
         assert!(
             manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 call_id: "call-a".to_string(),
             })
         );
         assert!(!manager.has_pending_prompt());
+    }
+
+    #[test]
+    fn remove_resolved_prompt_keeps_same_call_id_for_other_turns_and_threads() {
+        let mut manager = InterruptManager::new();
+        manager.push_user_input(user_input("same-call", "turn-1"));
+        manager.push_user_input(user_input("same-call", "turn-2"));
+        let mut other_thread = user_input("same-call", "turn-1");
+        other_thread.thread_id = "thread-2".to_string();
+        manager.push_user_input(other_thread);
+        assert!(
+            !manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-3".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert!(
+            manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-2".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(manager.queue.len(), 2);
+        assert!(
+            manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "same-call".to_string(),
+            })
+        );
+        assert_eq!(manager.queue.len(), 1);
+        let Some(QueuedInterrupt::RequestUserInput(remaining)) = manager.queue.front() else {
+            panic!("expected foreign-thread input");
+        };
+        assert_eq!(remaining.thread_id, "thread-2");
     }
 
     #[test]

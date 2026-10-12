@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production reconstruction of a Delivery verdict from sealed durable facts.
-
 use std::collections::{BTreeMap, HashSet};
 use std::{error::Error, fmt};
 
@@ -10,10 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Sha256Digest};
 
-use super::{
-    DurableCandidateSourceInput, FrozenDeliveryCandidate, assert_frozen_candidate_current,
-    validated_git_snapshot_from_candidate, validated_git_snapshot_from_source,
-};
+use super::{FrozenDeliveryCandidate, assert_frozen_candidate_current};
 use crate::domain::evidence::{
     EvidenceRefType, EvidenceSource, ResolveDeliveryEvidenceInput, ResolvedDeliveryEvidence,
     VerifiedEvidenceOutcome, accepted_runtime_source, checkout_attestation_from_snapshot,
@@ -34,10 +29,6 @@ const SESSION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1
 const JSON_CONTENT_TYPE: &str = "application/json";
 const MAX_RUNTIME_EVENTS: usize = 100_000;
 
-/// One event read from the canonical accepted runtime ledger.
-///
-/// The Control Plane derives `occurred_at_millis` from the event's canonical
-/// `Instant`; the verdict resolver never accepts an outcome or identity here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionRuntimeEvent {
     category: ProductionRuntimeEventCategory,
@@ -48,7 +39,6 @@ pub struct ProductionRuntimeEvent {
 }
 
 impl ProductionRuntimeEvent {
-    /// Seals one event already read from the canonical runtime ledger.
     #[must_use]
     pub const fn from_durable_ledger(
         category: ProductionRuntimeEventCategory,
@@ -67,7 +57,6 @@ impl ProductionRuntimeEvent {
     }
 }
 
-/// Delivery-owned classification of one accepted runtime event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionRuntimeEventCategory {
     Lifecycle,
@@ -80,8 +69,6 @@ pub enum ProductionRuntimeEventCategory {
     Diagnostic,
 }
 
-/// Payload bytes whose base64 form and digest were already checked by the
-/// Control Plane's canonical runtime-ledger adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionRuntimePayload {
     content_type: String,
@@ -89,8 +76,6 @@ pub struct ProductionRuntimePayload {
 }
 
 impl ProductionRuntimePayload {
-    /// Seals payload bytes after the Control Plane has checked the durable
-    /// transport encoding and digest.
     #[must_use]
     pub fn from_validated_bytes(content_type: impl Into<String>, bytes: Vec<u8>) -> Self {
         Self {
@@ -100,58 +85,31 @@ impl ProductionRuntimePayload {
     }
 }
 
-/// Durable runtime facts for one independent verification role.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionVerificationRuntime {
     role: VerificationRole,
     terminal: DeliveryTerminalOutcomeFacts,
-    source: DurableCandidateSourceInput,
+    snapshot: winwincode_domain::CanonicalSnapshot,
     events: Vec<ProductionRuntimeEvent>,
-    read_only_candidate_source: bool,
 }
 
 impl ProductionVerificationRuntime {
-    /// Joins one settled Worker outcome, its exact Git Artifact, and the
-    /// accepted append-only runtime ledger. Role and execution identity remain
-    /// derived from those sealed facts.
     #[must_use]
     pub fn from_durable(
         role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
-        source: DurableCandidateSourceInput,
+        snapshot: winwincode_domain::CanonicalSnapshot,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
             role,
             terminal,
-            source,
+            snapshot,
             events,
-            read_only_candidate_source: false,
-        }
-    }
-
-    /// Joins a verification terminal and runtime ledger to the current
-    /// writer's validated candidate source. Read-only verification consumes
-    /// that checkout and therefore does not produce a second candidate
-    /// Artifact of its own.
-    #[must_use]
-    pub fn from_durable_read_only(
-        role: VerificationRole,
-        terminal: DeliveryTerminalOutcomeFacts,
-        candidate_source: DurableCandidateSourceInput,
-        events: Vec<ProductionRuntimeEvent>,
-    ) -> Self {
-        Self {
-            role,
-            terminal,
-            source: candidate_source,
-            events,
-            read_only_candidate_source: true,
         }
     }
 }
 
-/// Sealed candidate, verification, and Evidence facts for verdict computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionVerdictFacts {
     candidate: FrozenDeliveryCandidate,
@@ -161,7 +119,6 @@ pub struct ProductionVerdictFacts {
 }
 
 impl ProductionVerdictFacts {
-    /// Consumes the sealed result for the Control Plane verdict boundary.
     #[must_use]
     pub fn into_parts(
         self,
@@ -180,7 +137,6 @@ impl ProductionVerdictFacts {
     }
 }
 
-/// Failure while reconciling durable production verdict facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionVerdictResolutionError {
     message: String,
@@ -194,15 +150,6 @@ impl fmt::Display for ProductionVerdictResolutionError {
 
 impl Error for ProductionVerdictResolutionError {}
 
-/// Resolves exact candidate, verification, and Evidence facts from production
-/// durable records.
-///
-/// # Errors
-///
-/// Rejects missing roles, non-contiguous or changed runtime events, an invalid
-/// policy attestation, stale candidate/spec/runtime positions, malformed
-/// structured findings, and any terminal, Artifact, lease, fence, session, or
-/// Git identity drift.
 pub fn resolve_production_verdict(
     delivery: &Delivery,
     candidate: FrozenDeliveryCandidate,
@@ -235,10 +182,15 @@ pub fn resolve_production_verdict(
     sessions.sort_by_key(|session| role_order(session.role));
     evidence.sort_by(|left, right| left.evidence().id.0.cmp(&right.evidence().id.0));
     evidence.dedup_by(|left, right| left.evidence().id == right.evidence().id);
+    let snapshot = sessions
+        .first()
+        .and_then(|session| session.pre_candidate_snapshot.clone())
+        .ok_or_else(|| error("verification Snapshot is missing"))?;
     let verification = validate_independent_verification(
         delivery,
         &candidate,
         &VerificationFacts {
+            snapshot,
             required_roles,
             sessions,
         },
@@ -248,14 +200,11 @@ pub fn resolve_production_verdict(
         .checked_add(2)
         .ok_or_else(|| error("verdict production time exceeds the durable range"))?;
 
-    // Frozen preview source authority requires one executor/remediator Commit
-    // Evidence sealed from the real frozen candidate already produced by the
-    // writer Worker. Never invent a commit id: rebuild it from the frozen
-    // candidateRef/commit that freeze_source just validated.
     let producer_commit = resolve_delivery_evidence(
         delivery,
         &candidate,
         ResolveDeliveryEvidenceInput {
+            snapshot: verification.snapshot().clone(),
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
             source: EvidenceSource::CandidateCommit,
@@ -287,12 +236,11 @@ fn resolve_verification_runtime(
     candidate: &FrozenDeliveryCandidate,
     runtime: &ProductionVerificationRuntime,
 ) -> Result<ResolvedVerificationRuntime, ProductionVerdictResolutionError> {
-    let (snapshot, verified_terminal) = if runtime.read_only_candidate_source {
-        validated_git_snapshot_from_candidate(delivery, candidate, &runtime.terminal)
-    } else {
-        validated_git_snapshot_from_source(delivery, &runtime.source, &runtime.terminal)
-    }
-    .map_err(|error_value| resolution_error(&error_value))?;
+    let snapshot = &runtime.snapshot;
+    let verified_terminal = runtime
+        .terminal
+        .verify_successful_report(delivery)
+        .map_err(|error_value| error(error_value.to_string()))?;
     let role = runtime.role;
     let binding = delivery
         .snapshot()
@@ -304,25 +252,19 @@ fn resolve_verification_runtime(
                 && binding.attempt == verified_terminal.attempt()
         })
         .ok_or_else(|| error("verification terminal SessionBinding is missing"))?;
-    let terminal = if runtime.read_only_candidate_source {
-        AcceptedVerificationJobOutcomeFact::from_verified_read_only_outcome(
-            &verified_terminal,
-            &snapshot,
-            role.as_str(),
-        )
-    } else {
-        AcceptedVerificationJobOutcomeFact::from_verified_outcome(
-            &verified_terminal,
-            &snapshot,
-            role.as_str(),
-        )
-    }
+    let terminal = AcceptedVerificationJobOutcomeFact::from_verified_outcome(
+        &verified_terminal,
+        binding,
+        snapshot,
+        role.as_str(),
+    )
     .map_err(|error_value| resolution_error(&error_value))?;
     let events = validated_runtime_events(&runtime.events, &terminal)?;
     validate_policy_attestation(&events, candidate)?;
     let result = structured_result(&events, delivery, candidate)?;
-    let checkout = checkout_attestation_from_snapshot(&terminal, &snapshot);
+    let checkout = checkout_attestation_from_snapshot(&terminal, snapshot, candidate.repository());
     let (findings, evidence) = resolve_findings(
+        snapshot,
         delivery,
         candidate,
         &binding.id,
@@ -341,7 +283,7 @@ fn resolve_verification_runtime(
             workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
             permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,
             pre_candidate_snapshot: Some(snapshot.clone()),
-            post_candidate_snapshot: Some(snapshot),
+            post_candidate_snapshot: Some(snapshot.clone()),
             accepted_job_outcome: Some(terminal),
             codex_turn_completed: true,
             mutation_records: Vec::new(),
@@ -446,6 +388,16 @@ struct VerificationResultPayload {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<StructuredFinding>,
+    #[serde(default)]
+    fusion_investigations: Option<Vec<StructuredFusionInvestigation>>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredFusionInvestigation {
+    claim_key: String,
+    status: String,
+    evidence_sources: Vec<StructuredEvidenceSource>,
 }
 
 #[derive(Deserialize)]
@@ -511,6 +463,7 @@ fn structured_result<'events>(
             "verification result names a stale candidate, specification, or empty finding set",
         ));
     }
+    validate_fusion_investigation_events(events, result)?;
     Ok(ParsedVerificationResult {
         event: result.event,
         payload: VerificationResultPayload {
@@ -519,8 +472,41 @@ fn structured_result<'events>(
             delivery_spec_revision: result.payload.delivery_spec_revision,
             candidate_ref: result.payload.candidate_ref.clone(),
             findings: result.payload.findings.clone(),
+            fusion_investigations: result.payload.fusion_investigations.clone(),
         },
     })
+}
+
+fn validate_fusion_investigation_events(
+    events: &[AcceptedRuntimeEvent<'_>],
+    result: &ParsedVerificationResult<'_>,
+) -> Result<(), ProductionVerdictResolutionError> {
+    let Some(investigations) = result.payload.fusion_investigations.as_ref() else {
+        return Ok(());
+    };
+    let mut claims = HashSet::with_capacity(investigations.len());
+    if investigations.is_empty()
+        || investigations.iter().any(|investigation| {
+            investigation.claim_key.trim().is_empty()
+                || !claims.insert(investigation.claim_key.as_str())
+                || !matches!(investigation.status.as_str(), "investigated" | "unresolved")
+                || investigation.evidence_sources.is_empty()
+        })
+    {
+        return Err(error("Fusion investigation result is malformed"));
+    }
+    for investigation in investigations {
+        for source in &investigation.evidence_sources {
+            let source_event = exact_source_event(events, &source.event_id)?;
+            if source_event.sequence >= result.event.sequence {
+                return Err(error(
+                    "Fusion investigation Evidence must precede its structured result",
+                ));
+            }
+            runtime_outcome(source_event, source.evidence_type)?;
+        }
+    }
+    Ok(())
 }
 
 impl Clone for StructuredFinding {
@@ -552,11 +538,17 @@ impl Clone for VerificationResultPayload {
             delivery_spec_revision: self.delivery_spec_revision,
             candidate_ref: self.candidate_ref.clone(),
             findings: self.findings.clone(),
+            fusion_investigations: self.fusion_investigations.clone(),
         }
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit sealed authorities are joined once at this boundary"
+)]
 fn resolve_findings(
+    snapshot: &winwincode_domain::CanonicalSnapshot,
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
     session_binding_id: &SessionBindingId,
@@ -623,6 +615,7 @@ fn resolve_findings(
                     delivery,
                     candidate,
                     ResolveDeliveryEvidenceInput {
+                        snapshot: snapshot.clone(),
                         work_run_id: terminal.work_run_id().clone(),
                         session_binding_id: session_binding_id.clone(),
                         source: EvidenceSource::Runtime {

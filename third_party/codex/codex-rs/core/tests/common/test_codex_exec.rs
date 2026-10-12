@@ -41,8 +41,12 @@ fn toml_string_literal(value: &str) -> String {
 }
 
 pub fn test_codex_exec() -> TestCodexExecBuilder {
+    let home = TempDir::new().expect("create temp home");
+    // Generic exec fixtures emit direct tool calls. Pin their model as Core fixtures do.
+    std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n")
+        .expect("write test model");
     TestCodexExecBuilder {
-        home: TempDir::new().expect("create temp home"),
+        home,
         cwd: TempDir::new().expect("create temp cwd"),
     }
 }

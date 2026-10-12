@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
@@ -121,6 +123,7 @@ impl BoundaryError {
 struct ServerState {
     config: Arc<ServerConfig>,
     auth_sessions: Arc<SqliteAuthSessionManager>,
+    credential_hash_permits: Arc<Semaphore>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
@@ -133,7 +136,6 @@ struct ServerState {
     preview: Option<Arc<PreviewApplication>>,
 }
 
-/// Running standalone listener with deterministic graceful shutdown.
 pub struct RunningServer {
     local_address: SocketAddr,
     public_url: String,
@@ -155,16 +157,6 @@ impl RunningServer {
         &self.public_url
     }
 
-    /// Stops accepting new HTTP work and waits for the listener task to drain.
-    ///
-    /// The embedded application remains open so a runtime supervisor can drain
-    /// Worker commands, interaction acknowledgements, and terminal outbox work
-    /// before the application state is closed.
-    ///
-    /// # Errors
-    ///
-    /// Reports a listener task or join failure after the listener no longer
-    /// accepts work.
     pub async fn shutdown_listener(&mut self) -> Result<(), ServerError> {
         for background in self.background_tasks.drain(..) {
             background.abort();
@@ -177,24 +169,12 @@ impl RunningServer {
             .map_err(|_| ServerError::new("server task did not shut down cleanly"))?
     }
 
-    /// Closes the embedded application after the runtime has drained.
-    ///
-    /// # Errors
-    ///
-    /// Reports an application shutdown failure.
     pub fn shutdown_application(self) -> Result<(), ServerError> {
         self.api
             .shutdown()
             .map_err(|_| ServerError::new("Control Plane shutdown failed"))
     }
 
-    /// Drains connections, stops the listener, and then closes the embedded
-    /// Control Plane lifecycle.
-    ///
-    /// # Errors
-    ///
-    /// Reports a server task, join, or application shutdown failure after the
-    /// listener no longer accepts work.
     pub async fn shutdown(mut self) -> Result<(), ServerError> {
         let listener_result = self.shutdown_listener().await;
         let application_result = self.shutdown_application();
@@ -202,12 +182,6 @@ impl RunningServer {
     }
 }
 
-/// Start the one public HTTP/HTTPS origin.
-///
-/// # Errors
-///
-/// Fails if TLS cannot load, the listener cannot bind, or it does not report a
-/// listening address within ten seconds.
 pub async fn start_server(
     config: ServerConfig,
     auth_sessions: Arc<SqliteAuthSessionManager>,
@@ -217,13 +191,6 @@ pub async fn start_server(
     start_server_with_remote_worker(config, auth_sessions, authenticator, api, None, None).await
 }
 
-/// Starts the public origin with the private authenticated remote Worker
-/// exchange attached to the same TLS listener.
-///
-/// # Errors
-///
-/// Fails closed when remote Worker mode is configured without TLS, or when
-/// the listener cannot start.
 #[allow(clippy::too_many_lines)]
 pub async fn start_server_with_remote_worker(
     config: ServerConfig,
@@ -261,7 +228,6 @@ pub async fn start_server_with_remote_worker(
             .map_err(|error| ServerError::new(error.to_string()))?;
             Some(Arc::new(application))
         }
-        // Servers without a Client surface keep the connect routes absent.
         None => None,
     };
     let client_occupancy = match &client_exchange {
@@ -273,14 +239,11 @@ pub async fn start_server_with_remote_worker(
             .map_err(|error| ServerError::new(error.to_string()))?;
             Some(Arc::new(application))
         }
-        // Servers without a Client surface keep the occupancy routes absent.
         None => None,
     };
-    // Servers without a Client surface keep the repository directory absent.
     let client_repositories = client_exchange
         .as_ref()
         .map(|_| Arc::new(ClientRepositoriesApplication::open(config.data_directory())));
-    // Servers without a Client surface keep the candidate routes absent.
     let client_candidates = match &client_exchange {
         Some(_) => {
             let application = ClientCandidatesApplication::open(
@@ -302,17 +265,12 @@ pub async fn start_server_with_remote_worker(
             .map_err(|error| ServerError::new(error.to_string()))?;
             Some(Arc::new(application))
         }
-        // Servers without a Client surface keep the launch routes absent.
         None => None,
     };
     let preview = config.preview_public_url().and_then(|origin| {
         PreviewApplication::open(config.data_directory().to_path_buf(), origin.to_owned())
             .map(Arc::new)
     });
-    // The periodic offline sweep projects heartbeat-stale devices to
-    // `offline` and their active occupancy leases to `recovery_pending`
-    // (plan 12.5). Each iteration opens and closes its own storage
-    // connection; the task holds no lock across awaits.
     let mut background_tasks = match &client_occupancy {
         Some(application) => {
             let sweep_application = Arc::clone(application);
@@ -338,6 +296,7 @@ pub async fn start_server_with_remote_worker(
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
+        credential_hash_permits: Arc::new(Semaphore::new(credential_hash_concurrency())),
         authenticator,
         api: Arc::clone(&api),
         remote_worker,
@@ -440,6 +399,10 @@ fn router(state: ServerState) -> Router {
         .route(
             "/internal/v1/execution-port/exchange",
             post(remote_worker_exchange),
+        )
+        .route(
+            "/internal/v1/execution-port/accounting",
+            get(remote_worker_accounting).post(remote_worker_accounting),
         )
         .route(
             "/internal/v1/client/exchange",
@@ -767,23 +730,70 @@ async fn remote_worker_exchange(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    // Registry ordering compares the canonical millisecond `Instant` text.
-    // Reuse the application clock so a registration and its placement cannot
-    // acquire different fractional-second widths at the HTTP boundary.
     let now = SystemStandaloneApplicationClock.now_instant();
-    match exchange.exchange(credential.as_bytes().to_vec(), &body, now) {
-        Ok(response) => (
+    let exchange = Arc::clone(exchange);
+    let credential = credential.as_bytes().to_vec();
+    let result =
+        tokio::task::spawn_blocking(move || exchange.exchange(credential, &body, now)).await;
+    match result {
+        Ok(Ok(response)) => (
             StatusCode::OK,
             [(CONTENT_TYPE, "application/json")],
             response,
         )
             .into_response(),
-        Err(error) => {
+        Ok(Err(error)) => {
             if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                 eprintln!("remote Worker exchange error: {error}");
             }
-            StatusCode::UNAUTHORIZED.into_response()
+            StatusCode::from_u16(error.status_code())
+                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+                .into_response()
         }
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn remote_worker_accounting(
+    State(state): State<ServerState>,
+    method: http::Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(exchange) = &state.remote_worker else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if headers.get_all(AUTHORIZATION).iter().count() != 1 {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(token) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let statement = (method == http::Method::POST).then_some(body.as_ref());
+    let offset = match headers.get("X-Accounting-Offset").map(|value| {
+        value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    }) {
+        Some(Some(offset)) => offset,
+        None => 0,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match exchange.accounting(
+        token,
+        statement,
+        offset,
+        SystemStandaloneApplicationClock.now_instant(),
+    ) {
+        Ok(bytes) => (StatusCode::OK, [(CONTENT_TYPE, "application/json")], bytes).into_response(),
+        Err(error) => StatusCode::from_u16(error.status_code())
+            .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+            .into_response(),
     }
 }
 
@@ -804,9 +814,6 @@ async fn client_control_exchange(
         .and_then(|value| value.strip_prefix("Bearer "))
         .filter(|value| !value.is_empty())
         .map(str::as_bytes);
-    // Registry ordering compares the canonical millisecond `Instant` text.
-    // Reuse the application clock so a registration and its placement cannot
-    // acquire different fractional-second widths at the HTTP boundary.
     let now = SystemStandaloneApplicationClock.now_instant();
     match exchange.exchange(credential.map(<[u8]>::to_vec), &body, now) {
         Ok(response) => (
@@ -820,8 +827,6 @@ async fn client_control_exchange(
                 eprintln!("client exchange error: {error}");
             }
             if error.is_authentication() {
-                // One uniform rejection: wrong, missing, or unknown-node
-                // credentials are indistinguishable.
                 StatusCode::UNAUTHORIZED.into_response()
             } else if error.is_invalid_request() {
                 StatusCode::BAD_REQUEST.into_response()
@@ -832,8 +837,6 @@ async fn client_control_exchange(
     }
 }
 
-/// The signed-in user's Client directory: one `DeviceSummary` card per
-/// granted Client (§16.4).
 async fn list_clients(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
     let origin = match allowed_origin(&state, &headers) {
         Ok(origin) => origin,
@@ -866,13 +869,6 @@ async fn list_clients(State(state): State<ServerState>, headers: HeaderMap, uri:
     }
 }
 
-/// The signed-in user's repository directory for one Client (REPO-100.4):
-/// the dual-authorized repository list (plan 13.4), projected field-by-field
-/// onto the repo-ui facade shape (REPO-100.3).
-///
-/// Unlike every other browser route the Client identity arrives in the URL
-/// query (`?clientId=…`), so the shared `authorize` query rejection does not
-/// apply here; every other authentication step is identical.
 async fn list_repositories(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1004,8 +1000,6 @@ async fn load_managed_app_template(
     }
 }
 
-/// One add-Client attempt (plan 11.4): bounded wait for the Device Client
-/// challenge acknowledgement, then the atomic consume-and-grant.
 #[allow(clippy::too_many_lines)]
 async fn create_client_connection(
     State(state): State<ServerState>,
@@ -1047,13 +1041,12 @@ async fn create_client_connection(
         );
     };
     let client_ip = client.ip().to_string();
-    match application.connect(&user_id.0, &client_ip, &body).await {
+    match application.connect(&user_id.0, &client_ip, &body) {
         Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
         Err(error) => connect_flow_error(&error, origin.as_ref()),
     }
 }
 
-/// Immediate revocation of the signed-in Owner's Client grant.
 async fn revoke_client_grant(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1098,7 +1091,6 @@ async fn revoke_client_grant(
     }
 }
 
-/// Maps one connect flow failure onto its §16.3 wire error code.
 fn connect_flow_error(error: &ClientConnectionsError, origin: Option<&HeaderValue>) -> Response {
     let (status, code, message) = match error.kind() {
         ClientConnectionsErrorKind::InvalidRequest => (
@@ -1155,8 +1147,6 @@ fn connect_flow_error(error: &ClientConnectionsError, origin: Option<&HeaderValu
     connect_error_response(status, code, message, origin)
 }
 
-/// One occupancy claim (plan 12.2): bounded wait for the Device Client
-/// occupancy acknowledgement, then the `occupied` holder view.
 async fn create_client_occupancy(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1201,9 +1191,6 @@ async fn create_client_occupancy(
     }
 }
 
-/// One occupancy release (plan 12.4): the holder releases, drains, or
-/// cancels-and-releases; a release while still `reserving` withdraws the
-/// claim.
 async fn release_client_occupancy(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1248,8 +1235,6 @@ async fn release_client_occupancy(
     }
 }
 
-/// The Owner-only safe cleanup of a recovery-pending lease whose window has
-/// passed (plan 12.5), with the higher force-fence token going downlink.
 async fn force_release_client_occupancy(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1285,8 +1270,6 @@ async fn force_release_client_occupancy(
     }
 }
 
-/// The occupancy projection of one Client: full view for the holder, the
-/// `occupied-by-other` privacy projection for everyone else (plan §16.4).
 async fn client_occupancy_status(
     State(state): State<ServerState>,
     Path(client_id): Path<String>,
@@ -1314,8 +1297,6 @@ async fn client_occupancy_status(
     }
 }
 
-/// Maps one occupancy flow failure onto its central occupancy wire error
-/// code.
 fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValue>) -> Response {
     let (status, code, message) = match error.kind() {
         ClientOccupancyErrorKind::InvalidRequest => (
@@ -1407,9 +1388,6 @@ fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValu
     connect_error_response(status, code, message, origin)
 }
 
-/// The dual-authorized candidate card list of one Client device (GIT-100.7):
-/// the receipt ledger projection filtered through the repository directory's
-/// visibility check.
 async fn list_client_candidates(
     State(state): State<ServerState>,
     Path(client_id): Path<String>,
@@ -1437,10 +1415,6 @@ async fn list_client_candidates(
     }
 }
 
-/// One candidate branch creation (GIT-100.7): the occupancy holder requests
-/// the local branch, the `client.candidate.apply` command with the
-/// `create_branch` strategy goes downlink durable, and the bounded wait
-/// resolves with the branch once the device settles `branch_created`.
 async fn create_client_candidate_branch(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1485,9 +1459,6 @@ async fn create_client_candidate_branch(
     }
 }
 
-/// One candidate target-branch apply (GIT-100.7): the expected head passes
-/// through to the device engine, the command goes downlink durable, and the
-/// bounded wait resolves with the settled apply receipt.
 async fn apply_client_candidate(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1532,8 +1503,6 @@ async fn apply_client_candidate(
     }
 }
 
-/// One candidate discard (GIT-100.7): the terminal decision settles into the
-/// receipt ledger and the refreshed card answers.
 async fn discard_client_candidate(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1578,7 +1547,6 @@ async fn discard_client_candidate(
     }
 }
 
-/// Maps one candidate flow failure onto its §16.3 wire error code.
 fn candidate_flow_error(error: &ClientCandidatesError, origin: Option<&HeaderValue>) -> Response {
     let (status, code, message) = match error.kind() {
         ClientCandidatesErrorKind::InvalidRequest => (
@@ -1640,10 +1608,6 @@ fn candidate_flow_error(error: &ClientCandidatesError, origin: Option<&HeaderVal
     connect_error_response(status, code, message, origin)
 }
 
-/// One Worker launch (plan 14.3): the occupancy holder submits the Client
-/// and repository binding, the server issues the single-use launch grant,
-/// the `client.worker.launch` frame goes downlink, and the bounded wait
-/// resolves with the session identity once the device acknowledges.
 async fn create_session(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1688,9 +1652,6 @@ async fn create_session(
     }
 }
 
-/// Schedules one Device-owned managed application operation. The command is
-/// validated and fenced by the Server before it enters the durable downlink;
-/// the response is the latest status observed from the Device exchange.
 async fn manage_managed_app(
     State(state): State<ServerState>,
     Path(client_id): Path<String>,
@@ -1736,8 +1697,14 @@ async fn manage_managed_app(
     }
 }
 
-/// Maps one launch flow failure onto the central launch wire error code.
 fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>) -> Response {
+    if let (Some(stage), Some(code)) = (error.failure_stage(), error.failure_code()) {
+        let request_id = next_diagnostic_request_id();
+        eprintln!(
+            "client_session_launch_failure requestId={} stage={stage} code={code}",
+            request_id.0
+        );
+    }
     let (status, code, message) = match error.kind() {
         ClientSessionsErrorKind::InvalidRequest => (
             StatusCode::BAD_REQUEST,
@@ -1808,8 +1775,6 @@ fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>)
     connect_error_response(status, code, message, origin)
 }
 
-/// The wire error shape of the connect surface: `error.code` carries the
-/// §16.3 taxonomy the browser facade translates.
 fn connect_error_response(
     status: StatusCode,
     code: &str,
@@ -1893,9 +1858,6 @@ async fn get_auth_session(
     response
 }
 
-/// The one unauthenticated initialization probe. It publishes exactly one
-/// boolean — whether a first Owner already exists — and nothing else, so the
-/// login page can show or hide the first-time bootstrap entry.
 async fn server_initialization(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1931,6 +1893,26 @@ async fn server_initialization(
     response
 }
 
+const CREDENTIAL_HASH_PERMIT_WAIT: Duration = Duration::from_millis(500);
+
+fn credential_hash_concurrency() -> usize {
+    std::env::var("WWC_SERVER_CREDENTIAL_HASH_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
+
+async fn acquire_credential_hash_permit(
+    permits: &Arc<Semaphore>,
+    wait: Duration,
+) -> Option<OwnedSemaphorePermit> {
+    match tokio::time::timeout(wait, Arc::clone(permits).acquire_owned()).await {
+        Ok(Ok(permit)) => Some(permit),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 async fn create_auth_session(
     State(state): State<ServerState>,
     ConnectInfo(client): ConnectInfo<SocketAddr>,
@@ -1963,18 +1945,37 @@ async fn create_auth_session(
         Ok(credentials) => credentials,
         Err(error) => return error.with_origin(origin).into_response(),
     };
-    // A Bearer credential carries the one-time bootstrap proof for first
-    // initialization; otherwise the request is a username + password login.
-    let issued = if credentials.bearer().is_some() {
-        state
-            .auth_sessions
-            .initialize(&credentials, &login.username, &login.password)
-    } else {
-        let client = client.ip().to_string();
-        state
-            .auth_sessions
-            .login(&credentials, &client, &login.username, &login.password)
+    let auth_sessions = Arc::clone(&state.auth_sessions);
+    let client = client.ip().to_string();
+    if credentials.bearer().is_none() && auth_sessions.login_rate_limited(&client, &login.username)
+    {
+        return auth_session_error(AuthSessionError::rate_limited(), Some(origin)).into_response();
+    }
+    let Some(permit) =
+        acquire_credential_hash_permit(&state.credential_hash_permits, CREDENTIAL_HASH_PERMIT_WAIT)
+            .await
+    else {
+        return BoundaryError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "browser session service is busy",
+            Some(origin),
+        )
+        .into_response();
     };
+    let issued = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if credentials.bearer().is_some() {
+            auth_sessions.initialize(&credentials, &login.username, &login.password)
+        } else {
+            auth_sessions.login(&credentials, &client, &login.username, &login.password)
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        eprintln!("error: browser session credential task failed: {error}");
+        Err(AuthSessionError::storage())
+    });
     let issued = match issued {
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
@@ -2060,7 +2061,6 @@ fn parse_auth_session_request(
     })
 }
 
-/// One username + password login or initialization request body.
 struct LoginRequest {
     username: String,
     password: String,
@@ -2350,11 +2350,9 @@ async fn command(State(state): State<ServerState>, request: Request<Body>) -> Re
         Ok(authorized) => authorized,
         Err(error) => return error.with_request_id(request_id).into_response(),
     };
-    api_response(
-        state.api.command(&principal, body),
-        request_id,
-        origin.as_ref(),
-    )
+    let api = Arc::clone(&state.api);
+    let result = run_blocking_api_operation(move || api.command(&principal, body)).await;
+    api_response(result, request_id, origin.as_ref())
 }
 
 async fn query(State(state): State<ServerState>, request: Request<Body>) -> Response {
@@ -2373,11 +2371,23 @@ async fn query(State(state): State<ServerState>, request: Request<Body>) -> Resp
         Ok(authorized) => authorized,
         Err(error) => return error.with_request_id(request_id).into_response(),
     };
-    api_response(
-        state.api.query(&principal, body),
-        request_id,
-        origin.as_ref(),
-    )
+    let api = Arc::clone(&state.api);
+    let result = run_blocking_api_operation(move || api.query(&principal, body)).await;
+    api_response(result, request_id, origin.as_ref())
+}
+
+async fn run_blocking_api_operation(
+    operation: impl FnOnce() -> Result<Value, ApiError> + Send + 'static,
+) -> Result<Value, ApiError> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .unwrap_or_else(|_| {
+            Err(ApiError::new(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "application service is unavailable",
+            ))
+        })
 }
 
 async fn parse_json_body(
@@ -2965,8 +2975,6 @@ fn terminal_code(status: StatusCode, source_code: &str) -> TerminalErrorCode {
         "REVISION_CONFLICT" => TerminalErrorCode::RevisionConflict,
         "CANDIDATE_STALE" => TerminalErrorCode::CandidateStale,
         "WRONG_STATE" => TerminalErrorCode::WrongState,
-        // Device-only execution prerequisites are public Control Plane facts.
-        // They must not fall through to WRONG_STATE via the HTTP 409 default.
         "DEVICE_SESSION_REQUIRED" => TerminalErrorCode::DeviceSessionRequired,
         "DEVICE_MODEL_UNAVAILABLE" => TerminalErrorCode::DeviceModelUnavailable,
         "INTERNAL_ERROR" => TerminalErrorCode::InternalError,
@@ -3067,7 +3075,6 @@ fn apply_cors(headers: &mut HeaderMap, origin: &HeaderValue) {
     headers.insert(VARY, HeaderValue::from_static("Origin"));
 }
 
-/// Listener/lifecycle failure that omits socket internals and credential data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerError {
     message: String,
@@ -3235,7 +3242,10 @@ mod public_error_mapping_tests {
             terminal_code(status, "DEVICE_SESSION_REQUIRED"),
             TerminalErrorCode::DeviceSessionRequired
         );
-        assert_eq!(public_reason("DEVICE_SESSION_REQUIRED"), "DEVICE_SESSION_REQUIRED");
+        assert_eq!(
+            public_reason("DEVICE_SESSION_REQUIRED"),
+            "DEVICE_SESSION_REQUIRED"
+        );
         let envelope = error_envelope(
             status,
             "DEVICE_SESSION_REQUIRED",
@@ -3275,5 +3285,34 @@ mod public_error_mapping_tests {
             TerminalErrorCode::WrongState
         );
         assert_eq!(public_reason("WRONG_STATE"), "WRONG_STATE");
+    }
+}
+
+#[cfg(test)]
+mod credential_hash_permit_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Semaphore;
+
+    use super::acquire_credential_hash_permit;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_permits_reject_after_a_bounded_wait() {
+        let permits = Arc::new(Semaphore::new(1));
+        let held = acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+            .await
+            .expect("first permit is available");
+        assert!(
+            acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+                .await
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            acquire_credential_hash_permit(&permits, Duration::from_millis(10))
+                .await
+                .is_some()
+        );
     }
 }

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Linear OAuth and GraphQL adapter over the durable Integration Framework.
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -21,7 +19,6 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical Integration Framework protocol identifier for Linear OAuth apps.
 pub const LINEAR_CONNECTOR_PROTOCOL: &str = "linear.oauth.v1";
 const USER_AGENT: &str = "WinWinCode-Linear-Connector";
 const MAX_RESPONSE_BYTES: u64 = 2 * 1_024 * 1_024;
@@ -34,11 +31,6 @@ macro_rules! linear_id {
         pub struct $name(String);
 
         impl $name {
-            /// Builds one canonical Linear UUID.
-            ///
-            /// # Errors
-            ///
-            /// Rejects a non-canonical lowercase UUID.
             pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
                 let value = value.into();
                 validate_uuid(&value)?;
@@ -59,7 +51,6 @@ linear_id!(LinearProjectId, "Canonical Linear project identity.");
 linear_id!(LinearIssueId, "Canonical Linear issue identity.");
 linear_id!(LinearCommentId, "Canonical Linear comment identity.");
 
-/// Exact Linear workspace/team and optional project boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearConnectorScope {
     workspace: LinearWorkspaceId,
@@ -97,14 +88,12 @@ impl LinearConnectorScope {
     }
 }
 
-/// Explicit TLS roots for Linear's GraphQL endpoint or a local fixture.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinearTlsRoots {
     WebPki,
     Specific(Vec<Vec<u8>>),
 }
 
-/// Credential-free Linear connector configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearConnectorConfig {
     integration_id: IntegrationId,
@@ -117,11 +106,6 @@ pub struct LinearConnectorConfig {
 }
 
 impl LinearConnectorConfig {
-    /// Builds an exact Linear OAuth/GraphQL boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid authority IDs, endpoints, or TLS roots.
     pub fn try_new(
         integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
@@ -160,7 +144,6 @@ impl LinearConnectorConfig {
     }
 }
 
-/// Closed Linear OAuth scope set used by the adapter.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum LinearOAuthScope {
     Read,
@@ -169,7 +152,6 @@ pub enum LinearOAuthScope {
     CommentsCreate,
 }
 
-/// Stable secret-resolution failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinearCredentialErrorKind {
     Revoked,
@@ -177,7 +159,6 @@ pub enum LinearCredentialErrorKind {
     Unavailable,
 }
 
-/// Secret-safe Linear credential resolution error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinearCredentialError {
     kind: LinearCredentialErrorKind,
@@ -203,15 +184,9 @@ impl fmt::Display for LinearCredentialError {
 
 impl std::error::Error for LinearCredentialError {}
 
-/// Short-lived Linear webhook secret that is zeroed on drop.
 pub struct LinearWebhookSecret(Vec<u8>);
 
 impl LinearWebhookSecret {
-    /// Builds an opaque webhook secret.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized secret material.
     pub fn try_new(value: impl AsRef<[u8]>) -> Result<Self, IntegrationError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > 4_096 {
@@ -237,7 +212,6 @@ impl Drop for LinearWebhookSecret {
     }
 }
 
-/// Short-lived OAuth access token and its credential-owner scope attestation.
 pub struct LinearOAuthToken {
     token: Vec<u8>,
     workspace_id: LinearWorkspaceId,
@@ -246,11 +220,6 @@ pub struct LinearOAuthToken {
 }
 
 impl LinearOAuthToken {
-    /// Builds a short-lived access token returned by the credential authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid token bytes, an empty scope set, or invalid expiry.
     pub fn try_new(
         token: impl AsRef<[u8]>,
         workspace_id: LinearWorkspaceId,
@@ -305,23 +274,12 @@ impl Drop for LinearOAuthToken {
     }
 }
 
-/// Credential-owner port. Refresh tokens and client secrets stay behind this seam.
 pub trait LinearCredentialPort {
-    /// Resolves the webhook secret for one credential reference.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_webhook_secret(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<LinearWebhookSecret, LinearCredentialError>;
 
-    /// Resolves or refreshes a short-lived OAuth token for one workspace.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_oauth_token(
         &mut self,
         reference: &CredentialReferenceId,
@@ -329,12 +287,10 @@ pub trait LinearCredentialPort {
     ) -> Result<LinearOAuthToken, LinearCredentialError>;
 }
 
-/// Time authority used for OAuth expiry, webhook replay, and rate-limit reset checks.
 pub trait LinearClock {
     fn now_millis(&self) -> u64;
 }
 
-/// Closed Linear webhook resource type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinearEventKind {
     Issue,
@@ -364,7 +320,6 @@ impl LinearEventKind {
     }
 }
 
-/// Closed Linear webhook action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinearEventAction {
     Create,
@@ -394,7 +349,6 @@ impl LinearEventAction {
     }
 }
 
-/// Exact Linear webhook headers before raw-body authentication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearWebhookHeaders {
     delivery_id: String,
@@ -404,11 +358,6 @@ pub struct LinearWebhookHeaders {
 }
 
 impl LinearWebhookHeaders {
-    /// Builds the four canonical `Linear-*` webhook headers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid UUID, resource type, signature, or timestamp headers.
     pub fn try_new(
         delivery_id: impl Into<String>,
         event_type: impl AsRef<str>,
@@ -435,7 +384,6 @@ impl LinearWebhookHeaders {
     }
 }
 
-/// Builds Integration Framework requests from Linear webhook headers and raw bodies.
 #[derive(Clone, Debug)]
 pub struct LinearWebhookRequestFactory {
     config: LinearConnectorConfig,
@@ -447,11 +395,6 @@ impl LinearWebhookRequestFactory {
         Self { config }
     }
 
-    /// Builds one authenticated-input request with resource-local ordering.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported payloads, mismatched headers, or foreign workspace scope.
     pub fn build(
         &self,
         scope: IntegrationScope,
@@ -484,7 +427,6 @@ impl LinearWebhookRequestFactory {
     }
 }
 
-/// HMAC-SHA256 and one-minute replay verifier for exact raw Linear bodies.
 pub struct LinearWebhookVerifier<Credentials, Clock> {
     config: LinearConnectorConfig,
     credentials: Credentials,
@@ -552,7 +494,6 @@ impl<Credentials: LinearCredentialPort, Clock: LinearClock> WebhookSignatureVeri
     }
 }
 
-/// Validated Linear webhook event supplied to a business-command mapper.
 pub struct LinearInboundEvent<'a> {
     kind: LinearEventKind,
     action: LinearEventAction,
@@ -594,13 +535,7 @@ impl LinearInboundEvent<'_> {
     }
 }
 
-/// Control Plane seam mapping one validated Linear event to a formal command.
 pub trait LinearEventMapperPort {
-    /// Maps one validated provider event to canonical command JSON.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe mapping failure.
     fn map_event(
         &mut self,
         authority: &ConnectorAuthority,
@@ -608,7 +543,6 @@ pub trait LinearEventMapperPort {
     ) -> Result<NormalizedInboundEvent, ConnectorCallError>;
 }
 
-/// Linear protocol mapper and retry-stable outbound GraphQL adapter.
 pub struct LinearConnector<Credentials, Mapper, Clock> {
     config: LinearConnectorConfig,
     credentials: Credentials,
@@ -618,11 +552,6 @@ pub struct LinearConnector<Credentials, Mapper, Clock> {
 }
 
 impl<Credentials, Mapper, Clock> LinearConnector<Credentials, Mapper, Clock> {
-    /// Builds a no-proxy, no-redirect, rustls-verified Linear connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots.
     pub fn try_new(
         config: LinearConnectorConfig,
         credentials: Credentials,
@@ -892,6 +821,7 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         if let Some(state_id) = &operation.state_id {
             input.insert("stateId".to_owned(), json!(state_id));
         }
+        claim.require_new_write_authority()?;
         let response = self.graphql(
             token,
             "mutation WinWinCodeIssueCreate($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id } } }",
@@ -944,6 +874,7 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         if let Some(remote_id) = self.lookup_comment_marker(token, operation, &marker)? {
             return remote_receipt("comment", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.graphql(
             token,
             "mutation WinWinCodeCommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }",
@@ -1052,39 +983,57 @@ impl<Credentials, Mapper, Clock: LinearClock> LinearConnector<Credentials, Mappe
         variables: &Value,
     ) -> Result<LinearResponse, ConnectorCallError> {
         let authorization = format!("Bearer {}", token.value());
-        let response = self
-            .agent
-            .post(&self.config.graphql_endpoint)
-            .header("Accept", "application/json")
-            .header("Authorization", &authorization)
-            .header("Content-Type", "application/json")
-            .header("User-Agent", USER_AGENT)
-            .send_json(json!({"query": query, "variables": variables}))
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "LINEAR_TRANSPORT_UNAVAILABLE",
-                )
-            })?;
+        let replay = if query.trim_start().starts_with("mutation")
+            && !query.starts_with("mutation WinWinCodeIssueUpdate(")
+        {
+            winwincode_network::Replay::ReconcileFirst
+        } else {
+            winwincode_network::Replay::ReplayExact
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| {
+                agent
+                    .post(&self.config.graphql_endpoint)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", USER_AGENT)
+                    .send_json(json!({"query": query, "variables": variables}))
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("LINEAR_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
+        })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "LINEAR_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, std::time::SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let reset_at_millis = response
             .headers()
             .get("x-ratelimit-endpoint-requests-reset")
             .or_else(|| response.headers().get("x-ratelimit-requests-reset"))
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "LINEAR_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             Some(serde_json::from_slice(&bytes).map_err(|_| response_invalid())?)
@@ -1506,7 +1455,14 @@ fn operation_marker(claim: &OutboundClaim) -> String {
 }
 
 fn response_invalid() -> ConnectorCallError {
-    connector_error(ConnectorCallErrorKind::Retryable, "LINEAR_RESPONSE_INVALID")
+    ConnectorCallError::from_network(
+        "LINEAR_RESPONSE_INVALID",
+        winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::ProtocolInvalid,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Decode,
+        ),
+    )
 }
 
 fn connector_error(kind: ConnectorCallErrorKind, code: &str) -> ConnectorCallError {

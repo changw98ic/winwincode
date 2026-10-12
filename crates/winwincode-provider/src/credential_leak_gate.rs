@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fail-closed Credential output inspection.
-//!
-//! The gate complements typed, secret-free DTOs. It fingerprints resolved
-//! secrets without retaining their bytes, applies an explicit JSON field
-//! policy, and rejects high-confidence credential encodings. It never attempts
-//! to repair output with string replacement.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +13,6 @@ const MAX_NESTING_DEPTH: usize = 64;
 const MAX_DURABLE_FINGERPRINT_BYTES: usize = 64 * 1024;
 const DURABLE_FINGERPRINT_SCHEMA: &str = "winwincode.credential-fingerprint.v1";
 
-/// Output seams that must never receive Credential material.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CredentialOutputBoundary {
     Log,
@@ -56,8 +48,6 @@ impl CredentialOutputBoundary {
     }
 }
 
-/// Stable diagnostic category. It identifies the failed policy, never the
-/// matched value, field contents, or provider response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialLeakErrorKind {
     ExactSecret,
@@ -66,7 +56,6 @@ pub enum CredentialLeakErrorKind {
     InvalidOutput,
 }
 
-/// Secret-free rejection from [`CredentialLeakGate`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialLeakError {
     boundary: CredentialOutputBoundary,
@@ -123,10 +112,6 @@ struct DurableSecretFingerprint {
     sha256: String,
 }
 
-/// Output gate holding only length/digest fingerprints of secrets it has seen.
-///
-/// Debug and serialization are intentionally absent so the fingerprint set
-/// cannot itself become a public or persisted contract.
 #[derive(Default)]
 pub struct CredentialLeakGate {
     fingerprints: Vec<SecretFingerprint>,
@@ -140,8 +125,6 @@ impl CredentialLeakGate {
         }
     }
 
-    /// Copies only one-way fingerprints for another in-process output seam.
-    /// Secret bytes remain owned by the canonical `ResolvedSecret` value.
     #[must_use]
     pub fn fingerprint_snapshot(&self) -> Self {
         Self {
@@ -149,8 +132,6 @@ impl CredentialLeakGate {
         }
     }
 
-    /// # Errors
-    /// Rejects fingerprints that cannot be serialized.
     pub fn to_durable_fingerprint_json(&self) -> Result<Vec<u8>, CredentialLeakError> {
         let durable = DurableSecretFingerprints {
             schema: DURABLE_FINGERPRINT_SCHEMA.to_owned(),
@@ -166,8 +147,6 @@ impl CredentialLeakGate {
         serde_json::to_vec(&durable).map_err(|_| invalid_persisted_fingerprint())
     }
 
-    /// # Errors
-    /// Rejects malformed or unsupported persisted fingerprints.
     pub fn from_durable_fingerprint_json(bytes: &[u8]) -> Result<Self, CredentialLeakError> {
         if bytes.is_empty() || bytes.len() > MAX_DURABLE_FINGERPRINT_BYTES {
             return Err(invalid_persisted_fingerprint());
@@ -205,8 +184,6 @@ impl CredentialLeakGate {
         Ok(Self { fingerprints })
     }
 
-    /// Adds one resolved secret fingerprint without retaining or cloning its
-    /// bytes. Resolution remains owned by the canonical `SecretStorePort`.
     pub fn track_secret(&mut self, secret: &ResolvedSecret) {
         let fingerprint = SecretFingerprint {
             byte_length: secret.expose().len(),
@@ -222,11 +199,6 @@ impl CredentialLeakGate {
         }
     }
 
-    /// Inspects arbitrary log, error, Artifact, Evidence, or package bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an exact tracked secret or a high-confidence Credential syntax.
     pub fn inspect_bytes(
         &self,
         boundary: CredentialOutputBoundary,
@@ -253,13 +225,39 @@ impl CredentialLeakGate {
         Ok(())
     }
 
-    /// Inspects a typed serializable output before it crosses a public or
-    /// durable seam.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on serialization, excessive nesting, forbidden fields, or
-    /// Credential material.
+    pub(crate) fn inspect_appended_bytes(
+        &self,
+        boundary: CredentialOutputBoundary,
+        bytes: &[u8],
+        previous_len: usize,
+    ) -> Result<(), CredentialLeakError> {
+        let Some(delta) = bytes.get(previous_len..) else {
+            return Err(CredentialLeakError {
+                boundary,
+                kind: CredentialLeakErrorKind::InvalidOutput,
+            });
+        };
+        self.inspect_bytes(boundary, delta)?;
+        for fingerprint in &self.fingerprints {
+            let length = fingerprint.byte_length;
+            if length <= 1 || previous_len == 0 || length > bytes.len() {
+                continue;
+            }
+            let start = previous_len.saturating_sub(length - 1);
+            let end = previous_len.saturating_add(length - 1).min(bytes.len());
+            if bytes[start..end]
+                .windows(length)
+                .any(|window| <[u8; 32]>::from(Sha256::digest(window)) == fingerprint.sha256)
+            {
+                return Err(CredentialLeakError {
+                    boundary,
+                    kind: CredentialLeakErrorKind::ExactSecret,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn inspect_serializable<T: Serialize + ?Sized>(
         &self,
         boundary: CredentialOutputBoundary,
@@ -272,12 +270,6 @@ impl CredentialLeakGate {
         self.inspect_value(boundary, &value, "", 0, false)
     }
 
-    /// Inspects canonical JSON bytes using both exact-byte and field-aware
-    /// checks.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed if the bytes are not valid JSON.
     pub fn inspect_json_bytes(
         &self,
         boundary: CredentialOutputBoundary,
@@ -465,7 +457,6 @@ fn contains_recognized_credential(value: &str) -> bool {
         || contains_bearer(&normalized)
         || contains_url_userinfo(&normalized)
         || contains_provider_token(&normalized)
-        || contains_sensitive_assignment(&normalized)
 }
 
 fn contains_private_key(value: &str) -> bool {
@@ -510,48 +501,12 @@ fn contains_provider_token(value: &str) -> bool {
     .iter()
     .any(|(prefix, minimum)| {
         value.match_indices(prefix).any(|(index, _)| {
-            // A provider token prefix must begin at a value boundary.  Without
-            // this check, ordinary public identifiers such as
-            // WorkItem transaction fixtures contain the `sk-` suffix of
-            // `task-` and are incorrectly rejected by the public WSS gate.
-            // Keep scanning every string and preserve fail-closed rejection for
-            // an actual token after a delimiter or at the start of a value.
             (index == 0 || !value.as_bytes()[index - 1].is_ascii_alphanumeric())
                 && value[index + prefix.len()..]
                     .bytes()
                     .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                     .count()
                     >= *minimum
-        })
-    })
-}
-
-fn contains_sensitive_assignment(value: &str) -> bool {
-    [
-        "api_key",
-        "apikey",
-        "authorization",
-        "client_secret",
-        "password",
-        "private_key",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|key| {
-        ['=', ':'].iter().any(|separator| {
-            let pattern = format!("{key}{separator}");
-            value.match_indices(&pattern).any(|(index, _)| {
-                let candidate = value[index + pattern.len()..]
-                    .trim_start_matches([' ', '\t', '\"', '\''])
-                    .split(|character: char| {
-                        character.is_ascii_whitespace() || ",;\"'}]".contains(character)
-                    })
-                    .next()
-                    .unwrap_or("");
-                !candidate.is_empty()
-                    && !matches!(candidate, "[redacted" | "<redacted>" | "redacted")
-            })
         })
     })
 }

@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic classification of Delivery failures into one business action.
-//!
-//! This module validates references to the current Delivery contract, frozen
-//! candidate, Evidence, Verdict, Attention, and source `WorkRun`. It returns a
-//! bounded [`FailurePacket`] plus the next business action. It deliberately
-//! does not execute retries, mutate a `Delivery`, or copy Codex/Agent state.
-
 use std::{collections::HashSet, error::Error, fmt};
 
 use serde::Serialize;
@@ -19,7 +12,6 @@ use crate::domain::{
     assert_frozen_candidate_current, bounded_text, safe_non_negative,
 };
 
-/// The subsystem whose accepted fact reported the failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureSourceKind {
@@ -29,7 +21,6 @@ pub enum FailureSourceKind {
     Runtime,
 }
 
-/// Failure facts accepted from an independent verifier or reviewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifierFailure {
@@ -43,7 +34,6 @@ pub enum VerifierFailure {
     EvidenceIntegrityViolation,
 }
 
-/// Failure facts accepted from the Delivery drift/policy observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverFailure {
@@ -57,7 +47,6 @@ pub enum ObserverFailure {
     UnsafeState,
 }
 
-/// Failure facts accepted from the provider gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderFailure {
@@ -67,7 +56,6 @@ pub enum ProviderFailure {
     PermanentProtocolViolation,
 }
 
-/// Failure facts accepted from the fenced execution runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeFailure {
@@ -81,8 +69,6 @@ pub enum RuntimeFailure {
     CancelledOrIntegrityLost,
 }
 
-/// A source-specific fact. Callers cannot pair a provider fact with a verifier
-/// source kind because the kind is derived from this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "sourceKind", content = "failure", rename_all = "snake_case")]
 pub enum FailureSignal {
@@ -145,7 +131,6 @@ impl FailureSignal {
     }
 }
 
-/// The only business actions the router may request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureRoute {
@@ -159,7 +144,6 @@ pub enum FailureRoute {
     Abort,
 }
 
-/// The authority expected to resolve one deterministically classified failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockerOwnerType {
@@ -181,7 +165,6 @@ impl FailureRoute {
     }
 }
 
-/// Exact contract identity retained in every failure packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureContractRef {
@@ -213,8 +196,6 @@ impl FailureContractRef {
     }
 }
 
-/// A bounded, reproducible statement of how observed behavior differs from
-/// the current contract or execution invariant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureCounterexample {
@@ -223,7 +204,6 @@ pub struct FailureCounterexample {
     pub reproduction_ref: String,
 }
 
-/// Accepted source identity retained by the packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureSource {
@@ -254,8 +234,6 @@ impl FailureSource {
     }
 }
 
-/// An immutable packet for the next application service. It contains only
-/// canonical references and bounded observations, not Agent or retry state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailurePacket {
@@ -335,7 +313,6 @@ impl FailurePacket {
     }
 }
 
-/// The router's complete output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureRoutingDecision {
@@ -355,7 +332,6 @@ impl FailureRoutingDecision {
     }
 }
 
-/// Observable and canonical references accepted by [`route_failure`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteFailureInput {
     pub signal: FailureSignal,
@@ -421,17 +397,6 @@ struct FailurePacketIdentity<'packet> {
     occurred_at_millis: u64,
 }
 
-/// Classifies one accepted failure and returns its next business action.
-///
-/// The function does not mutate Delivery state or run the requested action.
-/// Only an explicitly transient infrastructure fact can request
-/// [`FailureRoute::InfraRetry`]; candidate/code failures request repair.
-///
-/// # Errors
-///
-/// Rejects a stale candidate, malformed counterexample/source, foreign or
-/// stale canonical references, a source that does not match its subsystem, or
-/// a report time that precedes the current Delivery/source run.
 pub fn route_failure(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -679,7 +644,7 @@ fn normalize_and_validate_evidence(
             })?;
         if evidence.delivery_spec_id != delivery.snapshot().spec.id
             || evidence.delivery_spec_revision != delivery.snapshot().spec.revision
-            || evidence.candidate_ref != candidate.candidate_ref()
+            || evidence.candidate_id != *candidate.candidate_id()
         {
             return Err(routing_error(
                 FailureRoutingErrorCode::ReferenceMismatch,

@@ -626,11 +626,12 @@ test('Evidence detail and Artifact content contracts are exact, bounded, and sec
     'atCursor',
     'readPageLimit',
     'evidenceId',
-    'candidateRef',
     'workRunId',
     'sessionBindingId',
     'type',
     'sourceRef',
+    'candidateId',
+    'snapshotId',
   ])
   assert.equal(detail.additionalProperties, false)
   assert.equal(detail.properties.outcome.$ref, '#/$defs/EvidenceOutcome')

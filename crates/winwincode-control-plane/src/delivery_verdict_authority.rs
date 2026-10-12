@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable candidate/runtime/Evidence join for production Delivery verdicts.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::from_slice;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
+    application::candidate_rejection::{
+        CandidateRejectionFact, CandidateRejectionReason, current_candidate_rejection,
+    },
     application::workrun_execution::DeliveryTerminalOutcomeFacts,
     domain::{
         Delivery, SessionBinding,
@@ -25,7 +25,9 @@ use winwincode_storage::{
     StorageError, ValidatedGitSourceArtifact,
 };
 
-use crate::runtime_event_transaction::{RuntimeLedgerState, runtime_stream_id_for_projection};
+use crate::runtime_event_transaction::{
+    RuntimeLedgerState, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection,
+};
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     DeliveryAuthorityError, DeliveryVerdictAuthority, repository_scope_key,
@@ -51,7 +53,6 @@ pub(crate) fn resolve(
         &writer_terminal,
         &delivery.snapshot().spec.base_revision,
     )?;
-    let delivery_writer_source = winwincode_storage::delivery_candidate_source(&writer_source);
     let candidate = freeze_source(
         storage,
         artifacts,
@@ -71,11 +72,16 @@ pub(crate) fn resolve(
             "adversarial-verifier" => VerificationRole::AdversarialVerifier,
             _ => return Err(DeliveryAuthorityError::new("unknown verification role")),
         };
-        verification.push(ProductionVerificationRuntime::from_durable_read_only(
-            role,
-            terminal,
-            delivery_writer_source.clone(),
-            events,
+        let (_, job) = crate::delivery_transaction::load_durable_execution_job(
+            storage,
+            &binding.execution_job_id,
+        )
+        .map_err(|error| storage_error(&error))?;
+        let snapshot = crate::snapshot_production::snapshot_for_job(storage, &job)
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| DeliveryAuthorityError::new("verification Snapshot is missing"))?;
+        verification.push(ProductionVerificationRuntime::from_durable(
+            role, terminal, snapshot, events,
         ));
     }
     let resolved = resolve_production_verdict(delivery, candidate, verification)
@@ -89,12 +95,6 @@ pub(crate) fn resolve(
     })
 }
 
-/// Rebuilds the current successful writer candidate from the same durable
-/// terminal and Artifact authorities used by production verdict resolution.
-///
-/// A Delivery without a successful current writer has no candidate. Once a
-/// writer succeeds, every missing, corrupt, ambiguous, or stale source fact is
-/// rejected rather than falling back to an older writer.
 pub(crate) fn resolve_current_candidate(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -106,10 +106,6 @@ pub(crate) fn resolve_current_candidate(
         .map(|resolved| resolved.map(|(candidate, _source)| candidate))
 }
 
-/// Rebuilds the current Candidate together with the opaque trusted Git source
-/// used to freeze it. Read-only Candidate detail projections use this seam so
-/// they never accept a caller-supplied repository locator, commit, tree, path,
-/// or diff digest.
 pub(crate) fn resolve_current_candidate_with_source(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -138,10 +134,20 @@ pub(crate) fn resolve_current_candidate_with_source(
         winwincode_domain::WorkRunState::Queued
             | winwincode_domain::WorkRunState::Leased
             | winwincode_domain::WorkRunState::Running
+            | winwincode_domain::WorkRunState::Failed
+            | winwincode_domain::WorkRunState::Cancelled
     ) {
         return Ok(None);
     }
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
+    if let Some(fact) = current_candidate_rejection(delivery)
+        && *terminal.metadata().last_event_sequence() == fact.last_event_sequence
+        && terminal.metadata().artifacts().iter().any(|artifact| {
+            artifact.artifact_id == fact.artifact_id && artifact.digest == fact.artifact_digest
+        })
+    {
+        return Ok(None);
+    }
     let source = source_for_terminal(
         artifacts,
         source_resolver,
@@ -162,7 +168,7 @@ pub(crate) fn resolve_current_candidate_with_source(
     Ok(Some((candidate, source)))
 }
 
-/// One candidate authority join shared by terminal replay, review reads and verdicts.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn freeze_source(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -184,10 +190,22 @@ pub(crate) fn freeze_source(
         binding.execution_job_id == *job_id
             && binding.execution_profile.as_deref() == Some("remediator")
     });
+    let candidate_id =
+        crate::snapshot_production::candidate_id_for_writer(current_writer(delivery)?)
+            .map_err(|error| storage_error(&error))?;
     let input = winwincode_storage::delivery_candidate_source(source);
     if !remediator {
-        return freeze_delivery_candidate_from_source(delivery, &input, terminal)
-            .map_err(|error| authority_error(&error));
+        return freeze_delivery_candidate_from_source(delivery, &input, terminal, candidate_id)
+            .map_err(|error| {
+                rejected_source_error(
+                    delivery,
+                    source,
+                    terminal,
+                    None,
+                    CandidateRejectionReason::InvalidCandidateSource,
+                    error.to_string(),
+                )
+            });
     }
     let (durable, job) = crate::delivery_transaction::load_durable_execution_job(storage, job_id)
         .map_err(|error| storage_error(&error))?;
@@ -196,10 +214,16 @@ pub(crate) fn freeze_source(
             "remediator has no WorkRun scope",
         ));
     };
-    let sealed = job_scope
-        .rework_authorization
-        .as_ref()
-        .ok_or_else(|| DeliveryAuthorityError::new("remediator has no sealed rework scope"))?;
+    let sealed = job_scope.rework_authorization.as_ref().ok_or_else(|| {
+        rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            None,
+            CandidateRejectionReason::MissingReworkAuthorization,
+            "remediator has no sealed rework scope",
+        )
+    })?;
     let key = crate::delivery_transaction::delivery_journal_key(delivery.id())
         .map_err(|error| authority_error(&error))?;
     let loaded = storage
@@ -250,7 +274,12 @@ pub(crate) fn freeze_source(
         || candidate.candidate_tree_id() != sealed.source_candidate_tree_id
         || !sealed.requires_full_reverification
     {
-        return Err(DeliveryAuthorityError::new(
+        return Err(rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkAuthorizationMismatch,
             "rework output differs from its durable authorization",
         ));
     }
@@ -262,17 +291,99 @@ pub(crate) fn freeze_source(
         terminal,
         candidate.candidate_commit_id(),
     )?;
+    if delta.changed_paths().iter().any(|path| {
+        !sealed
+            .targets
+            .iter()
+            .any(|target| target.file_path == path.path())
+    }) {
+        return Err(rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            "rework output changes a path outside its sealed authorization",
+        ));
+    }
     let delta = winwincode_storage::delivery_rework_candidate_source(
         source_resolver,
         &previous_source,
         &delta,
     )
-    .map_err(|error| authority_error(&error))?;
-    freeze_rework_candidate_from_sources(delivery, &authorization, &input, &delta, terminal)
-        .map_err(|error| authority_error(&error))
+    .map_err(|error| match error.kind() {
+        winwincode_storage::ArtifactErrorKind::Conflict
+        | winwincode_storage::ArtifactErrorKind::InvalidInput => rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            error.to_string(),
+        ),
+        _ => authority_error(&error),
+    })?;
+    freeze_rework_candidate_from_sources(
+        delivery,
+        &authorization,
+        &input,
+        &delta,
+        terminal,
+        candidate_id,
+    )
+    .map_err(|error| {
+        rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            error.to_string(),
+        )
+    })
 }
 
-fn current_writer(delivery: &Delivery) -> Result<&SessionBinding, DeliveryAuthorityError> {
+fn rejected_source_error(
+    delivery: &Delivery,
+    source: &ValidatedGitSourceArtifact,
+    terminal: &DeliveryTerminalOutcomeFacts,
+    authorization_digest: Option<Sha256Digest>,
+    reason: CandidateRejectionReason,
+    message: impl Into<String>,
+) -> DeliveryAuthorityError {
+    let Some(writer) = delivery.snapshot().session_bindings.iter().find(|binding| {
+        binding.execution_job_id == *terminal.authority().active_lease().execution_job_id()
+            && binding.work_run_id == *terminal.work_run_id()
+    }) else {
+        return DeliveryAuthorityError::new(message);
+    };
+    DeliveryAuthorityError::rejected_candidate(
+        message,
+        CandidateRejectionFact {
+            version: 1,
+            delivery_id: delivery.id().clone(),
+            delivery_spec_id: delivery.snapshot().spec.id.clone(),
+            delivery_spec_revision: delivery.snapshot().spec.revision,
+            source_delivery_revision: delivery.revision(),
+            session_binding_id: writer.id.clone(),
+            work_run_id: writer.work_run_id.clone(),
+            job_id: writer.execution_job_id.clone(),
+            attempt: writer.attempt,
+            artifact_id: source.artifact().artifact_id().clone(),
+            artifact_digest: source.artifact().digest().clone(),
+            last_event_sequence: terminal.metadata().last_event_sequence().clone(),
+            candidate_commit_id: source.candidate_commit_id().into(),
+            candidate_tree_id: source.candidate_tree_id().into(),
+            diff_sha256: source.diff_sha256().into(),
+            authorization_digest,
+            reason,
+        },
+    )
+}
+
+pub(crate) fn current_writer(
+    delivery: &Delivery,
+) -> Result<&SessionBinding, DeliveryAuthorityError> {
     selected_current_writer(delivery)?.ok_or_else(|| {
         DeliveryAuthorityError::new("current writer is missing or has not succeeded")
     })
@@ -282,6 +393,11 @@ fn selected_current_writer(
     delivery: &Delivery,
 ) -> Result<Option<&SessionBinding>, DeliveryAuthorityError> {
     let bindings = &delivery.snapshot().session_bindings;
+    if delivery.snapshot().same_candidate_reverification.is_some() {
+        return Ok(
+            winwincode_delivery::domain::same_candidate::selected_writer(delivery.snapshot()),
+        );
+    }
     let writers = || {
         bindings.iter().filter(|binding| {
             matches!(
@@ -310,6 +426,7 @@ fn selected_current_writer(
 fn current_verification_bindings(
     delivery: &Delivery,
 ) -> Result<Vec<&SessionBinding>, DeliveryAuthorityError> {
+    let writer = current_writer(delivery)?;
     let mut ordered = Vec::new();
     for role in ["reviewer", "verifier", "adversarial-verifier"] {
         let matches = || {
@@ -317,7 +434,18 @@ fn current_verification_bindings(
                 .snapshot()
                 .session_bindings
                 .iter()
-                .filter(|binding| binding.execution_profile.as_deref() == Some(role))
+                .skip(
+                    winwincode_delivery::domain::same_candidate::verification_round_floor(
+                        delivery.snapshot(),
+                    ),
+                )
+                .filter(|binding| {
+                    binding.execution_profile.as_deref() == Some(role)
+                        && binding.work_contract_id == writer.work_contract_id
+                        && binding.work_contract_revision == writer.work_contract_revision
+                        && binding.work_item_id == writer.work_item_id
+                        && binding.work_item_revision == writer.work_item_revision
+                })
         };
         let Some(key) = matches()
             .map(|binding| (binding.bound_at_millis, binding.attempt))
@@ -345,7 +473,7 @@ fn current_verification_bindings(
     Ok(ordered)
 }
 
-fn load_terminal(
+pub(crate) fn load_terminal(
     storage: &dyn ProductStateStorage,
     delivery: &Delivery,
     job_id: &ExecutionJobId,
@@ -354,7 +482,7 @@ fn load_terminal(
         .map_err(|error| storage_error(&error))
 }
 
-fn source_for_terminal(
+pub(crate) fn source_for_terminal(
     artifacts: &ArtifactStore,
     source_resolver: &dyn GitSourceResolver,
     scope: &RepositoryScope,
@@ -414,24 +542,10 @@ fn runtime_events(
 ) -> Result<Vec<ProductionRuntimeEvent>, DeliveryAuthorityError> {
     let scope_key = repository_scope_key(scope).map_err(|error| storage_error(&error))?;
     let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
-    let stored = storage
-        .load_state(&stream_id)
+    let mut ledger = load_ledger(storage, &stream_id)
         .map_err(|error| storage_error(&error))?
         .ok_or_else(|| DeliveryAuthorityError::new("verification runtime ledger is missing"))?;
-    let ledger: RuntimeLedgerState = from_slice(&stored.payload).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger is invalid: {error}"))
-    })?;
-    let canonical = serde_json::to_vec(&ledger).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger encode failed: {error}"))
-    })?;
-    if canonical != stored.payload
-        || stored.revision != ledger.highest_sequence
-        || ledger.events.len() as u64 != ledger.highest_sequence
-    {
-        return Err(DeliveryAuthorityError::new(
-            "verification runtime ledger is non-canonical or truncated",
-        ));
-    }
+    hydrate_runtime_ledger(storage, &mut ledger).map_err(|error| storage_error(&error))?;
     validate_runtime_identity(&ledger, delivery, binding, terminal)?;
     ledger
         .events

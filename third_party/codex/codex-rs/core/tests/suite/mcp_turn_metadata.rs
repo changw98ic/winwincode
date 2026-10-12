@@ -739,6 +739,7 @@ async fn mcp_tool_call_metadata_records_prior_request_user_input_tool() -> Resul
 
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(

@@ -9,8 +9,6 @@ const repositoryScope = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
-// Planted marker: if any secret-safe boundary leaks into the checklist, this string
-// becomes readable in the page text and the browser assertion fails.
 const SECRET_MARKER = 'vault-locator-secret-marker'
 let complete = false
 const queries = []

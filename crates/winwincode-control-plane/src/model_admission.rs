@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable, route-isolated model policy admission.
-//!
-//! The module runs before a Provider adapter is invoked. It binds every
-//! reservation to one trusted Gateway scope, resolved route, catalog version,
-//! Credential rotation, and frozen policy snapshot. The durable ledger owns
-//! only operational reservations; final organization billing remains outside
-//! this module and consumes the settled usage facts.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -34,17 +26,10 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_COMMIT_RETRIES: usize = 64;
 const MAX_DURABLE_ROUTE_AUTHORITY_BYTES: usize = 64 * 1024;
 
-/// One fixed UTC minute supplied by an authoritative clock.
 pub trait ModelAdmissionClock: Send + Sync {
-    /// Returns the current Unix minute.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable dependency failure when the clock is unavailable.
     fn unix_minute(&self) -> Result<u64, ModelAdmissionClockError>;
 }
 
-/// Stable authoritative-clock failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelAdmissionClockError;
 
@@ -56,30 +41,21 @@ impl fmt::Display for ModelAdmissionClockError {
 
 impl std::error::Error for ModelAdmissionClockError {}
 
-/// Whether one policy authority permits the already resolved route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRoutePolicyDecision {
-    /// The authority permits the exact route.
     Allow,
-    /// The authority denies the exact route.
     Deny,
 }
 
-/// Operational limits frozen before Provider admission.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelAdmissionLimits {
-    /// Accepted requests in one fixed UTC minute.
     pub requests_per_minute: u64,
-    /// Reserved tokens in one fixed UTC minute.
     pub tokens_per_minute: u64,
-    /// Simultaneous active reservations for the route and scope.
     pub concurrent_requests: u64,
-    /// Settled plus reserved tokens in the named budget period.
     pub token_budget: u64,
-    /// Settled plus reserved cost, in micros, in the named budget period.
-    pub cost_budget_micros: u64,
+    pub cost_budget_micros: Option<u64>,
 }
 
 impl ModelAdmissionLimits {
@@ -92,10 +68,12 @@ impl ModelAdmissionLimits {
                 self.tokens_per_minute,
                 self.concurrent_requests,
                 self.token_budget,
-                self.cost_budget_micros,
             ]
             .into_iter()
             .any(|value| value > MAX_SAFE_INTEGER)
+            || self
+                .cost_budget_micros
+                .is_some_and(|value| value > MAX_SAFE_INTEGER)
         {
             return Err(ModelAdmissionError::invalid());
         }
@@ -103,7 +81,6 @@ impl ModelAdmissionLimits {
     }
 }
 
-/// One auditable policy layer supplied by the policy authority.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelAdmissionPolicyLayer {
@@ -115,11 +92,6 @@ pub struct ModelAdmissionPolicyLayer {
 }
 
 impl ModelAdmissionPolicyLayer {
-    /// Builds one validated policy layer.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed authority, revision, budget-period, or limit values.
     pub fn try_new(
         authority_id: String,
         revision: u64,
@@ -142,7 +114,6 @@ impl ModelAdmissionPolicyLayer {
     }
 }
 
-/// Effective policy frozen from the configured Community authority.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenModelAdmissionPolicy {
@@ -156,20 +127,12 @@ pub struct FrozenModelAdmissionPolicy {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPolicySource {
-    /// Stable policy authority identifier.
     pub authority_id: String,
-    /// Exact authority revision included in the frozen decision.
     pub revision: u64,
-    /// Route decision contributed by this authority.
     pub decision: ModelRoutePolicyDecision,
 }
 
 impl FrozenModelAdmissionPolicy {
-    /// Freezes the effective policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid layer or mismatched budget period.
     pub fn freeze(base: ModelAdmissionPolicyLayer) -> Result<Self, ModelAdmissionError> {
         base.limits.validate()?;
         let route_allowed = base.route_decision == ModelRoutePolicyDecision::Allow;
@@ -192,39 +155,32 @@ impl FrozenModelAdmissionPolicy {
         })
     }
 
-    /// Returns the effective operational limits.
     #[must_use]
     pub const fn limits(&self) -> ModelAdmissionLimits {
         self.limits
     }
 
-    /// Returns whether every policy authority permits the route.
     #[must_use]
     pub const fn route_allowed(&self) -> bool {
         self.route_allowed
     }
 
-    /// Returns the stable policy fingerprint retained by reservations.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
-    /// Returns the budget period shared by every intersected authority.
     #[must_use]
     pub fn budget_period_id(&self) -> &str {
         &self.budget_period_id
     }
 
-    /// Returns the auditable Community authority source.
     #[must_use]
     pub fn sources(&self) -> &[ModelPolicySource] {
         &self.sources
     }
 }
 
-/// Secret-free route authority verified from Settings, Catalog, and Credential
-/// reference state before admission.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrozenModelRouteAuthority {
     target: ModelSettingsTarget,
@@ -252,12 +208,6 @@ struct DurableFrozenModelRouteAuthority {
 }
 
 impl FrozenModelRouteAuthority {
-    /// Joins the trusted Gateway identity with the exact Catalog and Credential
-    /// resolutions that produced its Model Route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any scope, Provider, model, Credential, or version mismatch.
     pub fn from_resolved_authority(
         identity: &ProviderGatewayIdentity,
         settings: &ModelSettingsProjection,
@@ -314,66 +264,51 @@ impl FrozenModelRouteAuthority {
         Ok(authority)
     }
 
-    /// Returns the exact route partition also used by [`crate::ModelRequestPool`].
     #[must_use]
     pub const fn route_key(&self) -> &ModelRequestRouteKey {
         &self.route_key
     }
 
-    /// Returns the exact durable Settings revision used for this route.
     #[must_use]
     pub const fn settings_revision(&self) -> u64 {
         self.settings_revision
     }
 
-    /// Returns the Settings concurrency preference. Admission intersects it
-    /// with the policy ceiling, so the preference can narrow but never widen.
     #[must_use]
     pub const fn settings_concurrency_limit(&self) -> u64 {
         self.settings_concurrency_limit
     }
 
-    /// Returns the verified Catalog version.
     #[must_use]
     pub const fn catalog_version(&self) -> u64 {
         self.catalog_version
     }
 
-    /// Returns the verified Credential rotation version.
     #[must_use]
     pub const fn credential_rotation_version(&self) -> u64 {
         self.credential_rotation_version
     }
 
-    /// Returns the verified Provider catalog-entry version.
     #[must_use]
     pub const fn provider_version(&self) -> u64 {
         self.provider_version
     }
 
-    /// Returns the exact secret-free Model Route.
     #[must_use]
     pub const fn route(&self) -> &ModelRoute {
         &self.route
     }
 
-    /// Returns the exact trusted Settings target.
     #[must_use]
     pub const fn target(&self) -> &ModelSettingsTarget {
         &self.target
     }
 
-    /// Returns the full target/route/Catalog/Credential fingerprint.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
-    /// Encodes the narrow secret-free durable representation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an internally inconsistent authority or serialization failure.
     pub fn to_durable_json(&self) -> Result<Vec<u8>, ModelAdmissionError> {
         self.validate_fingerprint()?;
         serde_json::to_vec(&DurableFrozenModelRouteAuthority {
@@ -389,12 +324,6 @@ impl FrozenModelRouteAuthority {
         .map_err(|_| ModelAdmissionError::invalid())
     }
 
-    /// Rehydrates and validates the narrow secret-free durable representation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, oversized, unknown-field, or fingerprint-mismatched
-    /// durable bytes.
     pub fn from_durable_json(bytes: &[u8]) -> Result<Self, ModelAdmissionError> {
         if bytes.is_empty() || bytes.len() > MAX_DURABLE_ROUTE_AUTHORITY_BYTES {
             return Err(ModelAdmissionError::invalid());
@@ -420,11 +349,6 @@ impl FrozenModelRouteAuthority {
         Ok(authority)
     }
 
-    /// Revalidates every persisted field and the canonical authority digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed or internally inconsistent deserialized authority.
     pub fn validate_fingerprint(&self) -> Result<(), ModelAdmissionError> {
         let route_key = ModelRequestRouteKey::from_target(&self.target, &self.route)
             .map_err(|_| ModelAdmissionError::identity_mismatch())?;
@@ -479,7 +403,6 @@ fn route_authority_fingerprint(
     Ok(format!("sha256:{:x}", Sha256::digest(payload)))
 }
 
-/// One pre-Provider reservation request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelReservationRequest {
     admission: ModelRequestAdmission,
@@ -488,12 +411,6 @@ pub struct ModelReservationRequest {
 }
 
 impl ModelReservationRequest {
-    /// Builds one bounded reservation from the same admission consumed by the
-    /// in-memory request pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a zero or unsafe token/cost estimate.
     pub fn try_new(
         admission: ModelRequestAdmission,
         estimated_tokens: u64,
@@ -512,172 +429,111 @@ impl ModelReservationRequest {
         })
     }
 
-    /// Returns the exchange identity used as the reservation key.
     #[must_use]
     pub const fn model_exchange_id(&self) -> &ModelExchangeId {
         &self.admission.model_exchange_id
     }
 }
 
-/// One cancellation or Provider-failure release category.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelReservationReleaseReason {
-    /// The caller cancelled before successful completion.
     Cancelled,
-    /// Provider open or streaming failed.
     ProviderFailed,
 }
 
-/// Command which releases one active reservation exactly once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelReservationRelease {
-    /// Idempotency identity for this terminal operation.
     pub request_id: RequestId,
-    /// Active exchange to release.
     pub model_exchange_id: ModelExchangeId,
-    /// Terminal release category.
     pub reason: ModelReservationReleaseReason,
 }
 
-/// Successful usage and cost settlement for one active reservation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelReservationCompletion {
-    /// Idempotency identity for this terminal operation.
     pub request_id: RequestId,
-    /// Active exchange to settle.
     pub model_exchange_id: ModelExchangeId,
-    /// Provider-normalized token usage.
     pub usage: ProviderTokenUsage,
-    /// Provider-normalized cost in micros; organization billing consumes this fact later.
-    pub actual_cost_micros: u64,
+    pub actual_cost_micros: Option<u64>,
 }
 
-/// Stable reason for a durable admission denial.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAdmissionDenialReason {
-    /// The configured policy denied the route.
     PolicyDenied,
-    /// The fixed-minute request limit was exhausted.
     RequestsPerMinute,
-    /// The fixed-minute token limit was exhausted.
     TokensPerMinute,
-    /// The route/scope concurrency ceiling was exhausted.
     Concurrency,
-    /// The operational token budget was exhausted.
     TokenBudget,
-    /// The operational cost budget was exhausted.
     CostBudget,
 }
 
-/// Durable reservation result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelReservationReceipt {
-    /// Original reservation request identity.
     pub request_id: RequestId,
-    /// Exact exchange reservation identity.
     pub model_exchange_id: ModelExchangeId,
-    /// Fingerprint of the exact frozen route authority admitted for this exchange.
     pub route_authority_fingerprint: String,
-    /// Denial reason, or `None` when admitted.
     pub denial: Option<ModelAdmissionDenialReason>,
-    /// Fixed UTC minute observed by the first durable execution.
     pub unix_minute: u64,
-    /// Durable ledger revision.
     pub revision: u64,
-    /// Whether this value came from the original durable receipt.
     pub idempotent_replay: bool,
 }
 
 impl ModelReservationReceipt {
-    /// Returns whether Provider invocation may start.
     #[must_use]
     pub const fn admitted(&self) -> bool {
         self.denial.is_none()
     }
 }
 
-/// Terminal reservation state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelReservationTerminalOutcome {
-    /// Reservation released because the caller cancelled.
     Cancelled,
-    /// Reservation released because Provider processing failed.
     ProviderFailed,
-    /// Reservation settled with actual usage.
     Completed,
 }
 
-/// Durable release or settlement result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelReservationTerminalReceipt {
-    /// Terminal operation idempotency identity.
     pub request_id: RequestId,
-    /// Exact exchange reservation identity.
     pub model_exchange_id: ModelExchangeId,
-    /// Fingerprint of the exact frozen route authority settled for this exchange.
     pub route_authority_fingerprint: String,
-    /// Applied terminal outcome.
     pub outcome: ModelReservationTerminalOutcome,
-    /// Actual settled token count; zero for a release.
     pub actual_tokens: u64,
-    /// Actual settled cost in micros; zero for a release.
-    pub actual_cost_micros: u64,
-    /// Durable ledger revision.
+    pub actual_cost_micros: Option<u64>,
     pub revision: u64,
-    /// Whether this value came from the original durable receipt.
     pub idempotent_replay: bool,
 }
 
-/// Read-only operational ledger projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAdmissionSnapshot {
-    /// Active reservations across policy revisions and budget periods.
     pub active_reservations: u64,
-    /// Requests accepted in the current retained fixed-minute window.
     pub minute_requests: u64,
-    /// Tokens currently counted in that fixed-minute window.
     pub minute_tokens: u64,
-    /// Tokens reserved but not settled in the requested budget period.
     pub budget_reserved_tokens: u64,
-    /// Cost reserved but not settled in the requested budget period.
     pub budget_reserved_cost_micros: u64,
-    /// Actual tokens settled in the requested budget period.
     pub budget_settled_tokens: u64,
-    /// Actual cost settled in the requested budget period.
     pub budget_settled_cost_micros: u64,
-    /// Current durable ledger revision.
+    pub pending_cost_settlements: u64,
     pub revision: u64,
 }
 
-/// Stable model-admission failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelAdmissionErrorKind {
-    /// Caller supplied malformed input.
     InvalidRequest,
-    /// Trusted route, Catalog, Credential, or scope facts did not match.
     IdentityMismatch,
-    /// Exchange identity was reused for another reservation.
     ReservationConflict,
-    /// Terminal command named no active or retained reservation.
     ReservationNotFound,
-    /// Reservation already reached another terminal outcome.
     TerminalConflict,
-    /// Scoped request identity was reused with changed input.
     RequestConflict,
-    /// Persisted admission state or receipt was invalid.
     CorruptState,
-    /// Authoritative clock was unavailable.
     ClockUnavailable,
-    /// Durable storage failed.
     Storage,
 }
 
-/// Bounded model-admission error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelAdmissionError {
     kind: ModelAdmissionErrorKind,
@@ -710,7 +566,6 @@ impl ModelAdmissionError {
         )
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn kind(&self) -> ModelAdmissionErrorKind {
         self.kind
@@ -779,6 +634,8 @@ struct BudgetLedger {
     reserved_cost_micros: u64,
     settled_tokens: u64,
     settled_cost_micros: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pending_cost_settlements: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -797,6 +654,8 @@ struct ActiveReservation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalReservation {
     outcome: ModelReservationTerminalOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_cost: Option<ActiveReservation>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -910,11 +769,11 @@ struct CompletionDigest<'a> {
     request_id: &'a RequestId,
     model_exchange_id: &'a ModelExchangeId,
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
-    actual_cost_micros: u64,
+    actual_cost_micros: Option<u64>,
 }
 
 struct CommandReceipt {
@@ -922,15 +781,12 @@ struct CommandReceipt {
     digest: Sha256Digest,
 }
 
-/// Durable model admission service. It must return an admitted receipt before
-/// the caller enters the Provider Gateway.
 pub struct ModelAdmissionService<'a> {
     storage: &'a mut dyn ProductStateStorage,
     clock: &'a dyn ModelAdmissionClock,
 }
 
 impl<'a> ModelAdmissionService<'a> {
-    /// Builds one service over the canonical state storage and authoritative clock.
     #[must_use]
     pub fn new(
         storage: &'a mut dyn ProductStateStorage,
@@ -939,13 +795,6 @@ impl<'a> ModelAdmissionService<'a> {
         Self { storage, clock }
     }
 
-    /// Atomically applies route policy, RPM, TPM, concurrency, and operational
-    /// token/cost budgets before Provider invocation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid authority/input, changed-body replay, corrupt state, or
-    /// unavailable clock/storage. Limit exhaustion is a durable denial receipt.
     pub fn reserve(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1029,13 +878,6 @@ impl<'a> ModelAdmissionService<'a> {
         ))
     }
 
-    /// Releases a cancelled or failed reservation once and restores its active,
-    /// token, and cost capacity. The accepted RPM count remains consumed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, an unknown/conflicting terminal, corrupt state,
-    /// changed-body replay, or storage failure.
     pub fn release(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1064,18 +906,11 @@ impl<'a> ModelAdmissionService<'a> {
                     }
                 };
                 release_capacity(state, active)?;
-                Ok((outcome, 0, 0))
+                Ok((outcome, 0, Some(0)))
             },
         )
     }
 
-    /// Releases an exact reservation when present; absence is a safe no-op for
-    /// recovery before the reserve side effect began.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, changed terminal replay, corrupt state, or
-    /// storage failure. An existing exact terminal receipt is replayed.
     pub fn release_if_reserved(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1106,14 +941,6 @@ impl<'a> ModelAdmissionService<'a> {
         Ok(None)
     }
 
-    /// Settles actual Provider usage once, releases concurrency, and replaces
-    /// the estimate with actual token/cost facts. The returned usage is an input
-    /// to the separate organization billing authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid usage, an unknown/conflicting terminal, corrupt state,
-    /// changed-body replay, or storage failure.
     pub fn complete(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -1122,7 +949,10 @@ impl<'a> ModelAdmissionService<'a> {
         validate_request_id(&request.request_id)?;
         validate_model_exchange_id(&request.model_exchange_id)?;
         let actual_tokens = total_tokens(request.usage)?;
-        if request.actual_cost_micros > MAX_SAFE_INTEGER {
+        if request
+            .actual_cost_micros
+            .is_some_and(|cost| cost > MAX_SAFE_INTEGER)
+        {
             return Err(ModelAdmissionError::invalid());
         }
         let command = completion_command(authority, request)?;
@@ -1147,11 +977,6 @@ impl<'a> ModelAdmissionService<'a> {
         )
     }
 
-    /// Reads the route/scope ledger for one budget period without mutation.
-    ///
-    /// # Errors
-    ///
-    /// Returns invalid/corrupt state or storage failures.
     pub fn snapshot(
         &self,
         authority: &FrozenModelRouteAuthority,
@@ -1178,6 +1003,7 @@ impl<'a> ModelAdmissionService<'a> {
             budget_reserved_cost_micros: budget.reserved_cost_micros,
             budget_settled_tokens: budget.settled_tokens,
             budget_settled_cost_micros: budget.settled_cost_micros,
+            pending_cost_settlements: budget.pending_cost_settlements,
             revision: state.revision,
         })
     }
@@ -1193,7 +1019,8 @@ impl<'a> ModelAdmissionService<'a> {
         F: Fn(
             &mut ModelAdmissionState,
             &ActiveReservation,
-        ) -> Result<(ModelReservationTerminalOutcome, u64, u64), ModelAdmissionError>,
+        )
+            -> Result<(ModelReservationTerminalOutcome, u64, Option<u64>), ModelAdmissionError>,
     {
         for _attempt in 0..MAX_COMMIT_RETRIES {
             if let Some(receipt) = self
@@ -1230,9 +1057,13 @@ impl<'a> ModelAdmissionService<'a> {
             }
             state.active.remove(&model_exchange_id.0);
             let (outcome, actual_tokens, actual_cost_micros) = apply(&mut state, &active)?;
-            state
-                .terminal
-                .insert(model_exchange_id.0.clone(), TerminalReservation { outcome });
+            state.terminal.insert(
+                model_exchange_id.0.clone(),
+                TerminalReservation {
+                    outcome,
+                    pending_cost: actual_cost_micros.is_none().then_some(active),
+                },
+            );
             let revision = next_revision(expected_revision)?;
             state.revision = revision;
             let result = ModelReservationTerminalReceipt {
@@ -1342,7 +1173,11 @@ fn admission_denial(
         checked_add(budget.reserved_cost_micros, budget.settled_cost_micros)?,
         request.estimated_cost_micros,
     )?;
-    if total_cost > policy.limits.cost_budget_micros {
+    if policy
+        .limits
+        .cost_budget_micros
+        .is_some_and(|limit| budget.pending_cost_settlements > 0 || total_cost > limit)
+    {
         return Ok(Some(ModelAdmissionDenialReason::CostBudget));
     }
     Ok(None)
@@ -1426,7 +1261,7 @@ fn settle_capacity(
     state: &mut ModelAdmissionState,
     active: &ActiveReservation,
     actual_tokens: u64,
-    actual_cost_micros: u64,
+    actual_cost_micros: Option<u64>,
 ) -> Result<(), ModelAdmissionError> {
     if state
         .minute
@@ -1445,15 +1280,21 @@ fn settle_capacity(
         .get_mut(&active.budget_period_id)
         .ok_or_else(ModelAdmissionError::corrupt)?;
     budget.reserved_tokens = checked_sub(budget.reserved_tokens, active.estimated_tokens)?;
-    budget.reserved_cost_micros =
-        checked_sub(budget.reserved_cost_micros, active.estimated_cost_micros)?;
     budget.settled_tokens = checked_add(budget.settled_tokens, actual_tokens)?;
-    budget.settled_cost_micros = checked_add(budget.settled_cost_micros, actual_cost_micros)?;
+    if let Some(cost) = actual_cost_micros {
+        budget.reserved_cost_micros =
+            checked_sub(budget.reserved_cost_micros, active.estimated_cost_micros)?;
+        budget.settled_cost_micros = checked_add(budget.settled_cost_micros, cost)?;
+    } else {
+        budget.pending_cost_settlements = checked_add(budget.pending_cost_settlements, 1)?;
+    }
     Ok(())
 }
 
 fn total_tokens(usage: ProviderTokenUsage) -> Result<u64, ModelAdmissionError> {
-    if usage.cached_input_tokens > usage.input_tokens
+    if usage
+        .cached_input_tokens
+        .is_some_and(|cached| cached > usage.input_tokens)
         || usage.reasoning_output_tokens > usage.output_tokens
         || usage.cache_write_input_tokens > usage.input_tokens
     {
@@ -1531,17 +1372,41 @@ fn validate_state_ledgers(state: &ModelAdmissionState) -> Result<(), ModelAdmiss
             Ok::<_, ModelAdmissionError>(totals)
         },
     )?;
+    let mut pending_by_period = BTreeMap::<&str, (u64, u64)>::new();
+    for reservation in state
+        .terminal
+        .values()
+        .filter_map(|terminal| terminal.pending_cost.as_ref())
+    {
+        if reservation.estimated_cost_micros > MAX_SAFE_INTEGER
+            || !state.budgets.contains_key(&reservation.budget_period_id)
+        {
+            return Err(ModelAdmissionError::corrupt());
+        }
+        let entry = pending_by_period
+            .entry(&reservation.budget_period_id)
+            .or_default();
+        entry.0 = checked_add(entry.0, reservation.estimated_cost_micros)?;
+        entry.1 = checked_add(entry.1, 1)?;
+    }
     for (period, ledger) in &state.budgets {
         let expected = reserved_by_period
             .get(period.as_str())
             .copied()
             .unwrap_or((0, 0));
-        if (ledger.reserved_tokens, ledger.reserved_cost_micros) != expected
+        let pending = pending_by_period
+            .get(period.as_str())
+            .copied()
+            .unwrap_or_default();
+        if (ledger.reserved_tokens, ledger.reserved_cost_micros)
+            != (expected.0, checked_add(expected.1, pending.0)?)
+            || ledger.pending_cost_settlements != pending.1
             || [
                 ledger.reserved_tokens,
                 ledger.reserved_cost_micros,
                 ledger.settled_tokens,
                 ledger.settled_cost_micros,
+                ledger.pending_cost_settlements,
             ]
             .into_iter()
             .any(|value| value > MAX_SAFE_INTEGER)
@@ -1849,4 +1714,9 @@ fn validate_token(value: &str, max_len: usize) -> Result<(), ModelAdmissionError
         return Err(ModelAdmissionError::invalid());
     }
     Ok(())
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

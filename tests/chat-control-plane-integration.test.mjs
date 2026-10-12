@@ -458,7 +458,6 @@ function contractFake() {
       if (!bindingIsExact) {
         return response(409, terminalError(
           request,
-          'DEVICE_SESSION_REQUIRED',
           'WRONG_STATE',
           'Input binding does not match the active ProductSession.',
         ))

@@ -38,4 +38,17 @@ test('prepared Rust Delivery ExecutionJob fixture satisfies the strict canonical
 
   assert.ok(validate)
   assert.equal(validate(fixture), true, JSON.stringify(validate.errors))
+  const unlimited = structuredClone(fixture)
+  unlimited.limits.deadlineAt = null
+  unlimited.limits.maxRuntimeSeconds = null
+  assert.equal(validate(unlimited), true, JSON.stringify(validate.errors))
+  for (const field of ['deadlineAt', 'maxRuntimeSeconds']) {
+    const missing = structuredClone(unlimited)
+    delete missing.limits[field]
+    assert.equal(validate(missing), false, `missing ${field}`)
+    const mixed = structuredClone(unlimited)
+    mixed.limits[field] = fixture.limits[field]
+    assert.equal(validate(mixed), false, `mixed ${field}`)
+  }
+
 })

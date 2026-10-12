@@ -252,6 +252,7 @@ test('release target contract is the exact supported four-platform matrix', () =
 
 test('release source identity excludes generated output and remains deterministic', () => {
   const paths = releaseSourcePaths(root)
+  assert.equal(paths.includes('.cargo/config.toml'), true)
   assert.equal(paths.some(path => path.includes('/dist/')), false)
   assert.equal(paths.some(path => path.includes('/prebuild/')), false)
   assert.equal(paths.some(path => path.startsWith('third_party/codex/')), false)

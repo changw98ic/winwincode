@@ -4,13 +4,13 @@ import { join, relative } from 'node:path'
 
 export const PRODUCT_RELEASE_SCHEMA_VERSION = 1
 
-/** JavaScript packages that are part of the deployable Client surface. */
 export const PRODUCT_PACKAGE_DIRECTORIES = Object.freeze([
   'apps/client',
   'packages/browser-core',
   'packages/browser-ui',
   'packages/contracts',
   'packages/control-plane-client',
+  'packages/network-request',
   'packages/strongflow',
 ])
 
@@ -28,14 +28,10 @@ export const PRODUCT_RELEASE_REQUIRED_CHECKS = Object.freeze([
 const releaseRootFiles = Object.freeze([
   '.gitignore',
   '.node-version',
-  'CODE_OF_CONDUCT.md',
-  'CONTRIBUTING.md',
   'Cargo.lock',
   'Cargo.toml',
   'LICENSE',
   'NOTICE',
-  'README.md',
-  'SECURITY.md',
   'THIRD_PARTY_NOTICES.md',
   'package.json',
   'pnpm-lock.yaml',
@@ -47,6 +43,7 @@ const releaseRootFiles = Object.freeze([
 ])
 
 const releaseRoots = Object.freeze([
+  '.cargo',
   '.github',
   'apps',
   'crates',
@@ -80,7 +77,6 @@ function visitSourceDirectory(root, directory, files) {
   }
 }
 
-/** Project-owned release input inventory. Pinned upstream source is represented by its lock. */
 export function releaseSourcePaths(root) {
   const paths = releaseRootFiles.filter(path => existsSync(join(root, path)))
   for (const directory of releaseRoots) {

@@ -72,6 +72,20 @@ fn canonical_typescript_fixture_round_trips() {
 }
 
 #[test]
+fn canonical_delivery_rejects_legacy_candidate_ref_evidence() {
+    let fixture = include_bytes!("fixtures/delivery-main.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(fixture).expect("fixture JSON");
+    legacy["evidence"][0]["candidateRef"] = serde_json::json!(
+        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    let error = Delivery::decode_json(&serde_json::to_vec(&legacy).expect("legacy JSON"))
+        .expect_err("legacy evidence must not be imported through the canonical reader");
+
+    assert_eq!(error.code(), DeliveryValidationErrorCode::InvalidShape);
+    assert!(error.to_string().contains("candidateRef"));
+}
+
+#[test]
 fn canonical_delivery_id_keeps_an_exact_github_source_and_cross_repository_target() {
     let snapshot = github_delivery_snapshot(CANONICAL_DELIVERY_ID);
     let delivery = Delivery::decode_json(&serde_json::to_vec(&snapshot).expect("snapshot json"))

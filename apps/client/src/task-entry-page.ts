@@ -10,7 +10,6 @@ import type {
 export interface TaskEntryPageOptions {
   readonly root: HTMLElement
   readonly model: TaskEntryViewModel
-  /** Raised once per started anchor; the host navigates to the run route. */
   readonly onStarted?: (anchor: ControlPlaneTaskAnchor) => void
 }
 
@@ -28,7 +27,6 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-/** The one copy per form-level failure; the alert role reaches screen readers. */
 function failureText(failure: TaskEntryFailure): string {
   switch (failure) {
     case 'no-occupied-client': return '请先占用执行设备，只有已占用的设备才能启动任务。'
@@ -44,13 +42,6 @@ function optionValue(select: HTMLSelectElement): string | null {
   return select.value === '' ? null : select.value
 }
 
-/**
- * Mount the §16.6 new-task form: the occupied-Client select, the repository
- * select driven by the shared repository list, the base branch defaulted to
- * the repository's default branch, the task description, the model route
- * choice, and the submit entry.  The module owns DOM and ARIA only; every
- * change translates into one view-model intent.
- */
 export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage {
   const document = options.root.ownerDocument
   const section = element(document, 'section', 'wwc-task-entry')
@@ -245,8 +236,6 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
 
     if (snapshot.status === 'started' && snapshot.anchor !== null) {
       const anchor = snapshot.anchor
-      // One navigation per started anchor; a re-render of the same anchor
-      // never re-triggers the host route change.
       if (reportedAnchor !== anchor) {
         reportedAnchor = anchor
         options.onStarted?.(anchor)

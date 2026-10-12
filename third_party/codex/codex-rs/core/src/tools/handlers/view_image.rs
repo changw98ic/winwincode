@@ -102,6 +102,7 @@ impl ViewImageHandler {
             ));
         }
 
+        let read_invocation = invocation.clone();
         let ToolInvocation {
             session,
             turn,
@@ -151,6 +152,13 @@ impl ViewImageHandler {
             ))
         })?;
         let model_visible_path = path_uri.inferred_native_path_string();
+        crate::tools::authorization::authorize_payload(
+            &read_invocation,
+            crate::ToolCallGatePayload::FileRead {
+                path: model_visible_path.clone(),
+            },
+        )
+        .await?;
         let sandbox = turn
             .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
         let fs = turn_environment.environment.get_filesystem();
@@ -211,6 +219,10 @@ impl ViewImageHandler {
 }
 
 impl CoreToolRuntime for ViewImageHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         true
     }

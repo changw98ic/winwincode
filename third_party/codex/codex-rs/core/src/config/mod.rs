@@ -672,6 +672,10 @@ pub struct Config {
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
 
+    /// Runtime-owned total budget at a local compaction checkpoint. This is
+    /// checked internally and never included in the summarization prompt.
+    pub compact_context_max_tokens: Option<usize>,
+
     /// Optional external notifier command. When set, Codex will spawn this
     /// program after each completed *turn* (i.e. when the agent finishes
     /// processing a user submission). The value must be the full command
@@ -4036,6 +4040,7 @@ impl Config {
             personality,
             developer_instructions,
             compact_prompt,
+            compact_context_max_tokens: None,
             include_permissions_instructions,
             include_apps_instructions,
             include_collaboration_mode_instructions,

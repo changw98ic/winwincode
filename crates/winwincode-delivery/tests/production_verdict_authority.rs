@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_arguments)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,6 +49,7 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct SettledSource {
+    content_digest: Sha256Digest,
     terminal: DeliveryTerminalOutcomeFacts,
     source: DurableCandidateSourceInput,
 }
@@ -57,6 +57,10 @@ struct SettledSource {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn durable_sources_resolve_one_replay_stable_production_verdict() {
+    use winwincode_domain::{
+        CandidateId, CanonicalSnapshot, GitObjectId, SchemaVersion, Snapshot, SnapshotId,
+        seal_snapshot,
+    };
     let root = temporary_directory("success");
     let repositories = root.join("repositories");
     let repository = repositories.join("project-one");
@@ -107,8 +111,6 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         run.worker_id = binding.worker_id.clone().expect("worker");
         run.worker_instance_id = binding.worker_instance_id.clone().expect("worker instance");
         if binding.execution_profile.as_deref() == Some("executor") {
-            // Production freezes Commit evidence only after the writer candidate
-            // is sealed into CandidateReady/Settled.
             run.state = winwincode_domain::WorkRunState::CandidateReady;
         }
     }
@@ -142,8 +144,28 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         &delivery,
         &writer_source.source,
         &writer_source.terminal,
+        CandidateId("cnd_01J00000000000000000000001".into()),
     )
     .expect("candidate");
+
+    let mut product = Snapshot {
+        schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: SnapshotId(canonical_id("snap", 91)),
+        candidate_id: candidate.candidate_id().clone(),
+        work_run_id: candidate.producer_work_run_id().clone(),
+        repository_id: RepositoryId(canonical_id("rep", 91)),
+        base_commit_id: GitObjectId(candidate.base_commit_id().into()),
+        base_tree_id: GitObjectId(candidate.base_tree_id().into()),
+        candidate_commit_id: GitObjectId(candidate.candidate_commit_id().into()),
+        candidate_tree_id: GitObjectId(candidate.candidate_tree_id().into()),
+        diff_sha256: Sha256Digest(format!("sha256:{}", candidate.diff_sha256())),
+        content_digest: writer_source.content_digest.clone(),
+        created_at_millis: i64::try_from(candidate.producer_finished_at_millis()).unwrap(),
+        immutable: true,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    product.validation_seal = seal_snapshot(&product);
+    let snapshot: CanonicalSnapshot = product.try_into().unwrap();
 
     let verification_sources = ["reviewer", "verifier"]
         .into_iter()
@@ -176,8 +198,10 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 candidate.candidate_ref(),
                 role,
+                None,
                 None,
             )
         })
@@ -188,16 +212,15 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     let replay = resolve_production_verdict(&delivery, candidate.clone(), verification)
         .expect("restart replay");
     assert_eq!(first, replay);
+    let expected_verdict = first.clone();
     let (candidate, verification, evidence, produced_at_millis) = first.into_parts();
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
     assert_eq!(verification.settlements().len(), 2);
-    // Runtime command evidence plus one executor Commit sealed from the frozen
-    // candidate that freeze_source rebuilt from the real Worker artifact.
     assert_eq!(evidence.len(), 3);
     assert!(
         evidence
             .iter()
-            .all(|item| item.evidence().candidate_ref == candidate.candidate_ref())
+            .all(|item| item.evidence().candidate_id == *candidate.candidate_id())
     );
     let commits = evidence
         .iter()
@@ -207,16 +230,53 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         .collect::<Vec<_>>();
     assert_eq!(commits.len(), 1);
     let commit = commits[0].evidence();
-    assert_eq!(
-        commit.source_ref,
-        format!("git_commit:{candidate_commit}")
-    );
+    assert_eq!(commit.source_ref, format!("git_commit:{candidate_commit}"));
     assert_eq!(commit.work_run_id, *candidate.producer_work_run_id());
     assert_eq!(
         commit.session_binding_id,
         *candidate.producer_session_binding_id()
     );
     assert!(produced_at_millis > 1_800_000_000_060);
+
+    let fusion_verification = verification_sources
+        .iter()
+        .map(|(role, run, settled)| {
+            verification_runtime(
+                &delivery,
+                run,
+                settled,
+                &snapshot,
+                candidate.candidate_ref(),
+                role,
+                None,
+                (*role == "reviewer").then_some("event-reviewer-source"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolve_production_verdict(&delivery, candidate.clone(), fusion_verification)
+            .expect("Fusion trail linked to direct reviewer evidence"),
+        expected_verdict,
+        "the Fusion trail is auditable metadata, not extra verdict authority"
+    );
+
+    let invalid_fusion_verification = verification_sources
+        .iter()
+        .map(|(role, run, settled)| {
+            verification_runtime(
+                &delivery,
+                run,
+                settled,
+                &snapshot,
+                candidate.candidate_ref(),
+                role,
+                None,
+                (*role == "reviewer").then_some("event-reviewer-policy"),
+            )
+        })
+        .collect::<Vec<_>>();
+    resolve_production_verdict(&delivery, candidate.clone(), invalid_fusion_verification)
+        .expect_err("Fusion trail cannot cite policy metadata as test or command Evidence");
 
     let stale_runtime = verification_sources
         .iter()
@@ -225,8 +285,10 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 "git-candidate:stale-runtime",
                 role,
+                None,
                 None,
             )
         })
@@ -241,9 +303,11 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 candidate.candidate_ref(),
                 role,
                 Some(&format!("event-{role}-binary")),
+                None,
             )
         })
         .collect::<Vec<_>>();
@@ -266,9 +330,11 @@ fn verification_runtime(
     delivery: &Delivery,
     run: &SessionBinding,
     settled: &SettledSource,
+    snapshot: &winwincode_domain::CanonicalSnapshot,
     candidate_ref: &str,
     role: &str,
     evidence_event_override: Option<&str>,
+    fusion_evidence_event_override: Option<&str>,
 ) -> ProductionVerificationRuntime {
     ProductionVerificationRuntime::from_durable(
         match role {
@@ -277,7 +343,7 @@ fn verification_runtime(
             _ => panic!("unexpected role"),
         },
         settled.terminal.clone(),
-        settled.source.clone(),
+        snapshot.clone(),
         runtime_events(
             run,
             candidate_ref,
@@ -290,6 +356,7 @@ fn verification_runtime(
                 .expect("fixture verification method"),
             role,
             evidence_event_override,
+            fusion_evidence_event_override,
         ),
     )
 }
@@ -439,6 +506,7 @@ fn settled_source(
         ),
     );
     SettledSource {
+        content_digest: source.content_digest().clone(),
         terminal,
         source: winwincode_storage::delivery_candidate_source(&source),
     }
@@ -453,6 +521,7 @@ fn runtime_events(
     verification_method: &str,
     role: &str,
     evidence_event_override: Option<&str>,
+    fusion_evidence_event_override: Option<&str>,
 ) -> Vec<ProductionRuntimeEvent> {
     let finished = run.bound_at_millis + 9;
     let source_id = ExecutionEventId(format!("event-{role}-source"));
@@ -462,6 +531,32 @@ fn runtime_events(
         ProductionRuntimeEventCategory::Test
     };
     let binary_bytes = b"\0verification-binary\xff";
+    let mut result = json!({
+        "protocol": "winwincode.independent-verification-result.v1",
+        "delivery_spec_id": delivery_spec_id,
+        "delivery_spec_revision": delivery_spec_revision,
+        "candidate_ref": candidate_ref,
+        "findings": [{
+            "finding_id": format!("finding-{role}"),
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "explanation": format!("{role} accepted the current candidate"),
+            "evidence_sources": [{
+                "type": if role == "reviewer" { "command" } else { "test" },
+                "event_id": evidence_event_override.unwrap_or(&source_id.0),
+            }],
+        }],
+    });
+    if let Some(event_id) = fusion_evidence_event_override {
+        result["fusion_investigations"] = json!([{
+            "claim_key": "claim:runtime-trace",
+            "status": "investigated",
+            "evidence_sources": [{
+                "type": if role == "reviewer" { "command" } else { "test" },
+                "event_id": event_id,
+            }],
+        }]);
+    }
     [
         (
             1,
@@ -504,25 +599,7 @@ fn runtime_events(
         (
             4,
             ProductionRuntimeEventCategory::Activity,
-            encoded_payload(
-                &serde_json::to_vec(&json!({
-                    "protocol": "winwincode.independent-verification-result.v1",
-                    "delivery_spec_id": delivery_spec_id,
-                    "delivery_spec_revision": delivery_spec_revision,
-                    "candidate_ref": candidate_ref,
-                    "findings": [{
-                        "finding_id": format!("finding-{role}"),
-                        "criterion_id": criterion_id,
-                        "verdict": "pass",
-                        "explanation": format!("{role} accepted the current candidate"),
-                        "evidence_sources": [{
-                            "type": if role == "reviewer" { "command" } else { "test" },
-                            "event_id": evidence_event_override.unwrap_or(&source_id.0),
-                        }],
-                    }],
-                }))
-                .expect("JSON"),
-            ),
+            encoded_payload(&serde_json::to_vec(&result).expect("JSON")),
             ExecutionEventId(format!("event-{role}-result")),
         ),
     ]

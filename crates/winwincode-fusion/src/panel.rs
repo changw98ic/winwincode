@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parallel blind panel runner.
-//!
-//! Guarantees encoded here:
-//! - at least three distinct Providers must be present in the canonical input;
-//! - every candidate receives the same blind prompt in an isolated request;
-//! - candidates are sent in parallel;
-//! - timeout, Provider failure, missing route, invalid answer, or token
-//!   overrun becomes one failure row and never cancels successful siblings.
-
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
@@ -39,7 +30,6 @@ use crate::MIN_PROVIDER_COUNT;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 const MAX_CONSTRAINTS: usize = 128;
 
-/// Invalid canonical input detected before any Provider request is sent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FusionPanelError(&'static str);
 
@@ -51,12 +41,6 @@ impl fmt::Display for FusionPanelError {
 
 impl std::error::Error for FusionPanelError {}
 
-/// Sends the same blind prompt to every candidate route in parallel.
-///
-/// # Errors
-///
-/// Returns a typed panel error only for invalid canonical input. Runtime
-/// Provider failures are retained as [`FusionCandidateFailure`] rows.
 pub async fn run_blind_panel(
     panel_id: &str,
     input: FusionInput,
@@ -68,7 +52,10 @@ pub async fn run_blind_panel(
     let dispatch = PanelDispatch {
         panel_id: panel_id.to_owned(),
         input_digest,
-        timeout: Duration::from_millis(input.budget.candidate_timeout_millis),
+        timeout: input
+            .budget
+            .candidate_timeout_millis
+            .map(Duration::from_millis),
         max_total_tokens: input.budget.max_total_tokens,
         prompt,
     };
@@ -100,12 +87,86 @@ enum CandidateOutcome {
     Failure(FusionCandidateFailure),
 }
 
+pub fn validate_panel_result(
+    panel_id: &str,
+    input: &FusionInput,
+    panel: &FusionPanelResult,
+) -> Result<(), FusionPanelError> {
+    validate_input(panel_id, input)?;
+    let prompt = blind_prompt(input);
+    let dispatch = PanelDispatch {
+        panel_id: panel_id.to_owned(),
+        input_digest: digest_prompt(&prompt)?,
+        timeout: None,
+        max_total_tokens: input.budget.max_total_tokens,
+        prompt,
+    };
+    let invalid = || FusionPanelError("Fusion panel does not match its original input");
+    if panel.panel_id != panel_id || panel.input_digest != dispatch.input_digest {
+        return Err(invalid());
+    }
+    let mut seen = HashSet::new();
+    let successes = panel.candidates.iter().map(|candidate| {
+        let audit = &candidate.audit;
+        (
+            &audit.panel_id,
+            &audit.candidate_id,
+            &audit.request_id,
+            &audit.input_digest,
+            &audit.request_payload_digest,
+            &audit.provider,
+            &audit.model,
+        )
+    });
+    let failures = panel.failures.iter().map(|row| {
+        (
+            &row.panel_id,
+            &row.candidate_id,
+            &row.request_id,
+            &row.input_digest,
+            &row.request_payload_digest,
+            &row.provider,
+            &row.model,
+        )
+    });
+    for (owner, member, request_id, digest, payload_digest, provider, model) in
+        successes.chain(failures)
+    {
+        let route = input
+            .provider_candidates
+            .iter()
+            .find(|route| &route.id == member)
+            .ok_or_else(invalid)?;
+        let request = provider_request(&dispatch, route);
+        let bytes = serde_json::to_vec(&request).map_err(|_| invalid())?;
+        if !seen.insert(member)
+            || owner != panel_id
+            || digest != &dispatch.input_digest
+            || request_id != &request.request_id
+            || payload_digest != &sha256(&bytes)
+            || provider != &route.provider
+            || model != &route.model
+        {
+            return Err(invalid());
+        }
+    }
+    if seen.len() != input.provider_candidates.len()
+        || panel.candidates.iter().any(|candidate| {
+            !candidate.answer.is_object() || candidate.audit.provider_response_id.trim().is_empty()
+        })
+        || panel.failures.iter().any(|row| row.code.trim().is_empty())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct PanelDispatch {
     panel_id: String,
     input_digest: String,
-    timeout: Duration,
-    max_total_tokens: u64,
+    timeout: Option<Duration>,
+    max_total_tokens: Option<u64>,
     prompt: FusionBlindPrompt,
 }
 
@@ -141,14 +202,18 @@ fn dispatch_candidate(
                 "PROVIDER_UNRESOLVED",
                 "Fusion router has no adapter for this Provider",
             )),
-            Some(adapter) => timeout(dispatch.timeout, adapter.complete(request))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(FusionProviderError::new(
-                        "TIMEOUT",
-                        "Fusion candidate exceeded its wall-time budget",
-                    ))
-                }),
+            Some(adapter) if dispatch.timeout.is_none() => adapter.complete(request).await,
+            Some(adapter) => timeout(
+                dispatch.timeout.unwrap_or_default(),
+                adapter.complete(request),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(FusionProviderError::new(
+                    "TIMEOUT",
+                    "Fusion candidate exceeded its wall-time budget",
+                ))
+            }),
         };
         let elapsed_millis = elapsed_millis(started);
         let identity = FailureIdentity {
@@ -185,11 +250,13 @@ fn dispatch_candidate(
     }
 }
 
-fn exceeds_token_budget(usage: Option<FusionTokenUsage>, max_total_tokens: u64) -> bool {
-    usage.is_some_and(|usage| {
-        usage.total_tokens > max_total_tokens
-            || usage.input_tokens.saturating_add(usage.output_tokens) > max_total_tokens
-    })
+fn exceeds_token_budget(usage: Option<FusionTokenUsage>, max_total_tokens: Option<u64>) -> bool {
+    usage
+        .zip(max_total_tokens)
+        .is_some_and(|(usage, max_total_tokens)| {
+            usage.total_tokens > max_total_tokens
+                || usage.input_tokens.saturating_add(usage.output_tokens) > max_total_tokens
+        })
 }
 
 struct FailureIdentity {
@@ -291,7 +358,8 @@ fn validate_input(panel_id: &str, input: &FusionInput) -> Result<(), FusionPanel
             "Fusion panels require three to sixteen Providers",
         ));
     }
-    if input.budget.candidate_timeout_millis == 0 || input.budget.max_total_tokens == 0 {
+    if input.budget.candidate_timeout_millis == Some(0) || input.budget.max_total_tokens == Some(0)
+    {
         return Err(FusionPanelError("Fusion budget limits must be positive"));
     }
     let mut ids = HashSet::new();

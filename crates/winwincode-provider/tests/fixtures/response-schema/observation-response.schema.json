@@ -1,0 +1,70 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "confidenceBps": {
+      "type": "integer"
+    },
+    "decision": {
+      "enum": [
+        "accept",
+        "repair_required",
+        "semantic_risk",
+        "infrastructure_error",
+        "inconclusive"
+      ],
+      "type": "string"
+    },
+    "observationId": {
+      "type": "string"
+    },
+    "reasonCode": {
+      "enum": [
+        "criteria_satisfied",
+        "targeted_repair_required",
+        "semantic_risk_detected",
+        "observer_infrastructure_error",
+        "insufficient_evidence"
+      ],
+      "type": "string"
+    },
+    "repairClass": {
+      "enum": [
+        "targeted_patch",
+        "regenerate_batch",
+        "replan",
+        "human_review",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rootCauses": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "observationId",
+    "decision",
+    "reasonCode",
+    "summary",
+    "rootCauses",
+    "repairClass",
+    "confidenceBps"
+  ],
+  "type": "object"
+}

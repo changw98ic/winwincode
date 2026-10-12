@@ -43,6 +43,7 @@ impl ReadMcpResourceHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        let resource_invocation = invocation.clone();
         let ToolInvocation {
             session,
             step_context,
@@ -67,6 +68,14 @@ impl ReadMcpResourceHandler {
         let ReadResourceArgs { server, uri } = args;
         let server = normalize_required_string("server", server)?;
         let uri = normalize_required_string("uri", uri)?;
+        ensure_model_can_access_mcp_server(turn.as_ref(), &server)?;
+        super::authorization::authorize(
+            &resource_invocation,
+            &server,
+            "resources/read",
+            &arguments,
+        )
+        .await?;
 
         let invocation = McpInvocation {
             server: server.clone(),
@@ -93,4 +102,12 @@ impl ReadMcpResourceHandler {
     }
 }
 
-impl CoreToolRuntime for ReadMcpResourceHandler {}
+impl CoreToolRuntime for ReadMcpResourceHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
+    fn uses_mcp_binding(&self) -> bool {
+        true
+    }
+}

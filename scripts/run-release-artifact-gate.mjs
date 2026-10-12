@@ -34,6 +34,7 @@ import {
   verifyReleaseArtifactDirectory,
 } from './release-artifact-contract.mjs'
 import {
+  serverTargetDirectory,
   writeApiProductionSourceSeal,
   writeHelperReleaseManifest,
 } from './run-api-production-vertical.mjs'
@@ -328,6 +329,10 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
   const helperReleaseManifest = resolve(binaryRoot, HELPER_RELEASE_MANIFEST_NAME)
   copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifest)
   chmodSync(helperReleaseManifest, 0o644)
+  run('cargo', ['build', '-p', 'winwincode-cli', '--bin', 'wwc', '--locked', '--offline'])
+  const cliBinary = resolve(binaryRoot, 'wwc')
+  copyFileSync(resolve(serverTargetDirectory(root), 'debug/wwc'), cliBinary)
+  chmodSync(cliBinary, 0o755)
   writeApiProductionSourceSeal({
     root,
     serverBinary: paths['winwincode-server'],
@@ -342,6 +347,14 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     '--directory', fixtureRoot,
   ], { capture: true, env: verificationChildEnvironment() }))
   assertReleaseApiReport(report)
+  run(process.execPath, [
+    '--test', '--test-name-pattern=public API cancellation closes',
+    'tests/api-production-vertical.test.mjs',
+  ], { env: {
+    ...verificationChildEnvironment(),
+    WWC_API_SKIP_BUILD: '1',
+    WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: binaryRoot,
+  } })
 }
 
 const { target, sourceCommit, sourceDateEpoch, output } = parseArguments(process.argv.slice(2))

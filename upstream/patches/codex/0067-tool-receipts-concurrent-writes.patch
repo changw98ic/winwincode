@@ -1,0 +1,125 @@
+diff --git a/codex-rs/state/src/runtime/tool_diagnostic_responses.rs b/codex-rs/state/src/runtime/tool_diagnostic_responses.rs
+--- a/codex-rs/state/src/runtime/tool_diagnostic_responses.rs
++++ b/codex-rs/state/src/runtime/tool_diagnostic_responses.rs
+@@ -13,7 +13,7 @@
+         response_digest: &str,
+     ) -> anyhow::Result<()> {
+         anyhow::ensure!(response_digest.len() == 64, "invalid model response digest");
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let rows = sqlx::query("SELECT diagnostic_id, evidence_version, boundary FROM (SELECT f.diagnostic_id, f.evidence_version, f.boundary_request_sequence AS boundary, ROW_NUMBER() OVER (PARTITION BY f.diagnostic_id ORDER BY f.evidence_version DESC, f.boundary_request_sequence DESC) AS ordinal FROM tool_diagnostic_feedback f JOIN tool_requests r ON r.sequence = f.boundary_request_sequence WHERE f.thread_id = ? AND r.request_json ->> '$.turn_id' = ? AND f.offered = 1) WHERE ordinal = 1")
+             .bind(thread_id).bind(turn_id).fetch_all(&mut *tx).await?;
+         for row in rows {
+diff --git a/codex-rs/state/src/runtime/tool_diagnostics.rs b/codex-rs/state/src/runtime/tool_diagnostics.rs
+--- a/codex-rs/state/src/runtime/tool_diagnostics.rs
++++ b/codex-rs/state/src/runtime/tool_diagnostics.rs
+@@ -45,7 +45,7 @@
+         thread_id: &str,
+         boundary_logical_id: &str,
+     ) -> anyhow::Result<Vec<ToolDiagnostic>> {
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let boundary: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.execution = 'running'")
+             .bind(thread_id).bind(boundary_logical_id).fetch_one(&mut *tx).await?;
+         let rows = sqlx::query("SELECT diagnostic_id, evidence_version, diagnostic_json FROM tool_diagnostics WHERE thread_id = ? AND evidence_version > offered_version ORDER BY evidence_version, diagnostic_id LIMIT 2")
+diff --git a/codex-rs/state/src/runtime/tool_reconciliation.rs b/codex-rs/state/src/runtime/tool_reconciliation.rs
+--- a/codex-rs/state/src/runtime/tool_reconciliation.rs
++++ b/codex-rs/state/src/runtime/tool_reconciliation.rs
+@@ -17,7 +17,7 @@
+             encoded.len() <= 16 * 1024,
+             "reconciliation metadata exceeds limit"
+         );
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_attempts a JOIN tool_requests r ON r.sequence = a.request_sequence WHERE r.thread_id = ? AND a.request_sequence = ? AND a.attempt_id = ? AND a.owner_id = ? AND a.operation_digest = ? AND a.revision = ?)")
+             .bind(&fact.thread_id).bind(fact.request_sequence).bind(&fact.attempt.attempt_id)
+             .bind(&fact.attempt.owner_id).bind(&fact.attempt.operation_digest).bind(fact.attempt.revision)
+diff --git a/codex-rs/state/src/runtime/tool_runtime.rs b/codex-rs/state/src/runtime/tool_runtime.rs
+--- a/codex-rs/state/src/runtime/tool_runtime.rs
++++ b/codex-rs/state/src/runtime/tool_runtime.rs
+@@ -23,7 +23,7 @@
+             cell_id.len() <= 1024 && scope_id.len() <= 1024,
+             "cell identity exceeds limit"
+         );
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let parent: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
+             .bind(thread_id).bind(parent_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
+         let row = sqlx::query("INSERT INTO tool_runtime_cells(thread_id, parent_request_sequence, cell_id, scope_id, owner_id, lifecycle) VALUES (?, ?, ?, ?, ?, 'live') RETURNING *")
+@@ -49,7 +49,7 @@
+         scope_id: &str,
+         owner_id: &str,
+     ) -> anyhow::Result<Option<ToolWaitFact>> {
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let waiter: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
+             .bind(thread_id).bind(waiter_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
+         let target: Option<i64> = sqlx::query_scalar("SELECT sequence FROM tool_runtime_cells WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live'")
+@@ -86,7 +86,7 @@
+         waiter: i64,
+         owner_id: &str,
+     ) -> anyhow::Result<()> {
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let row = sqlx::query("UPDATE tool_runtime_waits SET state = 'settled', revision = revision + 1 WHERE waiter_request_sequence = ? AND owner_id = ? AND state = 'waiting' AND EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND thread_id = ?) RETURNING target_cell_sequence, revision")
+             .bind(waiter).bind(owner_id).bind(waiter).bind(thread_id).fetch_one(&mut *tx).await?;
+         let fact = ToolWaitFact {
+@@ -112,7 +112,7 @@
+         scope_id: &str,
+         owner_id: &str,
+     ) -> anyhow::Result<()> {
+-        let mut tx = self.pool.begin().await?;
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+         let row = sqlx::query("UPDATE tool_runtime_cells SET lifecycle = 'closed', revision = revision + 1 WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live' RETURNING *")
+             .bind(thread_id).bind(cell_id).bind(scope_id).bind(owner_id).fetch_optional(&mut *tx).await?;
+         if let Some(row) = row {
+diff --git a/codex-rs/state/src/runtime/tool_runtime_tests.rs b/codex-rs/state/src/runtime/tool_runtime_tests.rs
+--- a/codex-rs/state/src/runtime/tool_runtime_tests.rs
++++ b/codex-rs/state/src/runtime/tool_runtime_tests.rs
+@@ -148,3 +148,46 @@
+             .all(|event| !matches!(event.fact, ToolRuntimeFact::Wait(_)))
+     );
+ }
++
++#[tokio::test]
++async fn cell_wait_creation_waits_for_the_current_writer_before_reading_its_snapshot() {
++    let home = unique_temp_dir();
++    let store = StateRuntime::init(
++        SqliteConfig::new_for_testing(home.as_path().abs()),
++        "test".into(),
++    )
++    .await
++    .unwrap();
++    let parent = request(&store, "exec").await;
++    store
++        .open_tool_cell("thread", "exec", "cell", "scope", "owner")
++        .await
++        .unwrap();
++    let waiter = request(&store, "wait").await;
++    let mut writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
++    sqlx::query("UPDATE tool_requests SET binding = binding WHERE sequence = ?")
++        .bind(parent)
++        .execute(&mut *writer)
++        .await
++        .unwrap();
++    let waiting_store = store.clone();
++    let mut waiting = tokio::spawn(async move {
++        waiting_store
++            .begin_tool_cell_wait("thread", "wait", "cell", "scope", "owner")
++            .await
++    });
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting)
++            .await
++            .is_err(),
++        "wait creation must wait for the writer instead of failing a read-to-write upgrade"
++    );
++    writer.commit().await.unwrap();
++    let fact = waiting.await.unwrap().unwrap().unwrap();
++    assert_eq!(fact.waiter_request_sequence, waiter);
++    assert_eq!(fact.state, ToolWaitState::Waiting);
++    store
++        .settle_tool_cell_wait("thread", waiter, "owner")
++        .await
++        .unwrap();
++}

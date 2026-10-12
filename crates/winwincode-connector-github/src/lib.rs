@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! GitHub App protocol adapter over the durable Integration Framework.
-
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -21,23 +19,16 @@ use winwincode_integration_core::{
     OutboundClaim, SignatureVerificationError, WebhookSignatureVerifier,
 };
 
-/// Canonical Integration Framework protocol identifier for GitHub Apps.
 pub const GITHUB_CONNECTOR_PROTOCOL: &str = "github.app.v1";
 const API_VERSION: &str = "2022-11-28";
 const USER_AGENT: &str = "WinWinCode-GitHub-Connector";
 const MAX_RESPONSE_BYTES: u64 = 2 * 1_024 * 1_024;
 const PAGE_SIZE: usize = 100;
 
-/// Canonical positive GitHub App identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubAppId(u64);
 
 impl GitHubAppId {
-    /// Builds an App identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or a value outside the JavaScript-safe integer range.
     pub fn try_new(value: u64) -> Result<Self, IntegrationError> {
         if value == 0 || value > MAX_SAFE_INTEGER {
             return Err(invalid("GitHub App identity is invalid"));
@@ -51,16 +42,10 @@ impl GitHubAppId {
     }
 }
 
-/// Canonical positive GitHub App installation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubInstallationId(u64);
 
 impl GitHubInstallationId {
-    /// Builds an installation identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or a value outside the JavaScript-safe integer range.
     pub fn try_new(value: u64) -> Result<Self, IntegrationError> {
         if value == 0 || value > MAX_SAFE_INTEGER {
             return Err(invalid("GitHub installation identity is invalid"));
@@ -74,7 +59,6 @@ impl GitHubInstallationId {
     }
 }
 
-/// Closed installation permission level.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHubPermission {
     None,
@@ -91,7 +75,6 @@ impl GitHubPermission {
     }
 }
 
-/// Permission snapshot bound to one short-lived installation token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubInstallationPermissions {
     issues: GitHubPermission,
@@ -117,14 +100,12 @@ impl GitHubInstallationPermissions {
     }
 }
 
-/// Explicit TLS root configuration for GitHub.com or GHES.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitHubTlsRoots {
     WebPki,
     Specific(Vec<Vec<u8>>),
 }
 
-/// Closed GitHub App/installation/repository configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitHubConnectorConfig {
     integration_id: IntegrationId,
@@ -139,11 +120,6 @@ pub struct GitHubConnectorConfig {
 }
 
 impl GitHubConnectorConfig {
-    /// Builds a credential-free GitHub.com or GHES connector configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identities, repository scope, URL, TLS roots, or bounds.
     pub fn try_new(
         integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
@@ -202,7 +178,6 @@ impl GitHubConnectorConfig {
     }
 }
 
-/// Stable secret-resolution error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHubCredentialErrorKind {
     Revoked,
@@ -210,7 +185,6 @@ pub enum GitHubCredentialErrorKind {
     Unavailable,
 }
 
-/// Secret-safe credential resolution error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubCredentialError {
     kind: GitHubCredentialErrorKind,
@@ -236,15 +210,9 @@ impl fmt::Display for GitHubCredentialError {
 
 impl std::error::Error for GitHubCredentialError {}
 
-/// Short-lived webhook secret; never serializable or clonable.
 pub struct GitHubWebhookSecret(Vec<u8>);
 
 impl GitHubWebhookSecret {
-    /// Builds an opaque webhook secret.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized secret material.
     pub fn try_new(value: impl AsRef<[u8]>) -> Result<Self, IntegrationError> {
         let value = value.as_ref();
         if value.is_empty() || value.len() > 4_096 {
@@ -270,7 +238,6 @@ impl Drop for GitHubWebhookSecret {
     }
 }
 
-/// Short-lived GitHub App installation token and its sealed scope snapshot.
 pub struct GitHubInstallationToken {
     token: Vec<u8>,
     app_id: GitHubAppId,
@@ -281,11 +248,6 @@ pub struct GitHubInstallationToken {
 }
 
 impl GitHubInstallationToken {
-    /// Builds a short-lived installation token returned by the credential owner.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid token bytes, repository, or expiry.
     pub fn try_new(
         token: impl AsRef<[u8]>,
         app_id: GitHubAppId,
@@ -339,23 +301,12 @@ impl Drop for GitHubInstallationToken {
     }
 }
 
-/// Credential-owner port for one App credential reference.
 pub trait GitHubCredentialPort {
-    /// Resolves the webhook secret only for signature verification.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_webhook_secret(
         &mut self,
         reference: &CredentialReferenceId,
     ) -> Result<GitHubWebhookSecret, GitHubCredentialError>;
 
-    /// Resolves one short-lived installation token scoped by App and installation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe credential error.
     fn resolve_installation_token(
         &mut self,
         reference: &CredentialReferenceId,
@@ -364,12 +315,10 @@ pub trait GitHubCredentialPort {
     ) -> Result<GitHubInstallationToken, GitHubCredentialError>;
 }
 
-/// Time authority used only for installation token expiry checks.
 pub trait GitHubClock {
     fn now_millis(&self) -> u64;
 }
 
-/// Exact GitHub webhook headers before raw-body authentication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitHubWebhookHeaders {
     delivery_id: String,
@@ -378,11 +327,6 @@ pub struct GitHubWebhookHeaders {
 }
 
 impl GitHubWebhookHeaders {
-    /// Builds a bounded GitHub webhook header set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/oversized delivery, event, or signature headers.
     pub fn try_new(
         delivery_id: impl Into<String>,
         event_type: impl Into<String>,
@@ -411,7 +355,6 @@ impl GitHubWebhookHeaders {
     }
 }
 
-/// Builds Integration Framework requests from GitHub webhook headers/body.
 #[derive(Clone, Debug)]
 pub struct GitHubWebhookRequestFactory {
     config: GitHubConnectorConfig,
@@ -423,11 +366,6 @@ impl GitHubWebhookRequestFactory {
         Self { config }
     }
 
-    /// Builds one raw request with resource-local ordering facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unsupported/non-canonical payloads or mismatched installation/repository scope.
     pub fn build(
         &self,
         scope: IntegrationScope,
@@ -456,7 +394,6 @@ impl GitHubWebhookRequestFactory {
     }
 }
 
-/// HMAC-SHA256 verifier using only the connector credential reference.
 pub struct GitHubWebhookVerifier<Credentials> {
     config: GitHubConnectorConfig,
     credentials: Credentials,
@@ -503,7 +440,6 @@ impl<Credentials: GitHubCredentialPort> WebhookSignatureVerifier
     }
 }
 
-/// Validated GitHub webhook event supplied to a business-command mapper.
 pub struct GitHubInboundEvent<'a> {
     event_type: &'a str,
     action: &'a str,
@@ -540,13 +476,7 @@ impl GitHubInboundEvent<'_> {
     }
 }
 
-/// Control Plane seam that maps a validated provider event to one formal command.
 pub trait GitHubEventMapperPort {
-    /// Maps one validated GitHub event to a canonical formal command payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns a secret-safe protocol/business mapping failure.
     fn map_event(
         &mut self,
         authority: &ConnectorAuthority,
@@ -554,7 +484,6 @@ pub trait GitHubEventMapperPort {
     ) -> Result<NormalizedInboundEvent, ConnectorCallError>;
 }
 
-/// GitHub protocol mapper and retry-stable outbound REST adapter.
 pub struct GitHubConnector<Credentials, Mapper, Clock> {
     config: GitHubConnectorConfig,
     credentials: Credentials,
@@ -564,11 +493,6 @@ pub struct GitHubConnector<Credentials, Mapper, Clock> {
 }
 
 impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
-    /// Builds a no-proxy, no-redirect, rustls-verified GitHub connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots.
     pub fn try_new(
         config: GitHubConnectorConfig,
         credentials: Credentials,
@@ -822,6 +746,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
         if let Some(remote_id) = self.lookup_marked_array(token, &path, "body", &marker)? {
             return remote_receipt("issue-comment", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -848,6 +773,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
         if let Some(remote_id) = self.lookup_marked_array(token, &path, "body", &marker)? {
             return remote_receipt("pull-request-review", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -904,6 +830,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
             "repos/{}/check-runs",
             encode_repository(&self.config.repository.0)
         );
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -1009,47 +936,65 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
             path.trim_start_matches('/')
         );
         let authorization = format!("Bearer {}", token.value());
-        let response = match (method, body) {
-            ("GET", None) => self
-                .agent
-                .get(&url)
-                .header("Accept", "application/vnd.github+json")
-                .header("Authorization", &authorization)
-                .header("User-Agent", USER_AGENT)
-                .header("X-GitHub-Api-Version", API_VERSION)
-                .call(),
-            ("POST", Some(body)) => {
-                let mut request = self
-                    .agent
-                    .post(&url)
+        let replay = if method == "GET" {
+            winwincode_network::Replay::ReplayExact
+        } else {
+            winwincode_network::Replay::ReconcileFirst
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| match (method, body) {
+                ("GET", None) => agent
+                    .get(&url)
                     .header("Accept", "application/vnd.github+json")
                     .header("Authorization", &authorization)
                     .header("User-Agent", USER_AGENT)
-                    .header("X-GitHub-Api-Version", API_VERSION);
-                if let Some(key) = idempotency_key {
-                    request = request.header("X-GitHub-Idempotency-Key", &key.0);
+                    .header("X-GitHub-Api-Version", API_VERSION)
+                    .call(),
+                ("POST", Some(body)) => {
+                    let mut request = agent
+                        .post(&url)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("Authorization", &authorization)
+                        .header("User-Agent", USER_AGENT)
+                        .header("X-GitHub-Api-Version", API_VERSION);
+                    if let Some(key) = idempotency_key {
+                        request = request.header("X-GitHub-Idempotency-Key", &key.0);
+                    }
+                    request.send_json(body)
                 }
-                request.send_json(body)
-            }
-            _ => {
-                return Err(connector_error(
-                    ConnectorCallErrorKind::Permanent,
-                    "GITHUB_REQUEST_INVALID",
-                ));
-            }
-        }
-        .map_err(|_| {
-            connector_error(
-                ConnectorCallErrorKind::Retryable,
-                "GITHUB_TRANSPORT_UNAVAILABLE",
-            )
+                _ => unreachable!("validated connector request"),
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("GITHUB_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
         })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "GITHUB_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, std::time::SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let retry_after_seconds = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+            .and_then(winwincode_network::retry_after_seconds);
         let rate_limited = status == 429
             || status == 403
                 && (response
@@ -1057,22 +1002,20 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
                     .get("x-ratelimit-remaining")
                     .is_some_and(|value| value == "0")
                     || retry_after_seconds.is_some());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "GITHUB_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             Some(serde_json::from_slice(&bytes).map_err(|_| {
-                connector_error(ConnectorCallErrorKind::Retryable, "GITHUB_RESPONSE_INVALID")
+                ConnectorCallError::from_network(
+                    "GITHUB_RESPONSE_INVALID",
+                    winwincode_network::NetworkFailure::new(
+                        winwincode_network::ErrorKind::ProtocolInvalid,
+                        winwincode_network::Acceptance::ResponseReceived,
+                        winwincode_network::Phase::Decode,
+                    ),
+                )
+                .for_replay(replay)
             })?)
         };
         Ok(GitHubResponse {

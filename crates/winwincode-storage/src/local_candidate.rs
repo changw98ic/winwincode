@@ -1,39 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server-side `LocalCandidateReceipt` ledger and the append-only
-//! `LocalApplyReceipt` history.
-//!
-//! The Device Client owns the local git facts of candidate delivery (plan 5.6,
-//! contracts 6 and 8): it freezes a candidate commit under the stable ref
-//! `refs/winwincode/candidates/<candidate-id>` before worktree cleanup and
-//! reports `client.candidate.retained`; every later "create branch / apply /
-//! discard" attempt answers with `client.candidate.apply_result`. The Control
-//! Plane is the audit authority over those client-issued receipts: this ledger
-//! stores the safe projection of the local ref state — ref name, commit, and
-//! lifecycle state — bound precisely to the Candidate product identity
-//! (receipt id, client node, repository binding, candidate ref), never an
-//! absolute filesystem path.
-//!
-//! Semantics frozen by `docs/contracts/client-control-state-machines.md`
-//! contract 6 and 8 and `schema/winwincode/v1/client-control.schema.json`:
-//!
-//! - Candidate retention is idempotent. A replay of the same receipt, or a
-//!   duplicate report of an already retained candidate ref with identical
-//!   facts, returns the original row; any field disagreement fails closed.
-//! - Every apply attempt appends exactly one `LocalApplyReceipt` row. The
-//!   rows are immutable: the module never updates or deletes them and
-//!   `BEFORE UPDATE/DELETE` triggers abort any stray write at the database
-//!   layer, so a retry appends a new receipt instead of rewriting history.
-//! - Failure outcomes use the frozen `LocalApplyResult` result codes
-//!   (`base_stale`, `working_tree_dirty`, `merge_conflict`,
-//!   `candidate_missing`, `permission_denied`, `failed`); they map to the
-//!   candidate state `failed`, which stays retryable.
-//! - `applied` and `discarded` are terminal: no further apply result can be
-//!   appended once the candidate lifecycle ended.
-//! - A successful `applied` result must carry the `resulting_commit`; a
-//!   failure or a discard must not claim one, and only a `merge_conflict`
-//!   may carry a conflict artifact reference.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -99,22 +65,12 @@ CREATE TRIGGER IF NOT EXISTS local_apply_receipts_no_delete
     END;
 ";
 
-/// Retention lifecycle of one locally frozen candidate (contract 6).
-///
-/// `applied` and `discarded` are terminal. `failed` is deliberately not
-/// terminal: every retry appends a fresh `LocalApplyReceipt` and may still
-/// reach `applied`, `branch_created`, or `discarded`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCandidateReceiptState {
-    /// The candidate commit is frozen under a stable local ref.
     Retained,
-    /// A durable local branch was created from the candidate ref.
     BranchCreated,
-    /// Terminal: the candidate reached its target branch.
     Applied,
-    /// Terminal: the candidate was discarded.
     Discarded,
-    /// The last apply attempt failed; retrying stays allowed.
     Failed,
 }
 
@@ -144,8 +100,6 @@ impl LocalCandidateReceiptState {
         }
     }
 
-    /// True once the candidate lifecycle ended; no further apply result may
-    /// be appended for a terminal candidate.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Applied | Self::Discarded)
@@ -158,17 +112,11 @@ impl fmt::Display for LocalCandidateReceiptState {
     }
 }
 
-/// Strategy the Device Client used (or attempted) to deliver the candidate
-/// onto its target branch (contract 8).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalApplyStrategy {
-    /// Create a durable local branch from the candidate ref.
     CreateBranch,
-    /// Fast-forward the target branch to the candidate commit.
     FastForward,
-    /// Cherry-pick the candidate commit onto the target branch.
     CherryPick,
-    /// Merge the candidate into the target branch.
     Merge,
 }
 
@@ -203,29 +151,17 @@ impl fmt::Display for LocalApplyStrategy {
     }
 }
 
-/// Frozen terminal outcome of one local apply attempt (contract 8). Every
-/// attempt writes exactly one receipt carrying exactly one result code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalApplyResult {
-    /// The attempt left the candidate retained: no branch, no apply.
     Retained,
-    /// The local branch was created.
     BranchCreated,
-    /// The candidate reached its target branch.
     Applied,
-    /// Fail closed: the target HEAD moved away from `expected_head`.
     BaseStale,
-    /// Fail closed: the target work tree violates the dirty policy.
     WorkingTreeDirty,
-    /// Fail closed: an isolated integration worktree reported a conflict.
     MergeConflict,
-    /// Fail closed: the candidate ref no longer resolves locally.
     CandidateMissing,
-    /// Fail closed: the user lacks the repository permission.
     PermissionDenied,
-    /// The candidate was discarded.
     Discarded,
-    /// Any other execution failure.
     Failed,
 }
 
@@ -265,8 +201,6 @@ impl LocalApplyResult {
         }
     }
 
-    /// The candidate state this result projects onto (contract 8 result-to-
-    /// state table). Failure codes all map to `failed`.
     #[must_use]
     pub const fn candidate_state(self) -> LocalCandidateReceiptState {
         match self {
@@ -283,8 +217,6 @@ impl LocalApplyResult {
         }
     }
 
-    /// True for the fail-closed result codes; they never produced a commit
-    /// and always stay retryable.
     #[must_use]
     pub const fn is_failure(self) -> bool {
         matches!(
@@ -305,11 +237,6 @@ impl fmt::Display for LocalApplyResult {
     }
 }
 
-/// Validated `client.candidate.retained` append command.
-///
-/// The `_id` and `_ref` postfixes on several fields are the frozen
-/// client-control schema vocabulary, so the lint against repeated field
-/// suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCandidateRetained {
@@ -322,13 +249,6 @@ pub struct LocalCandidateRetained {
 }
 
 impl LocalCandidateRetained {
-    /// Builds one validated retention command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical receipt, client node, and binding identities, a
-    /// candidate ref outside `refs/winwincode/candidates/`, a non-hex commit,
-    /// or a non-canonical local ref name before any durable write.
     pub fn try_new(
         local_candidate_receipt_id: impl Into<String>,
         client_node_id: impl Into<String>,
@@ -385,8 +305,6 @@ impl LocalCandidateRetained {
     }
 }
 
-/// Validated `client.candidate.apply_result` settlement command: the
-/// immutable record of exactly one local apply attempt.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalApplySettlement {
@@ -404,14 +322,6 @@ pub struct LocalApplySettlement {
 }
 
 impl LocalApplySettlement {
-    /// Builds one validated apply-result settlement.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, refs, commits, and artifact
-    /// references, an `applied` result without a resulting commit, a
-    /// resulting commit on any non-applying outcome, or a conflict artifact
-    /// reference outside a `merge_conflict` result.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         local_apply_receipt_id: impl Into<String>,
@@ -545,98 +455,53 @@ impl LocalApplySettlement {
     }
 }
 
-/// Durable `LocalCandidateReceipt` row: the safe projection of one locally
-/// frozen candidate (plan 5.6, contract 6).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCandidateReceiptRecord {
-    /// Stable client-issued retention receipt identifier.
     pub local_candidate_receipt_id: String,
-    /// The client node whose device owns the local ref.
     pub client_node_id: String,
-    /// Repository binding the candidate was produced against.
     pub repository_binding_id: String,
-    /// Stable local git ref, `refs/winwincode/candidates/<candidate-id>`.
     pub candidate_ref: String,
-    /// Frozen candidate commit (full SHA-1 or SHA-256).
     pub candidate_commit: String,
-    /// Local ref name as reported by the Device Client.
     pub local_ref_name: String,
-    /// Retention lifecycle state.
     pub state: LocalCandidateReceiptState,
-    /// Instant the retention was first recorded.
     pub created_at: Instant,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Durable `LocalApplyReceipt` row: the immutable audit record of exactly
-/// one local apply attempt (contract 8).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalApplyReceiptRecord {
-    /// Stable client-issued apply receipt identifier.
     pub local_apply_receipt_id: String,
-    /// The candidate receipt this attempt settled against.
     pub local_candidate_receipt_id: String,
-    /// The client node that executed the attempt.
     pub client_node_id: String,
-    /// Repository binding the attempt executed against.
     pub repository_binding_id: String,
-    /// Candidate ref the attempt targeted.
     pub candidate_ref: String,
-    /// Target branch of the attempt.
     pub target_branch: String,
-    /// Expected target HEAD the attempt was validated against.
     pub expected_head: String,
-    /// Delivery strategy the attempt used.
     pub strategy: LocalApplyStrategy,
-    /// Frozen terminal outcome.
     pub result: LocalApplyResult,
-    /// Commit produced by the attempt; only `applied` (and optionally
-    /// `branch_created`) carry one.
     pub resulting_commit: Option<String>,
-    /// Opaque client-local conflict artifact reference; only a
-    /// `merge_conflict` result carries one, never a filesystem path.
     pub conflict_artifact_ref: Option<String>,
-    /// Instant the attempt was settled.
     pub created_at: Instant,
-    /// Fixed at one: the row is immutable after its single insert.
     pub revision: u64,
 }
 
-/// Stable local-candidate ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCandidateStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// The client node identity does not exist.
     UnknownClientNode,
-    /// No repository binding matches the requested identity.
     UnknownRepositoryBinding,
-    /// No local candidate receipt matches the requested identity.
     UnknownLocalCandidate,
-    /// No local apply receipt matches the requested identity.
     UnknownLocalApplyReceipt,
-    /// The candidate is already retained under a different identity or with
-    /// different facts.
     LocalCandidateConflict,
-    /// The apply receipt id is already used with different fields.
     ApplyReceiptConflict,
-    /// The candidate already reached its `applied` or `discarded` terminal.
     TerminalCandidateConflict,
-    /// The settlement identity does not match the retained candidate.
     CandidateIdentityMismatch,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race that should be impossible inside
-    /// one immediate transaction.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free local-candidate ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCandidateStoreError {
     kind: LocalCandidateStoreErrorKind,
@@ -658,19 +523,11 @@ impl fmt::Display for LocalCandidateStoreError {
 
 impl std::error::Error for LocalCandidateStoreError {}
 
-/// Local candidate and apply receipt ledger borrowing the sole product-state
-/// `SQLite` authority.
 pub struct LocalCandidateLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable local candidate ledger on this same product-state
-    /// database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn local_candidate_ledger(
         &mut self,
     ) -> Result<LocalCandidateLedger<'_>, LocalCandidateStoreError> {
@@ -690,23 +547,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Records a `client.candidate.retained` report (plan 5.6, contract 6):
-    /// the candidate commit is frozen under its stable local ref and the
-    /// receipt enters the ledger as `retained`.
-    ///
-    /// The append is idempotent in both replay shapes: the same receipt id
-    /// replayed with identical facts returns the original row, and a
-    /// duplicate retention of an already retained candidate ref (even under
-    /// a fresh receipt id) also returns the original row. Any field
-    /// disagreement fails closed with a stable conflict category; the
-    /// candidate identity `(client_node_id, candidate_ref)` is enforced
-    /// durably by a unique index.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical command, an unknown client node or repository
-    /// binding, a candidate ref already retained with different facts, a
-    /// receipt id reused for a different candidate, or storage failure.
     pub fn record_retained(
         &mut self,
         retained: &LocalCandidateRetained,
@@ -760,28 +600,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         Ok(record)
     }
 
-    /// Records a `client.candidate.apply_result` settlement (contract 8) and
-    /// advances the candidate state machine in the same transaction.
-    ///
-    /// The attempt identity must match the retained candidate exactly
-    /// (client node, repository binding, and candidate ref). Every accepted
-    /// settlement appends exactly one immutable `LocalApplyReceipt` row; the
-    /// frozen result code decides the candidate state projection and
-    /// failure codes keep the candidate retryable. A replay of an already
-    /// settled receipt id with identical fields is an accepted idempotent
-    /// no-op that returns the stored rows unchanged. `applied` and
-    /// `discarded` candidates refuse any further settlement.
-    ///
-    /// Returns the immutable apply receipt plus the candidate receipt in its
-    /// post-settlement state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical command, an unknown candidate, an identity
-    /// mismatch against the retained candidate, an apply receipt id reused
-    /// with different fields, a terminal candidate, a result that is not a
-    /// legal projection of the candidate's current state, or storage
-    /// failure.
     pub fn record_apply_result(
         &mut self,
         settlement: &LocalApplySettlement,
@@ -870,12 +688,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         Ok((apply_receipt, candidate))
     }
 
-    /// Returns one durable local candidate receipt projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity, corrupt stored rows, or
-    /// storage failure.
     pub fn candidate_snapshot(
         &self,
         local_candidate_receipt_id: &str,
@@ -884,13 +696,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         load_candidate(self.connection()?, local_candidate_receipt_id)
     }
 
-    /// Returns the candidate receipt for one client-local candidate ref, if
-    /// any. This is the lookup the Device Client exchange identities use.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or candidate ref, or
-    /// storage failure.
     pub fn candidate_for_ref(
         &self,
         client_node_id: &str,
@@ -901,11 +706,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         load_candidate_by_ref(self.connection()?, client_node_id, candidate_ref)
     }
 
-    /// Returns one immutable local apply receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity or storage failure.
     pub fn apply_receipt(
         &self,
         local_apply_receipt_id: &str,
@@ -914,13 +714,6 @@ impl<'storage> LocalCandidateLedger<'storage> {
         load_apply(self.connection()?, local_apply_receipt_id)
     }
 
-    /// Returns the full immutable apply history of one candidate, oldest
-    /// first, ordered deterministically by settlement instant then receipt
-    /// id. History rows are never rewritten by later settlements.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical receipt identity or storage failure.
     pub fn apply_history_for_candidate(
         &self,
         local_candidate_receipt_id: &str,
@@ -977,20 +770,12 @@ impl<'storage> LocalCandidateLedger<'storage> {
     }
 }
 
-/// Rejects an apply result whose projection is not legal from the
-/// candidate's current state (contract 6 legal transition table).
 fn ensure_legal_projection(
     candidate: &LocalCandidateReceiptRecord,
     result: LocalApplyResult,
 ) -> Result<(), LocalCandidateStoreError> {
     let legal = match result {
-        // A retained outcome confirms the candidate is still merely
-        // retained; no other state projects back to `retained`.
         LocalApplyResult::Retained => candidate.state == LocalCandidateReceiptState::Retained,
-        // Branch creation, application, discarding, and every failure code
-        // stay reachable from every non-terminal state — contract 6 keeps
-        // `failed` retryable up to `applied` / `branch_created` /
-        // `discarded`. Terminal states were already refused above.
         _ => !candidate.state.is_terminal(),
     };
     if legal {
@@ -1006,9 +791,6 @@ fn ensure_legal_projection(
     ))
 }
 
-/// Judges the retention owners inside the caller's transaction so an unknown
-/// identity reports precisely instead of masking as a foreign-key failure.
-/// The durable foreign keys remain the race backstop.
 fn ensure_retention_owners(
     transaction: &Transaction<'_>,
     retained: &LocalCandidateRetained,
@@ -1038,8 +820,6 @@ fn ensure_retention_owners(
     Ok(())
 }
 
-/// Ensures a replayed or duplicate retention matches the stored candidate
-/// identity exactly.
 fn ensure_candidate_identity(
     existing: &LocalCandidateReceiptRecord,
     retained: &LocalCandidateRetained,
@@ -1058,8 +838,6 @@ fn ensure_candidate_identity(
     ))
 }
 
-/// Ensures a duplicate retention under a fresh receipt id still describes
-/// the same frozen candidate facts.
 fn ensure_candidate_facts(
     existing: &LocalCandidateReceiptRecord,
     retained: &LocalCandidateRetained,
@@ -1076,8 +854,6 @@ fn ensure_candidate_facts(
     ))
 }
 
-/// Ensures the settlement names exactly the retained candidate identity:
-/// precise Candidate product binding (plan 5.6).
 fn ensure_settlement_binding(
     candidate: &LocalCandidateReceiptRecord,
     settlement: &LocalApplySettlement,
@@ -1094,7 +870,6 @@ fn ensure_settlement_binding(
     ))
 }
 
-/// Ensures a replayed settlement matches the stored immutable receipt.
 fn ensure_settlement_fields(
     existing: &LocalApplyReceiptRecord,
     settlement: &LocalApplySettlement,
@@ -1411,8 +1186,6 @@ const fn is_crockford_base32(byte: u8) -> bool {
     )
 }
 
-/// Validates the frozen `CandidateRef` shape:
-/// `refs/winwincode/candidates/<candidate-id>`.
 fn validate_candidate_ref(value: &str) -> Result<(), LocalCandidateStoreError> {
     const PREFIX: &str = "refs/winwincode/candidates/";
     let Some(suffix) = value.strip_prefix(PREFIX) else {
@@ -1431,8 +1204,6 @@ fn validate_candidate_ref(value: &str) -> Result<(), LocalCandidateStoreError> {
     }
 }
 
-/// Validates the frozen `GitCommitSha` shape: full SHA-1 or SHA-256, lower
-/// case hex.
 fn validate_commit_sha(value: &str, label: &str) -> Result<(), LocalCandidateStoreError> {
     let valid = (value.len() == 40 || value.len() == 64)
         && value
@@ -1445,8 +1216,6 @@ fn validate_commit_sha(value: &str, label: &str) -> Result<(), LocalCandidateSto
     }
 }
 
-/// Validates the frozen `GitRefName` shape as accepted by
-/// `git check-ref-format`; git itself enforces the full ref rules.
 fn validate_git_ref_name(value: &str, label: &str) -> Result<(), LocalCandidateStoreError> {
     let valid = !value.is_empty()
         && value.len() <= MAX_REF_BYTES
@@ -1461,8 +1230,6 @@ fn validate_git_ref_name(value: &str, label: &str) -> Result<(), LocalCandidateS
     }
 }
 
-/// Validates the frozen conflict artifact reference shape: an opaque
-/// client-local reference that can never be a filesystem path.
 fn validate_conflict_artifact_ref(value: &str) -> Result<(), LocalCandidateStoreError> {
     let valid = !value.is_empty()
         && value.len() <= MAX_ARTIFACT_REF_BYTES
@@ -1479,7 +1246,6 @@ fn validate_conflict_artifact_ref(value: &str) -> Result<(), LocalCandidateStore
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), LocalCandidateStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1515,8 +1281,6 @@ fn map_candidate_insert_sql(sql: &rusqlite::Error) -> LocalCandidateStoreError {
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the one-identity-per-candidate
-            // index; the foreign keys name their missing owner precisely.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 LocalCandidateStoreErrorKind::LocalCandidateConflict,
                 "candidate ref is already retained for this client node",
@@ -1656,8 +1420,6 @@ mod tests {
 
     fn temporary_directory(name: &str) -> PathBuf {
         let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        // Wall-clock nanos keep the directory unique even when the operating
-        // system reuses a previous run's process id.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -1896,7 +1658,6 @@ mod tests {
             )
             .is_ok()
         );
-        // An applied result without a resulting commit is rejected.
         assert!(
             try_settlement_command(
                 5,
@@ -1910,7 +1671,6 @@ mod tests {
             )
             .is_err()
         );
-        // A failure result must not claim a resulting commit.
         assert!(
             try_settlement_command(
                 5,
@@ -1924,7 +1684,6 @@ mod tests {
             )
             .is_err()
         );
-        // Only a merge conflict may carry a conflict artifact reference.
         assert!(
             try_settlement_command(
                 5,
@@ -1938,7 +1697,6 @@ mod tests {
             )
             .is_err()
         );
-        // A filesystem-looking artifact reference is rejected.
         assert!(
             try_settlement_command(
                 5,
@@ -2020,7 +1778,6 @@ mod tests {
         assert_eq!(first.state, LocalCandidateReceiptState::Retained);
         assert_eq!(first.revision, 1);
 
-        // Exact replay returns the original row unchanged.
         let replay = {
             let mut ledger = storage.local_candidate_ledger().expect("ledger");
             ledger
@@ -2030,8 +1787,6 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(replay.revision, 1);
 
-        // A duplicate report of the same candidate under a fresh receipt id
-        // is also idempotent.
         let duplicate = retained_command(21, node.as_str(), binding.as_str(), 30, COMMIT);
         let merged = {
             let mut ledger = storage.local_candidate_ledger().expect("ledger");
@@ -2041,7 +1796,6 @@ mod tests {
         };
         assert_eq!(first, merged);
 
-        // Different facts for the same candidate ref fail closed.
         let conflicting = retained_command(22, node.as_str(), binding.as_str(), 30, OTHER_COMMIT);
         let mut ledger = storage.local_candidate_ledger().expect("ledger");
         let error = ledger
@@ -2096,8 +1850,6 @@ mod tests {
         }
         let receipt = command.local_candidate_receipt_id().to_owned();
 
-        // First attempt fails base-stale, then a branch is created, then the
-        // candidate applies. Each attempt appends exactly one receipt.
         let attempts = [
             (
                 40_u64,
@@ -2156,7 +1908,6 @@ mod tests {
             .expect("candidate");
         assert_eq!(candidate.state, LocalCandidateReceiptState::Applied);
 
-        // The terminal candidate refuses any further settlement.
         let late = settlement_command(
             43,
             receipt.as_str(),
@@ -2205,9 +1956,6 @@ mod tests {
                 .expect("settlement");
         }
 
-        // The stored history rows are immutable: a stray UPDATE or DELETE at
-        // the database layer is aborted by the durable triggers, so no later
-        // settlement can ever rewrite an older attempt.
         for sql in [
             "UPDATE local_apply_receipts SET result = 'failed' WHERE local_apply_receipt_id = ?1",
             "DELETE FROM local_apply_receipts WHERE local_apply_receipt_id = ?1",
@@ -2246,8 +1994,6 @@ mod tests {
         }
         let receipt = command.local_candidate_receipt_id().to_owned();
 
-        // A merge conflict keeps the candidate failed but records the
-        // conflict artifact reference.
         let conflict = settlement_command(
             44,
             receipt.as_str(),
@@ -2271,7 +2017,6 @@ mod tests {
         };
         assert_eq!(candidate.state, LocalCandidateReceiptState::Failed);
 
-        // Replaying the same settlement is an accepted idempotent no-op.
         let (replay, replay_candidate) = {
             let mut ledger = storage.local_candidate_ledger().expect("ledger");
             ledger
@@ -2281,7 +2026,6 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(replay_candidate.state, LocalCandidateReceiptState::Failed);
 
-        // The same receipt id with different fields fails closed.
         let mutated = settlement_command(
             44,
             receipt.as_str(),
@@ -2301,7 +2045,6 @@ mod tests {
             LocalCandidateStoreErrorKind::ApplyReceiptConflict
         );
 
-        // Retry after failure succeeds: failed -> applied is legal.
         let retry = settlement_command(
             45,
             receipt.as_str(),
@@ -2341,7 +2084,6 @@ mod tests {
         let receipt = command.local_candidate_receipt_id().to_owned();
         let mut ledger = storage.local_candidate_ledger().expect("ledger");
 
-        // Unknown candidate identity is reported precisely.
         let unknown = settlement_command(
             46,
             candidate_id(999).as_str(),
@@ -2360,7 +2102,6 @@ mod tests {
             LocalCandidateStoreErrorKind::UnknownLocalCandidate
         );
 
-        // A settlement naming another binding does not match the candidate.
         let foreign = settlement_command(
             47,
             receipt.as_str(),
@@ -2379,7 +2120,6 @@ mod tests {
             LocalCandidateStoreErrorKind::CandidateIdentityMismatch
         );
 
-        // A settlement naming another candidate ref does not match either.
         let other_ref = settlement_command(
             48,
             receipt.as_str(),
@@ -2414,7 +2154,6 @@ mod tests {
         }
         let receipt = command.local_candidate_receipt_id().to_owned();
 
-        // branch_created moves the candidate out of plain `retained`.
         let branch = settlement_command(
             49,
             receipt.as_str(),
@@ -2433,8 +2172,6 @@ mod tests {
         };
         assert_eq!(candidate.state, LocalCandidateReceiptState::BranchCreated);
 
-        // A `retained` outcome is only a projection of the plain `retained`
-        // state and is not legal from `branch_created`.
         let retained_outcome = settlement_command(
             50,
             receipt.as_str(),
@@ -2454,7 +2191,6 @@ mod tests {
             LocalCandidateStoreErrorKind::IllegalStateTransition
         );
 
-        // Candidate lookups agree across both identities.
         let ledger = storage.local_candidate_ledger().expect("ledger");
         let by_ref = ledger
             .candidate_for_ref(node.as_str(), candidate_ref(37).as_str())

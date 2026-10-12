@@ -29,7 +29,6 @@ function scalarAt(value, index) {
   return { scalar: first, width: 1 }
 }
 
-/** Encodes one string token under the `winwincode-export/v1` canonical JSON rules. */
 export function canonicalJsonString(value) {
   if (typeof value !== 'string') throw new TypeError('canonical JSON value must be a string')
 
@@ -46,7 +45,6 @@ export function canonicalJsonString(value) {
   return `${encoded}"`
 }
 
-/** Compares strings by Unicode scalar value, independently of JavaScript's UTF-16 ordering. */
 export function compareUnicodeScalars(left, right) {
   let leftIndex = 0
   let rightIndex = 0
@@ -90,7 +88,6 @@ function canonicalContent(content) {
     + `"projects":[${projects.map(canonicalProject).join(',')}]}`
 }
 
-/** Produces the exact bytes hashed for `contentSha256`. */
 export function canonicalWinWinCodeExportDigestMaterialBytes(document) {
   const encoded = `{"format":${canonicalJsonString(document.format)},`
     + `"exportId":${canonicalJsonString(document.exportId)},`
@@ -98,7 +95,6 @@ export function canonicalWinWinCodeExportDigestMaterialBytes(document) {
   return utf8Encoder.encode(encoded)
 }
 
-/** Produces the exact complete canonical document bytes. */
 export function canonicalWinWinCodeExportBytes(document) {
   const encoded = `{"format":${canonicalJsonString(document.format)},`
     + `"exportId":${canonicalJsonString(document.exportId)},`
@@ -107,7 +103,6 @@ export function canonicalWinWinCodeExportBytes(document) {
   return utf8Encoder.encode(encoded)
 }
 
-/** Applies the byte gate and rejects another serialization of the same JSON value. */
 export function decodeCanonicalWinWinCodeExportJson(bytes) {
   const document = parseBoundedWinWinCodeExportJson(bytes)
   const canonical = canonicalWinWinCodeExportBytes(document)

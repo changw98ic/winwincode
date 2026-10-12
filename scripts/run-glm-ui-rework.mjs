@@ -1,11 +1,5 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-/**
- * GLM UI rework vertical on the Device-only production path.
- *
- * Real GLM secrets are Device-local only. The Server never receives
- * WWC_SERVER_MODEL_* variables.
- */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
@@ -25,8 +19,6 @@ const sourcePaths = execFileSync('git', ['ls-files', '-z', '--',
   'apps/client/src', 'apps/client/public', 'packages/browser-ui/src',
   'packages/browser-core/src'], { encoding: 'utf8' }).split('\0').filter(Boolean)
 const files = Object.fromEntries(sourcePaths.map(path => [path, readFileSync(path, 'utf8')]))
-// An explicit captured baseline permits replay after the generated CSS was applied.
-// It changes only the verification checkout, never the application's source file.
 const replayArguments = process.argv.slice(2)
 assert.ok(replayArguments.length === 0 || (replayArguments.length === 2 && replayArguments[0] === '--baseline-css'), 'Usage: run-glm-ui-rework.mjs [--baseline-css captured-before-chat.css]')
 if (replayArguments.length) files[targetPath] = readFileSync(resolve(replayArguments[1]), 'utf8')
@@ -83,6 +75,11 @@ try {
     devicePrerequisites: true,
     deviceRoute,
     deviceProviderSecrets,
+    deviceProvider: {
+      ...deviceRoute,
+      endpoint: `${url.href.replace(/\/$/u, '')}/v1/messages`,
+      displayName: 'GLM live acceptance',
+    },
     wwcBinary: process.env.WWC_CLI_BINARY ?? resolve('target/debug/wwc'),
     serverEnvironment,
     timeoutMillis: 600_000,

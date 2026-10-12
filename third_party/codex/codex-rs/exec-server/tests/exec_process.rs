@@ -97,8 +97,10 @@ async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
     }
 
     let context = create_process_context(/*use_remote*/ true).await?;
-    let workspace = TempDir::new()?;
-    let outside_workspace = TempDir::new()?;
+    // Process Minimal intentionally grants scratch access; use an owned non-scratch root.
+    let fixture_root = TempDir::new_in(std::env::current_dir()?)?;
+    let workspace = TempDir::new_in(fixture_root.path())?;
+    let outside_workspace = TempDir::new_in(fixture_root.path())?;
     let denied_file = outside_workspace.path().join("denied.txt");
     std::fs::write(&denied_file, b"denied")?;
     let cwd = PathUri::from_host_native_path(workspace.path())?;

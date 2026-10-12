@@ -1039,3 +1039,73 @@ fn outbound_adapter_credential_revocation_atomically_dead_letters_and_revokes() 
     drop(framework);
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn offline_budget_and_unknown_write_fence_survive_restart() {
+    use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase, Replay};
+    let root = temporary_directory("network-budget");
+    let integration = integration_id('D');
+    let scope = integration_scope('1', '4');
+    let request = outbound(
+        integration.clone(),
+        scope.clone(),
+        "network-budget",
+        RetryPolicy::try_new(2, 10, 40).unwrap(),
+        100,
+    );
+    let mut storage = IntegrationStorage::open(&root).unwrap();
+    storage
+        .register(&registration(integration.clone(), scope.clone(), '5'))
+        .unwrap();
+    storage.enqueue_outbound(&request).unwrap();
+    let mut now = 100;
+    for _ in 0..6 {
+        let claim = storage
+            .claim_due(&scope, &integration, now, lease('D'), now + 1000)
+            .unwrap()
+            .unwrap();
+        let error = ConnectorCallError::from_network(
+            "OFFLINE",
+            NetworkFailure::new(
+                ErrorKind::ConnectionUnavailable,
+                Acceptance::NotSent,
+                Phase::Connect,
+            ),
+        )
+        .for_replay(Replay::ReconcileFirst);
+        let OutboundAttemptResult::RetryScheduled(operation) =
+            storage.record_failure(&scope, &claim, &error, now).unwrap()
+        else {
+            panic!("offline consumed ordinary budget")
+        };
+        now = operation.eligible_at_millis();
+        drop(storage);
+        storage = IntegrationStorage::open(&root).unwrap();
+    }
+    let claim = storage
+        .claim_due(&scope, &integration, now, lease('D'), now + 1000)
+        .unwrap()
+        .unwrap();
+    assert!(!claim.requires_reconciliation());
+    let unknown = ConnectorCallError::from_network(
+        "UNKNOWN_WRITE",
+        NetworkFailure::new(ErrorKind::Timeout, Acceptance::Unknown, Phase::ResponseBody),
+    );
+    let OutboundAttemptResult::RetryScheduled(operation) = storage
+        .record_failure(&scope, &claim, &unknown, now)
+        .unwrap()
+    else {
+        panic!("expected reconciliation pass")
+    };
+    now = operation.eligible_at_millis();
+    drop(storage);
+    storage = IntegrationStorage::open(&root).unwrap();
+    let claim = storage
+        .claim_due(&scope, &integration, now, lease('D'), now + 1000)
+        .unwrap()
+        .unwrap();
+    assert!(claim.requires_reconciliation());
+    assert!(claim.require_new_write_authority().is_err());
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}

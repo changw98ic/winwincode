@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { chromeBinary, DevTools, evaluate, freePort, stopChild } from './fixtures/real-browser-harness.mjs'
 
-// A stylesheet component check, not a substitute for the full Chat browser flow.
 test('Sidebar session links render a 48px touch target with keyboard focus', async t => {
   const chromePath = chromeBinary()
   assert.ok(chromePath, 'Chrome or Chromium is required')

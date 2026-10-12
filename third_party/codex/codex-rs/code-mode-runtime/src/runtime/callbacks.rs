@@ -72,6 +72,45 @@ pub(super) fn tool_callback(
     retval.set(promise.into());
 }
 
+pub(super) fn tool_definition_callback(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue<v8::Value>,
+) {
+    if args.length() != 1 || !args.get(0).is_string() {
+        throw_type_error(scope, "toolDefinition expects one tool name string");
+        return;
+    }
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let definition = scope.get_slot::<RuntimeState>().and_then(|state| {
+        state
+            .enabled_tools
+            .iter()
+            .find(|tool| tool.global_name == name)
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.global_name,
+                    "description": tool.description,
+                    "kind": tool.kind,
+                    "input_schema": tool.input_schema,
+                    "output_schema": tool.output_schema,
+                })
+            })
+    });
+    let Some(definition) = definition else {
+        throw_type_error(
+            scope,
+            "toolDefinition name is not in the authorized tool catalog",
+        );
+        return;
+    };
+    let Some(value) = json_to_v8(scope, &definition) else {
+        throw_type_error(scope, "failed to serialize tool definition");
+        return;
+    };
+    retval.set(value);
+}
+
 pub(super) fn text_callback(
     scope: &mut v8::PinScope<'_, '_>,
     args: v8::FunctionCallbackArguments,

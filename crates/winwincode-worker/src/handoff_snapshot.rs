@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded advisory state used to resume an interrupted Worker task.
-
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
@@ -17,63 +15,42 @@ use crate::workspace_runtime::DelegatedBatchHistory;
 const MAX_GIT_STATUS_BYTES: usize = 256 * 1024;
 const MAX_DIRTY_ENTRIES: usize = 100;
 
-/// Current task shown in an advisory recovery snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HandoffCurrentTask {
-    /// Exact execution Job.
     pub execution_job_id: ExecutionJobId,
-    /// Exact `WorkItem` when this is a `WorkRun` job.
     pub work_item_id: Option<WorkItemId>,
-    /// Bounded task title.
     pub title: String,
-    /// Bounded task goal.
     pub goal: String,
 }
 
-/// Acceptance-criterion progress rebuilt from durable `ChangeBatch` receipts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HandoffCriterionProgress {
-    /// Criteria covered by accepted batches.
     pub completed: Vec<CriterionId>,
-    /// Criteria named by the current unsettled batch.
     pub current: Vec<CriterionId>,
-    /// Criteria not yet covered by an accepted or current batch.
     pub remaining: Vec<CriterionId>,
 }
 
-/// Bounded Git working-tree summary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HandoffDirtySummary {
-    /// Total entries reported by Git.
     pub total_entries: usize,
-    /// First bounded set of Git short-status entries.
     pub entries: Vec<String>,
-    /// Whether entries were omitted from this advisory view.
     pub truncated: bool,
 }
 
-/// Complete non-authoritative Worker recovery hint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct WorkerHandoffSnapshot {
-    /// This value is always false; Controller facts remain authoritative.
     pub canonical_fact: bool,
-    /// Current active task.
     pub current_task: HandoffCurrentTask,
-    /// Receipt-derived criterion progress.
     pub progress: HandoffCriterionProgress,
-    /// Exact current Git commit.
     pub git_head: String,
-    /// Bounded current Git status.
     pub dirty: HandoffDirtySummary,
-    /// Most recent validation check whose name identifies a test.
     pub last_test: Option<ValidationCheckSummary>,
 }
 
-/// Secret-free handoff snapshot failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HandoffSnapshotError;
 
@@ -85,11 +62,6 @@ impl fmt::Display for HandoffSnapshotError {
 
 impl std::error::Error for HandoffSnapshotError {}
 
-/// Builds one bounded recovery hint from the live checkout and durable receipts.
-///
-/// # Errors
-///
-/// Rejects unavailable Git state or an oversized/non-UTF-8 status result.
 pub fn build_worker_handoff_snapshot(
     active: &ActiveJob,
     checkout: &Path,

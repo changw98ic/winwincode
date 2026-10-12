@@ -14,20 +14,11 @@ use super::{
     portable_identifier, positive, safe_non_negative, schema_version, validation_error,
 };
 
-/// Exact link between a canonical `WorkRun` and separately owned sessions.
-///
-/// Product, Delivery, contract, item, `WorkRun`, and `ExecutionJob` identities are immutable.
-/// `WorkerSession` and `CodexThread` are filled only when their respective owners
-/// report them. There is deliberately no generic `sessionId` or legacy DSH
-/// session field in the canonical Rust model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionBindingSourceKind {
-    /// The Control Plane created the pending binding with workrun.start.
     WorkRunStart,
-    /// The Controller appended a `WorkRun` using a verified dispatch proof.
     WorkRunDispatch,
-    /// A Worker reported the binding through the typed `ExecutionPort`.
     ExecutionPort,
 }
 
@@ -57,12 +48,6 @@ pub struct SessionRuntimeContext {
     pub workspace: SessionWorkspace,
 }
 
-/// Immutable provenance for the source that established the binding facts.
-///
-/// The source is deliberately separate from the four session identities. A
-/// binding can be created by a Delivery dispatch and later completed by a
-/// Worker message, but it must retain which typed seam supplied its current
-/// authority instead of accepting an unqualified string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionBindingSourceProvenance {
@@ -137,42 +122,23 @@ pub struct SessionBinding {
     pub product_session_id: ProductSessionId,
     pub execution_job_id: ExecutionJobId,
     #[serde(deserialize_with = "super::deserialize_required_option")]
-    /// Execution profile copied from the accepted queue Job by the Store.
-    /// Pending delivery bindings intentionally have no profile until a
-    /// verified `WorkRun` dispatch is appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_profile: Option<String>,
-    /// Secret-free immutable Agent, Provider, and detached Workspace facts.
-    /// Pending bindings receive this only with the accepted `CodexThread`.
     pub runtime_context: Option<SessionRuntimeContext>,
     pub worker_session_id: Option<WorkerSessionId>,
     #[serde(deserialize_with = "super::deserialize_required_option")]
     pub codex_thread_id: Option<CodexThreadId>,
-    /// Scheduler Worker identity associated with the current lease. It is
-    /// pending until a Worker binding is accepted.
     pub worker_id: Option<WorkerId>,
-    /// Worker process boot identity associated with the current lease.
     pub worker_instance_id: Option<WorkerInstanceId>,
-    /// Lease that fenced the Worker session and Codex thread.
     pub lease_id: Option<LeaseId>,
-    /// Attempt that owns this binding in the canonical `WorkRun`.
     pub attempt: u64,
-    /// Monotonic scheduler fencing token for the lease.
     pub fencing_token: Option<FencingToken>,
-    /// Typed source and reference for the binding facts.
     pub source_provenance: SessionBindingSourceProvenance,
     pub bound_at_millis: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl SessionBinding {
-    /// Builds a deterministic complete authority for a test-only fixture.
-    /// Production callers receive authority from the typed Control Plane
-    /// message path instead of constructing persisted binding facts.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a SHA-256 digest does not contain the required 16-byte prefix.
     #[must_use]
     pub fn with_test_authority(mut self, seed: &str, attempt: u64) -> Self {
         let digest = Sha256::digest(seed.as_bytes());

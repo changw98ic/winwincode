@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Authenticated Worker claim lifecycle over the canonical local stores.
-
 use std::{fmt, path::Path};
 
 use sha2::{Digest, Sha256};
@@ -14,7 +12,6 @@ use winwincode_storage::{
     LeaseWriteStatus, SqliteStorage, StorageError, WorkerRegistryScope, WorkerSlotState,
 };
 
-/// Stable production Worker lifecycle failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerExecutionLifecycleErrorKind {
     Authority,
@@ -22,7 +19,6 @@ pub enum WorkerExecutionLifecycleErrorKind {
     Storage,
 }
 
-/// Secret-free production Worker lifecycle error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerExecutionLifecycleError {
     kind: WorkerExecutionLifecycleErrorKind,
@@ -53,17 +49,11 @@ impl From<StorageError> for WorkerExecutionLifecycleError {
     }
 }
 
-/// Local production composition for authenticated Worker claims.
 pub struct DurableWorkerExecutionLifecycle {
     storage: SqliteStorage,
 }
 
 impl DurableWorkerExecutionLifecycle {
-    /// Opens and verifies the canonical queue, admission, and Registry stores.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded storage failure when the local database is unavailable.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, WorkerExecutionLifecycleError> {
         let mut storage = SqliteStorage::open(data_directory).map_err(storage_error)?;
         storage.execution_queue().map_err(storage_error)?;
@@ -72,13 +62,6 @@ impl DurableWorkerExecutionLifecycle {
         Ok(Self { storage })
     }
 
-    /// Claims a durable Job after joining its queue, admission, Worker, and
-    /// transport-authenticated placement authority.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for missing or changed authority, unavailable stores, or
-    /// Registry rejection. Registry rejection also releases local admission.
     pub fn claim(
         &mut self,
         claim: &ExecutionLeaseClaim,
@@ -150,30 +133,124 @@ impl DurableWorkerExecutionLifecycle {
         ))
     }
 
-    /// Settles local admission for an authenticated successful Worker outcome.
-    /// Embedded executions have no authenticated placement and return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing Usage, changed placement, stale session authority, or
-    /// a non-successful outcome.
+    #[allow(clippy::too_many_lines)]
     pub fn settle_terminal_outcome(
         &mut self,
         message: &JobOutcomeMessage,
     ) -> Result<Option<ExecutionAdmissionReceipt>, WorkerExecutionLifecycleError> {
-        if message.outcome.status != ExecutionOutcomeStatus::Succeeded {
-            return Err(authority_error());
-        }
         if !self.matches_authenticated_placement(message)? {
             return Ok(None);
         }
-        let usage = message.outcome.usage.as_ref().ok_or_else(authority_error)?;
+        let trusted = self
+            .storage
+            .execution_admission()
+            .map_err(admission_error)?
+            .load_reservation_by_job(&message.lease.job_id)
+            .map_err(admission_error)?
+            .ok_or_else(authority_error)?;
+        let mut usage = if let Some(usage) = &message.outcome.usage {
+            usage.clone()
+        } else {
+            winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(
+                trusted_execution_runtime_millis(&trusted, &message.outcome.finished_at)?,
+                0,
+            )
+        };
+        require_terminal_authority(
+            &mut self.storage,
+            &WorkerUsageSettlement {
+                outcome_status: message.outcome.status.clone(),
+                job_id: message.lease.job_id.clone(),
+                worker_session_id: message.worker_session_id.clone(),
+                request_id: stable_request_id("terminal-authority", &message.message_id.0),
+                actual_tokens: u64::try_from(usage.known_tokens).map_err(|_| authority_error())?,
+                actual_cost_microunits: usage
+                    .cost_microunits
+                    .map(u64::try_from)
+                    .transpose()
+                    .map_err(|_| authority_error())?,
+                actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                    .map_err(|_| authority_error())?,
+                completed_at: message.outcome.finished_at.clone(),
+            },
+        )?;
+        usage = self
+            .storage
+            .combine_execution_attempt_usage(&message.lease, &usage)
+            .map_err(|_| authority_error())?;
+        if self
+            .storage
+            .execution_has_unknown_predecessor(&message.lease.job_id)
+            .map_err(|_| authority_error())?
+        {
+            usage.runtime_millis =
+                trusted_execution_runtime_millis(&trusted, &message.outcome.finished_at)?;
+        }
+        if !winwincode_execution_port::usage::valid_usage(&usage) {
+            return Err(authority_error());
+        }
+        if usage.tokens.is_none() {
+            let current = require_terminal_authority(
+                &mut self.storage,
+                &WorkerUsageSettlement {
+                    outcome_status: message.outcome.status.clone(),
+                    job_id: message.lease.job_id.clone(),
+                    worker_session_id: message.worker_session_id.clone(),
+                    request_id: stable_request_id("terminal-unknown", &message.message_id.0),
+                    actual_tokens: u64::try_from(usage.known_tokens)
+                        .map_err(|_| authority_error())?,
+                    actual_cost_microunits: usage
+                        .cost_microunits
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| authority_error())?,
+                    actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                        .map_err(|_| authority_error())?,
+                    completed_at: message.outcome.finished_at.clone(),
+                },
+            )?;
+            let expected_revision = if current.state == ExecutionReservationState::Released {
+                current
+                    .revision
+                    .checked_sub(1)
+                    .ok_or_else(authority_error)?
+            } else {
+                current.revision
+            };
+            return self
+                .storage
+                .execution_admission()
+                .map_err(admission_error)?
+                .release_with_unknown_usage(
+                    &ExecutionReservationRelease {
+                        scope: current.scope,
+                        worker_pool_id: current.worker_pool_id,
+                        job_id: current.job_id,
+                        request_id: stable_request_id("terminal-unknown", &message.message_id.0),
+                        expected_revision,
+                        reason: if message.outcome.status == ExecutionOutcomeStatus::Cancelled {
+                            ExecutionReservationReleaseReason::Cancelled
+                        } else {
+                            ExecutionReservationReleaseReason::Failed
+                        },
+                        released_at: message.outcome.finished_at.clone(),
+                    },
+                    &usage,
+                )
+                .map(Some)
+                .map_err(admission_error);
+        }
         self.settle_usage(&WorkerUsageSettlement {
+            outcome_status: message.outcome.status.clone(),
             job_id: message.lease.job_id.clone(),
             worker_session_id: message.worker_session_id.clone(),
             request_id: stable_request_id("terminal-settle", &message.message_id.0),
-            actual_tokens: u64::try_from(usage.tokens).map_err(|_| authority_error())?,
-            actual_cost_microunits: u64::try_from(usage.cost_microunits)
+            actual_tokens: u64::try_from(usage.tokens.ok_or_else(authority_error)?)
+                .map_err(|_| authority_error())?,
+            actual_cost_microunits: usage
+                .cost_microunits
+                .map(u64::try_from)
+                .transpose()
                 .map_err(|_| authority_error())?,
             actual_runtime_millis: u64::try_from(usage.runtime_millis)
                 .map_err(|_| authority_error())?,
@@ -182,13 +259,6 @@ impl DurableWorkerExecutionLifecycle {
         .map(Some)
     }
 
-    /// Releases local admission for an authenticated failed or cancelled
-    /// Worker outcome. Embedded executions return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects successful outcomes, changed placement, changed replay, or
-    /// unavailable durable state.
     pub fn release_terminal_outcome(
         &mut self,
         message: &JobOutcomeMessage,
@@ -200,16 +270,8 @@ impl DurableWorkerExecutionLifecycle {
             }
             ExecutionOutcomeStatus::Succeeded => return Err(authority_error()),
         };
-        if !self.matches_authenticated_placement(message)? {
-            return Ok(None);
-        }
-        self.release_admission(
-            &message.lease.job_id,
-            stable_request_id("terminal-release", &message.message_id.0),
-            reason,
-            message.outcome.finished_at.clone(),
-        )
-        .map(Some)
+        let _ = reason;
+        self.settle_terminal_outcome(message)
     }
 
     fn matches_authenticated_placement(
@@ -268,45 +330,6 @@ impl DurableWorkerExecutionLifecycle {
         }
     }
 
-    fn release_admission(
-        &mut self,
-        job_id: &ExecutionJobId,
-        request_id: RequestId,
-        reason: ExecutionReservationReleaseReason,
-        released_at: Instant,
-    ) -> Result<ExecutionAdmissionReceipt, WorkerExecutionLifecycleError> {
-        let current = self
-            .storage
-            .execution_admission()
-            .map_err(admission_error)?
-            .load_reservation_by_job(job_id)
-            .map_err(admission_error)?
-            .ok_or_else(authority_error)?;
-        let expected_revision = match current.state {
-            ExecutionReservationState::Queued | ExecutionReservationState::Running => {
-                current.revision
-            }
-            ExecutionReservationState::Released => current
-                .revision
-                .checked_sub(1)
-                .ok_or_else(authority_error)?,
-            ExecutionReservationState::Settled => return Err(authority_error()),
-        };
-        self.storage
-            .execution_admission()
-            .map_err(admission_error)?
-            .release(&ExecutionReservationRelease {
-                scope: current.scope,
-                worker_pool_id: current.worker_pool_id,
-                job_id: current.job_id,
-                request_id,
-                expected_revision,
-                reason,
-                released_at,
-            })
-            .map_err(admission_error)
-    }
-
     fn release_admission_after_claim_failure(
         &mut self,
         admission: &ExecutionReservationRecord,
@@ -329,12 +352,29 @@ impl DurableWorkerExecutionLifecycle {
     }
 }
 
+pub(crate) fn trusted_execution_runtime_millis(
+    reservation: &ExecutionReservationRecord,
+    finished_at: &Instant,
+) -> Result<i64, WorkerExecutionLifecycleError> {
+    let started = reservation
+        .started_at
+        .as_ref()
+        .ok_or_else(authority_error)?;
+    let start = crate::session_binding_transaction::instant_millis(started)
+        .map_err(|_| authority_error())?;
+    let finish = crate::session_binding_transaction::instant_millis(finished_at)
+        .map_err(|_| authority_error())?;
+    i64::try_from(finish.checked_sub(start).ok_or_else(authority_error)?)
+        .map_err(|_| authority_error())
+}
+
 struct WorkerUsageSettlement {
+    outcome_status: ExecutionOutcomeStatus,
     job_id: ExecutionJobId,
     worker_session_id: WorkerSessionId,
     request_id: RequestId,
     actual_tokens: u64,
-    actual_cost_microunits: u64,
+    actual_cost_microunits: Option<u64>,
     actual_runtime_millis: u64,
     completed_at: Instant,
 }
@@ -373,10 +413,20 @@ fn require_terminal_authority(
         || slot.authority.worker_instance_id != lease.worker_instance_id
         || slot.authority.attempt != lease.attempt
         || slot.authority.fencing_token != lease.fencing_token
-        || !matches!(
-            slot.state,
-            WorkerSlotState::Running | WorkerSlotState::Completed
-        )
+        || !match slot.state {
+            WorkerSlotState::Running => true,
+            WorkerSlotState::Cancelling | WorkerSlotState::Cancelled => {
+                command.outcome_status == ExecutionOutcomeStatus::Cancelled
+            }
+            WorkerSlotState::Completed => {
+                command.outcome_status == ExecutionOutcomeStatus::Succeeded
+            }
+            WorkerSlotState::Failed => matches!(
+                command.outcome_status,
+                ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError
+            ),
+            WorkerSlotState::RecoveryFailed => false,
+        }
         || command.completed_at.0 < lease.issued_at.0
     {
         return Err(authority_error());

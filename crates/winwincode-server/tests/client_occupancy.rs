@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The user-facing Client occupancy flow over real HTTP: the four
-//! `/api/v1/clients/occupancy` routes wired to `ClientOccupancyApplication`
-//! and the real client exchange, covering the full claim chain driven by a
-//! fake device that answers `client.occupancy.offer` with
-//! `client.occupancy.ack` over the exchange protocol, the exactly-one-winner
-//! concurrent claim gate, the unanswered-offer rollback, the non-holder
-//! privacy projection, the three release modes with their downlink frames,
-//! the offline sweep into `recovery_pending` and its preemption block, the
-//! token-stable recovery resume, and the Owner-only overdue force release.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -60,11 +50,7 @@ use winwincode_storage::{
 const BOOTSTRAP_PROOF: &str = "client-occupancy-test-bootstrap";
 const ORIGIN: &str = "https://client.example";
 const OWNER_PASSWORD: &str = "initial-owner-password";
-/// Placeholder client node id a fresh device sends before the server assigns
-/// the canonical `cnd_` identity.
 const FRESH_NODE: &str = "device-local-pending";
-/// Enrollment instance; a following hello from the takeover instance carries
-/// the reported capacity the claim gate needs.
 const ENROLL_INSTANCE: &str = "cix_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const DEVICE_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const SCHEMA_VERSION: &str = "winwincode/v1";
@@ -289,8 +275,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// Initializes the Owner with a password, then signs in; returns
-/// (cookie, userId).
 async fn initialize_and_login_owner(address: std::net::SocketAddr) -> (String, String) {
     let response = http_request(
         address,
@@ -318,8 +302,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
         .to_owned();
     (session_cookie_from_response(&response), user_id)
 }
-
-// ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
     address: std::net::SocketAddr,
@@ -381,9 +363,6 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-/// Enrolls a fresh device over the exchange; returns (nodeId, publicClientId,
-/// credential, next client-to-server sequence). The node stays
-/// `pending_enrollment`.
 async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
@@ -419,7 +398,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     (node, public_client_id, credential, 2)
 }
 
-/// Walks the announcement hello so the node projects `online`.
 async fn walk_hello(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -451,9 +429,6 @@ async fn walk_hello(
     );
 }
 
-/// Enrolls and walks the takeover hello, then sends one real heartbeat: the
-/// node is `online` reporting four worker-session slots under the device
-/// instance, with a heartbeat instant the offline sweep can age out.
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -464,8 +439,6 @@ async fn enroll_online_device(
     (node, public_client_id, credential)
 }
 
-/// Publishes one connect code digest the way the Device Client would, and
-/// returns the 8-digit code.
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -485,8 +458,6 @@ fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String
     code.to_owned()
 }
 
-/// Consumes one published code directly, staging the active `use` grant a
-/// connected user would hold.
 fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
@@ -516,8 +487,6 @@ fn consume_code_as(data_directory: &Path, node: &str, code: &str, user_id: &str)
         .expect("atomic consume and grant");
 }
 
-/// Rewrites one registry column of a node directly (test staging for device
-/// local facts no public API mutates).
 fn set_node_column(data_directory: &Path, node: &str, assignment: &str) {
     let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
         .expect("open database");
@@ -529,8 +498,6 @@ fn set_node_column(data_directory: &Path, node: &str, assignment: &str) {
         .expect("node column update");
 }
 
-/// Counts terminal occupancy leases by their release reason (the audit
-/// history behind the availability projection).
 fn count_released_leases(data_directory: &Path, reason: &str) -> i64 {
     let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
         .expect("open database");
@@ -572,7 +539,6 @@ fn downlink_ack_cursor(data_directory: &Path, node: &str) -> u64 {
     cursors.max(high_water)
 }
 
-/// Sends one device heartbeat reporting `running` active worker sessions.
 async fn send_heartbeat(
     address: std::net::SocketAddr,
     data_directory: &Path,
@@ -600,10 +566,6 @@ async fn send_heartbeat(
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
-/// The fake device: polls the durable downlink outbox like the real daemon
-/// polls its inbox, acknowledges every frame, and answers every
-/// `client.occupancy.offer` with a `client.occupancy.ack` echoing the exact
-/// lease and fencing token.
 fn spawn_offer_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
@@ -667,8 +629,6 @@ fn spawn_offer_responder(
     })
 }
 
-// ---- occupancy HTTP helpers ------------------------------------------------
-
 fn occupancy_body(client_id: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -699,7 +659,6 @@ async fn claim_occupied(address: std::net::SocketAddr, client_id: &str, cookie: 
     assert_eq!(status_of(&response), "201", "{response}");
 }
 
-/// Reads the active occupancy lease of one node directly from storage.
 fn active_lease(
     data_directory: &Path,
     node: &str,
@@ -711,9 +670,6 @@ fn active_lease(
         .expect("active lease lookup")
 }
 
-/// Polls `predicate` until it holds or the budget elapses (the fake responder
-/// settles its ack through a real exchange round trip; awaiting keeps the
-/// single-threaded test runtime responsive).
 async fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
     for _ in 0..200 {
         if predicate() {
@@ -723,8 +679,6 @@ async fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
     }
     predicate()
 }
-
-// ---- tests ----------------------------------------------------------------
 
 #[tokio::test]
 async fn occupancy_routes_require_a_signed_in_session() {
@@ -819,8 +773,6 @@ async fn claim_completes_through_offer_ack_and_projects_occupied() {
     assert!(fencing_token >= 1);
     assert_eq!(value["capacityTotal"], json!(4));
 
-    // Durable facts: the lease is occupied with the ACK recorded, and the
-    // acked offer frame is retained no longer.
     let settled = wait_until(|| {
         active_lease(&data_directory, &node)
             .is_some_and(|lease| lease.state == OccupancyLeaseState::Occupied)
@@ -841,7 +793,6 @@ async fn claim_completes_through_offer_ack_and_projects_occupied() {
         );
     }
 
-    // The holder reads the full projection.
     let response = http_request(
         address,
         &cookie_get(
@@ -856,8 +807,6 @@ async fn claim_completes_through_offer_ack_and_projects_occupied() {
     assert_eq!(view["holderUserId"], json!(user_id));
     assert_eq!(view["fencingToken"], json!(fencing_token));
 
-    // An idempotent re-claim returns the same occupation without a second
-    // lease.
     let response = http_request(
         address,
         &cookie_post(
@@ -894,14 +843,19 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
         &publish_connect_code(&data_directory, &node, "55556666"),
         &user_id,
     );
-    // No responder: the durable offer stays unanswered until the deadline.
-    let application = ClientOccupancyApplication::open(
+    let clock = Arc::new(OccupancyTestClock(AtomicU64::new(
+        winwincode_server::StandaloneApplicationClock::now_millis(
+            &winwincode_server::SystemStandaloneApplicationClock,
+        ),
+    )));
+    let application = ClientOccupancyApplication::open_with_clock(
         &data_directory,
         &ClientOccupancyConfig {
             offer_wait: Duration::from_millis(300),
             poll_interval: Duration::from_millis(25),
             ..ClientOccupancyConfig::default()
         },
+        clock.clone(),
     )
     .expect("valid application");
     let request = json!({
@@ -924,12 +878,8 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
             "the rolled-back lease is terminal"
         );
     }
-    // Every rolled-back offer ended as `released` with the `ack_timeout`
-    // reason: the terminal rows are the audit history behind the projection.
     assert_eq!(count_released_leases(&data_directory, "ack_timeout"), 5);
 
-    // Five failures reached the fixed-window threshold: the next claim is
-    // throttled before any lease work happens.
     let throttled = application
         .claim(&user_id, &request)
         .await
@@ -939,6 +889,18 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
         ClientOccupancyErrorKind::RateLimited,
         "{throttled}"
     );
+
+    clock.0.fetch_add(300_000, Ordering::SeqCst);
+    let next_window = application
+        .claim(&user_id, &request)
+        .await
+        .expect_err("a fresh window admits an offer, which still has no responder");
+    assert_eq!(
+        next_window.kind(),
+        ClientOccupancyErrorKind::OccupancyAckTimeout
+    );
+    assert_eq!(count_released_leases(&data_directory, "ack_timeout"), 6);
+    assert!(active_lease(&data_directory, &node).is_none());
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
@@ -962,8 +924,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         &user_id,
     );
 
-    // Drain: active worker sessions move the lease to `draining` and the
-    // release command carries the drain mode downlink.
     let responder = spawn_offer_responder(
         data_directory.clone(),
         address,
@@ -1014,13 +974,10 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         );
     }
 
-    // The automatic drain judgement: a heartbeat reporting zero running
-    // sessions completes the drain and releases the lease.
     send_heartbeat(address, &data_directory, &node, &credential, 0).await;
     let drained = wait_until(|| active_lease(&data_directory, &node).is_none()).await;
     assert!(drained, "the draining lease released after the heartbeat");
 
-    // Immediate release: no active worker session releases at once.
     let responder = spawn_offer_responder(
         data_directory.clone(),
         address,
@@ -1049,8 +1006,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
     assert_eq!(response_body(&response)["occupancy"], json!("released"));
     assert!(active_lease(&data_directory, &node).is_none());
 
-    // Cancel-and-release requires the explicit confirmation flag, then moves
-    // a busy lease to draining with the cancel mode downlink.
     let responder = spawn_offer_responder(
         data_directory.clone(),
         address,
@@ -1117,14 +1072,11 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         assert_eq!(value["payload"]["mode"], json!("cancel_tasks_and_release"));
     }
 
-    // A release while the offer is still unanswered withdraws the claim.
     set_node_column(
         &data_directory,
         &node,
         "reported_running_worker_sessions = 0",
     );
-    // The cancelled lease is still draining; the device reporting zero
-    // running sessions completes it before the fresh claim.
     send_heartbeat(address, &data_directory, &node, &credential, 0).await;
     let drained = wait_until(|| active_lease(&data_directory, &node).is_none()).await;
     assert!(
@@ -1167,8 +1119,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
     let claim_outcome = claim_task.await.expect("claim task");
     let error = claim_outcome.expect_err("the withdrawn claim must fail");
     assert_eq!(error.kind(), ClientOccupancyErrorKind::OccupancyRejected);
-    // The withdrawn lease ended with the `claim_withdrawn` reason: the
-    // terminal row is the audit history behind the now-available projection.
     assert!(active_lease(&data_directory, &node).is_none());
     assert_eq!(count_released_leases(&data_directory, "claim_withdrawn"), 1);
 
@@ -1205,9 +1155,6 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
     let occupied = active_lease(&data_directory, &node).expect("occupied lease");
     let original_token = occupied.fencing_token;
 
-    // The device goes silent; the offline sweep projects it and its lease.
-    // The deadline base sits far in the future so the recovery window is
-    // deterministically still open regardless of the wall clock.
     let application =
         ClientOccupancyApplication::open(&data_directory, &ClientOccupancyConfig::default())
             .expect("valid application");
@@ -1234,7 +1181,6 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
         "the recovery window is still open"
     );
 
-    // Reconnect the device before reconciling the pending lease.
     walk_hello(
         address,
         &data_directory,
@@ -1244,10 +1190,6 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
     )
     .await;
 
-    // The recovery resume reuses the original fencing token unchanged: no new
-    // occupancy happened. (The `client.worker.reconcile` exchange settlement
-    // belongs to the worker lane; the resume is applied through the shared
-    // service here.)
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let mut occupancy = ClientOccupancyService::new(&mut storage);
@@ -1307,8 +1249,6 @@ async fn force_release_enforces_the_recovery_deadline() {
     responder.abort();
     let occupied = active_lease(&data_directory, &node).expect("occupied lease");
 
-    // The Owner sweep marks the dropped device; the window is still open, so
-    // the force release is refused and nothing is released automatically.
     let application =
         ClientOccupancyApplication::open(&data_directory, &ClientOccupancyConfig::default())
             .expect("valid application");
@@ -1337,13 +1277,8 @@ async fn force_release_enforces_the_recovery_deadline() {
     let pending = active_lease(&data_directory, &node).expect("still recovery pending");
     assert_eq!(pending.state, OccupancyLeaseState::RecoveryPending);
 
-    // Past the deadline the Owner cleanup releases the lease and mints the
-    // strictly higher force-fence token that goes downlink.
     let ack_before_force = downlink_ack_cursor(&data_directory, &node);
     {
-        // Backdate the deadline the way an elapsed window would leave it
-        // (a recovery replay keeps the original deadline, so the raw column
-        // update stages the elapsed window deterministically).
         let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
             .expect("open database");
         connection
@@ -1410,7 +1345,6 @@ async fn force_release_enforces_the_recovery_deadline() {
         );
     }
 
-    // The released client is available again.
     let response = http_request(
         address,
         &cookie_get(
@@ -1423,4 +1357,30 @@ async fn force_release_enforces_the_recovery_deadline() {
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+struct OccupancyTestClock(AtomicU64);
+
+impl winwincode_server::StandaloneApplicationClock for OccupancyTestClock {
+    fn now_millis(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn now_instant(&self) -> Instant {
+        let millis = self.now_millis();
+        let date = time::OffsetDateTime::from_unix_timestamp(
+            i64::try_from(millis / 1_000).expect("epoch"),
+        )
+        .expect("test timestamp");
+        Instant(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            date.year(),
+            u8::from(date.month()),
+            date.day(),
+            date.hour(),
+            date.minute(),
+            date.second(),
+            millis % 1_000
+        ))
+    }
 }

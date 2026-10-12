@@ -1,20 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact-bound runtime projection over accepted, sealed Worker/Codex facts.
-//!
-//! Accepted bindings and events are capabilities with private fields and no
-//! deserializer. Production callers therefore cannot promote raw Worker input
-//! into trusted projection facts.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::projection::runtime::AcceptedRuntimeEvent;
-//!
-//! let _forged = AcceptedRuntimeEvent {
-//!     sequence: 1,
-//!     ..todo!()
-//! };
-//! ```
-
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
@@ -29,6 +14,9 @@ use crate::domain::{Delivery, SessionBindingId, SessionRuntimeContext};
 use crate::projection::redaction::{
     RuntimeDiffSummaryProjection, contains_credential_material, is_safe_source_ref,
 };
+
+#[path = "core_tool.rs"]
+mod core_tool;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_RUNTIME_SESSIONS: usize = 256;
@@ -96,7 +84,7 @@ pub struct AcceptedRuntimeBinding {
     seal: Sha256Digest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AcceptedRuntimeEvent {
     identity: RuntimeIdentity,
     sequence: u64,
@@ -106,7 +94,7 @@ pub struct AcceptedRuntimeEvent {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum AcceptedRuntimeFact {
     Checkpoint,
@@ -118,8 +106,7 @@ enum AcceptedRuntimeFact {
     LiveDiff(RuntimeDiffSummaryProjection),
 }
 
-/// One already-accepted ledger fact decoded by the Control Plane's trusted source seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PersistedRuntimeFact {
     Checkpoint,
     Plan(RuntimePlanProjection),
@@ -130,7 +117,7 @@ pub enum PersistedRuntimeFact {
     LiveDiff(RuntimeDiffSummaryProjection),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PersistedRuntimeEvent {
     pub sequence: u64,
     pub event_id: ExecutionEventId,
@@ -199,6 +186,7 @@ pub struct RuntimeAgentEdgeProjection {
 pub enum RuntimeActivityType {
     Command,
     Test,
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -224,9 +212,11 @@ pub enum RuntimeActivityOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeActivityProjection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_tool: Option<Box<winwincode_domain::CoreToolRuntimeProjection>>,
     pub call_id: String,
     pub activity_type: RuntimeActivityType,
     pub command: Option<String>,
@@ -269,7 +259,7 @@ pub struct RuntimeRecoveryProjection {
     pub latest_recovery_source_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSessionProjection {
     pub session_binding_id: SessionBindingId,
@@ -293,7 +283,7 @@ pub struct RuntimeSessionProjection {
     pub diff_summary: Option<RuntimeDiffSummaryProjection>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeFoldSnapshot {
     pub delivery_id: DeliveryId,
@@ -331,12 +321,6 @@ pub struct RuntimeProjection {
 }
 
 impl RuntimeProjection {
-    /// Opens a read-only projection over exact accepted runtime bindings.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a sealed binding is not current and exact for the
-    /// supplied canonical Delivery.
     pub fn new(
         delivery: &Delivery,
         bindings: Vec<AcceptedRuntimeBinding>,
@@ -405,13 +389,6 @@ impl RuntimeProjection {
         &self.snapshot
     }
 
-    /// Rebuilds a Delivery-stage projection from accepted runtime-ledger facts
-    /// decoded and bounded by the Control Plane source seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the current Delivery binding, `WorkRun`, scheduler
-    /// authority, or accepted sequence positions are not exact.
     #[allow(clippy::too_many_arguments)]
     pub fn from_persisted_facts(
         delivery: &Delivery,
@@ -469,12 +446,6 @@ impl RuntimeProjection {
         Self::replay(delivery, vec![binding], &events)
     }
 
-    /// Rebuilds the projection from a complete ordered accepted-fact stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid binding or fact, or when the supplied
-    /// stream contains a sequence gap.
     pub fn replay(
         delivery: &Delivery,
         bindings: Vec<AcceptedRuntimeBinding>,
@@ -509,12 +480,6 @@ impl RuntimeProjection {
         Ok(projection)
     }
 
-    /// Folds one already accepted and sealed runtime fact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error before mutation when the event is not exact for one
-    /// accepted binding.
     pub fn apply(
         &mut self,
         event: &AcceptedRuntimeEvent,
@@ -656,7 +621,7 @@ fn fold_fact(
             fold_agent(session, agent)?;
         }
         AcceptedRuntimeFact::Activity(activity) => {
-            fold_activity(session, activity)?;
+            fold_activity(&mut session.activities, activity)?;
         }
         AcceptedRuntimeFact::Usage(usage) => {
             let mut usage = usage.clone();
@@ -675,15 +640,28 @@ fn fold_fact(
     Ok(())
 }
 
+pub fn fold_runtime_activities(
+    events: &[PersistedRuntimeEvent],
+) -> Result<Vec<RuntimeActivityProjection>, RuntimeProjectionError> {
+    let mut activities = Vec::new();
+    for event in events {
+        if let PersistedRuntimeFact::Activity(activity) = &event.fact {
+            validate_activity(activity)?;
+            fold_activity(&mut activities, activity)?;
+        }
+    }
+    Ok(activities)
+}
+
 fn fold_activity(
-    session: &mut RuntimeSessionProjection,
+    activities: &mut Vec<RuntimeActivityProjection>,
     activity: &RuntimeActivityProjection,
 ) -> Result<(), RuntimeProjectionError> {
-    if let Some(existing) = session
-        .activities
-        .iter_mut()
-        .find(|existing| existing.call_id == activity.call_id)
+    if let Some(index) = activities
+        .iter()
+        .position(|existing| existing.call_id == activity.call_id)
     {
+        let existing = &activities[index];
         if existing.activity_type != activity.activity_type
             || existing.command != activity.command
             || (activity_status_is_terminal(existing.status)
@@ -694,19 +672,12 @@ fn fold_activity(
                 "runtime activity identity is immutable and terminal status cannot regress",
             ));
         }
-        *existing = activity.clone();
-    } else {
-        if session.activities.len() >= MAX_ACTIVITIES {
-            return Err(projection_error(
-                RuntimeProjectionErrorCode::InvalidFact,
-                "runtime activities exceed the bounded 100-item projection",
-            ));
-        }
-        session.activities.push(activity.clone());
+        activities.remove(index);
     }
-    session
-        .activities
-        .sort_by(|left, right| left.call_id.cmp(&right.call_id));
+    if activities.len() >= MAX_ACTIVITIES {
+        activities.remove(0);
+    }
+    activities.push(activity.clone());
     Ok(())
 }
 
@@ -917,7 +888,11 @@ fn validate_agent(agent: &RuntimeAgentProjection) -> Result<(), RuntimeProjectio
 }
 
 fn validate_activity(activity: &RuntimeActivityProjection) -> Result<(), RuntimeProjectionError> {
-    if !portable_value(&activity.call_id, 200)
+    if activity
+        .core_tool
+        .as_ref()
+        .is_some_and(|meta| !core_tool::valid(meta))
+        || !portable_value(&activity.call_id, 200)
         || activity
             .command
             .as_deref()
@@ -1248,9 +1223,6 @@ fn projection_error(
     }
 }
 
-/// Narrow fixture-only constructor for accepted runtime capabilities. The
-/// real persisted-fact adapter is a Phase 4 gate and production builds do not
-/// enable this module.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
@@ -1282,7 +1254,7 @@ pub mod test_support {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum RuntimeFactFixture {
         Checkpoint,
         Plan(RuntimePlanProjection),
@@ -1301,13 +1273,6 @@ pub mod test_support {
         },
     }
 
-    /// Seals one fixture binding after checking it against the canonical
-    /// Delivery. A settled run requires a positive final event sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the canonical binding is incomplete or the
-    /// supplied scheduler authority is outside the accepted contract.
     pub fn accepted_binding(
         delivery: &Delivery,
         session_binding_id: &SessionBindingId,
@@ -1382,13 +1347,6 @@ pub mod test_support {
         Ok(accepted)
     }
 
-    /// Seals one safe semantic event under an already accepted fixture
-    /// binding. Raw logs, process output, tool payloads, and provider traffic
-    /// have no representable variant.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the fixture fact is invalid or cannot be sealed.
     pub fn accepted_event(
         binding: &AcceptedRuntimeBinding,
         sequence: u64,
@@ -1448,7 +1406,7 @@ mod tests {
     use super::*;
     use crate::domain::{Delivery, test_fixture};
 
-    fn fixture() -> (Delivery, AcceptedRuntimeBinding, AcceptedRuntimeEvent) {
+    pub(super) fn fixture() -> (Delivery, AcceptedRuntimeBinding, AcceptedRuntimeEvent) {
         let delivery = Delivery::try_from_snapshot(test_fixture()).expect("canonical Delivery");
         let session = &delivery.snapshot().session_bindings[0];
         let run = &delivery.snapshot().work_run_aggregate.runs[0];
@@ -1494,7 +1452,7 @@ mod tests {
         (delivery, binding, event)
     }
 
-    fn event_with_fact(
+    pub(super) fn event_with_fact(
         template: &AcceptedRuntimeEvent,
         sequence: u64,
         fact: AcceptedRuntimeFact,
@@ -1875,6 +1833,7 @@ mod tests {
         binding.settled_last_sequence = Some(2);
         binding.seal = seal_binding(&binding).expect("binding seal");
         command.fact = AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-command".into(),
             activity_type: RuntimeActivityType::Command,
             command: Some("cargo fmt --check".into()),
@@ -1888,6 +1847,7 @@ mod tests {
         test.sequence = 2;
         test.event_id = ExecutionEventId("runtime-event-2".into());
         test.fact = AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-test".into(),
             activity_type: RuntimeActivityType::Test,
             command: Some("cargo test -p winwincode-delivery".into()),
@@ -1925,6 +1885,7 @@ mod tests {
                 1,
                 &format!("runtime-secret-{index}"),
                 test_support::RuntimeFactFixture::Activity(RuntimeActivityProjection {
+                    core_tool: None,
                     call_id: format!("call-secret-{index}"),
                     activity_type: RuntimeActivityType::Command,
                     command: Some(command.into()),
@@ -1943,6 +1904,7 @@ mod tests {
             1,
             "runtime-secret-source",
             test_support::RuntimeFactFixture::Activity(RuntimeActivityProjection {
+                core_tool: None,
                 call_id: "call-secret-source".into(),
                 activity_type: RuntimeActivityType::Command,
                 command: Some("cargo check".into()),
@@ -1965,6 +1927,7 @@ mod tests {
             &template,
             1,
             AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+                core_tool: None,
                 call_id: "call-stable".into(),
                 activity_type: RuntimeActivityType::Command,
                 command: Some("cargo test -p winwincode-delivery".into()),
@@ -1978,6 +1941,7 @@ mod tests {
             &template,
             2,
             AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+                core_tool: None,
                 call_id: "call-stable".into(),
                 activity_type: RuntimeActivityType::Command,
                 command: Some("cargo test -p winwincode-delivery".into()),
@@ -1995,6 +1959,7 @@ mod tests {
             &template,
             2,
             AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+                core_tool: None,
                 call_id: "call-stable".into(),
                 activity_type: RuntimeActivityType::Test,
                 command: Some("cargo test --workspace".into()),
@@ -2018,6 +1983,7 @@ mod tests {
             &template,
             3,
             AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+                core_tool: None,
                 status: RuntimeActivityStatus::Running,
                 outcome: RuntimeActivityOutcome::Observed,
                 exit_code: None,
@@ -2119,6 +2085,7 @@ mod tests {
         activity.sequence = 2;
         activity.event_id = ExecutionEventId("runtime-event-2".into());
         activity.fact = AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+            core_tool: None,
             call_id: "call-replay".into(),
             activity_type: RuntimeActivityType::Test,
             command: Some("cargo test -p winwincode-delivery".into()),
@@ -2344,6 +2311,7 @@ mod tests {
                 &template,
                 3,
                 AcceptedRuntimeFact::Activity(RuntimeActivityProjection {
+                    core_tool: None,
                     call_id: "call-wire".into(),
                     activity_type: RuntimeActivityType::Test,
                     command: None,
@@ -2480,3 +2448,7 @@ mod tests {
         assert!(actual.get("workerInstanceId").is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_window_tests.rs"]
+mod window_tests;

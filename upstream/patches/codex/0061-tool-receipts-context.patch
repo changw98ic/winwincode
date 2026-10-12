@@ -1,0 +1,197 @@
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -3,6 +3,7 @@
+ mod approved_command_prefix_saved;
+ mod apps_instructions;
+ mod available_plugins_instructions;
++mod code_mode_result_unavailable;
+ mod contextual_user_message;
+ mod current_time_reminder;
+ mod environment_context;
+@@ -34,6 +35,8 @@
+ mod rollout_budget;
+ mod subagent_notification;
+ mod token_budget_context;
++mod tool_diagnostics;
++mod tool_receipts;
+ mod turn_aborted;
+ mod user_instructions;
+ mod user_shell_command;
+@@ -93,3 +96,15 @@
+ pub(crate) use turn_aborted::TurnAborted;
+ pub(crate) use user_instructions::UserInstructions;
+ pub(crate) use user_shell_command::UserShellCommand;
++
++pub(crate) use code_mode_result_unavailable::CodeModeResultUnavailable;
++pub(crate) use tool_receipts::ToolReceipt;
++pub(crate) use tool_receipts::ToolReceipts;
++
++#[cfg(test)]
++mod tool_receipts_tests;
++
++pub(crate) use tool_diagnostics::ToolDiagnosticFeedback;
++
++#[cfg(test)]
++mod tool_diagnostics_tests;
+diff --git a/codex-rs/core/src/context/tool_diagnostics.rs b/codex-rs/core/src/context/tool_diagnostics.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/tool_diagnostics.rs
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ContextualUserFragment;
++use codex_state::ToolDiagnostic;
++
++/// Compact references into durable evidence, delivered at a normal Code Mode boundary.
++pub(crate) struct ToolDiagnosticFeedback(pub Vec<ToolDiagnostic>);
++impl ContextualUserFragment for ToolDiagnosticFeedback {
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<model_behavior_diagnosis>", "</model_behavior_diagnosis>")
++    }
++    fn body(&self) -> String {
++        let diagnostics: Vec<_> = self.0.iter()
++            .filter(|diagnostic| diagnostic.diagnostic_id.len() <= 80).take(2)
++            .map(|diagnostic| serde_json::json!({
++                "diagnostic_id": diagnostic.diagnostic_id, "evidence_version": diagnostic.evidence_version,
++                "kind": diagnostic.kind, "progress": diagnostic.progress_source_sequence.map_or("unknown", |_| "verified_receipt"),
++                "calls": diagnostic.evidence.iter().rev().take(2).map(|call| serde_json::json!({
++                    "request_sequence": call.request_sequence,
++                    "tool": call.tool_name.chars().take(64).collect::<String>(),
++                })).collect::<Vec<_>>(),
++                "question": diagnostic.question.chars().take(256).collect::<String>(),
++            })).collect();
++        serde_json::json!({
++            "type": "model_behavior_diagnosis", "schema_version": 1,
++            "assessment": "possible", "diagnostics": diagnostics,
++            "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
++        }).to_string()
++    }
++}
+diff --git a/codex-rs/core/src/context/tool_diagnostics_tests.rs b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ContextualUserFragment;
++use super::ToolDiagnosticFeedback;
++use codex_state::ToolDiagnostic;
++use codex_state::ToolDiagnosticCall;
++use codex_state::ToolDiagnosticKind;
++use codex_utils_output_truncation::approx_token_count;
++#[test]
++fn diagnostic_context_caps_evidence_and_question_size() {
++    let diagnosis = ToolDiagnostic {
++        schema_version: 1,
++        diagnostic_id: "d".repeat(80),
++        thread_id: "thread".into(),
++        kind: ToolDiagnosticKind::RepeatedOperation,
++        evidence_version: 1,
++        progress_source_sequence: None,
++        question: "😀".repeat(10_000),
++        evidence: (1..20)
++            .map(|request_sequence| ToolDiagnosticCall {
++                request_sequence,
++                logical_id: "logical".into(),
++                tool_name: "😀".repeat(10_000),
++                operation_digest: "digest".into(),
++                parent_call_id: None,
++                cell_id: None,
++            })
++            .collect(),
++    };
++    let fragment = ToolDiagnosticFeedback(vec![diagnosis; 8]);
++    let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
++    let diagnoses = body["diagnostics"].as_array().unwrap();
++    assert_eq!(diagnoses.len(), 2);
++    assert!(
++        diagnoses
++            .iter()
++            .all(|item| item["calls"].as_array().unwrap().len() == 2)
++    );
++    assert_eq!(
++        diagnoses[0]["question"].as_str().unwrap().chars().count(),
++        256
++    );
++    assert!(approx_token_count(&fragment.render()) < 1_000);
++}
+diff --git a/codex-rs/core/src/context/tool_receipts.rs b/codex-rs/core/src/context/tool_receipts.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/tool_receipts.rs
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ContextualUserFragment;
++use codex_state::ToolExecutionStatus;
++use codex_state::ToolOutputDelivery;
++use codex_state::ToolOutputDisposition;
++use serde::Serialize;
++
++#[derive(Serialize)]
++pub(crate) struct ToolReceipt {
++    pub source_id: String,
++    pub tool: String,
++    pub request_sequence: i64,
++    pub execution: Option<ToolExecutionStatus>,
++    pub disposition: ToolOutputDisposition,
++    pub delivery: ToolOutputDelivery,
++    pub source_request_sequence: Option<i64>,
++}
++/// Four bounded metadata references; input and result bodies never enter this fragment.
++pub(crate) struct ToolReceipts(pub Vec<ToolReceipt>);
++impl ContextualUserFragment for ToolReceipts {
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<core_tool_receipts>", "</core_tool_receipts>")
++    }
++    fn body(&self) -> String {
++        serde_json::json!({"type":"core_tool_receipts","schema_version":1,"receipts":self.0.iter().filter(|receipt| receipt.source_id.len() <= 80 && receipt.tool.chars().count() <= 64).take(4).collect::<Vec<_>>()}).to_string()
++    }
++}
+diff --git a/codex-rs/core/src/context/tool_receipts_tests.rs b/codex-rs/core/src/context/tool_receipts_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/tool_receipts_tests.rs
+@@ -0,0 +1,30 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ContextualUserFragment;
++use super::ToolReceipt;
++use super::ToolReceipts;
++use codex_state::ToolExecutionStatus;
++use codex_state::ToolOutputDelivery;
++use codex_state::ToolOutputDisposition;
++use codex_utils_output_truncation::approx_token_count;
++
++#[test]
++fn receipts_keep_bounded_metadata_and_drop_oversized_identifiers() {
++    let receipts = (0..12)
++        .map(|index| ToolReceipt {
++            source_id: "x".repeat(if index == 0 { 81 } else { 80 }),
++            tool: "😀".repeat(64),
++            request_sequence: index,
++            execution: Some(ToolExecutionStatus::Completed),
++            disposition: ToolOutputDisposition::Accepted,
++            delivery: ToolOutputDelivery::Offered,
++            source_request_sequence: Some(42),
++        })
++        .collect();
++    let fragment = ToolReceipts(receipts);
++    let body: serde_json::Value = serde_json::from_str(&fragment.body()).unwrap();
++    let references = body["receipts"].as_array().unwrap();
++    assert_eq!(references.len(), 4);
++    assert_eq!(references[0]["request_sequence"], 1);
++    assert_eq!(references[3]["request_sequence"], 4);
++    assert!(approx_token_count(&fragment.render()) < 1_000);
++}

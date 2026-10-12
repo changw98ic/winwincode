@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic policy reduction for Jev context and memory decisions.
-//!
-//! The module consumes provider-neutral NLI probabilities. Model adapters stay
-//! outside this crate; only system policy may turn probabilities into actions.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Provider-neutral entailment result for one hypothesis.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NliProbabilities {
@@ -18,21 +12,15 @@ pub struct NliProbabilities {
     pub neutral: f64,
 }
 
-/// H1-H4 scores used by context retention policy.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextHypotheses {
-    /// H1: required system fact or task constraint.
     pub critical: NliProbabilities,
-    /// H2: useful for the current task.
     pub relevant: NliProbabilities,
-    /// H3: useful in compact or archived form.
     pub compressible: NliProbabilities,
-    /// H4: safe to discard as noise or superseded output.
     pub disposable: NliProbabilities,
 }
 
-/// System-owned decision thresholds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JevPolicy {
@@ -47,7 +35,6 @@ pub struct JevPolicy {
     pub long_term_memory_threshold: f64,
 }
 
-/// Context item facts owned by the runtime, not the NLI provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextDecisionInput {
@@ -58,7 +45,6 @@ pub struct ContextDecisionInput {
     pub hypotheses: ContextHypotheses,
 }
 
-/// Closed context-retention action set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContextRetention {
@@ -69,7 +55,6 @@ pub enum ContextRetention {
     Archive,
 }
 
-/// Closed memory-write action set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MemoryWrite {
@@ -79,7 +64,6 @@ pub enum MemoryWrite {
     LongTermMemory,
 }
 
-/// Stable audit reasons emitted by the deterministic reducer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionReason {
@@ -99,7 +83,6 @@ pub enum DecisionReason {
     LongTermImportance,
 }
 
-/// Auditable context decision. Provider and model are observations only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextDecision {
@@ -111,7 +94,6 @@ pub struct ContextDecision {
     pub reason_codes: Vec<DecisionReason>,
 }
 
-/// System-computed inputs for memory importance.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportanceSignals {
@@ -127,7 +109,6 @@ impl ImportanceSignals {
     }
 }
 
-/// Runtime facts considered before writing memory.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryDecisionInput {
@@ -136,7 +117,6 @@ pub struct MemoryDecisionInput {
     pub importance: ImportanceSignals,
 }
 
-/// Auditable memory-write decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryDecision {
@@ -146,7 +126,6 @@ pub struct MemoryDecision {
     pub reason_codes: Vec<DecisionReason>,
 }
 
-/// Relationship retained on an appended memory record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MemoryRelationKind {
@@ -155,7 +134,6 @@ pub enum MemoryRelationKind {
     Complements,
 }
 
-/// Persistent lifecycle state. Supersession points forward and keeps history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 pub enum MemoryStatus {
@@ -163,7 +141,6 @@ pub enum MemoryStatus {
     Superseded { by: String },
 }
 
-/// Minimal provider-independent memory state used by the pure reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryRecord {
@@ -172,7 +149,6 @@ pub struct MemoryRecord {
     pub relation: Option<MemoryRelation>,
 }
 
-/// Link from a new record to retained history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryRelation {
@@ -180,7 +156,6 @@ pub struct MemoryRelation {
     pub memory_id: String,
 }
 
-/// Candidate used for deterministic retrieval reranking.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryRankCandidate {
@@ -188,7 +163,6 @@ pub struct MemoryRankCandidate {
     pub importance: ImportanceSignals,
 }
 
-/// Invalid provider output, policy, or memory state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JevDecisionError {
     InvalidProbability,
@@ -210,12 +184,6 @@ impl fmt::Display for JevDecisionError {
 
 impl std::error::Error for JevDecisionError {}
 
-/// Maps H1-H4 probabilities to one context action. Low confidence fails open
-/// to `KEEP`, and a system-protected item can never reach `DROP`.
-///
-/// # Errors
-///
-/// Rejects malformed probabilities, policy thresholds, or provider metadata.
 pub fn decide_context(
     input: &ContextDecisionInput,
     policy: &JevPolicy,
@@ -301,11 +269,6 @@ pub fn decide_context(
     })
 }
 
-/// Maps system-computed importance to one memory scope.
-///
-/// # Errors
-///
-/// Rejects malformed importance signals or policy thresholds.
 pub fn decide_memory(
     input: MemoryDecisionInput,
     policy: &JevPolicy,
@@ -343,12 +306,6 @@ pub fn decide_memory(
     })
 }
 
-/// Appends a related memory and marks a superseded record with a forward
-/// pointer. Contradictions and complements append without rewriting history.
-///
-/// # Errors
-///
-/// Rejects empty, duplicate, or missing identities.
 pub fn relate_memory(
     existing: &[MemoryRecord],
     new_id: &str,
@@ -384,8 +341,6 @@ pub fn relate_memory(
     Ok(records)
 }
 
-/// Reranks retrieved memory by importance and returns a bounded Top 3-10.
-/// Invalid candidates are omitted because retrieval is fail-open advisory data.
 #[must_use]
 pub fn rerank_memory(
     candidates: &[MemoryRankCandidate],
@@ -436,7 +391,7 @@ fn validate_importance(value: ImportanceSignals) -> Result<(), JevDecisionError>
     }
 }
 
-fn validate_policy(policy: &JevPolicy) -> Result<(), JevDecisionError> {
+pub fn validate_policy(policy: &JevPolicy) -> Result<(), JevDecisionError> {
     let thresholds = [
         policy.minimum_confidence,
         policy.pin_threshold,

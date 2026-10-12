@@ -1,20 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Application lifecycle host for the `WinWinCode` Control Plane.
-//!
-//! Community product boundary: WinWinCode Community is a single local Owner
-//! product with an embedded Codex Core execution kernel, local Device
-//! Client/Worker, and local SQLite product state. This crate root exports
-//! Community local execution control-plane modules only. Network Vault/KMS
-//! composition and Cloud/Enterprise management modules are not Community
-//! product surface. Organization/tenant identifiers that remain in internal
-//! scope keys are protocol encodings mapped by bootstrap to the single local
-//! Owner.
-//!
-//! This crate owns application composition, Delivery persistence adapters, and
-//! durable event publication. It has no dependency on Codex Core, an HTTP
-//! server, or an Execution Worker runtime.
-
 pub use winwincode_provider::{
     CanonicalModelStreamFrame, CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate,
     CredentialOutputBoundary, DeviceProviderError, DeviceProviderStore, HttpsSseProviderAdapter,
@@ -37,6 +22,7 @@ mod action_policy_enforcement;
 mod artifact_transaction;
 pub mod automation_recipe;
 mod candidate_git_release;
+mod candidate_rejection_transaction;
 mod candidate_source;
 mod chat_interaction_application;
 pub mod chat_interaction_projection;
@@ -60,11 +46,17 @@ mod device_execution_binding;
 mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
+mod execution_lease_period;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
-pub mod fusion_analysis;
+pub use winwincode_fusion::analysis as fusion_analysis;
+pub mod fusion_bench;
 pub mod fusion_compose;
+pub mod fusion_investigation;
+pub use winwincode_fusion::knowledge as fusion_knowledge;
+pub use winwincode_fusion::planner as fusion_planner;
 mod gate_interaction_service;
+pub mod heartbeat;
 pub mod knowledge;
 mod local_candidate;
 pub mod local_secret_store;
@@ -81,6 +73,8 @@ pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
 mod page_annotation_delivery;
+mod strongflow_read_snapshot;
+pub use strongflow_read_snapshot::StrongFlowReadSnapshot;
 pub mod peer_collaboration;
 mod product_session_execution_application;
 mod product_session_service;
@@ -104,6 +98,8 @@ mod rework_transaction;
 mod runtime_event_transaction;
 mod session_binding_transaction;
 pub mod session_identity;
+mod snapshot_production;
+pub mod source_hygiene;
 mod strongflow_device_execution;
 pub mod strongflow_projection;
 mod temporary_root_lease;
@@ -368,7 +364,8 @@ pub use publication_production::{
 };
 pub use quick_device_execution::{
     QUICK_DEVICE_WORKER_POOL_ID, QuickDeviceDispatch, QuickDeviceDispatchError,
-    QuickDeviceDispatchErrorKind, dispatch_turn_to_device_worker,
+    QuickDeviceDispatchErrorKind, dispatch_chat_job_to_device_worker,
+    dispatch_turn_to_device_worker,
 };
 pub use remote_worker_pool::{
     RemoteWorkerAuthenticationError, RemoteWorkerAuthenticationErrorKind,
@@ -476,8 +473,6 @@ pub use worker_management::{
     WorkerManagementService, WorkerManagementServiceError, WorkerManagementServiceErrorKind,
 };
 
-/// Deterministic trusted-fact fixtures for exercising the typed Control Plane
-/// seam without exposing production authority constructors.
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use winwincode_api::generated::CommandEnvelope;
@@ -492,10 +487,6 @@ pub mod test_support {
         delivery_command_transaction::TrustedDeliverySpecFacts,
     };
 
-    /// Exercises the terminal storage transaction independently of local service adapters.
-    ///
-    /// # Errors
-    /// Returns the same authority, receipt, or storage error as the production transaction.
     pub fn commit_terminal_transaction(
         storage: &mut dyn winwincode_storage::ProductStateStorage,
         scope: &RepositoryScope,
@@ -506,10 +497,16 @@ pub mod test_support {
         super::DeliveryTerminalOutcomeCommitReceipt,
         super::DeliveryTerminalOutcomeCommitError,
     > {
-        super::terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)
+        super::terminal_outcome_transaction::execute_at(
+            storage,
+            scope,
+            message,
+            facts,
+            server_time,
+            facts.authority().expires_at(),
+        )
     }
 
-    /// Complete product-owned Spec semantics used by integration fixtures.
     #[derive(Clone, Debug, PartialEq)]
     pub struct DeliverySpecFactsFixture {
         pub repository_scope: RepositoryScope,
@@ -520,7 +517,6 @@ pub mod test_support {
         pub criterion_verification_methods: Vec<(String, String)>,
     }
 
-    /// Adapter-confirmed repository authority used by sealed stage fixtures.
     #[derive(Clone, Debug, PartialEq)]
     pub struct DeliveryRepositoryFactsFixture {
         pub repository_scope: RepositoryScope,
@@ -528,13 +524,6 @@ pub mod test_support {
         pub source_ref: Option<DeliverySourceRef>,
     }
 
-    /// Binds trusted repository, time, and exact criterion verification facts
-    /// to one create or Spec-replacement command.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the command and adapter-confirmed repository
-    /// scope do not identify the same canonical authority.
     pub fn delivery_spec_command_facts(
         command: &CommandEnvelope,
         fixture: DeliverySpecFactsFixture,
@@ -554,12 +543,6 @@ pub mod test_support {
         )
     }
 
-    /// Binds one production-sealed Attention transition to its exact command.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the command and adapter-confirmed repository
-    /// scope do not identify the same canonical authority.
     pub fn delivery_attention_command_facts(
         command: &CommandEnvelope,
         repository: DeliveryRepositoryFactsFixture,
@@ -592,7 +575,6 @@ impl DeliveryChangeKind {
     }
 }
 
-/// Canonical state and outbox values produced by one validated application command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateChange {
     pub stream_id: String,
@@ -615,7 +597,6 @@ impl StateChange {
     }
 }
 
-/// Local Control Plane process configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
     data_directory: PathBuf,
@@ -632,7 +613,6 @@ impl ControlPlaneConfig {
         }
     }
 
-    /// Overrides the parent under which the instance-owned temporary root is created.
     #[must_use]
     pub fn with_temporary_parent(mut self, temporary_parent: impl AsRef<Path>) -> Self {
         self.temporary_parent = temporary_parent.as_ref().to_path_buf();
@@ -650,7 +630,6 @@ impl ControlPlaneConfig {
     }
 }
 
-/// Error returned by an event publisher adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventPublishError {
     message: String,
@@ -673,28 +652,14 @@ impl fmt::Display for EventPublishError {
 
 impl std::error::Error for EventPublishError {}
 
-/// Event transport owned and closed by the Control Plane lifecycle.
 pub trait EventPublisher: Send {
-    /// Publishes one durable event. Implementations must deduplicate by
-    /// `event.event_id` because a crash after publish and before acknowledgement
-    /// can cause the same outbox event to be offered again.
-    ///
-    /// # Errors
-    ///
-    /// Returns a transport-specific failure without acknowledging the event.
     fn publish(&mut self, event: &OutboxEvent) -> Result<(), EventPublishError>;
 
-    /// Closes the event transport and releases its resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns a transport-specific failure if deterministic close fails.
     fn close(&mut self) -> Result<(), EventPublishError> {
         Ok(())
     }
 }
 
-/// Failure while draining the durable outbox.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutboxError {
     Publish(EventPublishError),
@@ -719,7 +684,6 @@ impl fmt::Display for OutboxError {
 
 impl std::error::Error for OutboxError {}
 
-/// Control Plane startup failure. All resources are closed before this is returned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartError {
     message: String,
@@ -741,12 +705,9 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// Control Plane commit failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitError {
-    /// No state was committed.
     Storage(StorageError),
-    /// State and outbox were committed, but the event remains pending.
     PublicationPending {
         receipt: Box<CommitReceipt>,
         source: OutboxError,
@@ -777,16 +738,15 @@ impl fmt::Display for CommitError {
 
 impl std::error::Error for CommitError {}
 
-/// Failure of the canonical base Delivery command transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryCommandCommitError {
-    /// No durable member committed because command or storage validation failed.
     Storage(StorageError),
-    /// The scoped Delivery required by a mutation does not exist.
-    NotFound { delivery_id: DeliveryId },
-    /// A different scoped request tried to create an existing Delivery.
-    AlreadyExists { delivery_id: DeliveryId },
-    /// The atomic transaction committed and only publication remains pending.
+    NotFound {
+        delivery_id: DeliveryId,
+    },
+    AlreadyExists {
+        delivery_id: DeliveryId,
+    },
     PublicationPending {
         receipt: Box<CommitReceipt>,
         source: OutboxError,
@@ -882,14 +842,10 @@ impl fmt::Display for DeliveryCommandCommitError {
 
 impl std::error::Error for DeliveryCommandCommitError {}
 
-/// Failure of the specialized atomic Delivery verdict command.
 #[derive(Debug)]
 pub enum DeliveryVerdictCommitError {
-    /// Sealed candidate, verification, or Evidence facts were stale or invalid.
     Coordination(CoordinationError),
-    /// No Delivery journal, state, receipt, or event fact committed.
     Storage(StorageError),
-    /// The complete transaction committed; publication remains in the outbox.
     PublicationPending {
         receipt: Box<CommitReceipt>,
         source: OutboxError,
@@ -927,13 +883,11 @@ impl From<StorageError> for DeliveryVerdictCommitError {
     }
 }
 
-/// Successful deterministic shutdown facts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShutdownReport {
     pub published_event_count: usize,
 }
 
-/// Shutdown failure. The lifecycle still attempts every close step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShutdownError {
     failures: Vec<String>,
@@ -959,20 +913,17 @@ impl fmt::Display for ShutdownError {
 
 impl std::error::Error for ShutdownError {}
 
-/// Running Control Plane application host.
-///
-/// The host is deliberately synchronous in this phase: it does not detach
-/// background tasks, so shutdown has a finite and observable ownership chain.
 pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
     local_database_path: Option<PathBuf>,
     audit_store: Option<AuditStore>,
     artifact_store: Option<ArtifactStore>,
     git_source_resolver: Option<Box<dyn GitSourceResolver>>,
+    git_source_read_handle: Option<strongflow_read_snapshot::SharedGitSourceResolver>,
     git_repository_root: Option<PathBuf>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
-    strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
+    strongflow_sources: Option<std::sync::Arc<strongflow_projection::StrongFlowProjectionSources>>,
     delivery_authority: Option<Box<dyn DeliveryAuthorityPort>>,
     delivery_dispatcher: Option<Box<dyn ExecutionJobDispatcher>>,
     publication_authority: Option<Box<dyn PublicationAuthorityPort>>,
@@ -980,12 +931,6 @@ pub struct ControlPlane {
 }
 
 impl ControlPlane {
-    /// Loads the durable managed-app configuration attached to one `WorkRun`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the storage error when the Control Plane is closed or the
-    /// projection store cannot be read.
     pub fn load_managed_app_run_config_for_work_run(
         &self,
         work_run_id: &winwincode_domain::WorkRunId,
@@ -994,13 +939,6 @@ impl ControlPlane {
             .load_managed_app_run_config_for_work_run(work_run_id)
     }
 
-    /// Opens and migrates the local `SQLite` database, replays durable outbox
-    /// events, and only then returns a running Control Plane.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StartError`] after closing owned resources when storage open,
-    /// migration, or durable outbox replay fails.
     #[allow(
         clippy::too_many_lines,
         reason = "startup keeps each owned resource's failure cleanup explicit"
@@ -1127,12 +1065,6 @@ impl ControlPlane {
         )
     }
 
-    /// Composes the application with a storage adapter at the `PostgreSQL`-ready seam.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StartError`] after closing both adapters when durable outbox
-    /// replay fails.
     pub fn start(
         storage: Box<dyn ProductStateStorage>,
         mut publisher: Box<dyn EventPublisher>,
@@ -1157,21 +1089,11 @@ impl ControlPlane {
         Self::start_with_resources(storage, None, None, None, publisher, temporary_root)
     }
 
-    /// Installs the production Artifact store used by Worker
-    /// `artifact.open` / `artifact.chunk` ingress. Production
-    /// `start_local` composition leaves this unset; without it every
-    /// diagnostic/candidate Artifact frame fails the HTTP exchange and the
-    /// Worker durable outbox stays pending forever.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StartError`] when an Artifact store is already installed.
     pub fn install_artifact_store(
         &mut self,
         artifact_store: ArtifactStore,
     ) -> Result<(), StartError> {
         if self.artifact_store.is_some() {
-            // Production start_local paths may already open the catalog.
             let _ = artifact_store.close();
             return Ok(());
         }
@@ -1179,12 +1101,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Composes the application with explicit product-state and Artifact adapters.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StartError`] after closing every owned adapter when startup
-    /// outbox replay fails.
     pub fn start_with_artifacts(
         storage: Box<dyn ProductStateStorage>,
         artifact_store: ArtifactStore,
@@ -1234,6 +1150,7 @@ impl ControlPlane {
             audit_store,
             artifact_store,
             git_source_resolver: None,
+            git_source_read_handle: None,
             git_repository_root: None,
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
@@ -1257,23 +1174,11 @@ impl ControlPlane {
         Ok(control_plane)
     }
 
-    /// Returns the canonical local product-state database owned by this host.
-    ///
-    /// Hosts composed through adapter injection do not claim a local database
-    /// identity and return `None`.
     #[must_use]
     pub fn local_database_path(&self) -> Option<&Path> {
         self.local_database_path.as_deref()
     }
 
-    /// Returns the instance-owned temporary root while the host is running.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the internal lifecycle invariant is broken and a running
-    /// host has already lost ownership of its temporary root. Shutdown consumes
-    /// the host, so callers cannot observe a normally released root through this
-    /// method.
     #[must_use]
     pub fn temporary_root(&self) -> &Path {
         self.temporary_root
@@ -1283,13 +1188,6 @@ impl ControlPlane {
             .expect("a running Control Plane must retain a healthy temporary-root lease")
     }
 
-    /// Installs the trusted runtime-ledger and publication read adapters before
-    /// the typed `StrongFlow` query port is exposed to a transport.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an adapter set was already installed. Replacing a
-    /// live authority would make previously issued read cursors ambiguous.
     pub fn install_strongflow_projection_sources(
         &mut self,
         sources: strongflow_projection::StrongFlowProjectionSources,
@@ -1301,17 +1199,10 @@ impl ControlPlane {
                 ),
             );
         }
-        self.strongflow_sources = Some(sources);
+        self.strongflow_sources = Some(std::sync::Arc::new(sources));
         Ok(())
     }
 
-    /// Installs the single trusted source resolver used to reconstruct Git
-    /// candidate identities from complete Artifact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects replacement of a live resolver so one process cannot reinterpret
-    /// an already accepted Artifact through another source authority.
     pub fn install_git_source_resolver(
         &mut self,
         resolver: Box<dyn GitSourceResolver>,
@@ -1322,19 +1213,12 @@ impl ControlPlane {
             ));
         }
         self.git_repository_root = resolver.controlled_repository_root().map(Path::to_path_buf);
-        self.git_source_resolver = Some(resolver);
+        let resolver = strongflow_read_snapshot::SharedGitSourceResolver::new(resolver);
+        self.git_source_resolver = Some(Box::new(resolver.clone()));
+        self.git_source_read_handle = Some(resolver);
         Ok(())
     }
 
-    /// Installs the controlled repository root used by durable candidate Git
-    /// references.  Local source resolvers provide this automatically; this
-    /// setter is for a resolver adapter whose repository root is configured by
-    /// the application rather than exposed by the adapter itself.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/non-directory root or replacement of an already
-    /// selected retention root.
     pub fn install_git_repository_root(
         &mut self,
         root: impl AsRef<Path>,
@@ -1362,21 +1246,11 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Returns the one controlled repository root selected for candidate
-    /// reconstruction and durable Git retention.
     #[must_use]
     pub fn git_repository_root(&self) -> Option<&Path> {
         self.git_repository_root.as_deref()
     }
 
-    /// Commits one canonical HTTP command's state and outbox first, then
-    /// publishes pending events.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommitError::Storage`] when nothing was committed, or
-    /// [`CommitError::PublicationPending`] when state is durable and its event
-    /// must be replayed.
     pub fn commit(
         &mut self,
         command: &CommandEnvelope,
@@ -1414,14 +1288,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Atomically commits one canonical non-dispatch Delivery command and its
-    /// public Delivery event through the single typed Delivery transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns before persistence for an unsupported command, invalid scope,
-    /// stale revision, or failed atomic member. Publication failure retains
-    /// the committed event for startup replay.
     pub fn commit_delivery_command(
         &mut self,
         command: &CommandEnvelope,
@@ -1441,15 +1307,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Atomically commits one `workrun.start` journal record, canonical
-    /// snapshot, scoped command receipt, and execution-job outbox intent before
-    /// offering the exact committed job to the `ExecutionPort` dispatcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns without dispatch when any pre-commit member fails. A dispatch or
-    /// acknowledgement failure carries the committed receipt and leaves the
-    /// durable event pending for startup replay.
     pub fn commit_delivery_execution(
         &mut self,
         command: &CommandEnvelope,
@@ -1471,10 +1328,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Appends the canonical `WorkRun` after the Registry accepts its dispatch.
-    ///
-    /// The accepted scheduler authority and queue proof are both required;
-    /// Worker wire data never creates a Delivery `WorkRun` by itself.
     pub(crate) fn commit_delivery_workrun(
         &mut self,
         durable: &DurableOutboxEvent,
@@ -1500,21 +1353,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Persists one authoritative Worker `session.binding` message as the two
-    /// canonical Delivery mutations that attach its `WorkerSession` and then its
-    /// `CodexThread`.
-    ///
-    /// The generated message is the only wire input. The second argument is an
-    /// opaque scheduler-owned `SessionBinding` authority, and `server_time` is
-    /// captured from the trusted ingress clock. The message cannot authorize
-    /// itself or backdate `sentAt` to reopen an expired lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns before the first write for a foreign job, stale binding, lease
-    /// mismatch, or malformed message. If the `WorkerSession` phase committed
-    /// but the `CodexThread` phase failed, the returned error carries the first
-    /// durable receipt so an exact retry can continue receipt-first.
     pub fn commit_delivery_session_binding(
         &mut self,
         message: &execution_port::SessionBindingMessage,
@@ -1536,18 +1374,6 @@ impl ControlPlane {
         Ok(commit)
     }
 
-    /// Accepts one generated Worker `runtime.event` only after joining its
-    /// durable Delivery-stage `ExecutionJob` to the current four-identity
-    /// `SessionBinding`. `server_time` is the trusted ingress clock; Worker
-    /// `sentAt` remains only a causal/audit fact. Rejected input returns a
-    /// stable generated ack and does not write Delivery state, journal,
-    /// receipt, or outbox members.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the runtime ledger cannot be read or
-    /// committed, or a publication-pending error when an accepted ack was
-    /// committed but its outbox notification still needs flushing.
     pub fn accept_runtime_event(
         &mut self,
         scope: &RepositoryScope,
@@ -1574,20 +1400,15 @@ impl ControlPlane {
         Ok(ack)
     }
 
-    /// Accepts one generated `artifact.open` after exact durable Job, scope,
-    /// `SessionBinding`, and scheduler authority validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns before metadata persistence for a foreign/stale lease, missing
-    /// durable Job, incomplete `SessionBinding`, or invalid immutable descriptor.
     pub fn accept_artifact_open(
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::ArtifactOpenMessage,
         authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
-        let storage = self.storage.as_deref().ok_or_else(|| {
+        self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
+            .map_err(ArtifactMessageError::Storage)?;
+        let storage = self.storage.as_deref_mut().ok_or_else(|| {
             ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
         })?;
         let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
@@ -1598,21 +1419,16 @@ impl ControlPlane {
         artifact_transaction::accept_open(storage, artifacts, scope, message, authority)
     }
 
-    /// Accepts one generated `artifact.chunk` through the same lease-scoped
-    /// authority and content-addressed Artifact interface as `artifact.open`.
-    ///
-    /// # Errors
-    ///
-    /// Returns without accepting bytes for a gap, changed chunk, invalid
-    /// digest/base64 payload, stale lease, or foreign Artifact identity.
     pub fn accept_artifact_chunk(
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::ArtifactChunkMessage,
         authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
+        self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
+            .map_err(ArtifactMessageError::Storage)?;
         let ack = {
-            let storage = self.storage.as_deref().ok_or_else(|| {
+            let storage = self.storage.as_deref_mut().ok_or_else(|| {
                 ArtifactMessageError::Storage(StorageError::adapter(
                     "Control Plane storage is closed",
                 ))
@@ -1641,17 +1457,6 @@ impl ControlPlane {
         Ok(ack)
     }
 
-    /// Rebuilds and freezes the current Delivery candidate from one exact,
-    /// complete Artifact and its successful fenced Worker outcome.
-    ///
-    /// This is a derived read: it does not append Delivery state or let a
-    /// caller supply commit/tree/diff/path identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing/foreign/corrupt Artifact bytes, mismatched scope or
-    /// provenance, stale terminal facts, and source identities that differ
-    /// from the current Delivery Spec.
     pub fn resolve_delivery_candidate(
         &self,
         scope: &RepositoryScope,
@@ -1688,23 +1493,6 @@ impl ControlPlane {
         )
     }
 
-    /// Pins a complete candidate Artifact after its final generated
-    /// acknowledgement has been accepted.
-    ///
-    /// The acknowledgement and chunk are checked against the same sealed
-    /// `SessionBinding` that accepted the upload.  Candidate source facts are
-    /// rebuilt from the durable Artifact and controlled Git repository before
-    /// the retention ledger creates its stable reference.  Calling this method
-    /// for a non-final or non-candidate frame is a no-op; exact final retries
-    /// return the existing durable pin.
-    ///
-    /// # Errors
-    ///
-    /// Returns before a pin is created for a changed acknowledgement, missing
-    /// source, foreign Artifact, unavailable local retention storage, or a Git
-    /// object/reference conflict.  Remote/custom resolver adapters can leave
-    /// the repository root unset; those adapters must invoke their equivalent
-    /// retention seam with a configured controlled root.
     #[allow(clippy::too_many_lines)]
     pub fn pin_candidate_git_after_final_artifact_ack(
         &mut self,
@@ -1724,10 +1512,6 @@ impl ControlPlane {
             || acknowledgement.error.is_some()
             || acknowledgement.replay_from_sequence.is_some()
         {
-            // Diagnostic verification artifacts (command stdout, etc.) share
-            // the Artifact channel but are not Delivery candidates. Pinning
-            // them as Git candidates fails the chunk acknowledgement and
-            // leaves the Worker durable outbox pending forever.
             return Ok(None);
         }
         if acknowledgement.lease != chunk.lease
@@ -1768,15 +1552,13 @@ impl ControlPlane {
         if matches!(
             job.execution_profile.as_str(),
             "reviewer" | "verifier" | "adversarial-verifier"
-        ) {
-            // Verification roles re-upload the already-frozen candidate checkout.
-            // The writer owns the Delivery Git pin; pinning the verification
-            // re-upload can fail the already-accepted chunk ack and strand the
-            // Worker durable outbox (and therefore JobOutcome/verdict).
-            return Ok(None);
+        ) && chunk.snapshot_id.is_none()
+        {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input("verification frame has no snapshotId"),
+            ));
         }
         let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
-            // Chat retains its candidate Git ref on the owning Device before upload.
             return Ok(None);
         };
         let provenance = candidate_source::provenance_from_session_binding(authority)?;
@@ -1841,16 +1623,6 @@ impl ControlPlane {
         Ok(Some(pin))
     }
 
-    /// Durably records that a terminal Delivery and every candidate reader
-    /// have closed.  The supplied terminal receipt must already be present in
-    /// the canonical receipt table and must identify the current Delivery
-    /// revision; this method is the only Control Plane constructor for the
-    /// release authority used below.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the terminal receipt is stale, foreign, or the
-    /// read-closure mutation cannot be committed.
     pub fn commit_candidate_git_reads_closed(
         &mut self,
         delivery_id: &DeliveryId,
@@ -1890,15 +1662,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Releases a candidate Git reference using the exact durable Delivery
-    /// terminal/read-closure receipt.  The receipt is checked again against
-    /// canonical state so a stale or tampered in-memory value cannot authorize
-    /// deletion.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the read-closure receipt is missing or the
-    /// resulting release authority fails durable validation.
     pub fn release_candidate_git_after_delivery_reads_closed(
         &mut self,
         pin: &CandidateGitPinReceipt,
@@ -1908,15 +1671,6 @@ impl ControlPlane {
         self.release_candidate_git_after_delivery_final(pin, &authority)
     }
 
-    /// Releases a durable candidate Git reference only after the caller has
-    /// sealed both the Delivery terminal receipt and the read-closure receipt.
-    /// The release ledger is receipt-first and idempotent across retries and
-    /// process restarts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a changed pin/terminal authority, a foreign repository, a moved
-    /// reference, or an unavailable local retention database.
     pub fn release_candidate_git_after_delivery_final(
         &mut self,
         pin: &CandidateGitPinReceipt,
@@ -1959,36 +1713,12 @@ impl ControlPlane {
         Ok(release)
     }
 
-    /// Completes the production terminal Delivery boundary for every
-    /// candidate retained by that Delivery.
-    ///
-    /// The terminal/read-closure receipt is committed before any Git
-    /// reference is touched.  Candidate bindings are loaded from the durable
-    /// retention ledger, then each exact reference is released through the
-    /// receipt-first compare-and-swap operation.  A failure after one or more
-    /// releases leaves the closure and release intents durable; an exact
-    /// Delivery command replay can therefore resume the remaining releases.
-    ///
-    /// This is intentionally a narrow Control Plane composition seam.  The
-    /// Delivery application calls it only after a canonical terminal
-    /// Delivery mutation (or its exact replay) has been loaded.  It does not
-    /// accept caller-supplied commit/tree/reference identities.
-    ///
-    /// # Errors
-    ///
-    /// Returns before releasing any reference when the terminal receipt is
-    /// stale or the Delivery still has an active reader.  A storage or Git
-    /// failure after the read-closure commit is retryable because all prior
-    /// receipts remain durable.
     pub fn finalize_candidate_git_after_delivery_terminal(
         &mut self,
         delivery_id: &DeliveryId,
         terminal_receipt: &CommitReceipt,
         terminal_outcome: CandidateGitTerminalOutcome,
     ) -> Result<Vec<CandidateGitReleaseReceipt>, CandidateResolutionError> {
-        // Adapter-injected Control Planes without a local candidate-retention
-        // root have no Git refs to release.  The local production composition
-        // always installs both values before accepting a Delivery command.
         if self.git_source_resolver.is_none() && self.git_repository_root.is_none() {
             return Ok(Vec::new());
         }
@@ -1998,9 +1728,6 @@ impl ControlPlane {
             delivery_id,
         )?
         else {
-            // A configured publication target is a future reader even before
-            // its durable Publication intent exists.  Keep every candidate
-            // pin until that intent reaches a terminal state.
             return Ok(Vec::new());
         };
         let reads_closed = self.commit_candidate_git_reads_closed_with_guards(
@@ -2053,11 +1780,6 @@ impl ControlPlane {
         Ok(pins)
     }
 
-    /// Retries the production candidate release for a terminal Delivery by
-    /// resolving its original durable mutation receipt from the canonical
-    /// stream revision.  Publication recovery uses this narrow composition
-    /// after a Published, Failed, or Cancelled Publication response, where
-    /// the original Delivery command response is no longer in memory.
     pub(crate) fn finalize_candidate_git_for_terminal_delivery(
         &mut self,
         delivery_id: &DeliveryId,
@@ -2103,19 +1825,6 @@ impl ControlPlane {
         .map(|_| ())
     }
 
-    /// Persists one lease-fenced Worker `job.outcome` through the only typed
-    /// terminal Delivery transaction.
-    ///
-    /// Receipt replay is resolved before current Delivery, journal, durable job,
-    /// or replacement authority is read. A new message is joined to its exact
-    /// durable dispatch intent and opaque scheduler/Worker facts before the
-    /// canonical terminal transition is committed. `server_time` is the
-    /// trusted ingress clock and Worker `sentAt` cannot authorize the lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns before persistence for a stale/foreign lease, binding, thread,
-    /// sequence, Artifact, message time, or non-terminal stage transition.
     pub fn commit_delivery_terminal_outcome(
         &mut self,
         scope: &RepositoryScope,
@@ -2123,11 +1832,35 @@ impl ControlPlane {
         facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
         server_time: &Instant,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+        self.commit_delivery_terminal_outcome_for_period(
+            scope,
+            message,
+            facts,
+            server_time,
+            facts.authority().expires_at(),
+        )
+    }
+
+    pub(crate) fn commit_delivery_terminal_outcome_for_period(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &execution_port::JobOutcomeMessage,
+        facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
+        server_time: &Instant,
+        accepted_period: &Instant,
+    ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryTerminalOutcomeCommitError::Storage)?;
-            terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)?
+            terminal_outcome_transaction::execute_at(
+                storage,
+                scope,
+                message,
+                facts,
+                server_time,
+                accepted_period,
+            )?
         };
         if let Some(data_directory) = self.local_database_path.as_deref().and_then(Path::parent) {
             let worker_terminal = DurableWorkerExecutionLifecycle::open(data_directory).and_then(
@@ -2158,13 +1891,6 @@ impl ControlPlane {
         Ok(commit)
     }
 
-    /// Atomically commits a constructor-derived bounded-rework clarification
-    /// without creating or dispatching an `ExecutionJob`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error before any durable write when the command,
-    /// transition, revision, receipt, or journal publication is not exact.
     pub fn commit_delivery_rework_clarification(
         &mut self,
         command: &CommandEnvelope,
@@ -2183,15 +1909,6 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Recomputes and atomically commits one Delivery's Evidence, Verdict,
-    /// blocking Attention, task state, status, scoped receipt, journal record,
-    /// and immutable outbox event.
-    ///
-    /// # Errors
-    ///
-    /// Returns before persistence for stale authoritative facts or when any
-    /// atomic member fails. Publication failure carries the committed receipt
-    /// and leaves the one event pending for replay.
     pub fn commit_delivery_verdict(
         &mut self,
         command: &CommandEnvelope,
@@ -2211,22 +1928,10 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Loads canonical state through the configured storage adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageError`] when the adapter read fails.
     pub fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         self.storage_ref()?.load_state(stream_id)
     }
 
-    /// Stops accepting work by consuming the host, flushes the outbox, closes
-    /// the publisher, and finally closes storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ShutdownError`] after attempting every close step when outbox
-    /// flush or adapter close fails.
     pub fn shutdown(mut self) -> Result<ShutdownReport, ShutdownError> {
         let mut failures = Vec::new();
         let published_event_count = match self.flush_outbox() {
@@ -2255,6 +1960,12 @@ impl ControlPlane {
             .map_err(OutboxError::Acknowledge)?;
         let mut published = 0;
         for event in events {
+            if matches!(
+                event.topic.as_str(),
+                snapshot_production::FREEZE_TOPIC | snapshot_production::DISPATCH_TOPIC
+            ) {
+                continue;
+            }
             self.publisher_mut()
                 .map_err(|error| OutboxError::Publish(EventPublishError::new(error.to_string())))?
                 .publish(&event)
@@ -2268,9 +1979,6 @@ impl ControlPlane {
         Ok(published)
     }
 
-    /// Flushes the durable audit bridge into the one immutable audit hash
-    /// chain. The payload is a complete canonical `AuditEvent`; the `SQLite`
-    /// row is only a pending marker and remains for idempotent crash recovery.
     fn flush_pending_audit_events(&mut self) -> Result<(), OutboxError> {
         let pending = self
             .storage_ref()
@@ -2390,10 +2098,6 @@ fn authority_lease(
 fn artifact_ack_digest(
     acknowledgement: &execution_port::ArtifactAckMessage,
 ) -> Result<Sha256Digest, CandidateResolutionError> {
-    // A replay of the same final chunk is acknowledged as `Duplicate` while
-    // the original write was acknowledged as `Accepted`.  Both responses
-    // describe the same immutable final write, so retention identity must use
-    // one canonical status rather than creating a second pin on replay.
     let mut canonical = acknowledgement.clone();
     canonical.status = execution_port::LeaseWriteStatus::Accepted;
     let bytes = serde_json::to_vec(&canonical).map_err(|_| {
@@ -2426,11 +2130,6 @@ pub(crate) fn storage_commit(
 const EXECUTION_AUDIT_SYSTEM_ACTOR: &str = "sys_00000000000000000000000000";
 const EXECUTION_AUDIT_ORIGIN: &str = "control-plane.execution-port";
 
-/// Encodes one complete execution audit event for the durable storage bridge.
-///
-/// The storage crate receives only the canonical event bytes and its event id;
-/// all event semantics remain owned by `winwincode-audit`, and the immutable
-/// `AuditStore` is the sole audit authority after the bridge is flushed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execution_audit_event(
     event_id: AuditEventId,
@@ -2460,9 +2159,6 @@ pub(crate) fn execution_audit_event(
     )
 }
 
-/// Encodes one execution audit event from a state transition owned by the
-/// caller. Runtime ledger transitions use this seam because they do not mutate
-/// the Delivery aggregate.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execution_audit_event_with_state(
     event_id: AuditEventId,
@@ -2568,12 +2264,6 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
     storage_receipt_scope_key(&public_event_scope(scope))
 }
 
-/// Builds the one canonical storage receipt identity from a generated command
-/// envelope's authenticated actor, exact tenant scope, and request id.
-///
-/// # Errors
-///
-/// Rejects a non-canonical actor, scope, or request identity.
 pub fn command_receipt_identity(
     actor: &Actor,
     scope: &Scope,
@@ -2855,3 +2545,11 @@ fn cleanup_suffix(failures: &[String]) -> String {
         format!("; cleanup also failed: {}", failures.join("; "))
     }
 }
+
+mod private_launch_material;
+pub use private_launch_material::PrivateLaunchMaterialStore;
+
+#[cfg(test)]
+extern crate self as winwincode_control_plane;
+#[cfg(test)]
+mod storage_mechanism_regression;

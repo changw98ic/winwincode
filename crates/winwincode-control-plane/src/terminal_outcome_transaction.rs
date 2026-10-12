@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Receipt-first transaction for one generated Worker `job.outcome`.
-
 use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
@@ -55,7 +53,6 @@ const TERMINAL_EVENT_NAMESPACE: &[u8] = b"winwincode.work-run-terminal.v1";
 const TERMINAL_RUNTIME_NAMESPACE: &[u8] = b"winwincode.work-run-terminal-runtime-invalidation.v1";
 const TERMINAL_AUTHORITY_STREAM_PREFIX: &str = "delivery-terminal-authority:";
 
-/// Durable receipt for one accepted Worker terminal outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryTerminalOutcomeCommitReceipt {
     receipt: CommitReceipt,
@@ -73,7 +70,6 @@ impl DeliveryTerminalOutcomeCommitReceipt {
     }
 }
 
-/// Failure of a terminal-outcome transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryTerminalOutcomeCommitError {
     Storage(StorageError),
@@ -130,6 +126,7 @@ pub(crate) fn execute_at(
     message: &JobOutcomeMessage,
     facts: &DeliveryTerminalOutcomeFacts,
     server_time: &Instant,
+    accepted_period: &Instant,
 ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
     let phase = TerminalPhase::new(scope, message)?;
     if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
@@ -141,7 +138,8 @@ pub(crate) fn execute_at(
     validate_trusted_lease_time(facts, server_time)?;
 
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
-    let context = TerminalContext::from_durable(scope, &durable, &job)?;
+    crate::snapshot_production::snapshot_for_job(storage, &job)?;
+    let mut context = TerminalContext::from_durable(scope, &durable, &job)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
     let session_identity = match validate_current_job_binding(&current, &job, &context) {
         Ok(identity) => identity,
@@ -150,7 +148,59 @@ pub(crate) fn execute_at(
             return Ok(DeliveryTerminalOutcomeCommitReceipt { receipt });
         }
     };
-    validate_message_authority(message, &job, &context, facts, &session_identity)?;
+    validate_message_authority(
+        message,
+        &job,
+        &context,
+        facts,
+        &session_identity,
+        accepted_period,
+    )?;
+    if message.outcome.error.as_ref().is_some_and(|error| {
+        error.code
+            == winwincode_execution_port::generated::ExecutionPortErrorCode::CandidateUnchanged
+    }) {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
+            return Err(
+                StorageError::invalid_input("unchanged remediation scope is missing").into(),
+            );
+        };
+        let sealed = job_scope.rework_authorization.as_ref().ok_or_else(|| {
+            StorageError::invalid_input("unchanged remediation authorization is missing")
+        })?;
+        if job.execution_profile != "remediator"
+            || message.outcome.status != ExecutionOutcomeStatus::Failed
+            || !sealed.requires_full_reverification
+            || job.workspace.checkout_revision != sealed.source_candidate_commit_id
+        {
+            return Err(StorageError::invalid_input(
+                "unchanged outcome differs from its accepted rework source",
+            )
+            .into());
+        }
+        let loaded = storage.load_journal(&delivery_journal_key(&context.delivery_id)?)?;
+        let journal = StagedDeliveryJournal::new(context.delivery_id.clone(), loaded);
+        let (source, _history) = DeliveryStore::borrowed(&journal)
+            .rework_dispatch_source(
+                &context.delivery_id,
+                durable.receipt_identity().request_id(),
+            )
+            .map_err(|_| {
+                StorageError::invalid_input("unchanged rework dispatch source is unavailable")
+            })?;
+        context.unchanged_recovery = Some(
+            winwincode_delivery::domain::same_candidate::verify_unchanged_rework_recovery(
+                &current,
+                &source,
+                facts,
+                &sealed.authorization_digest,
+                &sealed.candidate_ref,
+            )
+            .map_err(|_| {
+                StorageError::invalid_input("unchanged rework source or terminal authority differs")
+            })?,
+        );
+    }
     let receipt = commit_terminal(
         storage,
         message,
@@ -170,15 +220,9 @@ fn validate_trusted_lease_time(
 ) -> Result<(), StorageError> {
     let now = instant_millis(server_time)?;
     let issued_at = instant_millis(facts.authority().issued_at())?;
-    let expires_at = instant_millis(facts.authority().expires_at())?;
     if now < issued_at {
         return Err(StorageError::invalid_input(
             "terminal ingress precedes the scheduler-owned lease",
-        ));
-    }
-    if now >= expires_at {
-        return Err(StorageError::invalid_input(
-            "terminal ingress observed an expired scheduler-owned lease",
         ));
     }
     Ok(())
@@ -223,6 +267,8 @@ struct TerminalContext {
     work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     job_event: DurableExecutionJobRef,
+    unchanged_recovery:
+        Option<winwincode_delivery::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
 }
 
 impl TerminalContext {
@@ -262,6 +308,7 @@ impl TerminalContext {
             work_run_id: job_scope.work_run_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
             job_event,
+            unchanged_recovery: None,
         })
     }
 }
@@ -313,8 +360,6 @@ struct TerminalAcceptedEvent {
     work_run_id: WorkRunId,
 }
 
-/// Secret-safe terminal facts kept with the accepted message digest. Worker
-/// prose, diagnostics, and raw lease authority never enter the durable event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AcceptedTerminalOutcome {
@@ -441,13 +486,14 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
             "successful job.outcome is missing immutable Usage",
         ));
     }
-    if let Some(usage) = &message.outcome.usage
-        && (!(0..=9_007_199_254_740_991).contains(&usage.tokens)
-            || !(0..=9_007_199_254_740_991).contains(&usage.cost_microunits)
-            || !(0..=9_007_199_254_740_991).contains(&usage.runtime_millis))
+    if message
+        .outcome
+        .usage
+        .as_ref()
+        .is_some_and(|usage| !winwincode_execution_port::usage::valid_usage(usage))
     {
         return Err(StorageError::invalid_input(
-            "job.outcome Usage is outside the public integer range",
+            "job.outcome Usage is inconsistent",
         ));
     }
     if message
@@ -477,12 +523,7 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     let expires_at = instant_millis(&message.lease.expires_at)?;
     let finished_at = instant_millis(&message.outcome.finished_at)?;
     let sent_at = instant_millis(&message.sent_at)?;
-    if issued_at >= expires_at
-        || finished_at < issued_at
-        || finished_at >= expires_at
-        || sent_at < finished_at
-        || sent_at > expires_at
-    {
+    if issued_at >= expires_at || finished_at < issued_at || sent_at < finished_at {
         return Err(StorageError::invalid_input(
             "job.outcome time is outside its active lease",
         ));
@@ -496,6 +537,7 @@ fn validate_message_authority(
     context: &TerminalContext,
     facts: &DeliveryTerminalOutcomeFacts,
     session_identity: &SessionIdentity,
+    accepted_period: &Instant,
 ) -> Result<(), StorageError> {
     let active = facts.authority().active_lease();
     let attempt = u64::try_from(message.lease.attempt)
@@ -522,7 +564,8 @@ fn validate_message_authority(
         || active.worker_instance_id() != &message.lease.worker_instance_id
         || active.worker_session_id() != &message.worker_session_id
         || facts.authority().issued_at() != &message.lease.issued_at
-        || facts.authority().expires_at() != &message.lease.expires_at
+        || accepted_period != &message.lease.expires_at
+        || accepted_period.0 > facts.authority().expires_at().0
         || facts.status() != expected_status
         || metadata.codex_thread_id() != message.outcome.codex_thread_id.as_ref()
         || metadata.finished_at_millis() != message_finished_at
@@ -702,6 +745,7 @@ fn commit_terminal(
                 request_digest: phase.request_digest()?,
                 expected_revision: current.revision(),
                 facts: facts.clone(),
+                unchanged_recovery: context.unchanged_recovery.clone(),
             },
         )))
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
@@ -786,8 +830,6 @@ fn commit_terminal(
     Ok(receipt)
 }
 
-/// Reads a successful report by exact job and accepted binding without
-/// marking the `WorkItem` complete or consuming a global stage handoff.
 pub(crate) fn load_successful_terminal_authority(
     storage: &dyn ProductStateStorage,
     delivery: &Delivery,

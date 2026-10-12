@@ -1,0 +1,493 @@
+diff --git a/codex-rs/state/src/runtime/tool_execution.rs b/codex-rs/state/src/runtime/tool_execution.rs
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -79,6 +79,28 @@
+         Ok(outcome)
+     }
+ 
++    /// Reads an accepted body only for the currently authorized receipt revision.
++    /// The caller must authorize this exact receipt before invoking this method.
++    pub async fn read_accepted_tool_output(
++        &self,
++        request_sequence: i64,
++        attempt_id: &str,
++        revision: i64,
++    ) -> anyhow::Result<Option<ToolStoredResults>> {
++        let row = sqlx::query("SELECT effective_input, accepted_result FROM tool_attempts WHERE request_sequence = ? AND attempt_id = ? AND revision = ? AND execution = 'completed' AND disposition = 'accepted' AND accepted_result IS NOT NULL")
++            .bind(request_sequence).bind(attempt_id).bind(revision)
++            .fetch_optional(self.pool.as_ref()).await?;
++        row.map(|row| {
++            Ok(ToolStoredResults {
++                effective_input: row.try_get("effective_input")?,
++                execution: None,
++                accepted: row.try_get("accepted_result")?,
++                rejection: None,
++            })
++        })
++        .transpose()
++    }
++
+     /// A pre-dispatch rejection remains distinct from an executed handler.
+     pub async fn deny_tool_request(&self, request_sequence: i64) -> anyhow::Result<()> {
+         let mut tx = self.pool.begin().await?;
+@@ -250,7 +272,7 @@
+         after: i64,
+         limit: u32,
+     ) -> anyhow::Result<Vec<ToolFactEvent>> {
+-        let rows = sqlx::query("SELECT sequence, fact_json FROM tool_fact_events WHERE thread_id = ? AND sequence > ? ORDER BY sequence LIMIT ?")
++        let rows = sqlx::query("SELECT sequence, json_extract(fact_json, '$.fact') AS fact_json FROM tool_fact_events WHERE thread_id = ? AND sequence > ? AND json_extract(fact_json, '$.kind') = 'request' ORDER BY sequence LIMIT ?")
+             .bind(thread_id).bind(after).bind(limit.clamp(1, 200)).fetch_all(self.pool.as_ref()).await?;
+         rows.into_iter()
+             .map(|row| {
+@@ -281,7 +303,9 @@
+     )
+     .bind(fact.request_sequence)
+     .bind(&fact.request.thread_id)
+-    .bind(serde_json::to_string(fact)?)
++    .bind(serde_json::to_string(&crate::ToolRuntimeFact::Request(
++        fact.clone(),
++    ))?)
+     .execute(connection)
+     .await?;
+     Ok(())
+diff --git a/codex-rs/state/src/runtime/tool_execution_tests.rs b/codex-rs/state/src/runtime/tool_execution_tests.rs
+--- a/codex-rs/state/src/runtime/tool_execution_tests.rs
++++ b/codex-rs/state/src/runtime/tool_execution_tests.rs
+@@ -450,3 +450,81 @@
+         2
+     );
+ }
++
++#[tokio::test]
++async fn accepted_output_read_is_bound_to_exact_attempt_revision_and_retained_body() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    let sequence = fact.request_sequence;
++    runtime
++        .claim_tool_attempt(sequence, "attempt", "owner", "digest", "{}")
++        .await
++        .unwrap();
++    runtime
++        .complete_tool_attempt(
++            sequence,
++            "attempt",
++            "owner",
++            ToolExecutionStatus::Completed,
++            Some("raw"),
++        )
++        .await
++        .unwrap();
++    runtime
++        .decide_tool_output(
++            sequence,
++            "attempt",
++            "owner",
++            ToolOutputDisposition::Accepted,
++            Some("accepted"),
++        )
++        .await
++        .unwrap();
++    let events = runtime
++        .list_tool_fact_events(&request.thread_id, 0, 200)
++        .await
++        .unwrap();
++    let revision = events
++        .last()
++        .unwrap()
++        .fact
++        .attempt
++        .as_ref()
++        .unwrap()
++        .revision;
++    assert_eq!(
++        runtime
++            .read_accepted_tool_output(sequence, "attempt", revision)
++            .await
++            .unwrap()
++            .unwrap()
++            .accepted,
++        Some("accepted".into())
++    );
++    assert!(
++        runtime
++            .read_accepted_tool_output(sequence, "foreign-attempt", revision)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    runtime
++        .offer_tool_output(sequence, "attempt", "owner")
++        .await
++        .unwrap();
++    assert!(
++        runtime
++            .read_accepted_tool_output(sequence, "attempt", revision)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    runtime.forget_tool_results(sequence).await.unwrap();
++    assert!(
++        runtime
++            .read_accepted_tool_output(sequence, "attempt", revision + 2)
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
+diff --git a/codex-rs/state/src/runtime/tool_runtime.rs b/codex-rs/state/src/runtime/tool_runtime.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_runtime.rs
+@@ -0,0 +1,196 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::StateRuntime;
++use crate::ToolCellFact;
++use crate::ToolRuntimeEvent;
++use crate::ToolRuntimeFact;
++use crate::ToolWaitFact;
++use crate::ToolWaitState;
++use anyhow::ensure;
++use sqlx::Row;
++use sqlx::SqliteConnection;
++
++impl StateRuntime {
++    /// Binds a host-created cell to its already claimed outer exec request.
++    pub async fn open_tool_cell(
++        &self,
++        thread_id: &str,
++        parent_logical_id: &str,
++        cell_id: &str,
++        scope_id: &str,
++        owner_id: &str,
++    ) -> anyhow::Result<ToolCellFact> {
++        ensure!(
++            cell_id.len() <= 1024 && scope_id.len() <= 1024,
++            "cell identity exceeds limit"
++        );
++        let mut tx = self.pool.begin().await?;
++        let parent: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
++            .bind(thread_id).bind(parent_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
++        let row = sqlx::query("INSERT INTO tool_runtime_cells(thread_id, parent_request_sequence, cell_id, scope_id, owner_id, lifecycle) VALUES (?, ?, ?, ?, ?, 'live') RETURNING *")
++            .bind(thread_id).bind(parent).bind(cell_id).bind(scope_id).bind(owner_id).fetch_one(&mut *tx).await?;
++        let fact = cell_fact(&row)?;
++        append(
++            &mut tx,
++            parent,
++            thread_id,
++            &ToolRuntimeFact::Cell(fact.clone()),
++        )
++        .await?;
++        tx.commit().await?;
++        Ok(fact)
++    }
++
++    /// A wait edge is recorded only for a live cell owned by the same Core incarnation.
++    pub async fn begin_tool_cell_wait(
++        &self,
++        thread_id: &str,
++        waiter_logical_id: &str,
++        cell_id: &str,
++        scope_id: &str,
++        owner_id: &str,
++    ) -> anyhow::Result<Option<ToolWaitFact>> {
++        let mut tx = self.pool.begin().await?;
++        let waiter: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
++            .bind(thread_id).bind(waiter_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
++        let target: Option<i64> = sqlx::query_scalar("SELECT sequence FROM tool_runtime_cells WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live'")
++            .bind(thread_id).bind(cell_id).bind(scope_id).bind(owner_id).fetch_optional(&mut *tx).await?;
++        let Some(target) = target else {
++            return Ok(None);
++        };
++        sqlx::query("INSERT INTO tool_runtime_waits(waiter_request_sequence, target_cell_sequence, owner_id, state) VALUES (?, ?, ?, 'waiting')")
++            .bind(waiter).bind(target).bind(owner_id).execute(&mut *tx).await?;
++        let fact = ToolWaitFact {
++            schema_version: 1,
++            thread_id: thread_id.into(),
++            waiter_request_sequence: waiter,
++            target_cell_sequence: target,
++            owner_id: owner_id.into(),
++            state: ToolWaitState::Waiting,
++            revision: 1,
++        };
++        append(
++            &mut tx,
++            waiter,
++            thread_id,
++            &ToolRuntimeFact::Wait(fact.clone()),
++        )
++        .await?;
++        tx.commit().await?;
++        Ok(Some(fact))
++    }
++
++    /// Settlement records a delivered wait boundary, including a normal yield.
++    pub async fn settle_tool_cell_wait(
++        &self,
++        thread_id: &str,
++        waiter: i64,
++        owner_id: &str,
++    ) -> anyhow::Result<()> {
++        let mut tx = self.pool.begin().await?;
++        let row = sqlx::query("UPDATE tool_runtime_waits SET state = 'settled', revision = revision + 1 WHERE waiter_request_sequence = ? AND owner_id = ? AND state = 'waiting' AND EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND thread_id = ?) RETURNING target_cell_sequence, revision")
++            .bind(waiter).bind(owner_id).bind(waiter).bind(thread_id).fetch_one(&mut *tx).await?;
++        let fact = ToolWaitFact {
++            schema_version: 1,
++            thread_id: thread_id.into(),
++            waiter_request_sequence: waiter,
++            target_cell_sequence: row.try_get("target_cell_sequence")?,
++            owner_id: owner_id.into(),
++            state: ToolWaitState::Settled,
++            revision: row.try_get("revision")?,
++        };
++        append(&mut tx, waiter, thread_id, &ToolRuntimeFact::Wait(fact)).await?;
++        tx.commit().await?;
++        Ok(())
++    }
++
++    /// Only an observed terminal runtime boundary closes a cell. Another owner
++    /// cannot infer termination merely by reopening the database.
++    pub async fn close_tool_cell(
++        &self,
++        thread_id: &str,
++        cell_id: &str,
++        scope_id: &str,
++        owner_id: &str,
++    ) -> anyhow::Result<()> {
++        let mut tx = self.pool.begin().await?;
++        let row = sqlx::query("UPDATE tool_runtime_cells SET lifecycle = 'closed', revision = revision + 1 WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live' RETURNING *")
++            .bind(thread_id).bind(cell_id).bind(scope_id).bind(owner_id).fetch_optional(&mut *tx).await?;
++        if let Some(row) = row {
++            let fact = cell_fact(&row)?;
++            append(
++                &mut tx,
++                fact.parent_request_sequence,
++                thread_id,
++                &ToolRuntimeFact::Cell(fact),
++            )
++            .await?;
++        }
++        tx.commit().await?;
++        Ok(())
++    }
++
++    /// Historical cell metadata does not imply that its owner is still live.
++    pub async fn latest_tool_cell(
++        &self,
++        thread_id: &str,
++        cell_id: &str,
++    ) -> anyhow::Result<Option<ToolCellFact>> {
++        let row = sqlx::query("SELECT * FROM tool_runtime_cells WHERE thread_id = ? AND cell_id = ? ORDER BY sequence DESC LIMIT 1")
++            .bind(thread_id).bind(cell_id).fetch_optional(self.pool.as_ref()).await?;
++        row.as_ref().map(cell_fact).transpose()
++    }
++
++    /// A single cursor rebuilds all payload-free runtime projections.
++    pub async fn list_tool_runtime_events(
++        &self,
++        thread_id: &str,
++        after: i64,
++        limit: u32,
++    ) -> anyhow::Result<Vec<ToolRuntimeEvent>> {
++        let rows = sqlx::query("SELECT sequence, fact_json FROM tool_fact_events WHERE thread_id = ? AND sequence > ? ORDER BY sequence LIMIT ?")
++            .bind(thread_id).bind(after).bind(limit.clamp(1, 200)).fetch_all(self.pool.as_ref()).await?;
++        rows.into_iter()
++            .map(|row| {
++                Ok(ToolRuntimeEvent {
++                    sequence: row.try_get("sequence")?,
++                    fact: serde_json::from_str(row.try_get("fact_json")?)?,
++                })
++            })
++            .collect()
++    }
++}
++
++fn cell_fact(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ToolCellFact> {
++    Ok(ToolCellFact {
++        schema_version: 1,
++        sequence: row.try_get("sequence")?,
++        thread_id: row.try_get("thread_id")?,
++        parent_request_sequence: row.try_get("parent_request_sequence")?,
++        cell_id: row.try_get("cell_id")?,
++        scope_id: row.try_get("scope_id")?,
++        owner_id: row.try_get("owner_id")?,
++        lifecycle: serde_json::from_value(serde_json::json!(row.try_get::<&str, _>("lifecycle")?))?,
++        revision: row.try_get("revision")?,
++    })
++}
++
++async fn append(
++    connection: &mut SqliteConnection,
++    request: i64,
++    thread: &str,
++    fact: &ToolRuntimeFact,
++) -> anyhow::Result<()> {
++    sqlx::query(
++        "INSERT INTO tool_fact_events(request_sequence, thread_id, fact_json) VALUES (?, ?, ?)",
++    )
++    .bind(request)
++    .bind(thread)
++    .bind(serde_json::to_string(fact)?)
++    .execute(connection)
++    .await?;
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "tool_runtime_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/tool_runtime_tests.rs b/codex-rs/state/src/runtime/tool_runtime_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_runtime_tests.rs
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::*;
++use crate::SqliteConfig;
++use crate::ToolRequestIdentity;
++use crate::ToolRequestObservation;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++async fn request(store: &StateRuntime, logical: &str) -> i64 {
++    let identity = ToolRequestIdentity {
++        thread_id: "thread".into(),
++        logical_id: logical.into(),
++        turn_id: "turn".into(),
++        scope_id: "scope".into(),
++        cell_id: None,
++        parent_call_id: None,
++        tool_name: "functions.exec".into(),
++        source: "model".into(),
++        binding: "input".into(),
++    };
++    let ToolRequestObservation::New(fact) = store.observe_tool_request(&identity).await.unwrap()
++    else {
++        panic!("new")
++    };
++    store
++        .claim_tool_attempt(fact.request_sequence, logical, "owner", "digest", "{}")
++        .await
++        .unwrap();
++    fact.request_sequence
++}
++
++#[tokio::test]
++async fn cells_and_waits_rebuild_from_one_ordered_stream_and_survive_restart() {
++    let home = unique_temp_dir();
++    let config = SqliteConfig::new_for_testing(home.as_path().abs());
++    let store = StateRuntime::init(config.clone(), "test".into())
++        .await
++        .unwrap();
++    let parent = request(&store, "exec").await;
++    let cell = store
++        .open_tool_cell("thread", "exec", "cell", "scope", "owner")
++        .await
++        .unwrap();
++    assert_eq!(cell.parent_request_sequence, parent);
++    let waiter = request(&store, "wait").await;
++    store
++        .begin_tool_cell_wait("thread", "wait", "cell", "scope", "owner")
++        .await
++        .unwrap();
++    let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
++    let events = reopened
++        .list_tool_runtime_events("thread", 0, 200)
++        .await
++        .unwrap();
++    assert_eq!(events.len(), 6);
++    assert!(
++        matches!(&events[5].fact, ToolRuntimeFact::Wait(fact) if fact.state == ToolWaitState::Waiting && fact.waiter_request_sequence == waiter && fact.target_cell_sequence == cell.sequence)
++    );
++    assert!(
++        reopened
++            .settle_tool_cell_wait("thread", waiter, "another-owner")
++            .await
++            .is_err()
++    );
++    reopened
++        .settle_tool_cell_wait("thread", waiter, "owner")
++        .await
++        .unwrap();
++    reopened
++        .close_tool_cell("thread", "cell", "scope", "another-owner")
++        .await
++        .unwrap();
++    assert_eq!(
++        reopened
++            .list_tool_runtime_events("thread", events[5].sequence, 200)
++            .await
++            .unwrap()
++            .len(),
++        1
++    );
++    reopened
++        .close_tool_cell("thread", "cell", "scope", "owner")
++        .await
++        .unwrap();
++    request(&reopened, "late-wait").await;
++    assert!(
++        reopened
++            .begin_tool_cell_wait("thread", "late-wait", "cell", "scope", "owner")
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let request_events = reopened
++        .list_tool_fact_events("thread", 0, 200)
++        .await
++        .unwrap();
++    assert_eq!(request_events.len(), 6);
++    assert!(
++        reopened
++            .list_tool_runtime_events("another-thread", 0, 200)
++            .await
++            .unwrap()
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn foreign_owner_and_unknown_cell_cannot_create_trusted_wait_edges() {
++    let home = unique_temp_dir();
++    let store = StateRuntime::init(
++        SqliteConfig::new_for_testing(home.as_path().abs()),
++        "test".into(),
++    )
++    .await
++    .unwrap();
++    request(&store, "exec").await;
++    assert!(
++        store
++            .open_tool_cell("thread", "exec", "cell", "scope", "other")
++            .await
++            .is_err()
++    );
++    store
++        .open_tool_cell("thread", "exec", "cell", "scope", "owner")
++        .await
++        .unwrap();
++    request(&store, "wait").await;
++    assert!(
++        store
++            .begin_tool_cell_wait("thread", "wait", "unknown", "scope", "owner")
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        store
++            .begin_tool_cell_wait("thread", "wait", "cell", "scope", "other")
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .list_tool_runtime_events("thread", 0, 200)
++            .await
++            .unwrap()
++            .iter()
++            .all(|event| !matches!(event.fact, ToolRuntimeFact::Wait(_)))
++    );
++}

@@ -1,20 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `DeviceExecutionBinding` application service over the durable binding
-//! ledger and its reservation capacity view.
-//!
-//! The Control Plane is the authoritative owner of the task-execution
-//! identity chain (plan 7.8, 14, 17.2): it binds one `WorkerSession` durably
-//! to the client node, occupancy lease, fencing token, and repository
-//! binding of its live `WorkerLaunchGrant`, attaches those device facts to
-//! one execution admission reservation so every Job identity stays
-//! traceable, and judges worker-session capacity for both the occupancy
-//! claim and the launch issue gates against one durable reservation ledger
-//! (`reserved` = non-terminal launch grants). Commands echo the stored
-//! authority exactly; any divergence is refused without a durable change,
-//! and the fixed CAS/replay rules make every transition at-most-once
-//! idempotent.
-
 use std::fmt;
 
 use winwincode_domain::Instant;
@@ -22,8 +7,6 @@ use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRelease, SqliteStorage,
 };
 
-/// Re-exported so service consumers can name the durable records and
-/// commands without importing the storage crate directly.
 pub use winwincode_storage::DeviceBindingReceipt;
 pub use winwincode_storage::DeviceExecutionBindingRecord;
 pub use winwincode_storage::DeviceExecutionBindingState as DeviceBindingState;
@@ -34,39 +17,23 @@ pub use winwincode_storage::DeviceExecutionFactsAttachment;
 pub use winwincode_storage::DeviceExecutionReservationFacts;
 pub use winwincode_storage::DeviceFactsReceipt;
 
-/// Stable service failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceExecutionBindingServiceErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// No launch grant matches the requested identity.
     UnknownLaunchGrant,
-    /// The launch grant is not live (`issued` or `consumed`).
     LaunchGrantNotLive,
-    /// An echoed binding or attachment field differs from the authority.
     FieldMismatch,
-    /// The worker session or grant already carries a binding, or the binding
-    /// identity is already used.
     BindingConflict,
-    /// No bound binding matches the requested worker session.
     UnknownBinding,
-    /// The execution Job does not exist.
     UnknownExecutionJob,
-    /// The execution Job already carries device facts.
     FactsAlreadyAttached,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race.
     RevisionConflict,
-    /// A request identity was reused with a different body.
     RequestConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free device execution binding service error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceExecutionBindingServiceError {
     kind: DeviceExecutionBindingServiceErrorKind,
@@ -137,25 +104,16 @@ impl From<DeviceExecutionBindingStoreError> for DeviceExecutionBindingServiceErr
     }
 }
 
-/// Device execution binding application service over one storage connection.
 pub struct DeviceExecutionBindingService<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl<'storage> DeviceExecutionBindingService<'storage> {
-    /// Builds one service over the sole product-state storage authority.
     #[must_use]
     pub fn new(storage: &'storage mut SqliteStorage) -> Self {
         Self { storage }
     }
 
-    /// Atomically binds one worker session to the identities of its live
-    /// launch grant behind the exact-echo gate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown or terminal grant, any field mismatch, a reused
-    /// binding identity, a conflicting replay, or storage failure.
     pub fn bind(
         &mut self,
         command: &DeviceExecutionBindingIssuance,
@@ -167,13 +125,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .bind(command, now)?)
     }
 
-    /// Releases the `bound` binding of one worker session through the fixed
-    /// compare-and-swap transition.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown bound binding, a lost revision race, a conflicting
-    /// replay, or storage failure.
     pub fn release(
         &mut self,
         command: &DeviceExecutionBindingRelease,
@@ -185,14 +136,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .release(command, now)?)
     }
 
-    /// Atomically attaches the device facts of one execution admission
-    /// reservation, copied verbatim from the launch grant.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown grant or Job, a terminal grant or reservation, a
-    /// missing binding, an already attached Job, a conflicting replay, or
-    /// storage failure.
     pub fn attach_facts(
         &mut self,
         command: &DeviceExecutionFactsAttachment,
@@ -204,11 +147,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .attach_facts(command, now)?)
     }
 
-    /// Returns the newest binding of a worker session.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity or storage failure.
     pub fn snapshot(
         &mut self,
         worker_session_id: &str,
@@ -219,11 +157,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .snapshot(worker_session_id)?)
     }
 
-    /// Returns one binding by its own identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical binding identity or storage failure.
     pub fn snapshot_by_binding_id(
         &mut self,
         device_execution_binding_id: &str,
@@ -234,11 +167,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .snapshot_by_binding_id(device_execution_binding_id)?)
     }
 
-    /// Returns the durable device facts of one execution reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical Job identity or storage failure.
     pub fn facts(
         &mut self,
         job_id: &str,
@@ -249,13 +177,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .facts(job_id)?)
     }
 
-    /// Reads the durable worker-session capacity ledger of one client node;
-    /// `None` when the node does not exist. Both the occupancy claim gate and
-    /// the launch issue gate judge against this one view.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn capacity_snapshot(
         &mut self,
         client_node_id: &str,
@@ -266,12 +187,6 @@ impl<'storage> DeviceExecutionBindingService<'storage> {
             .capacity_snapshot(client_node_id)?)
     }
 
-    /// Counts the durable reservation view of one client node: its
-    /// non-terminal launch grants.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical client node identity or storage failure.
     pub fn reserved_worker_sessions_for_node(
         &mut self,
         client_node_id: &str,
@@ -334,7 +249,6 @@ mod tests {
 
     const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-    /// Every authoritative identity one binding needs.
     struct Fixture {
         node: String,
         instance: String,
@@ -344,8 +258,6 @@ mod tests {
         binding_id: String,
     }
 
-    /// Seeds the registry, access grants, occupancy lease, and repository
-    /// binding (the shared launch-grant fixture chain).
     #[allow(clippy::too_many_lines)]
     fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> Fixture {
         let node = id("cnd", seed);
@@ -453,7 +365,6 @@ mod tests {
         }
     }
 
-    /// Issues one live launch grant over the seeded fixture.
     fn issue_launch_grant(
         storage: &mut SqliteStorage,
         seed: u64,
@@ -483,7 +394,6 @@ mod tests {
             .expect("issue")
     }
 
-    /// Echoes every grant field into a validated bind command.
     fn bind_command(seed: u64, grant: &WorkerLaunchGrantRecord) -> DeviceExecutionBindingIssuance {
         DeviceExecutionBindingIssuance::try_new(
             id("deb", seed),
@@ -502,8 +412,6 @@ mod tests {
         .expect("bind command")
     }
 
-    /// Configures every admission boundary and reserves one queued Job for
-    /// the fixture holder.
     fn seed_reservation(storage: &mut SqliteStorage, seed: u64, fixture: &Fixture) -> String {
         let scope = ExecutionQueueScope {
             organization_id: OrganizationId(id("org", seed)),
@@ -517,9 +425,9 @@ mod tests {
         let limits = ExecutionAdmissionLimits {
             max_concurrent: 4,
             max_queued: 4,
-            token_budget: 10_000,
-            cost_budget_microunits: 10_000,
-            max_runtime_millis: 60_000,
+            token_budget: Some(10_000),
+            cost_budget_microunits: Some(10_000),
+            max_runtime_millis: Some(60_000),
         };
         {
             let mut admission = storage.execution_admission().expect("admission");
@@ -562,9 +470,9 @@ mod tests {
                     job_id: ExecutionJobId(id("job", seed)),
                     request_id: RequestId(id("req", seed + 13)),
                     repository_access: ExecutionRepositoryAccess::ReadOnly,
-                    reserved_tokens: 100,
-                    reserved_cost_microunits: 1_000,
-                    runtime_limit_millis: 30_000,
+                    reserved_tokens: Some(100),
+                    reserved_cost_microunits: Some(1_000),
+                    runtime_limit_millis: Some(30_000),
                     submitted_at: instant(T2),
                 })
                 .expect("reserve");
@@ -574,7 +482,6 @@ mod tests {
 
     #[test]
     fn representative_store_errors_map_one_to_one_onto_the_service_taxonomy() {
-        // Input validation failures need no database.
         let invalid = DeviceExecutionBindingIssuance::try_new(
             "nope",
             id("req", 1),
@@ -680,7 +587,6 @@ mod tests {
         let command = bind_command(400, &grant);
         {
             let mut service = DeviceExecutionBindingService::new(&mut storage);
-            // The capacity ledger counts the issued grant before the binding.
             let reserved = service
                 .reserved_worker_sessions_for_node(&fixture.node)
                 .expect("reserved");
@@ -758,7 +664,6 @@ mod tests {
         let grant = issue_launch_grant(&mut storage, 600, &fixture);
         let job = seed_reservation(&mut storage, 700, &fixture);
         let mut service = DeviceExecutionBindingService::new(&mut storage);
-        // A guessed field refuses the binding without a durable change.
         let mut guessed = bind_command(800, &grant);
         guessed.expected_occupancy_fencing_token += 1;
         let error = service
@@ -768,7 +673,6 @@ mod tests {
             error.kind(),
             DeviceExecutionBindingServiceErrorKind::FieldMismatch
         );
-        // Facts cannot attach before the session is bound.
         let error = service
             .attach_facts(
                 &DeviceExecutionFactsAttachment::try_new(
@@ -784,7 +688,6 @@ mod tests {
             error.kind(),
             DeviceExecutionBindingServiceErrorKind::UnknownBinding
         );
-        // The happy path then succeeds and stays idempotent.
         let receipt = service
             .bind(&bind_command(820, &grant), &instant(T2))
             .expect("bind");

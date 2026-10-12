@@ -1,0 +1,326 @@
+{
+  "schemaVersion": 1,
+  "policy": "winwincode.network-request-policy.v1",
+  "entries": [
+    {
+      "file": "crates/winwincode-network/src/http.rs",
+      "operations": [
+        "execute_http(",
+        "execute_http_once("
+      ],
+      "policyMarkers": [
+        "RequestRetry::new"
+      ],
+      "owner": "logical HTTP executor or durable caller queue"
+    },
+    {
+      "file": "crates/winwincode-network/src/transport.rs",
+      "operations": [
+        "ExchangeConnector",
+        "ExchangeResolver"
+      ],
+      "policyMarkers": [
+        "is_cancelled"
+      ],
+      "owner": "cancellable one-attempt socket transport"
+    },
+    {
+      "file": "crates/winwincode-provider/src/device_model.rs",
+      "operations": [
+        "invoke_model_using",
+        "begin_model_diagnostic",
+        "model_invocation_attempts"
+      ],
+      "policyMarkers": [
+        "RequestRetry::new"
+      ],
+      "owner": "Device model logical request"
+    },
+    {
+      "file": "crates/winwincode-provider/src/provider_https_sse.rs",
+      "operations": [
+        "open_recovering_admitted",
+        "open_https",
+        "drain_attempt"
+      ],
+      "policyMarkers": [
+        "journal.prepare"
+      ],
+      "owner": "Gateway/probe durable whole-response executor; Device calls one attempt"
+    },
+    {
+      "file": "crates/winwincode-provider/src/jev.rs",
+      "operations": [
+        "score_blocking",
+        "evaluate_authorized"
+      ],
+      "policyMarkers": [
+        "RequestRetry::new"
+      ],
+      "owner": "JEV logical score request"
+    },
+    {
+      "file": "crates/winwincode-provider/src/device_store.rs",
+      "operations": [
+        "test_provider"
+      ],
+      "policyMarkers": [
+        "open_recovering_admitted"
+      ],
+      "owner": "probe whole-response executor and per-attempt permit"
+    },
+    {
+      "file": "crates/winwincode-provider/src/chatgpt_oauth.rs",
+      "operations": [
+        "token_request",
+        "load_jwks"
+      ],
+      "policyMarkers": [
+        "execute_http_once",
+        "execute_http"
+      ],
+      "owner": "OAuth grant is one attempt; public identity-key reads use bounded shared recovery"
+    },
+    {
+      "file": "crates/winwincode-control-plane/src/provider_gateway.rs",
+      "operations": [
+        "invoke_provider"
+      ],
+      "policyMarkers": [
+        "open_recovering"
+      ],
+      "owner": "selected provider adapter owns retries"
+    },
+    {
+      "file": "crates/winwincode-device-client/src/http.rs",
+      "operations": [
+        "exchange_authorized"
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "Device durable outbox"
+    },
+    {
+      "file": "crates/winwincode-device-client/src/daemon.rs",
+      "operations": [
+        "tick_authorized"
+      ],
+      "policyMarkers": [
+        "network_journal.prepare"
+      ],
+      "owner": "Device durable outbox"
+    },
+    {
+      "file": "crates/winwincode-device-client/src/managed_app.rs",
+      "operations": [
+        "health_state"
+      ],
+      "policyMarkers": [
+        "execute_http"
+      ],
+      "owner": "bounded local health query"
+    },
+    {
+      "file": "crates/winwincode-device-client/src/preview.rs",
+      "operations": [
+        "run_once_with_stop",
+        "forward_http",
+        "classify_websocket"
+      ],
+      "policyMarkers": [
+        "winwincode_network::decide",
+        "RequestRetry::new"
+      ],
+      "owner": "tunnel supervisor or one forwarded logical HTTP request"
+    },
+    {
+      "file": "crates/winwincode-worker/src/remote_transport.rs",
+      "operations": [
+        "exchange_inner",
+        "queued_http_attempt",
+        "spawn_accounting_reconciler"
+      ],
+      "policyMarkers": [
+        "network_journal.prepare"
+      ],
+      "owner": "Worker durable queue; accounting uses the same journal"
+    },
+    {
+      "file": "crates/winwincode-connector-github/src/lib.rs",
+      "operations": [
+        "fn request("
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "integration SQLite delivery queue with unknown-write fence"
+    },
+    {
+      "file": "crates/winwincode-connector-jira/src/lib.rs",
+      "operations": [
+        "fn request("
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "integration SQLite delivery queue with unknown-write fence"
+    },
+    {
+      "file": "crates/winwincode-connector-linear/src/lib.rs",
+      "operations": [
+        "fn graphql("
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "integration SQLite delivery queue with unknown-write fence"
+    },
+    {
+      "file": "crates/winwincode-connector-slack/src/lib.rs",
+      "operations": [
+        "fn request("
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "integration SQLite delivery queue with unknown-write fence"
+    },
+    {
+      "file": "crates/winwincode-connector-teams/src/lib.rs",
+      "operations": [
+        "fn request("
+      ],
+      "policyMarkers": [
+        "execute_http_once"
+      ],
+      "owner": "integration SQLite delivery queue with unknown-write fence"
+    },
+    {
+      "file": "crates/winwincode-integration-sqlite/src/lib.rs",
+      "operations": [
+        "outbound_retry_at",
+        "network_attempt_counts"
+      ],
+      "policyMarkers": [
+        "winwincode_network::decide"
+      ],
+      "owner": "one durable delivery retry owner; leaf HTTP does not loop"
+    },
+    {
+      "file": "scripts/generate-contracts.mjs",
+      "operations": [
+        "createControlPlaneWebSocketClient",
+        "createControlPlaneHttpClient"
+      ],
+      "policyMarkers": [
+        "executeFetch",
+        "networkDecide"
+      ],
+      "owner": "generated browser HTTP request and WS session"
+    },
+    {
+      "file": "apps/client/src/generated/control-plane-client.ts",
+      "operations": [
+        "createControlPlaneWebSocketClient",
+        "createControlPlaneHttpClient"
+      ],
+      "policyMarkers": [
+        "executeFetch",
+        "networkDecide"
+      ],
+      "owner": "generated browser HTTP request and WS session"
+    },
+    {
+      "file": "packages/control-plane-client/src/index.ts",
+      "operations": [
+        "createControlPlaneClient"
+      ],
+      "policyMarkers": [
+        "executeFetch"
+      ],
+      "owner": "generated transport or auth logical exchange, never both"
+    },
+    {
+      "file": "scripts/run-api-production-vertical.mjs",
+      "operations": [
+        "requestJsonOnce",
+        "requestJson("
+      ],
+      "policyMarkers": [
+        "executeRequest"
+      ],
+      "owner": "Node logical HTTPS request with fixed serialized body"
+    },
+    {
+      "file": "scripts/verify-mainline-release-source.mjs",
+      "operations": [
+        "requestFetch"
+      ],
+      "policyMarkers": [
+        "requestFetch"
+      ],
+      "owner": "read-only workflow source query"
+    },
+    {
+      "file": "packages/network-request/src/index.mjs",
+      "operations": [
+        "executeRequest",
+        "executeFetch",
+        "requestFetch"
+      ],
+      "policyMarkers": [
+        "decide("
+      ],
+      "owner": "shared JavaScript request executor"
+    },
+    {
+      "file": "apps/client/src/community-control-plane-client.ts",
+      "operations": [
+        "sendHttp("
+      ],
+      "policyMarkers": [
+        "@winwincode/network-request"
+      ],
+      "owner": "shared browser logical HTTP executor"
+    },
+    {
+      "file": "apps/client/src/device-provider-panel.ts",
+      "operations": [
+        "sendHttp("
+      ],
+      "policyMarkers": [
+        "@winwincode/network-request"
+      ],
+      "owner": "shared browser logical HTTP executor"
+    },
+    {
+      "file": "apps/client/src/extensions-page.ts",
+      "operations": [
+        "sendHttp("
+      ],
+      "policyMarkers": [
+        "@winwincode/network-request"
+      ],
+      "owner": "shared browser logical HTTP executor"
+    },
+    {
+      "file": "apps/client/src/candidate-run-preview-control-plane.ts",
+      "operations": [
+        "sendHttp("
+      ],
+      "policyMarkers": [
+        "@winwincode/network-request"
+      ],
+      "owner": "shared browser logical HTTP executor"
+    }
+  ],
+  "excluded": [
+    "GitHub publication writes",
+    "S3 publication writes",
+    "inbound listeners",
+    "network test fixtures",
+    "vendored SDK routes outside the product host model/MCP transport",
+    "MCP transport: latest committed Code Mode ownership; network migration deferred"
+  ]
+}

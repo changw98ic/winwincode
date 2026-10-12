@@ -1322,17 +1322,67 @@ async fn executor_skill_invocation_is_environment_scoped_and_deduplicated() -> R
                 .expect("unified exec should be configurable in tests");
         });
     let test = builder.build_with_auto_env(&server).await?;
-    test.submit_turn("Read the executor skill twice.").await?;
+    let (sandbox_policy, permission_profile) =
+        core_test_support::test_codex::turn_permission_fields(
+            codex_protocol::models::PermissionProfile::Disabled,
+            test.config.cwd.as_path(),
+        );
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "Read the executor skill twice.".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+                    sandbox_policy: Some(sandbox_policy),
+                    permission_profile,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+    let mut runtime_outputs = std::collections::HashMap::new();
+    loop {
+        match test.codex.next_event().await?.msg {
+            EventMsg::Error(error) => panic!("executor skill turn failed: {error:?}"),
+            EventMsg::TurnComplete(_) => break,
+            EventMsg::RawResponseItem(raw) => {
+                if let codex_protocol::models::ResponseItem::FunctionCallOutput {
+                    call_id,
+                    output,
+                    ..
+                } = raw.item
+                {
+                    runtime_outputs.insert(call_id, output);
+                }
+            }
+            _ => {}
+        }
+    }
 
+    // Prompt GC retains the latest identical read; both real executions must still succeed.
+    assert_eq!(runtime_outputs.len(), 2);
     for call_id in ["executor-skill-first", "executor-skill-again"] {
-        let output = response
-            .function_call_output_text(call_id)
+        let output = runtime_outputs
+            .get(call_id)
             .expect("executor skill command should return output");
+        assert_eq!(output.success, Some(true));
+        let codex_protocol::models::FunctionCallOutputBody::Text(text) = &output.body else {
+            panic!("executor skill command should return text");
+        };
         assert!(
-            output.contains("executor skill contents"),
-            "command output: {output}"
+            text.contains("executor skill contents"),
+            "command output: {text}"
         );
     }
+    assert!(
+        response
+            .function_call_output_text("executor-skill-again")
+            .expect("latest skill read should remain model visible")
+            .contains("executor skill contents")
+    );
 
     let events = wait_for_analytics_events(&server, "skill_invocation", /*expected_count*/ 1).await;
     assert_eq!(events.len(), 1, "executor skill should be counted once");

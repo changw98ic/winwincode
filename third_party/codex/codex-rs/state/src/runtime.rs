@@ -54,6 +54,14 @@ pub(crate) mod test_support;
 mod thread_section_order;
 mod thread_sections;
 mod threads;
+mod tool_control_input_recovery;
+mod tool_dependencies;
+mod tool_diagnostic_responses;
+mod tool_diagnostics;
+mod tool_execution;
+mod tool_reconciliation;
+mod tool_runtime;
+mod tool_sharing;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
@@ -74,6 +82,9 @@ pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
 pub use threads::ThreadFilterOptions;
+pub use tool_control_input_recovery::ControlInputRecovery;
+pub use tool_control_input_recovery::ControlInputRecoveryHeader;
+pub use tool_control_input_recovery::ControlInputResultPage;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
 // - one bucket per non-null thread_id

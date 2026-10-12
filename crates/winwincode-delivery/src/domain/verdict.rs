@@ -54,6 +54,9 @@ pub struct CriterionResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryVerdict {
+    pub snapshot_id: winwincode_domain::SnapshotId,
+    pub candidate_id: winwincode_domain::CandidateId,
+    pub candidate_digest: winwincode_domain::Sha256Digest,
     pub schema_version: u8,
     pub id: DeliveryVerdictId,
     pub delivery_id: DeliveryId,
@@ -65,11 +68,6 @@ pub struct DeliveryVerdict {
     pub produced_at_millis: u64,
 }
 
-/// Evidence and verdict facts derived together for one atomic Delivery write.
-///
-/// Its fields are private and there is no deserializer or public constructor.
-/// Callers can inspect or move the computed canonical facts, but cannot submit
-/// a preselected status, `CriterionResult`, `DeliveryVerdict`, or Attention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputedDeliveryVerdict {
     evidence: Vec<EvidenceRef>,
@@ -92,12 +90,6 @@ impl ComputedDeliveryVerdict {
     }
 }
 
-/// Highest-authority input that determined a [`CanonicalDecision`].
-///
-/// Priority is strict and never inverted:
-/// Verified Fact > Tool Observation > Model Consensus > Single Model Claim.
-/// Fusion and analyzer output have no authority to override Verifier real
-/// test results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionAuthority {
     VerifiedFact,
@@ -107,11 +99,6 @@ pub enum DecisionAuthority {
     NoDecision,
 }
 
-/// Read-only adjudication over existing Delivery facts and Evidence.
-///
-/// This projection has no identity or deserializer and is never a second
-/// canonical store. Its references point back to the current Delivery,
-/// candidate, verdict, and Evidence that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalDecision {
     delivery_id: DeliveryId,
@@ -154,24 +141,12 @@ impl CanonicalDecision {
     }
 }
 
-/// One host-mapped model claim shaped from analyzer output.
-///
-/// Control-plane owns `FusionAnalysis` (FUSION-03). Delivery accepts this
-/// fixture so adjudication never imports the analyzer crate and never creates
-/// a dependency cycle. Analyzer evidence quality never becomes Delivery
-/// [`DecisionAuthority::VerifiedFact`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzerClaimFixture {
     pub candidate_id: String,
     pub outcome: CriterionVerdict,
 }
 
-/// Analyzer-shaped fixture consumed by [`adjudicate_canonical_decision_from_analysis`].
-///
-/// Hosts map real `FusionAnalysis` findings into this shape: unanimous
-/// consensus outcomes, evidence-ranked conflict positions, and unsupported
-/// model claims all become adjudication model claims. Candidate counts never
-/// raise authority above tool observation or verified facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionAnalysisFixture {
     pub consensus_outcomes: Vec<CriterionVerdict>,
@@ -183,15 +158,12 @@ impl FusionAnalysisFixture {
     #[must_use]
     pub fn from_claims(claims: &[AnalyzerClaimFixture]) -> Self {
         let mut fixture = Self::default();
-        // Hosts may tag consensus later; default fixture keeps every claim in
-        // the model-claim tier so verified facts still outrank them.
         for claim in claims {
             fixture.unsupported_model_claims.push(claim.outcome);
         }
         fixture
     }
 
-    /// Maps this fixture into adjudicator model claims.
     #[must_use]
     pub fn model_claims(&self) -> Vec<CriterionVerdict> {
         let mut claims = self.consensus_outcomes.clone();
@@ -201,24 +173,6 @@ impl FusionAnalysisFixture {
     }
 }
 
-/// Adjudicates without granting model output any canonical-state write power.
-///
-/// Binds Repo State ([`FrozenDeliveryCandidate`]), Canonical State
-/// ([`Delivery`]), Tests and Tool Evidence ([`ResolvedDeliveryEvidence`]),
-/// and Verifier Evidence ([`ComputedDeliveryVerdict`] or a persisted
-/// [`DeliveryVerdict`]).
-///
-/// Priority is strict: a persisted or freshly computed verifier verdict,
-/// sealed test Evidence, sealed tool Evidence, unanimous model claims, then a
-/// single model claim. An inconclusive verifier verdict remains authoritative;
-/// lower tiers cannot turn a verification dispute into a pass.
-///
-/// This function never invents a verifier pass. When no verifier or sealed
-/// test fact exists, authority is not [`DecisionAuthority::VerifiedFact`].
-///
-/// # Errors
-///
-/// Rejects stale repository, canonical, verifier, or Evidence bindings.
 pub fn adjudicate_canonical_decision(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -289,15 +243,6 @@ pub fn adjudicate_canonical_decision(
     Ok(decision(delivery, candidate, outcome, authority, vec![]))
 }
 
-/// Adjudicates from analyzer-shaped fixture data plus sealed Delivery facts.
-///
-/// Control-plane maps `analyze_fusion` output into [`FusionAnalysisFixture`].
-/// Delivery never imports that analyzer crate. Verifier and sealed test facts
-/// still outrank every mapped model claim.
-///
-/// # Errors
-///
-/// Rejects stale repository, canonical, verifier, or Evidence bindings.
 pub fn adjudicate_canonical_decision_from_analysis(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -440,6 +385,8 @@ struct DeliveryVerdictCriterionIdentity<'criterion> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeliveryVerdictIdentity<'verdict> {
+    snapshot_id: &'verdict winwincode_domain::SnapshotId,
+    candidate_id: &'verdict winwincode_domain::CandidateId,
     delivery_spec_id: &'verdict DeliverySpecId,
     delivery_spec_revision: u64,
     candidate_ref: &'verdict str,
@@ -448,16 +395,6 @@ struct DeliveryVerdictIdentity<'verdict> {
     unresolved_findings: &'verdict [String],
 }
 
-/// Computes one deterministic, fail-closed verdict from sealed domain facts.
-///
-/// This is the module's only computation entry. It never accepts caller-made
-/// Evidence, criterion results, verdict status, or Attention values.
-///
-/// # Errors
-///
-/// Rejects stale candidates or verification projections, duplicate/foreign
-/// Evidence, invalid time ordering, and any derived facts that do not satisfy
-/// the canonical Delivery relationships.
 #[allow(clippy::too_many_lines)]
 pub fn compute_delivery_verdict(
     delivery: &Delivery,
@@ -480,6 +417,13 @@ pub fn compute_delivery_verdict(
         ));
     }
     validate_resolved_evidence(delivery, candidate, evidence, produced_at_millis)?;
+    if evidence
+        .iter()
+        .any(|item| &item.evidence().snapshot_id != verification.snapshot().snapshot_id())
+    {
+        return Err(invalid_computation("Evidence belongs to another Snapshot"));
+    }
+
     validate_verification_time(verification, produced_at_millis)?;
 
     let mut actions = Vec::new();
@@ -563,6 +507,8 @@ pub fn compute_delivery_verdict(
     let id = deterministic_id(
         "delivery-verdict:sha256",
         &DeliveryVerdictIdentity {
+            snapshot_id: verification.snapshot().snapshot_id(),
+            candidate_id: candidate.candidate_id(),
             delivery_spec_id: &delivery.snapshot().spec.id,
             delivery_spec_revision: delivery.snapshot().spec.revision,
             candidate_ref: candidate.candidate_ref(),
@@ -572,6 +518,9 @@ pub fn compute_delivery_verdict(
         },
     )?;
     let verdict = DeliveryVerdict {
+        snapshot_id: verification.snapshot().snapshot_id().clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        candidate_digest: candidate.candidate_digest().clone(),
         schema_version: super::DELIVERY_SCHEMA_VERSION,
         id: DeliveryVerdictId(id),
         delivery_id: delivery.id().clone(),
@@ -729,7 +678,7 @@ fn validate_resolved_evidence(
         let current = reference.delivery_id == *delivery.id()
             && reference.delivery_spec_id == delivery.snapshot().spec.id
             && reference.delivery_spec_revision == delivery.snapshot().spec.revision
-            && reference.candidate_ref == candidate.candidate_ref()
+            && reference.candidate_id == *candidate.candidate_id()
             && reference.created_at_millis <= produced_at_millis;
         if !current || !ids.insert(reference.id.0.as_str()) {
             return Err(invalid_computation(
@@ -871,6 +820,48 @@ fn compute_criterion(
     }
 }
 
+#[must_use]
+pub fn compute_verifier_result(
+    delivery: &Delivery,
+    settlement: &VerificationRoleSettlement,
+    evidence: &[ResolvedDeliveryEvidence],
+) -> (CriterionVerdict, Vec<EvidenceId>) {
+    let evaluations = delivery
+        .snapshot()
+        .spec
+        .acceptance_criteria
+        .iter()
+        .filter(|criterion| criterion.required)
+        .map(|criterion| evaluate_role(criterion, settlement, evidence))
+        .collect::<Vec<_>>();
+    let status = if evaluations
+        .iter()
+        .any(|value| value.outcome == RoleOutcome::InfraError)
+    {
+        CriterionVerdict::InfraError
+    } else if evaluations
+        .iter()
+        .any(|value| value.outcome == RoleOutcome::Product(ProductOutcome::Fail))
+    {
+        CriterionVerdict::Fail
+    } else if evaluations.is_empty()
+        || evaluations
+            .iter()
+            .any(|value| value.outcome != RoleOutcome::Product(ProductOutcome::Pass))
+    {
+        CriterionVerdict::Inconclusive
+    } else {
+        CriterionVerdict::Pass
+    };
+    let mut evidence_ids = evaluations
+        .into_iter()
+        .flat_map(|value| value.evidence_ids)
+        .collect::<Vec<_>>();
+    evidence_ids.sort_by(|left, right| left.0.cmp(&right.0));
+    evidence_ids.dedup();
+    (status, evidence_ids)
+}
+
 fn evaluate_role(
     criterion: &AcceptanceCriterion,
     settlement: &VerificationRoleSettlement,
@@ -979,7 +970,7 @@ fn evaluate_settled_role(
                 reference.source_ref == *source_ref
                     && reference.work_run_id == *assignment.work_run_id()
                     && reference.session_binding_id == *assignment.session_binding_id()
-                    && reference.candidate_ref == finding.candidate_ref()
+                    && reference.snapshot_id == *terminal.snapshot_id()
             })
             .collect::<Vec<_>>();
         if matching.len() != 1 {
@@ -1184,10 +1175,6 @@ const fn direct_evidence_type(evidence_type: EvidenceRefType) -> bool {
     )
 }
 
-/// Retains already-resolved executor/remediator Commit Evidence that names the
-/// exact frozen candidate producer identity. Preview source authority reads
-/// this sealed fact from the Delivery evidence store even when no acceptance
-/// criterion cites it as runtime verification evidence.
 fn is_producer_candidate_commit_evidence(
     resolved: &ResolvedDeliveryEvidence,
     candidate: &FrozenDeliveryCandidate,
@@ -1196,7 +1183,7 @@ fn is_producer_candidate_commit_evidence(
     reference.evidence_type == EvidenceRefType::Commit
         && reference.work_run_id == *candidate.producer_work_run_id()
         && reference.session_binding_id == *candidate.producer_session_binding_id()
-        && reference.candidate_ref == candidate.candidate_ref()
+        && reference.candidate_id == *candidate.candidate_id()
         && reference.source_ref == format!("git_commit:{}", candidate.candidate_commit_id())
 }
 
@@ -1580,6 +1567,16 @@ mod tests {
         let candidate = candidate(&delivery);
         let (verification, evidence) = passing_inputs(&delivery, &candidate);
 
+        for settlement in verification.settlements() {
+            let (status, ids) = super::compute_verifier_result(&delivery, settlement, &evidence);
+            assert_eq!(status, CriterionVerdict::Pass);
+            assert!(!ids.is_empty());
+            assert!(
+                ids.iter()
+                    .all(|id| evidence.iter().any(|item| &item.evidence().id == id
+                        && &item.evidence().snapshot_id == verification.snapshot().snapshot_id()))
+            );
+        }
         let first = compute_delivery_verdict(
             &delivery,
             &candidate,
@@ -1638,6 +1635,9 @@ mod tests {
             &delivery,
             &candidate,
             ResolveDeliveryEvidenceInput {
+                snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(
+                    &candidate,
+                ),
                 work_run_id: candidate.producer_work_run_id().clone(),
                 session_binding_id: candidate.producer_session_binding_id().clone(),
                 source: EvidenceSource::CandidateCommit,
@@ -1672,8 +1672,7 @@ mod tests {
             commits[0].session_binding_id,
             *candidate.producer_session_binding_id()
         );
-        assert_eq!(commits[0].candidate_ref, candidate.candidate_ref());
-        // Criterion evaluation still uses only runtime command/test evidence.
+        assert_eq!(&commits[0].candidate_id, candidate.candidate_id());
         assert!(
             !computed.verdict().criteria[0]
                 .evidence_refs
@@ -2395,6 +2394,9 @@ mod tests {
             &running_delivery,
             &candidate,
             &VerificationFacts {
+                snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(
+                    &candidate,
+                ),
                 required_roles: vec![VerificationRole::Reviewer, VerificationRole::Verifier],
                 sessions: vec![VerificationSessionFacts {
                     role: VerificationRole::Reviewer,

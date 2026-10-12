@@ -169,16 +169,19 @@ impl ConnectionDriver {
                 Ok(_) => {
                     let reason =
                         "code-mode host returned an invalid open-session response".to_string();
+                    cleanup.complete();
                     let _ = response_tx.send(Err(reason.clone()));
                     self.fail(reason);
                     return false;
                 }
                 Err(err) => {
+                    cleanup.complete();
                     let _ = response_tx.send(Err(err));
                 }
             },
             PendingRequest::Execute {
                 session,
+                initial_timeout,
                 response_tx,
                 initial_response_tx,
                 initial_response_rx,
@@ -213,6 +216,8 @@ impl ConnectionDriver {
                             cell_id: remote_cell_id.clone(),
                             response_tx: initial_response_tx,
                         },
+                        initial_timeout,
+                        &self.event_tx,
                     );
                     let started = StartedCell::from_result_receiver(public_id, initial_response_rx);
                     if cancellation.is_cancelled() || response_tx.is_closed() {
@@ -311,8 +316,12 @@ impl ConnectionDriver {
                 response_tx,
             } => match result {
                 Ok(HostResponse::SessionClosed { session_id }) if session_id == session.id => {
-                    let effects = self.close_session_locally(&session.id);
-                    if !self.apply_delegate_effects(effects) {
+                    let (effects, cleanup) = self.close_session_locally(&session.id);
+                    let applied = self.apply_delegate_effects(effects);
+                    if let Some(cleanup) = cleanup {
+                        cleanup.complete();
+                    }
+                    if !applied {
                         return false;
                     }
                     let _ = response_tx.send(Ok(()));

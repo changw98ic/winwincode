@@ -9,7 +9,6 @@ repository.workspace = true
 include = ["src/**", "Cargo.toml"]
 
 [features]
-# Exposes deterministic sealed facts only to Rust integration tests.
 test-support = []
 
 [dependencies]

@@ -830,6 +830,7 @@ async fn settings_update_does_not_retarget_active_turn_environment() -> Result<(
     assert_eq!(snapshot.workspace_roots, vec![next_cwd.clone()]);
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(
@@ -970,6 +971,7 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     serve_environment_info(listener).await;
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(
@@ -2543,6 +2545,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
     serve_environment_info(listener).await;
     test.codex
         .submit(Op::UserInputAnswer {
+            call_id: request.call_id.clone(),
             id: request.turn_id,
             response: RequestUserInputResponse {
                 answers: HashMap::from([(

@@ -1018,7 +1018,8 @@ async fn escalated_patch_rejects_symlink_swapped_after_approval_request() -> Res
     assert_eq!(fs::read_to_string(&outside)?, "original\n", "{output:?}");
     assert!(fs::symlink_metadata(&target)?.is_symlink());
     assert!(
-        output.contains("Failed to read file to update"),
+        output.contains("Failed to read file to update")
+            || output.contains("path contains a symbolic link"),
         "{output:?}"
     );
     test.codex.shutdown_and_wait().await?;

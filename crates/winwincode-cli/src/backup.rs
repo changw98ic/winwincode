@@ -1,40 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Owner-facing `wwc backup` surface: consistent snapshots, verification,
-//! restore, and bounded repair for the Server product-state directory and the
-//! Device Client local data directory (OPS-100.5).
-//!
-//! Four boundaries are deliberate:
-//!
-//! - Consistency over convenience. A snapshot is produced by `SQLite`'s
-//!   `VACUUM INTO` against the live WAL database, so every snapshot is one
-//!   consistent committed cut. File-level cold copies of a hot database are
-//!   never used as backups; file copies appear only on the restore side,
-//!   where the source is an already sealed snapshot file.
-//! - No plaintext credential in a backup. The Device Client local store
-//!   carries the raw device credential secret by design ("the secret never
-//!   leaves the device"), so the snapshot zeroes exactly that column and
-//!   keeps the digest-era metadata. Server databases store only Argon2id
-//!   hashes and session digests. Every snapshot is additionally scanned for
-//!   plaintext credential markers, and verify re-checks the redaction, so a
-//!   backup artifact that carries secret material fails verification.
-//! - Restore is fail-closed on schema version. Every snapshot's
-//!   `PRAGMA user_version` is checked against the same version sets the
-//!   canonical adapters accept at startup (aligned with
-//!   `startup_rejects_a_database_from_a_newer_schema_version`); an
-//!   unsupported version refuses the whole restore before any target file is
-//!   touched. Digest, integrity, and secret-scan verification run first, and
-//!   the Device credential is re-bound from the live local store by digest,
-//!   because the backup deliberately carries no credential material.
-//!   Restoring a Device backup therefore requires the same live device; a
-//!   lost device must re-enroll instead of restoring identity material.
-//! - Repair is bounded and leaves a trace. Without `--apply` it is a
-//!   read-only diagnosis (`PRAGMA integrity_check`, schema-version facts,
-//!   WAL sizes). `--apply` executes only the allowlisted bounded actions
-//!   (WAL checkpoint and stale backup temp-file cleanup); corruption beyond
-//!   that is never rewritten — the answer is restore from backup. Every
-//!   invocation appends one JSON line to `backup-repair-log.jsonl`.
-
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
@@ -49,54 +14,28 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::WwcCliExit;
 
-/// Success exit code, mirroring the `wwc` command vocabulary.
 pub const EXIT_SUCCESS: i32 = 0;
-/// Verification findings exit code (the doctor convention).
 pub const EXIT_DIAGNOSTIC_FAILED: i32 = 1;
-/// Usage error exit code.
 pub const EXIT_USAGE: i32 = 2;
-/// Store not initialized yet exit code.
 pub const EXIT_ACTION_REQUIRED: i32 = 3;
-/// Fail-closed refusal or operational failure exit code.
 pub const EXIT_SERVICE: i32 = 5;
 
-/// The one accepted local backup manifest format.
 const MANIFEST_FORMAT: &str = "winwincode.local-backup.v1";
 
-/// Logical name of the Server product-state database.
 const CONTROL_PLANE_DATABASE: &str = "control-plane";
-/// Logical name of the Device Client local database.
 const DEVICE_CLIENT_DATABASE: &str = "device-client";
 
-/// Current Server product-state schema version, aligned with
-/// `winwincode-storage`'s `SCHEMA_VERSION` (6). Locked to the source by
-/// `tests/backup-restore.test.mjs`.
 const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = 6;
-/// Older Server product-state versions `winwincode-storage` still migrates at
-/// startup; restore accepts exactly this set plus the current version.
 const SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS: [i64; 5] = [1, 2, 3, 4, 5];
 
-/// Suffix of the intermediate `VACUUM INTO` target, renamed into place only
-/// after the snapshot passed every check.
 const VACUUM_TMP_SUFFIX: &str = ".vacuum-tmp";
-/// Suffix of the intermediate restore copy, renamed into place only after
-/// credential re-binding.
 const RESTORE_TMP_SUFFIX: &str = ".restore-tmp";
-/// The append-only bounded-repair trace file inside the data directory.
 const REPAIR_LOG_FILE: &str = "backup-repair-log.jsonl";
 
-/// How long one open or checkpoint waits for a concurrent writer. Matches the
-/// storage adapter's bound.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Upper bound on recorded `integrity_check` findings per database so one
-/// badly damaged file cannot flood the report or the trace log.
 const MAX_FINDINGS_PER_DATABASE: usize = 5;
 
-/// Plaintext credential markers scanned against every snapshot's bytes,
-/// conceptually aligned with the evidence-export secret scanner. Hashes and
-/// digests (Argon2id PHC strings, `sha256:` digests) are not plaintext and do
-/// not match any marker.
 const SECRET_MARKERS: &[&str] = &[
     "-----beginprivatekey",
     "authorization:bearer",
@@ -111,7 +50,6 @@ const SECRET_MARKERS: &[&str] = &[
     "wwc_session=",
 ];
 
-/// Help lines appended to `wwc help` by the CLI dispatcher.
 pub const BACKUP_HELP_LINES: [&str; 7] = [
     "  wwc backup snapshot --store server|device --data-dir PATH --output PATH [--json]",
     "  wwc backup verify --from BACKUP-DIR [--json]",
@@ -122,22 +60,13 @@ pub const BACKUP_HELP_LINES: [&str; 7] = [
     "restore 校验 schema 版本 fail closed；repair 默认只读诊断，--apply 只执行白名单动作并留痕。",
 ];
 
-/// Which durable store the command addresses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupStoreKind {
-    /// The Server product-state directory (`WWC_SERVER_DATA_DIRECTORY`
-    /// semantics): every `*.sqlite3` sidecar database it contains.
     Server,
-    /// The Device Client local data directory: `device-client.sqlite3`.
     Device,
 }
 
 impl BackupStoreKind {
-    /// Parses the `--store` flag value.
-    ///
-    /// # Errors
-    ///
-    /// Rejects anything other than `server` or `device`.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "server" => Ok(Self::Server),
@@ -161,81 +90,51 @@ impl fmt::Display for BackupStoreKind {
     }
 }
 
-/// One snapshot fact recorded in the manifest and the command output.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupDatabaseEntry {
-    /// Logical database name (the file stem without `.sqlite3`).
     pub name: String,
-    /// Canonical snapshot file name inside the backup directory.
     pub file: String,
-    /// Raw `PRAGMA user_version` of the snapshot (`0` for sidecars that do
-    /// not manage a schema version).
     pub schema_version: i64,
-    /// Snapshot byte count at capture time.
     pub byte_count: u64,
-    /// `sha256:` digest of the snapshot bytes.
     pub sha256: String,
-    /// `PRAGMA quick_check` verdict at capture time.
     pub integrity: String,
-    /// Whether the raw device credential column was zeroed in this snapshot.
     pub credential_redacted: bool,
 }
 
-/// The only accepted backup manifest document.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupManifest {
-    /// Manifest format constant.
     pub format: String,
-    /// Which store the backup belongs to.
     pub store: String,
-    /// Capture wall-clock milliseconds.
     pub created_at_millis: u64,
-    /// One entry per snapshotted database.
     pub databases: Vec<BackupDatabaseEntry>,
 }
 
-/// One bounded-repair or diagnosis trace line.
 #[derive(Clone, Debug, Serialize)]
 pub struct RepairLogEntry {
-    /// Wall-clock milliseconds of the invocation.
     pub timestamp_millis: u64,
-    /// Addressed store.
     pub store: String,
-    /// `diagnose` or `apply`.
     pub mode: String,
-    /// Read-only findings; empty when healthy.
     pub findings: Vec<RepairFinding>,
-    /// Actions actually executed (empty without `--apply`).
     pub actions: Vec<RepairAction>,
 }
 
-/// One read-only diagnosis finding.
 #[derive(Clone, Debug, Serialize)]
 pub struct RepairFinding {
-    /// Logical database name.
     pub database: String,
-    /// Stable finding code (`open-failed`, `integrity`, `schema-version`).
     pub code: String,
-    /// Human-readable detail.
     pub detail: String,
 }
 
-/// One executed bounded-repair action.
 #[derive(Clone, Debug, Serialize)]
 pub struct RepairAction {
-    /// Stable action code (`wal-checkpoint`, `stale-temp-cleanup`).
     pub action: String,
-    /// Logical target (database name or removed temp file name).
     pub target: String,
-    /// `ok` or `failed`.
     pub outcome: String,
-    /// Human-readable detail.
     pub detail: String,
 }
 
-/// Successful command outcome, rendered human-readable or as JSON.
 #[derive(Debug, Serialize)]
 #[serde(
     tag = "status",
@@ -243,80 +142,36 @@ pub struct RepairAction {
     rename_all_fields = "camelCase"
 )]
 pub enum BackupOutcome {
-    /// One backup directory was produced.
     SnapshotComplete {
-        /// Addressed store.
         store: String,
-        /// The backup directory holding `manifest.json` and snapshots.
         backup_directory: String,
-        /// Per-database facts.
         databases: Vec<BackupDatabaseEntry>,
     },
-    /// The backup directory passed every verification.
     VerifyOk {
-        /// Addressed store recorded in the manifest.
         store: String,
-        /// Per-database re-verified facts.
         databases: Vec<BackupDatabaseEntry>,
     },
-    /// One restore completed and placed every snapshot.
     RestoreComplete {
-        /// Addressed store.
         store: String,
-        /// Restored database names.
         databases: Vec<String>,
-        /// Restart guidance for the owning process.
         note: String,
     },
-    /// One diagnosis or bounded repair completed.
     RepairReport {
-        /// `diagnose` or `apply`.
         mode: String,
-        /// Whether every database passed diagnosis.
         healthy: bool,
-        /// Read-only findings.
         findings: Vec<RepairFinding>,
-        /// Actions executed (only with `--apply`).
         actions: Vec<RepairAction>,
-        /// The trace file the entry was appended to.
         log_file: String,
     },
 }
 
-/// Failure of one backup command.
 #[derive(Clone, Debug)]
 pub enum BackupFailure {
-    /// Invalid command usage; rendered with the backup usage text.
-    Usage {
-        /// Human-readable explanation in the CLI language.
-        message: String,
-    },
-    /// The addressed data directory holds no database to operate on.
-    NotInitialized {
-        /// Human-readable explanation in the CLI language.
-        message: String,
-    },
-    /// Verification found a fact that contradicts the manifest or the
-    /// secret-free contract. Rendered like a failed doctor run.
-    VerifyFailed {
-        /// Bounded list of findings.
-        findings: Vec<String>,
-    },
-    /// Fail-closed refusal with a stable machine-readable code.
-    Refused {
-        /// Stable code (`restore.unsupported-schema-version`,
-        /// `backup.secret-detected`, ...).
-        code: &'static str,
-        /// Human-readable explanation in the CLI language.
-        message: String,
-    },
-    /// Operational failure (I/O, `SQLite`) with a stable code.
-    Failed {
-        /// Stable code.
-        code: &'static str,
-        /// Human-readable explanation in the CLI language.
-        message: String,
-    },
+    Usage { message: String },
+    NotInitialized { message: String },
+    VerifyFailed { findings: Vec<String> },
+    Refused { code: &'static str, message: String },
+    Failed { code: &'static str, message: String },
 }
 
 impl fmt::Display for BackupFailure {
@@ -339,8 +194,6 @@ struct BackupCommandExit {
     json: bool,
 }
 
-/// Runs one `wwc backup ...` command. Usage failures are rendered with the
-/// backup usage text, mirroring the `run_cli` convention.
 #[must_use]
 pub fn run_backup(arguments: &[String]) -> WwcCliExit {
     match run_backup_inner(arguments) {
@@ -477,10 +330,6 @@ fn parse_store(parsed: &ParsedArguments) -> Result<BackupStoreKind, BackupFailur
     BackupStoreKind::parse(&value).map_err(|message| usage_failure(&message))
 }
 
-/// Resolves the data directory. The Server store falls back to
-/// `WWC_SERVER_DATA_DIRECTORY` used by the Server; the
-/// Device store requires an explicit `--data-dir` like the `wwc device`
-/// commands.
 fn resolve_data_directory(
     parsed: &ParsedArguments,
     store: BackupStoreKind,
@@ -588,15 +437,6 @@ struct RepairReport {
     actions: Vec<RepairAction>,
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot
-// ---------------------------------------------------------------------------
-
-/// Discovers the databases one store owns inside its data directory.
-///
-/// Server discovery is intentionally dynamic: every `*.sqlite3` sidecar the
-/// data directory contains is covered, so new sidecars are backed up without
-/// this module knowing them. Device discovery is the canonical single store.
 fn discover_databases(
     store: BackupStoreKind,
     data_directory: &Path,
@@ -651,8 +491,6 @@ fn store_display(store: BackupStoreKind) -> &'static str {
     }
 }
 
-/// Supported-restore version set for one logical database. `None` marks a
-/// sidecar that does not manage `user_version` (integrity-only restore).
 fn supported_restore_versions(name: &str) -> Option<Vec<i64>> {
     match name {
         CONTROL_PLANE_DATABASE => {
@@ -665,7 +503,6 @@ fn supported_restore_versions(name: &str) -> Option<Vec<i64>> {
     }
 }
 
-/// The human label of the version-gated databases, `None` for sidecars.
 fn schema_gate_label(name: &str) -> Option<&'static str> {
     match name {
         CONTROL_PLANE_DATABASE => Some("Server 产品状态库"),
@@ -764,13 +601,6 @@ fn prepare_output_directory(data_directory: &Path, output: &Path) -> Result<(), 
     Ok(())
 }
 
-/// Creates one consistent snapshot of one live database with `VACUUM INTO`.
-///
-/// The source connection never issues DML; it is opened read-write only to
-/// avoid `SQLite`'s read-only WAL shared-memory limitation on a live store.
-/// `VACUUM INTO` reads one committed cut through the WAL and refuses to
-/// overwrite an existing target, so the intermediate file cannot clobber
-/// anything.
 fn create_snapshot(source: &Path, vacuum_tmp: &Path) -> Result<i64, BackupFailure> {
     let connection = open_live_connection(source)?;
     let check: String = connection
@@ -804,9 +634,6 @@ fn create_snapshot(source: &Path, vacuum_tmp: &Path) -> Result<i64, BackupFailur
     Ok(schema_version)
 }
 
-/// Zeroes the raw device credential secret inside one Device snapshot. The
-/// digest-era metadata (digest, generation) stays, so verify and restore can
-/// bind the snapshot to the live credential without carrying the secret.
 fn redact_device_credentials(snapshot_tmp: &Path) -> Result<(), BackupFailure> {
     let connection = open_live_connection(snapshot_tmp)?;
     let credential_table: Option<String> = connection
@@ -835,8 +662,6 @@ fn redact_device_credentials(snapshot_tmp: &Path) -> Result<(), BackupFailure> {
     Ok(())
 }
 
-/// Verifies and seals one snapshot file: integrity, secret scan, digest,
-/// owner-only permissions, atomic rename into its final name.
 fn seal_snapshot(
     vacuum_tmp: &Path,
     snapshot_path: &Path,
@@ -874,7 +699,6 @@ fn seal_snapshot(
     })
 }
 
-/// Verifies one sealed snapshot file and returns its `quick_check` verdict.
 fn verify_snapshot_file(path: &Path, name: &str) -> Result<String, BackupFailure> {
     let connection = open_snapshot_connection(path)?;
     let check: String = connection
@@ -923,13 +747,6 @@ fn write_manifest(output: &Path, manifest: &BackupManifest) -> Result<(), Backup
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Verify
-// ---------------------------------------------------------------------------
-
-/// Verifies one whole backup directory: manifest shape, per-file digest and
-/// byte count, integrity, schema-version consistency, secret scan, and the
-/// Device credential redaction contract.
 fn verify_backup_directory(from: &Path) -> Result<BackupManifest, BackupFailure> {
     let manifest_path = from.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path).map_err(|_| BackupFailure::Refused {
@@ -1032,8 +849,6 @@ fn verify_backup_entry(from: &Path, entry: &BackupDatabaseEntry, findings: &mut 
     }
 }
 
-/// Returns `Err` when any Device snapshot credential row still carries secret
-/// material instead of the 32-byte all-zero redaction form.
 fn credential_redaction_finding(connection: &Connection) -> Result<(), String> {
     let rows: Vec<(String, Vec<u8>)> = {
         let mut statement = connection
@@ -1056,15 +871,6 @@ fn credential_redaction_finding(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Restore
-// ---------------------------------------------------------------------------
-
-/// Restores one verified backup directory into the data directory.
-///
-/// Order is fail-closed by construction: verification first, then the schema
-/// version gates, then the Device credential continuity check, and only then
-/// per-database placement through an atomic rename.
 fn restore_store(
     store: BackupStoreKind,
     data_directory: &Path,
@@ -1119,15 +925,12 @@ fn restore_store(
     Ok(restored)
 }
 
-/// The live Device credential facts restore re-binds into the restored store.
 struct LiveCredential {
     device_id: String,
     secret: Vec<u8>,
     digest: String,
 }
 
-/// Reads the live Device credential rows and proves each secret still matches
-/// its stored digest, so the re-bind continues the exact live credential.
 fn read_live_credentials(data_directory: &Path) -> Result<Vec<LiveCredential>, BackupFailure> {
     let live_path = data_directory.join(format!("{DEVICE_CLIENT_DATABASE}.sqlite3"));
     if !live_path.is_file() {
@@ -1187,10 +990,6 @@ fn credential_read_failure(detail: &str) -> BackupFailure {
     }
 }
 
-/// Places one snapshot into the data directory: copy to a temp file (the
-/// source here is a sealed snapshot file, never a live database), re-bind the
-/// live Device credential, drop the replaced database's stale WAL sidecars,
-/// then rename atomically.
 fn place_snapshot(
     store: BackupStoreKind,
     data_directory: &Path,
@@ -1231,9 +1030,6 @@ fn target_with_suffix(target: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os_string)
 }
 
-/// Re-binds the live credential secrets into the restored Device store copy
-/// before it is renamed into place, so placement stays atomic and the placed
-/// store is immediately usable by the live device.
 fn rebind_device_credentials(
     restore_tmp: &Path,
     live_credentials: Option<&Vec<LiveCredential>>,
@@ -1310,10 +1106,6 @@ fn rebind_failure(detail: &str) -> BackupFailure {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Repair
-// ---------------------------------------------------------------------------
-
 fn repair_store(
     store: BackupStoreKind,
     data_directory: &Path,
@@ -1353,8 +1145,6 @@ fn repair_store(
     Ok(report)
 }
 
-/// Read-only diagnosis of one database. Never rewrites anything: damage
-/// beyond bounded repair is reported with restore guidance.
 fn diagnose_database(name: &str, path: &Path, findings: &mut Vec<RepairFinding>) {
     let connection = match open_live_connection(path) {
         Ok(connection) => connection,
@@ -1431,7 +1221,6 @@ fn diagnose_database(name: &str, path: &Path, findings: &mut Vec<RepairFinding>)
     }
 }
 
-/// Bounded action: one WAL checkpoint per database, never a rewrite.
 fn checkpoint_database(name: &str, path: &Path, actions: &mut Vec<RepairAction>) {
     let outcome = checkpoint_once(path);
     match outcome {
@@ -1466,7 +1255,6 @@ fn checkpoint_once(path: &Path) -> Result<String, BackupFailure> {
     ))
 }
 
-/// Bounded action: remove only this module's own stale temp files.
 fn cleanup_stale_temp_files(data_directory: &Path, actions: &mut Vec<RepairAction>) {
     let Ok(read) = fs::read_dir(data_directory) else {
         return;
@@ -1522,12 +1310,6 @@ fn append_repair_log(data_directory: &Path, entry: &RepairLogEntry) -> Result<()
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Opens a live (possibly WAL) database without creating it. Diagnosis and
-/// snapshot paths never issue DML on this connection.
 fn open_live_connection(path: &Path) -> Result<Connection, BackupFailure> {
     let connection = Connection::open_with_flags(
         path,
@@ -1546,7 +1328,6 @@ fn open_live_connection(path: &Path) -> Result<Connection, BackupFailure> {
     Ok(connection)
 }
 
-/// Opens a sealed snapshot file read-only.
 fn open_snapshot_connection(path: &Path) -> Result<Connection, BackupFailure> {
     let connection =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
@@ -1573,7 +1354,6 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), BackupFailure> {
     })
 }
 
-/// Directories need the search bit (0o700), files stay owner-only (0o600).
 fn set_directory_permissions(path: &Path) -> Result<(), BackupFailure> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
         BackupFailure::Failed {
@@ -1583,8 +1363,6 @@ fn set_directory_permissions(path: &Path) -> Result<(), BackupFailure> {
     })
 }
 
-/// Resolves one path through existing ancestors so prefix comparisons work
-/// across symlinked roots (macOS `/var` -> `/private/var`).
 fn canonical_existing_or_parent(path: &Path) -> Option<PathBuf> {
     if let Ok(absolute) = fs::canonicalize(path) {
         return Some(absolute);
@@ -1601,15 +1379,10 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-/// The device credential digest formula from the Device Client identity
-/// module, kept byte-identical so restore can verify the live secret against
-/// snapshot metadata.
 fn credential_digest(secret: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(secret))
 }
 
-/// Marker scan over raw bytes, aligned with the evidence-export secret
-/// scanner. Returns the first matching marker.
 fn scan_secret_markers(bytes: &[u8]) -> Option<&'static str> {
     let mut normalized = Vec::with_capacity(bytes.len());
     normalized.extend(bytes.iter().filter_map(|byte| match byte {
@@ -1840,8 +1613,6 @@ mod tests {
             )
             .expect("seed receipts, outbox, and cursor");
         drop(database);
-        // A sidecar the Server owns next to the product database: it stores
-        // only session digests and does not manage user_version.
         let sidecar = connection(&data_directory.join("auth-sessions.sqlite3"));
         sidecar
             .execute_batch(
@@ -1906,7 +1677,6 @@ mod tests {
         }
     }
 
-    /// Creates one initialized Device store and returns (`device_id`, `secret`).
     fn seed_device_store(data_directory: &Path) -> (String, Vec<u8>) {
         let mut store = DeviceStore::open(data_directory).expect("device store");
         let record = ensure_device_identity(&mut store, &device_seed(), "2026-09-05T00:00:00Z")
@@ -1964,7 +1734,6 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["auth-sessions", "control-plane"]);
 
-        // Simulate loss: wipe the live facts after the backup exists.
         {
             let database = connection(&data_directory.join("control-plane.sqlite3"));
             database
@@ -1998,25 +1767,18 @@ mod tests {
         assert_server_restored(&data_directory, &user_id, &username, &temporary_password);
     }
 
-    /// Asserts the exact owner identity, the seeded receipt, the outbox
-    /// event, the projection cursor, and the auth-session digest all came
-    /// back through the snapshot.
     fn assert_server_restored(
         data_directory: &Path,
         user_id: &str,
         username: &str,
         temporary_password: &str,
     ) {
-        // IDs and the credential fact survive: the exact owner account opens
-        // and the exact temporary password still verifies.
         let service = UserAccountService::open(data_directory).expect("reopen storage");
         let verified = service
             .verify_credentials(username, temporary_password)
             .expect("verification runs")
             .expect("credential survives restore");
         assert_eq!(verified.user_id.0, user_id);
-        // Receipts survive byte-exactly: the seeded receipt is the only one
-        // (account creation itself writes no command receipt).
         assert_eq!(
             count(
                 data_directory,
@@ -2100,7 +1862,6 @@ mod tests {
         );
         assert!(restore.stderr.contains("未改动"));
 
-        // Fail-closed means the live store is untouched.
         let service = UserAccountService::open(&data_directory).expect("reopen storage");
         let verified = service
             .verify_credentials(&username, &temporary_password)
@@ -2125,7 +1886,11 @@ mod tests {
             "--output",
             &backup,
         ]));
-        patch_snapshot_version(&fixture.backup_dir(), "device-client", 7);
+        patch_snapshot_version(
+            &fixture.backup_dir(),
+            "device-client",
+            winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION + 1,
+        );
 
         let restore = run(&[
             "restore",
@@ -2175,7 +1940,6 @@ mod tests {
         assert_eq!(entry["name"], "device-client");
         assert_eq!(entry["credential_redacted"], true);
 
-        // The backup artifact carries no plaintext credential.
         let snapshot_path = fixture.backup_dir().join("device-client.sqlite3");
         assert!(!secret_in_file(&secret, &snapshot_path));
         {
@@ -2193,7 +1957,6 @@ mod tests {
             assert_eq!(length, 32);
             assert_eq!(nonzero, 0);
         }
-        // The live store keeps the real secret.
         {
             let store = DeviceStore::open(&data_directory).expect("live store");
             let record = load_device_identity(&store)
@@ -2202,7 +1965,6 @@ mod tests {
             assert_eq!(record.credential().expose_secret(), secret);
         }
 
-        // Simulate local state loss while identity and credential survive.
         {
             let database = connection(&data_directory.join("device-client.sqlite3"));
             database
@@ -2339,7 +2101,6 @@ mod tests {
             "--output",
             &backup,
         ]));
-        // A snapshot that carries the raw secret again must fail verification.
         {
             let snapshot_path = fixture.backup_dir().join("device-client.sqlite3");
             let database = connection(&snapshot_path);
@@ -2350,8 +2111,6 @@ mod tests {
                 )
                 .expect("re-plant secret");
             drop(database);
-            // Re-seal the manifest so verification reaches the redaction
-            // check instead of stopping at the digest mismatch first.
             let manifest_path = fixture.backup_dir().join("manifest.json");
             let bytes = fs::read(&manifest_path).expect("manifest");
             let mut manifest: BackupManifest =
@@ -2493,7 +2252,6 @@ mod tests {
         assert_eq!(entry["store"], "device");
         assert_eq!(entry["findings"].as_array().expect("findings").len(), 0);
 
-        // Read-only: the database bytes did not change.
         let after = fs::read(data_directory.join("device-client.sqlite3")).expect("after bytes");
         assert_eq!(before, after);
         let store = DeviceStore::open(&data_directory).expect("store still opens");
@@ -2594,7 +2352,6 @@ mod tests {
             Some("authorization:bearer")
         );
         assert_eq!(scan_secret_markers(b"plain text without markers"), None);
-        // Argon2id hashes and sha256 digests are not plaintext credentials.
         assert_eq!(
             scan_secret_markers(b"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNTYWx0c1NhbHRTYWx0$digest",),
             None

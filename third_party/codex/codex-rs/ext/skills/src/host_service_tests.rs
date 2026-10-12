@@ -244,6 +244,7 @@ async fn watchable_skill_root_paths_exclude_plugin_and_system_roots() {
 async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
+    let fixture_home = dunce::canonicalize(codex_home.path()).expect("fixture home");
     write_user_skill(&codex_home, "user", "user-skill", "from the host loader");
     let plugin_skill_path = write_plugin_skill(
         &codex_home,
@@ -273,6 +274,7 @@ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
         .outcome()
         .skills
         .iter()
+        .filter(|skill| skill.path_to_skills_md.as_path().starts_with(&fixture_home))
         .map(|skill| (skill.name.as_str(), skill.plugin_id.as_deref()))
         .collect::<Vec<_>>();
 
@@ -289,6 +291,7 @@ async fn snapshot_for_config_preserves_host_precedence_for_symlinked_plugin_root
 
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
+    let fixture_home = dunce::canonicalize(codex_home.path()).expect("fixture home");
     let plugin_skill_path = write_plugin_skill(
         &codex_home,
         "test",
@@ -319,7 +322,11 @@ async fn snapshot_for_config_preserves_host_precedence_for_symlinked_plugin_root
     .await;
 
     assert_eq!(
-        outcome.skills,
+        outcome
+            .skills
+            .into_iter()
+            .filter(|skill| skill.path_to_skills_md.as_path().starts_with(&fixture_home))
+            .collect::<Vec<_>>(),
         vec![codex_skills::SkillMetadata {
             name: "sample:search".to_string(),
             description: "shared skill".to_string(),

@@ -1,35 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Managed Worker session entry (`--managed-session`, plan §14.4).
-//!
-//! A managed Worker process is started by the Device Client, never by the
-//! Server: the Client writes one local mode-0600 config file carrying the
-//! full `WorkerLaunchGrant` identity binding plus the only two absolute
-//! paths a Worker ever receives, and spawns
-//! `winwincode-worker --managed-session <config-file>`. The config file is
-//! the single source of identity and locality:
-//!
-//! - every field is validated before the process starts; a missing or
-//!   mis-shaped field refuses startup with the exact field named;
-//! - [`sourceDirectory`]/[`dataDirectory`] are read only from this local
-//!   file — no Server message ever carries a Worker filesystem path (plan
-//!   §14.4 and §17.3);
-//! - the [`WorkerSessionCredential`] at `workerCredentialPath` is one of
-//!   the four strictly separated credential classes (contract
-//!   `client-control-port-v1.md`, "四类凭据分离"): it authenticates exactly
-//!   one `WorkerSession` on the `ExecutionPort` and nothing else. It is
-//!   loaded with the same private-file rule as the existing remote
-//!   transport and fingerprinted with the same `sha256:<hex>` digest the
-//!   Server-side `FileRemoteWorkerAuthenticator` computes, so the digest is
-//!   available at every handshake without ever being transmitted.
-//!
-//! The execution loop itself is unchanged: a managed Worker uses the exact
-//! same [`RemoteWorkerPort`](crate::remote_transport::RemoteWorkerPort)
-//! exchange/replay machinery as `--remote`; only the identity source
-//! differs. Unknown config fields are rejected (fail closed) so an older
-//! Worker never silently ignores identity material written by a newer
-//! Device Client.
-
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,21 +11,13 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::generated::ModelGatewayRoute;
 
-/// Largest accepted config file size. Identity bindings are small; the
-/// bound only turns accidental or hostile oversized files into a clean
-/// startup rejection.
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 
-/// Largest accepted Worker Session Credential, matching the private-file
-/// bound the remote transport applies on every exchange.
 const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
 
-/// Why a managed session config was refused at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedSessionConfigError {
-    /// Offending field name, or `None` for file-level failures.
     pub field: Option<&'static str>,
-    /// Exact, secret-free refusal reason.
     pub reason: String,
 }
 
@@ -92,10 +54,8 @@ impl fmt::Display for ManagedSessionConfigError {
 
 impl std::error::Error for ManagedSessionConfigError {}
 
-/// Why a Worker Session Credential could not be loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCredentialError {
-    /// Exact, secret-free refusal reason (never contains credential bytes).
     pub reason: String,
 }
 
@@ -107,54 +67,27 @@ impl fmt::Display for WorkerCredentialError {
 
 impl std::error::Error for WorkerCredentialError {}
 
-/// Fully validated identity and locality binding for one managed Worker
-/// session (plan §14.4 field list, §17.2 grant binding).
-///
-/// Construct only through [`ManagedSessionConfig::read`]; every field was
-/// shape-checked and the config file was verified mode-0600 before this
-/// value exists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedSessionConfig {
-    /// `ClientNode` the launching Device Client runs on.
     pub client_node_id: ClientNodeId,
-    /// One Device Client process boot; grant binding requires the current
-    /// instance, so an old process's config never launches a Worker.
     pub client_instance_id: ClientInstanceId,
-    /// Occupancy lease the session consumes.
     pub occupancy_lease_id: ClientOccupancyLeaseId,
-    /// Fencing token of the lease as an exact unsigned 64-bit value
-    /// (carried as a decimal string on the wire, contract Envelope rules).
     pub occupancy_fencing_token: u64,
-    /// Repository binding the session executes against; the Worker never
-    /// learns another binding's root.
     pub repository_binding_id: RepositoryBindingId,
-    /// Optional product session scope.
     pub product_session_id: Option<ProductSessionId>,
-    /// Optional `WorkRun` scope.
     pub work_run_id: Option<WorkRunId>,
-    /// The one `WorkerSession` this process authenticates.
     pub worker_session_id: WorkerSessionId,
-    /// Stable Worker identity reused across replacement boots.
     pub worker_id: WorkerId,
-    /// Identity of this exact process boot.
     pub worker_instance_id: WorkerInstanceId,
-    /// Local source root. Only ever provided by the local Device Client;
-    /// no Server path can reach this field.
     pub source_directory: PathBuf,
-    /// Local Worker data root (workspaces and Codex runtime live under it).
     pub data_directory: PathBuf,
-    /// Private Provider configuration owned by the launching Device.
+    pub execution_workspace_directory: Option<PathBuf>,
     pub provider_directory: PathBuf,
-    /// `https://HOST:PORT` origin of the `ExecutionPort` exchange endpoint.
     pub server_origin: String,
-    /// Local path of the Worker Session Credential file (mode-0600 enforced).
     pub worker_credential_path: PathBuf,
-    /// Optional model gateway route; the canonical embedded route is used
-    /// when absent, matching the `--remote` entry.
     pub model_route: Option<ModelGatewayRoute>,
 }
 
-/// Raw config file shape before validation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManagedSessionConfigFile {
@@ -170,13 +103,13 @@ struct ManagedSessionConfigFile {
     worker_instance_id: Option<String>,
     source_directory: Option<String>,
     data_directory: Option<String>,
+    execution_workspace_directory: Option<String>,
     provider_directory: Option<String>,
     server_origin: Option<String>,
     worker_credential_path: Option<String>,
     model_route: Option<ModelRouteFile>,
 }
 
-/// Raw `modelRoute` shape before validation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelRouteFile {
@@ -185,17 +118,6 @@ struct ModelRouteFile {
 }
 
 impl ManagedSessionConfig {
-    /// Reads and validates one managed session config file.
-    ///
-    /// The file must be a regular file with exactly mode 0600 — a config
-    /// carrying identity and locality binding is launch-gating material.
-    /// Any missing or mis-shaped field refuses startup and names the field.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable files, non-0600 permissions, oversized or
-    /// non-JSON content, unknown fields, and every missing or mis-shaped
-    /// field with the field name in the error.
     pub fn read(path: &Path) -> Result<Self, ManagedSessionConfigError> {
         let metadata = fs::metadata(path).map_err(|_| {
             ManagedSessionConfigError::file_error(format!(
@@ -260,6 +182,10 @@ impl ManagedSessionConfigFile {
         )?);
         let source_directory = local_path("sourceDirectory", self.source_directory)?;
         let data_directory = local_path("dataDirectory", self.data_directory)?;
+        let execution_workspace_directory = self
+            .execution_workspace_directory
+            .map(|value| local_path("executionWorkspaceDirectory", Some(value)))
+            .transpose()?;
         let provider_directory = local_path("providerDirectory", self.provider_directory)?;
         let server_origin = require("serverOrigin", self.server_origin)?;
         if crate::remote_transport::parse_origin(&server_origin).is_err() {
@@ -284,6 +210,7 @@ impl ManagedSessionConfigFile {
             worker_instance_id,
             source_directory,
             data_directory,
+            execution_workspace_directory,
             provider_directory,
             server_origin,
             worker_credential_path,
@@ -393,8 +320,6 @@ fn model_route(
     Ok(Some(ModelGatewayRoute { capability, route }))
 }
 
-/// Enforces exactly mode 0600 on the config file (plan §14.4: 非 0600 拒绝
-/// 启动).
 #[cfg(unix)]
 fn require_exact_mode_0600(
     metadata: &fs::Metadata,
@@ -413,10 +338,6 @@ fn require_exact_mode_0600(
     Ok(())
 }
 
-/// One loaded Worker Session Credential: the fourth, strictly separated
-/// credential class. It authenticates exactly one `WorkerSession` on the
-/// `ExecutionPort` and must never be reused as a Device, Browser, or Connect
-/// credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSessionCredential {
     path: PathBuf,
@@ -424,19 +345,6 @@ pub struct WorkerSessionCredential {
 }
 
 impl WorkerSessionCredential {
-    /// Loads the credential from one private file and fingerprints it.
-    ///
-    /// The private-file rule matches the existing remote transport and the
-    /// Server-side `FileRemoteWorkerAuthenticator` exactly: a regular file
-    /// with no group/other permission bits, non-empty and at most 16 KiB.
-    /// The digest uses the same `sha256:<hex>` form the Server computes
-    /// over the presented bearer token, so the two sides can bind the
-    /// credential to a `WorkerLaunchGrant.credentialDigest` without the
-    /// digest ever being transmitted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, non-private, oversized, or empty credential files.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, WorkerCredentialError> {
         let path = path.into();
         let bytes = read_private_credential(&path)?;
@@ -444,22 +352,17 @@ impl WorkerSessionCredential {
         Ok(Self { path, digest })
     }
 
-    /// Local path the credential was loaded from.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// `sha256:<hex>` fingerprint of the credential bytes, aligned with the
-    /// Server-side `WorkerLaunchGrant.credentialDigest` binding.
     #[must_use]
     pub const fn digest(&self) -> &Sha256Digest {
         &self.digest
     }
 }
 
-/// Applies the same private-file rule as the remote transport's per-exchange
-/// credential read; the transport re-validates on every exchange.
 #[cfg(unix)]
 fn read_private_credential(path: &Path) -> Result<Vec<u8>, WorkerCredentialError> {
     use std::os::unix::fs::PermissionsExt;
@@ -806,13 +709,9 @@ mod tests {
         write_file(&path, "wsc-test-token", 0o600);
         let credential = WorkerSessionCredential::load(&path).expect("credential loads");
         assert_eq!(credential.path(), path.as_path());
-        // Same fingerprint form the Server-side authenticator computes.
         let expected = Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"wsc-test-token")));
         assert_eq!(credential.digest(), &expected);
 
-        // Private 0400 mode stays acceptable: the credential private-file
-        // rule matches the remote transport (no group/other bits), which is
-        // the handshake mechanism's own contract.
         write_file(&path, "wsc-test-token", 0o400);
         let reloaded = WorkerSessionCredential::load(&path).expect("0400 credential loads");
         assert_eq!(reloaded.digest(), credential.digest());

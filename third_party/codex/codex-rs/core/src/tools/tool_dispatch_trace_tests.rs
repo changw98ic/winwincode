@@ -127,6 +127,11 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
     }));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
+    super::super::execution_facts::ExecutionFacts::for_session(&session).register_cell(
+        "cell-1".into(),
+        "call-code".into(),
+        &turn.sub_id,
+    );
 
     registry
         .dispatch_any_with_terminal_outcome(
@@ -264,7 +269,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
         )
         .await;
 
-    assert!(matches!(result, Err(FunctionCallError::Fatal(_))));
+    assert!(matches!(result, Err(FunctionCallError::RespondToModel(_))));
     let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
     let tool_call = &replayed.tool_calls["incompatible-call"];
     assert_eq!(tool_call.execution.status, ExecutionStatus::Failed);

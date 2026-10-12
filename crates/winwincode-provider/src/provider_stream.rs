@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider-neutral streaming conversion for the central Gateway.
-//!
-//! Provider adapters emit typed wire events. The converter validates their
-//! lifecycle, coalesces content blocks so Provider chunk boundaries do not
-//! change the canonical result, assigns stable tool identities and stream
-//! sequences, and produces the embedded kernel's canonical `ModelPort` JSON.
-//! No old UI message format is accepted.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
@@ -26,7 +18,6 @@ const MAX_STREAM_BLOCKS: usize = 4_096;
 const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Provider tool category mapped to the kernel's canonical response item.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderToolKind {
@@ -34,11 +25,6 @@ pub enum ProviderToolKind {
     Custom,
 }
 
-/// Canonical Provider-neutral identity of one callable tool.
-///
-/// Provider adapters may expose a bounded alias on their wire protocol, but
-/// the alias is never parsed back into this identity. The adapter must retain
-/// an explicit alias-to-identity binding for the whole exchange.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderToolIdentity {
@@ -49,11 +35,6 @@ pub struct ProviderToolIdentity {
 }
 
 impl ProviderToolIdentity {
-    /// Builds one canonical identity after enforcing the Codex tool bounds.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, overlong, or non-identifier names and namespaces.
     pub fn try_new(
         kind: ProviderToolKind,
         name: String,
@@ -89,7 +70,6 @@ impl ProviderToolIdentity {
     }
 }
 
-/// Stable invalid canonical tool identity category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderToolIdentityError {
     InvalidName,
@@ -104,15 +84,15 @@ impl fmt::Display for ProviderToolIdentityError {
 
 impl std::error::Error for ProviderToolIdentityError {}
 
-/// Provider terminal reason which has no arbitrary diagnostic text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderFinishReason {
     Stop,
     ToolCalls,
     MaxTokens,
+    Interrupted,
+    Filtered,
 }
 
-/// Stable Provider stream failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamFailureKind {
     Authentication,
@@ -126,7 +106,6 @@ pub enum ProviderStreamFailureKind {
     Unknown,
 }
 
-/// Bounded Provider failure facts. Arbitrary Provider messages are absent.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderStreamFailure {
     kind: ProviderStreamFailureKind,
@@ -185,24 +164,20 @@ impl fmt::Debug for ProviderStreamFailure {
     }
 }
 
-/// Provider token accounting retained until the terminal canonical event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderTokenUsage {
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
 }
 
-/// Typed wire event accepted from a selected Provider adapter.
-///
-/// Debug output intentionally reveals only the variant name; response content,
-/// reasoning, tool arguments and Provider request identities remain hidden.
 #[derive(Clone, PartialEq)]
 pub enum ProviderStreamEvent {
     ResponseStarted {
         provider_response_id: String,
+        observed_model_id: Option<String>,
     },
     TextStarted {
         index: u32,
@@ -281,7 +256,6 @@ impl fmt::Debug for ProviderStreamEvent {
     }
 }
 
-/// Stable conversion failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamConversionErrorKind {
     InvalidEvent,
@@ -292,7 +266,6 @@ pub enum ProviderStreamConversionErrorKind {
     SequenceOverflow,
 }
 
-/// Secret-free conversion error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderStreamConversionError {
     kind: ProviderStreamConversionErrorKind,
@@ -332,7 +305,6 @@ impl fmt::Display for ProviderStreamConversionError {
 
 impl std::error::Error for ProviderStreamConversionError {}
 
-/// One ordered, leak-checked canonical `ModelPort` message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CanonicalModelStreamFrame {
     sequence: u64,
@@ -341,18 +313,23 @@ pub struct CanonicalModelStreamFrame {
 }
 
 impl CanonicalModelStreamFrame {
+    pub(crate) fn from_codex_event(sequence: u64, payload_json: String, terminal: bool) -> Self {
+        Self {
+            sequence,
+            payload_json,
+            terminal,
+        }
+    }
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
 
-    /// Returns the exact JSON consumed by the embedded kernel's `ModelPort`.
     #[must_use]
     pub fn payload_json(&self) -> &str {
         &self.payload_json
     }
 
-    /// Builds the generated opaque `ExecutionPort` payload for this event.
     #[must_use]
     pub fn encoded_payload(&self) -> EncodedPayload {
         EncodedPayload {
@@ -418,13 +395,12 @@ enum OpenBlock {
     Tool(ToolBlock),
 }
 
-/// Stateful converter tied to one successful Gateway open receipt.
 pub struct ProviderStreamConverter {
     model_exchange_id: String,
-    model_id: String,
     leak_gate: CredentialLeakGate,
     provider_response_id: Option<String>,
     blocks: BTreeMap<u32, OpenBlock>,
+    pending_text: Vec<TextBlock>,
     used_indices: BTreeSet<u32>,
     tool_calls: BTreeMap<String, u32>,
     usage: Option<ProviderTokenUsage>,
@@ -433,16 +409,14 @@ pub struct ProviderStreamConverter {
 }
 
 impl ProviderStreamConverter {
-    /// Binds conversion to the exact route and Credential fingerprint snapshot
-    /// returned by a successful the device Provider runtime call.
     #[must_use]
     pub fn from_gateway_receipt(receipt: &ProviderGatewayOpenReceipt) -> Self {
         Self {
             model_exchange_id: receipt.model_exchange_id.0.clone(),
-            model_id: receipt.route.model_id.clone(),
             leak_gate: receipt.stream_leak_gate(),
             provider_response_id: None,
             blocks: BTreeMap::new(),
+            pending_text: Vec::new(),
             used_indices: BTreeSet::new(),
             tool_calls: BTreeMap::new(),
             usage: None,
@@ -451,15 +425,6 @@ impl ProviderStreamConverter {
         }
     }
 
-    /// Converts one Provider event into zero or more ordered canonical frames.
-    /// Content deltas are intentionally coalesced until their block ends. This
-    /// makes output independent of Provider chunk segmentation and lets the
-    /// leak gate inspect complete content before any content frame is emitted.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid lifecycle order, identity drift, oversized content,
-    /// Credential material, or events after a terminal outcome.
     pub fn ingest(
         &mut self,
         event: ProviderStreamEvent,
@@ -473,6 +438,7 @@ impl ProviderStreamConverter {
         let result = self.ingest_inner(event);
         if result.is_err() {
             self.blocks.clear();
+            self.pending_text.clear();
             self.terminal = true;
         }
         result
@@ -486,6 +452,7 @@ impl ProviderStreamConverter {
         match event {
             ProviderStreamEvent::ResponseStarted {
                 provider_response_id,
+                observed_model_id,
             } => {
                 if self.provider_response_id.is_some() || !self.blocks.is_empty() {
                     return Err(ProviderStreamConversionError::protocol());
@@ -498,12 +465,15 @@ impl ProviderStreamConverter {
                     )
                     .map_err(|_| credential_leak())?;
                 self.provider_response_id = Some(provider_response_id);
-                self.emit(vec![
-                    ModelPortMessage::Created,
-                    ModelPortMessage::ServerModel {
-                        model: self.model_id.clone(),
-                    },
-                ])
+                let mut messages = vec![ModelPortMessage::Created];
+                if let Some(model) = observed_model_id {
+                    validate_token(&model, 256)?;
+                    self.leak_gate
+                        .inspect_bytes(CredentialOutputBoundary::Event, model.as_bytes())
+                        .map_err(|_| credential_leak())?;
+                    messages.push(ModelPortMessage::ServerModel { model });
+                }
+                self.emit(messages)
             }
             ProviderStreamEvent::TextStarted { index } => {
                 self.require_started()?;
@@ -517,7 +487,7 @@ impl ProviderStreamConverter {
                     }),
                 );
                 self.emit(vec![ModelPortMessage::OutputItemAdded {
-                    item: ModelOutputItem::assistant_message(item_id, String::new()),
+                    item: ModelOutputItem::assistant_message(item_id, String::new(), None),
                 }])
             }
             ProviderStreamEvent::TextDelta { index, delta } => {
@@ -540,15 +510,19 @@ impl ProviderStreamConverter {
                 else {
                     return Err(ProviderStreamConversionError::protocol());
                 };
+                self.leak_gate
+                    .inspect_bytes(CredentialOutputBoundary::Event, block.text.as_bytes())
+                    .map_err(|_| credential_leak())?;
                 let mut messages = Vec::new();
                 if !block.text.is_empty() {
                     messages.push(ModelPortMessage::OutputTextDelta {
                         delta: block.text.clone(),
                     });
                 }
-                messages.push(ModelPortMessage::OutputItemDone {
-                    item: ModelOutputItem::assistant_message(block.item_id, block.text),
-                });
+                self.pending_text.push(block);
+                if !self.tool_calls.is_empty() {
+                    messages.extend(self.finish_text(Some("commentary")));
+                }
                 self.emit(messages)
             }
             ProviderStreamEvent::ReasoningStarted {
@@ -632,6 +606,11 @@ impl ProviderStreamConverter {
                 else {
                     return Err(ProviderStreamConversionError::protocol());
                 };
+                for content in [&block.summary, &block.content] {
+                    self.leak_gate
+                        .inspect_bytes(CredentialOutputBoundary::Event, content.as_bytes())
+                        .map_err(|_| credential_leak())?;
+                }
                 let mut messages = block
                     .segments
                     .into_iter()
@@ -688,9 +667,11 @@ impl ProviderStreamConverter {
                         arguments: String::new(),
                     }),
                 );
-                self.emit(vec![ModelPortMessage::OutputItemAdded {
+                let mut messages = self.finish_text(Some("commentary"));
+                messages.push(ModelPortMessage::OutputItemAdded {
                     item: ModelOutputItem::tool(identity, item_id, provider_call_id, String::new()),
-                }])
+                });
+                self.emit(messages)
             }
             ProviderStreamEvent::ToolCallArgumentsDelta {
                 index,
@@ -725,6 +706,9 @@ impl ProviderStreamConverter {
                 if block.provider_call_id != provider_call_id {
                     return Err(ProviderStreamConversionError::protocol());
                 }
+                self.leak_gate
+                    .inspect_bytes(CredentialOutputBoundary::Event, block.arguments.as_bytes())
+                    .map_err(|_| credential_leak())?;
                 let mut messages = Vec::new();
                 if !block.arguments.is_empty() {
                     messages.push(ModelPortMessage::ToolCallInputDelta {
@@ -760,6 +744,7 @@ impl ProviderStreamConverter {
                 let message = match reason {
                     ProviderFinishReason::Stop if self.used_indices.is_empty() => {
                         ModelPortMessage::Error {
+                            token_usage: self.usage.map(ModelTokenUsage::from),
                             error: ModelFailure::new(
                                 "EMPTY_RESPONSE",
                                 "Provider completed without any response content",
@@ -776,7 +761,21 @@ impl ProviderStreamConverter {
                             end_turn: Some(reason == ProviderFinishReason::Stop),
                         }
                     }
+                    ProviderFinishReason::Interrupted | ProviderFinishReason::Filtered => {
+                        ModelPortMessage::Error {
+                            token_usage: self.usage.map(ModelTokenUsage::from),
+                            error: ModelFailure::new(
+                                if reason == ProviderFinishReason::Filtered {
+                                    "CONTENT_FILTER"
+                                } else {
+                                    "PROVIDER_INTERRUPTED"
+                                },
+                                "Provider response ended before completion",
+                            ),
+                        }
+                    }
                     ProviderFinishReason::MaxTokens => ModelPortMessage::Error {
+                        token_usage: self.usage.map(ModelTokenUsage::from),
                         error: ModelFailure::new(
                             "MAX_TOKENS",
                             "Provider response reached its output-token limit",
@@ -790,6 +789,7 @@ impl ProviderStreamConverter {
             ProviderStreamEvent::Failed(failure) => {
                 validate_failure(&self.leak_gate, &failure)?;
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::from_provider(failure),
                 }])?;
                 self.blocks.clear();
@@ -798,6 +798,7 @@ impl ProviderStreamConverter {
             }
             ProviderStreamEvent::Cancelled => {
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::new("CANCELLED", "Model stream was cancelled"),
                 }])?;
                 self.blocks.clear();
@@ -806,6 +807,7 @@ impl ProviderStreamConverter {
             }
             ProviderStreamEvent::Disconnected => {
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::new(
                         "STREAM_CLOSED",
                         "Provider stream ended without a terminal event",
@@ -835,10 +837,30 @@ impl ProviderStreamConverter {
         Ok(())
     }
 
+    fn finish_text(&mut self, phase: Option<&'static str>) -> Vec<ModelPortMessage> {
+        self.pending_text
+            .drain(..)
+            .map(|block| ModelPortMessage::OutputItemDone {
+                item: ModelOutputItem::assistant_message(block.item_id, block.text, phase),
+            })
+            .collect()
+    }
+
     fn emit(
         &mut self,
-        messages: Vec<ModelPortMessage>,
+        mut messages: Vec<ModelPortMessage>,
     ) -> Result<Vec<CanonicalModelStreamFrame>, ProviderStreamConversionError> {
+        if let Some(terminal) = messages.iter().find(|message| message.is_terminal()) {
+            let phase = match terminal {
+                ModelPortMessage::Completed {
+                    end_turn: Some(true),
+                    ..
+                } if self.tool_calls.is_empty() => Some("final_answer"),
+                ModelPortMessage::Completed { .. } => Some("commentary"),
+                _ => None,
+            };
+            messages.splice(0..0, self.finish_text(phase));
+        }
         let mut payloads = Vec::with_capacity(messages.len());
         for message in &messages {
             let payload = serde_json::to_vec(message)
@@ -879,6 +901,7 @@ fn append_checked(
     current: &mut String,
     delta: &str,
 ) -> Result<(), ProviderStreamConversionError> {
+    let previous_len = current.len();
     let next_length = current
         .len()
         .checked_add(delta.len())
@@ -887,7 +910,11 @@ fn append_checked(
     current.push_str(delta);
     debug_assert_eq!(current.len(), next_length);
     leak_gate
-        .inspect_bytes(CredentialOutputBoundary::Event, current.as_bytes())
+        .inspect_appended_bytes(
+            CredentialOutputBoundary::Event,
+            current.as_bytes(),
+            previous_len,
+        )
         .map_err(|_| credential_leak())
 }
 
@@ -961,7 +988,7 @@ fn inspect_tool_identity(
 fn validate_usage(usage: ProviderTokenUsage) -> Result<(), ProviderStreamConversionError> {
     let values = [
         usage.input_tokens,
-        usage.cached_input_tokens,
+        usage.cached_input_tokens.unwrap_or(0),
         usage.cache_write_input_tokens,
         usage.output_tokens,
         usage.reasoning_output_tokens,
@@ -1088,6 +1115,8 @@ enum ModelPortMessage {
     },
     Error {
         error: ModelFailure,
+        #[serde(rename = "tokenUsage", skip_serializing_if = "Option::is_none")]
+        token_usage: Option<ModelTokenUsage>,
     },
 }
 
@@ -1105,7 +1134,8 @@ enum ModelOutputItem {
         id: String,
         role: &'static str,
         content: Vec<ModelOutputContent>,
-        phase: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<&'static str>,
     },
     #[serde(rename = "reasoning")]
     Reasoning {
@@ -1134,7 +1164,7 @@ enum ModelOutputItem {
 }
 
 impl ModelOutputItem {
-    fn assistant_message(id: String, text: String) -> Self {
+    fn assistant_message(id: String, text: String, phase: Option<&'static str>) -> Self {
         Self::Message {
             id,
             role: "assistant",
@@ -1142,7 +1172,7 @@ impl ModelOutputItem {
                 kind: "output_text",
                 text,
             }],
-            phase: "final_answer",
+            phase,
         }
     }
 
@@ -1197,10 +1227,10 @@ struct ModelReasoningSummary {
 }
 
 #[derive(Serialize)]
-#[allow(clippy::struct_field_names)] // Exact field names are the canonical ModelPort wire contract.
+#[allow(clippy::struct_field_names)]
 struct ModelTokenUsage {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,

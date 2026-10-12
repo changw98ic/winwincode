@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Same-cut composition over the verified aggregate journal and trusted source ports.
-
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
@@ -35,7 +33,6 @@ use crate::{
 
 const MAX_QUERY_LIMIT: usize = 200;
 
-/// Exact current publishable fact set joined to one bounded read cursor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublicationAuthorizationSnapshot {
     binding: PublicationFactBinding,
@@ -152,13 +149,6 @@ pub(crate) struct CurrentPublicationApproval<'delivery> {
     pub(crate) resolved_at: u64,
 }
 
-/// Loads one restart-stable current Publication read from the installed
-/// production authority without composing a runtime projection.
-///
-/// # Errors
-///
-/// Rejects missing adapters, foreign scope, a changed Delivery, or changed
-/// candidate/Publication facts between the current and exact reads.
 pub(crate) fn load_current_publication_read(
     control_plane: &ControlPlane,
     scope: &RepositoryScope,
@@ -632,12 +622,6 @@ pub(crate) fn load_current(
         })
 }
 
-/// Verifies the complete append-only journal and returns every authoritative
-/// Delivery snapshot through one already-issued read revision.
-///
-/// Historical Candidate reads use the journal records rather than accepting
-/// a caller-supplied Candidate descriptor. Verifying the complete retained
-/// chain also makes a later gap or changed record fail the older read closed.
 pub(crate) fn load_history_through(
     control_plane: &ControlPlane,
     delivery_id: &DeliveryId,
@@ -949,6 +933,7 @@ pub(crate) fn derive_publication_binding(
         candidate.delivery_spec_id().0.clone(),
         candidate.delivery_spec_revision(),
         candidate.candidate_ref(),
+        candidate.candidate_digest().clone(),
         candidate.diff_sha256(),
         verdict.id().0.clone(),
         approval.attention.id.clone(),
@@ -1377,7 +1362,6 @@ mod tests {
             id: AttentionItemId("attention-delivery-approval-1".into()),
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
-            // Human approval is not a Worker execution.
             work_run_id: None,
             item_type: AttentionItemType::DeliveryApproval,
             title: "Approve delivery".into(),
@@ -1474,7 +1458,8 @@ mod tests {
             21,
             "spec_00000000000000000000000001",
             1,
-            format!("git-candidate:sha256:{}", "a".repeat(64)),
+            format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+            winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             "c".repeat(64),
             "verdict:fixture:pass",
             AttentionItemId("att_00000000000000000000000001".into()),

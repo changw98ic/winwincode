@@ -1,6 +1,7 @@
 mod callbacks;
 mod globals;
 mod module_loader;
+mod timer_scheduler;
 mod timers;
 mod value;
 
@@ -147,6 +148,7 @@ pub(super) struct RuntimeState {
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_tool_calls: HashMap<String, v8::Global<v8::PromiseResolver>>,
     pending_timeouts: HashMap<u64, timers::ScheduledTimeout>,
+    timer_scheduler: Option<timer_scheduler::TimerScheduler>,
     stored_values: HashMap<String, JsonValue>,
     stored_value_writes: HashMap<String, JsonValue>,
     enabled_tools: Vec<EnabledToolMetadata>,
@@ -189,6 +191,7 @@ fn run_runtime(
         event_tx: event_tx.clone(),
         pending_tool_calls: HashMap::new(),
         pending_timeouts: HashMap::new(),
+        timer_scheduler: None,
         stored_values: config.stored_values,
         stored_value_writes: HashMap::new(),
         enabled_tools: config.enabled_tools,
@@ -309,8 +312,8 @@ fn capture_scope_send_error(
     error_text: Option<String>,
 ) {
     let stored_value_writes = scope
-        .get_slot::<RuntimeState>()
-        .map(|state| state.stored_value_writes.clone())
+        .get_slot_mut::<RuntimeState>()
+        .map(|state| std::mem::take(&mut state.stored_value_writes))
         .unwrap_or_default();
 
     send_result(event_tx, stored_value_writes, error_text);
@@ -512,3 +515,7 @@ await new Promise(() => {});
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "mechanism_regression_tests.rs"]
+mod mechanism_regression_tests;

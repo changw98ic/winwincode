@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generated `ExecutionPort` Artifact messages mapped to the durable Artifact store.
-
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,7 +27,6 @@ use crate::session_binding_transaction::{instant_millis, require_id};
 
 const MAX_ENCODED_PAYLOAD_BYTES: usize = 16_777_216;
 
-/// Failure before an Artifact message can be acknowledged.
 #[derive(Debug)]
 pub enum ArtifactMessageError {
     Storage(StorageError),
@@ -60,21 +57,23 @@ impl From<ArtifactError> for ArtifactMessageError {
 }
 
 pub(crate) fn accept_open(
-    storage: &dyn ProductStateStorage,
+    storage: &mut dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactOpenMessage,
     authority: &SessionBindingAuthority,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_open_shape(message)?;
+    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = ArtifactMessageContext::from_authority(
         scope,
         &message.lease,
         &message.worker_session_id,
         &message.sent_at,
         authority,
+        storage,
+        &job.payload_digest,
     )?;
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let session_claim = ArtifactSessionClaim {
         worker_session_id: &message.worker_session_id,
         message_identity: &message.session_identity,
@@ -169,7 +168,8 @@ fn frozen_artifact_open(
         metering_attribution(scope, durable, job, session_identity)?,
         ArtifactRetention::Indefinite,
         context.sent_at_millis,
-    ))
+    )
+    .with_replaced_artifact(message.replaces_artifact_id.clone()))
 }
 
 fn metering_attribution(
@@ -214,19 +214,22 @@ fn metering_attribution(
 }
 
 pub(crate) fn accept_chunk(
-    storage: &dyn ProductStateStorage,
+    storage: &mut dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactChunkMessage,
     authority: &SessionBindingAuthority,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_chunk_shape(message)?;
+    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = ArtifactMessageContext::from_authority(
         scope,
         &message.lease,
         &message.worker_session_id,
         &message.sent_at,
         authority,
+        storage,
+        &job.payload_digest,
     )?;
     let bytes = STANDARD
         .decode(&message.payload.data_base64)
@@ -250,7 +253,6 @@ pub(crate) fn accept_chunk(
         bytes,
         message.is_final,
     );
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let session_claim = ArtifactSessionClaim {
         worker_session_id: &message.worker_session_id,
         message_identity: &message.session_identity,
@@ -434,7 +436,6 @@ struct ArtifactSessionClaim<'a> {
 
 #[derive(Clone, Copy)]
 enum ArtifactLeaseRejection {
-    Expired,
     StaleFencingToken,
     WorkerInstance,
 }
@@ -446,19 +447,23 @@ impl ArtifactMessageContext {
         worker_session_id: &winwincode_domain::WorkerSessionId,
         sent_at: &winwincode_domain::Instant,
         authority: &SessionBindingAuthority,
+        storage: &mut dyn ProductStateStorage,
+        payload_digest: &winwincode_domain::Sha256Digest,
     ) -> Result<Self, StorageError> {
         let scope_key = repository_scope_key(scope)?;
-        let mut rejection = validate_authority(lease, worker_session_id, authority)?;
+        let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
+            storage,
+            lease,
+            payload_digest,
+            authority,
+        )?;
+        let rejection = validate_authority(lease, worker_session_id, authority, accepted_window)?;
         let sent_at_millis = instant_millis(sent_at)?;
         let issued_at_millis = instant_millis(&lease.issued_at)?;
-        let expires_at_millis = instant_millis(&lease.expires_at)?;
         if sent_at_millis < issued_at_millis {
             return Err(StorageError::invalid_input(
                 "Artifact message time precedes its active lease",
             ));
-        }
-        if sent_at_millis >= expires_at_millis {
-            rejection = Some(ArtifactLeaseRejection::Expired);
         }
         let attempt = u64::try_from(lease.attempt)
             .map_err(|_| StorageError::invalid_input("Artifact lease attempt is out of range"))?;
@@ -676,6 +681,7 @@ fn validate_authority(
     lease: &ExecutionLeaseStamp,
     worker_session_id: &winwincode_domain::WorkerSessionId,
     authority: &SessionBindingAuthority,
+    accepted_window: bool,
 ) -> Result<Option<ArtifactLeaseRejection>, StorageError> {
     let attempt = u64::try_from(lease.attempt)
         .map_err(|_| StorageError::invalid_input("Artifact lease attempt is out of range"))?;
@@ -685,8 +691,7 @@ fn validate_authority(
         || active.lease_id() != &lease.lease_id
         || active.worker_id() != &lease.worker_id
         || active.worker_session_id() != worker_session_id
-        || authority.issued_at() != &lease.issued_at
-        || authority.expires_at() != &lease.expires_at
+        || !accepted_window
     {
         return Err(StorageError::invalid_input(
             "Artifact message does not match the scheduler-owned active lease",
@@ -757,10 +762,6 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
         ));
     }
     let content_type = message.payload.content_type.as_bytes();
-    // Open accepts any bounded mediaType string; chunk contentType must accept
-    // the same production diagnostic media types, including RFC 6838
-    // parameters such as `text/plain; charset=utf-8`. Rejecting parameters
-    // after open accepts them leaves the Worker durable outbox pending forever.
     if content_type.is_empty()
         || content_type.len() > 200
         || !content_type[0].is_ascii_alphanumeric()
@@ -768,8 +769,7 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
-                    b'!'
-                        | b'#'
+                    b'!' | b'#'
                         | b'$'
                         | b'&'
                         | b'^'
@@ -857,7 +857,7 @@ fn ack_open(
     receipt: &ArtifactWriteReceipt,
     session_identity: &SessionIdentity,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
-    ack(
+    let mut acknowledgement = ack(
         message.message_id.clone(),
         message.sent_at.clone(),
         message.lease.clone(),
@@ -865,7 +865,16 @@ fn ack_open(
         message.artifact.artifact_id.clone(),
         receipt,
         session_identity,
-    )
+    )?;
+    if receipt.record().artifact_id() != &message.artifact.artifact_id {
+        acknowledgement.ack_sequence = ExecutionAckSequence(0);
+        acknowledgement.retained_artifact =
+            Some(winwincode_execution_port::generated::ArtifactReference {
+                artifact_id: receipt.record().artifact_id().clone(),
+                digest: receipt.record().digest().clone(),
+            });
+    }
+    Ok(acknowledgement)
 }
 
 fn ack_chunk(
@@ -896,11 +905,6 @@ fn ack_lease_rejection(
     session_identity: &SessionIdentity,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     let (status, code, message) = match rejection {
-        ArtifactLeaseRejection::Expired => (
-            LeaseWriteStatus::RejectedExpiredLease,
-            ExecutionPortErrorCode::LeaseExpired,
-            "Artifact message lease has expired",
-        ),
         ArtifactLeaseRejection::StaleFencingToken => (
             LeaseWriteStatus::RejectedStaleFencingToken,
             ExecutionPortErrorCode::StaleFencingToken,
@@ -1006,6 +1010,7 @@ fn ack_response(
     session_identity: &SessionIdentity,
 ) -> ArtifactAckMessage {
     ArtifactAckMessage {
+        retained_artifact: None,
         ack_sequence,
         artifact_id,
         error,

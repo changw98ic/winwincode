@@ -46,7 +46,6 @@ use winwincode_control_plane::{
     },
 };
 use winwincode_delivery::{
-    application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
     application::verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     application::workrun_execution::{
         TerminalArtifactReference, TerminalOutcomeStatus,
@@ -54,6 +53,10 @@ use winwincode_delivery::{
             active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
             terminal_outcome_metadata, terminal_worker_outcome,
         },
+    },
+    application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+        verdict::{SubmitVerdictFacts, compute_verdict_transition},
     },
     domain::{
         AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType,
@@ -125,11 +128,6 @@ struct PositiveTerminalAuthority {
 enum PositiveTerminalDisposition {
     Settled { delivery_revision: u64 },
 }
-
-// PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
-// Missing sources return TRUSTED_FACTS_UNAVAILABLE.
-// WebSocket `runtime-projection.invalidated.v1` is only an invalidation; these reads
-// expose complete committed snapshots.
 
 #[derive(Clone)]
 struct JournalStorage {
@@ -957,7 +955,7 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
     );
     let mut snapshot = pre_candidate.into_snapshot();
     for evidence in &mut snapshot.evidence {
-        evidence.candidate_ref = candidate.candidate_ref().into();
+        evidence.candidate_id = candidate.candidate_id().clone();
     }
     let verdict = snapshot.verdict.as_mut().expect("passing verdict");
     verdict.candidate_ref = candidate.candidate_ref().into();
@@ -970,9 +968,6 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
 }
 
 fn normalize_projection_read_revision(delivery: &Delivery) -> Delivery {
-    // The read harness accepts one seeded journal record at revision one. The
-    // production transitions have already established the lifecycle facts;
-    // only the isolated query coordinate is normalized here.
     let mut snapshot = delivery.clone().into_snapshot();
     snapshot.revision = 1;
     Delivery::try_from_snapshot(snapshot).expect("projection read fixture")
@@ -1311,6 +1306,7 @@ fn positive_candidate_fixture() -> (Fixture, PathBuf, FrozenDeliveryCandidate, S
         &delivery,
         &winwincode_storage::delivery_candidate_source(&source),
         &terminal,
+        winwincode_domain::CandidateId("cnd_4FTQCJQDCCS9S41A0QK9M4EYWR".into()),
     )
     .expect("freeze candidate");
     let mut f =
@@ -1358,6 +1354,22 @@ fn positive_candidate_fixture() -> (Fixture, PathBuf, FrozenDeliveryCandidate, S
             revision: 1,
             payload: serde_json::to_vec(&authority).expect("terminal authority JSON"),
         },
+    );
+    let artifact = &terminal.metadata().artifacts()[0];
+    let canonical = f
+        .control_plane
+        .resolve_delivery_candidate(
+            &f.scope,
+            f.delivery.id(),
+            &artifact.artifact_id,
+            &artifact.digest,
+            &terminal,
+        )
+        .expect("canonical candidate");
+    assert_eq!(
+        candidate.candidate_id(),
+        canonical.candidate_id(),
+        "positive fixture must use the canonical writer identity"
     );
     (f, root, candidate, base_commit, candidate_commit)
 }
@@ -1497,16 +1509,7 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         .expect("candidate SessionBinding")
         .clone();
     let candidate_ref = candidate.candidate_ref().to_owned();
-    let candidate_digest = {
-        let digest = candidate_ref
-            .strip_prefix("git-candidate:")
-            .expect("candidate digest");
-        Sha256Digest(if digest.starts_with("sha256:") {
-            digest.to_owned()
-        } else {
-            format!("sha256:{digest}")
-        })
-    };
+    let candidate_digest = candidate.candidate_digest().clone();
     snapshot
         .work_run_aggregate
         .runs
@@ -1534,7 +1537,7 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
     candidate_evidence.delivery_spec_revision = snapshot.spec.revision;
     candidate_evidence.work_run_id = run.id.clone();
     candidate_evidence.session_binding_id = binding.id.clone();
-    candidate_evidence.candidate_ref = candidate_ref.clone();
+    candidate_evidence.candidate_id = candidate.candidate_id().clone();
     candidate_evidence.evidence_type = EvidenceRefType::Commit;
     candidate_evidence.source_ref = format!("git_commit:{}", candidate.candidate_commit_id());
     snapshot.evidence[0] = candidate_evidence;
@@ -1546,7 +1549,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         delivery_spec_revision: snapshot.spec.revision,
         work_run_id: run.id.clone(),
         session_binding_id: binding.id.clone(),
-        candidate_ref: candidate_ref.clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         evidence_type: EvidenceRefType::Diff,
         source_ref: format!("git_diff:{}", diff_sha256.0),
         created_at_millis: 1_800_000_000_074,
@@ -1559,7 +1563,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         delivery_spec_revision: snapshot.spec.revision,
         work_run_id: run.id.clone(),
         session_binding_id: binding.id.clone(),
-        candidate_ref: candidate_ref.clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         evidence_type: EvidenceRefType::File,
         source_ref: format!("git_file:{}:", candidate.candidate_tree_id()),
         created_at_millis: 1_800_000_000_075,
@@ -1835,6 +1840,12 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
             annotation_id: annotation_id.clone(),
             action: PageAnnotationAction::Upsert {
                 candidate: PageAnnotationCandidateIdentity {
+                    candidate_id: winwincode_domain::CandidateId(
+                        "cnd_01J00000000000000000000001".into(),
+                    ),
+                    snapshot_id: winwincode_domain::SnapshotId(
+                        "snap_01J00000000000000000000001".into(),
+                    ),
                     delivery_id: delivery_id.clone(),
                     delivery_spec_id: spec_id.0.clone(),
                     delivery_spec_revision: snapshot_revision(&delivery),
@@ -2012,7 +2023,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         },
         parameters: EvidenceReadBinding {
             at_cursor: cursor,
-            candidate_ref: evidence.candidate_ref.clone(),
+            candidate_id: evidence.candidate_id.clone(),
+            snapshot_id: evidence.snapshot_id.clone(),
             delivery_id: delivery_id.clone(),
             evidence_id: evidence.id.clone(),
             read_page_limit: 20,
@@ -2168,11 +2180,27 @@ fn product_runtime_state(
 ) -> Vec<u8> {
     let events = (1..=event_count)
         .map(|sequence| {
+            let core_fact = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion":"winwincode.core-tool-fact.v1",
+                "sourceThreadId":format!("core-{label}"), "sourceSequence":sequence,
+                "factJson":serde_json::json!({"kind":"cell","fact":{
+                    "schema_version":1,"sequence":sequence,"cell_id":format!("cell-{sequence}"),
+                    "parent_request_sequence":1,"lifecycle":"closed",
+                }}).to_string(),
+            }))
+            .expect("Core cell fact");
             let event = ExecutionEventRecord {
                 category: ExecutionEventCategory::Lifecycle,
                 event_id: ExecutionEventId(format!("xevt_product_{label}_{sequence}")),
                 occurred_at: Instant(format!("2026-08-25T00:00:{sequence:02}Z")),
-                payload: None,
+                payload: Some(winwincode_execution_port::generated::EncodedPayload {
+                    content_type: "application/vnd.winwincode.core-tool-fact+json".into(),
+                    data_base64: STANDARD.encode(&core_fact),
+                    payload_digest: Sha256Digest(format!(
+                        "sha256:{:x}",
+                        Sha256::digest(&core_fact)
+                    )),
+                }),
                 sequence: ExecutionSequence(
                     i64::try_from(sequence).expect("fixture sequence fits in i64"),
                 ),
@@ -2320,6 +2348,13 @@ fn assert_product_runtime_snapshot(
         format!("product-session-runtime:job_product_{label}")
     );
     assert_eq!(session.as_of_sequence, sequence);
+    assert_eq!(session.activities.len(), usize::try_from(sequence).unwrap());
+    assert!(session.activities.iter().all(|activity| {
+        activity
+            .core_tool
+            .as_ref()
+            .is_some_and(|meta| meta.source_thread_id == format!("core-{label}"))
+    }));
     assert_eq!(session.attempt, 1);
     assert!(session.work_run_id.is_none());
 }
@@ -2834,8 +2869,6 @@ fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
         Some(&session.work_run_id)
     );
 
-    // This test-only trusted source seals a different lease; the public read
-    // still has to compare it against the persisted accepted assignment.
     let binding = accepted_binding(
         &f.delivery,
         &session.id,
@@ -2921,6 +2954,67 @@ fn delivery_get_projects_current_diagram_execution_through_the_generated_contrac
             .work_item_id
     );
     assert_eq!(execution.affected_file_count.0, 1);
+}
+
+#[test]
+fn delivery_get_keeps_rework_status_readable_without_stale_candidate_verdict() {
+    let fixture = verdict_fixture(
+        &DeliveryId("dlv_01J00000000000000000000000".into()),
+        VerdictFixtureOutcome::Fail,
+    );
+    let failed = compute_verdict_transition(
+        &fixture.delivery,
+        SubmitVerdictFacts {
+            expected_revision: fixture.delivery.revision(),
+            candidate: &fixture.candidate,
+            verification: &fixture.verification,
+            evidence: &fixture.evidence,
+            produced_at_millis: 1_800_000_000_100,
+        },
+    )
+    .expect("compute failed verdict")
+    .delivery()
+    .clone();
+    let attention = failed
+        .snapshot()
+        .attention_items
+        .iter()
+        .find(|item| {
+            item.options
+                .iter()
+                .any(|option| option.id == "start-rework")
+        })
+        .expect("bounded rework attention");
+    let reworking = resolve_attention(
+        &failed,
+        ResolveAttentionInput {
+            expected_revision: failed.revision(),
+            attention_item_id: attention.id.clone(),
+            work_run_id: attention.work_run_id.clone(),
+            expected_context: attention.context.clone(),
+            actor: "usr_01J00000000000000000000005".into(),
+            decision: AttentionDecision::Resolved,
+            resolution: "Begin the authorized rework.".into(),
+            now_millis: 1_800_000_000_101,
+        },
+    )
+    .expect("start bounded rework")
+    .delivery()
+    .clone();
+    assert_eq!(reworking.snapshot().status, DeliveryStatus::Reworking);
+
+    let projection = fixture_with_delivery(
+        normalize_projection_read_revision(&reworking),
+        false,
+        false,
+        false,
+        None,
+    );
+    let detail = detail_and_cursor(&projection).0;
+    assert_eq!(detail.status, WorkItemState::Failed);
+    assert!(detail.current_candidate.is_none());
+    assert!(detail.evidence.is_empty());
+    assert!(detail.verdict.is_none());
 }
 
 #[test]

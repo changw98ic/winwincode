@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production application registry behind the generated HTTP and WebSocket dispatcher.
-//!
-//! The registry owns no second business model. Product services and the
-//! `ControlPlane` use separate connections to the same authoritative `SQLite`
-//! database, while the durable event hub owns transport cursors only.
-
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -57,7 +51,6 @@ use crate::{
 
 const AUTHORIZATION_EPOCH: i64 = 1;
 
-/// Time source used only at application-command and liveness boundaries.
 pub trait StandaloneApplicationClock: Send + Sync {
     #[must_use]
     fn now_millis(&self) -> u64;
@@ -66,7 +59,6 @@ pub trait StandaloneApplicationClock: Send + Sync {
     fn now_instant(&self) -> Instant;
 }
 
-/// System clock used by the production composition.
 pub struct SystemStandaloneApplicationClock;
 
 impl StandaloneApplicationClock for SystemStandaloneApplicationClock {
@@ -103,12 +95,7 @@ pub(crate) struct ApplicationState {
     pub(crate) control_plane: ControlPlane,
     pub(crate) storage: SqliteStorage,
     pub(crate) worker_outbound: DurableWorkerInteractionOutbound,
-    /// Immutable startup execution authority shared by every Chat command and
-    /// by the supervised Worker runtime. It is resolved once at composition
-    /// time; request handlers never inspect the checkout or create defaults.
     pub(crate) execution_config: ProductSessionExecutionConfig,
-    /// Immutable startup bounds used to interpret the durable request-pool
-    /// authority for the secret-safe `ModelRoute` availability projection.
     pub(crate) model_request_pool_config: Option<ModelRequestPoolConfig>,
 }
 
@@ -118,7 +105,6 @@ struct ApplicationComposition {
     execution_config: ProductSessionExecutionConfig,
 }
 
-/// One production registry for generated HTTP commands, queries, and WS frames.
 pub struct StandaloneControlPlaneApplication {
     state: Arc<Mutex<Option<ApplicationState>>>,
     hub: Arc<DurableEventHub>,
@@ -129,14 +115,6 @@ pub struct StandaloneControlPlaneApplication {
 }
 
 impl StandaloneControlPlaneApplication {
-    /// Composes already-open product services around one `SQLite` authority.
-    ///
-    /// The service and Worker-outbound connections are rejected unless both
-    /// name the canonical local database owned by the supplied `ControlPlane`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects any different product-state database.
     pub fn new(
         control_plane: ControlPlane,
         storage: SqliteStorage,
@@ -154,11 +132,6 @@ impl StandaloneControlPlaneApplication {
         )
     }
 
-    /// Composes a collaboration service that shares the same durable authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the same invalid local composition as [`Self::new`].
     pub fn new_with_collaboration(
         control_plane: ControlPlane,
         storage: SqliteStorage,
@@ -181,13 +154,6 @@ impl StandaloneControlPlaneApplication {
         )
     }
 
-    /// Composes the optional durable page-annotation controller. The caller
-    /// must build it from the same product-state database and the canonical
-    /// responsibility authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a service connection not opened on the expected authoritative database path.
     pub fn new_with_collaboration_and_page_annotations(
         control_plane: ControlPlane,
         storage: SqliteStorage,
@@ -211,11 +177,6 @@ impl StandaloneControlPlaneApplication {
         )
     }
 
-    /// Same composition with an injected clock for deterministic tests.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a service connection not opened on the expected authoritative database path.
     pub fn new_with_clock(
         control_plane: ControlPlane,
         storage: SqliteStorage,
@@ -276,24 +237,12 @@ impl StandaloneControlPlaneApplication {
         })
     }
 
-    /// Attaches the sole supervised runtime health source to this application.
-    ///
-    /// The handle is read synchronously by the HTTP health endpoint; runtime
-    /// lifecycle remains owned by the composition root and is never started
-    /// from a synchronous application callback.
     #[must_use]
     pub fn with_runtime_health(mut self, runtime: Arc<dyn RuntimeHealthPort>) -> Self {
         self.runtime = runtime;
         self
     }
 
-    /// Attaches the same immutable request-pool bounds used by the supervised
-    /// model execution runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns service unavailable if the application state lock is poisoned
-    /// or the application has already been shut down.
     pub fn with_model_request_pool_config(
         self,
         config: ModelRequestPoolConfig,
@@ -388,14 +337,6 @@ impl StandaloneControlPlaneApplication {
     ) -> Result<CommandDispatchResponse, ApiError> {
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
-        // FLOW-100.3: the ProductSession continue permission gate. A session
-        // bound to device execution continues only for its current occupancy
-        // holder while the repository binding stays visible under the
-        // dual-authorization projection; sessions without a device anchor
-        // pass through unchanged.
-        // FLOW-100.4: the approval is the dispatch trigger — an approved
-        // Chat turn of a device-anchored session executes on the launched
-        // Device WorkerSession instead of the local embedded worker.
         let mut execution_config = state.execution_config.clone();
         let device_dispatch = match &request {
             CommandRequest::ChatSubmitCommand(command) => Some(
@@ -469,10 +410,6 @@ impl StandaloneControlPlaneApplication {
             }
         }
         .map_err(|error| product_session_error(&error))?;
-        // FLOW-100.4: route the committed turn to the session's Device
-        // WorkerSession. The durable dispatch never blocks the accepted
-        // Chat receipt on a transport action; ordinary admission
-        // backpressure keeps the turn queued for the device worker.
         if let Some((product_session_id, request_id)) = device_dispatch {
             dispatch_turn_to_device_worker(
                 &mut state.storage,
@@ -622,9 +559,6 @@ impl StandaloneControlPlaneApplication {
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
         let dispatch_now = self.clock.now_instant();
-        // FLOW-100.5: the acting browser user of a `workrun.start` is the
-        // candidate device dispatcher; service and system actors never route
-        // to a device.
         let advance_actor = match &request {
             CommandRequest::WorkRunStartCommand(command) => match &command.actor {
                 Actor::UserActor(user) => Some(user.id.0.clone()),
@@ -671,15 +605,6 @@ impl StandaloneControlPlaneApplication {
             }
             .map_err(|error| delivery_application_error(&error))?,
         };
-        // FLOW-100.5: route the committed Codex WorkRun job of the advanced
-        // Delivery WorkRun to its Device WorkerSession. The WorkRun's durable
-        // launch anchor decides: with an anchor, the routing glue binds the
-        // launched worker session and attaches the job's device facts (after
-        // the FLOW-100.3 permission gate approves the acting user); without
-        // one, the WorkRun keeps the supervised local execution path. The
-        // durable dispatch never blocks the committed Delivery receipt on a
-        // transport action; ordinary admission backpressure keeps the WorkRun
-        // job queued for the device worker.
         let advance_work_run_id = match advance_command.as_ref() {
             Some(command) => resolve_advance_work_run(&mut state.storage, command)?,
             None => None,
@@ -966,10 +891,6 @@ impl StandaloneControlPlaneApplication {
             limit,
             cursor: query.page.cursor,
         };
-        // The Inbox cursor pages source items before overlays are projected.
-        // Walk those pages until the requested Delivery page is full (or the
-        // stable Inbox cut ends), otherwise unrelated Deliveries can hide
-        // annotations beyond the first 200 source items.
         let mut request = list_request;
         let mut filtered = Vec::new();
         let mut catalog_revision = None;
@@ -1083,58 +1004,53 @@ impl StandaloneControlPlaneApplication {
     }
 
     fn strongflow_query(&self, request: QueryRequest) -> Result<QueryResultResponse, ApiError> {
-        let mut guard = self.state()?;
-        let state = guard.as_mut().ok_or_else(service_unavailable)?;
-        match request {
-            QueryRequest::DeliveryGetQuery(query) => state
+        let snapshot = {
+            let guard = self.state()?;
+            let state = guard.as_ref().ok_or_else(service_unavailable)?;
+            state
                 .control_plane
+                .strongflow_read_snapshot()
+                .map_err(|error| strongflow_error(&error))?
+        };
+        match request {
+            QueryRequest::DeliveryGetQuery(query) => snapshot
                 .delivery_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::RuntimeProjectionGetQuery(query) => state
-                .control_plane
+            QueryRequest::RuntimeProjectionGetQuery(query) => snapshot
                 .runtime_projection_get(&query)
                 .map_err(|error| strongflow_error(&error)),
             QueryRequest::WorkRunGetQuery(query) => {
-                let mut response = state
-                    .control_plane
+                let mut response = snapshot
                     .workrun_get(&query)
                     .map_err(|error| strongflow_error(&error))?;
                 if let QueryResultResponse::WorkRunGetResultResponse(result) = &mut response {
                     result.result.managed_app_run_configs =
-                        project_managed_app_run_configs(&state.storage, &result.result)?;
+                        project_managed_app_run_configs(&snapshot, &result.result)?;
                 }
                 Ok(response)
             }
-            QueryRequest::CandidateFilesListQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateFilesListQuery(query) => snapshot
                 .candidate_files_list(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateDiffGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateDiffGetQuery(query) => snapshot
                 .candidate_diff_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateFileContentGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateFileContentGetQuery(query) => snapshot
                 .candidate_file_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateHistoryListQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateHistoryListQuery(query) => snapshot
                 .candidate_history_list(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateHistoricalReviewGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateHistoricalReviewGetQuery(query) => snapshot
                 .candidate_historical_review_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::EvidenceGetQuery(query) => state
-                .control_plane
+            QueryRequest::EvidenceGetQuery(query) => snapshot
                 .evidence_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::EvidenceArtifactContentGetQuery(query) => state
-                .control_plane
+            QueryRequest::EvidenceArtifactContentGetQuery(query) => snapshot
                 .evidence_artifact_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::DeliveryListQuery(query) => state
-                .control_plane
+            QueryRequest::DeliveryListQuery(query) => snapshot
                 .delivery_list(&query)
                 .map(QueryResultResponse::DeliveryListResultResponse)
                 .map_err(|error| delivery_application_error(&error)),
@@ -1144,14 +1060,14 @@ impl StandaloneControlPlaneApplication {
 }
 
 fn project_managed_app_run_configs(
-    storage: &SqliteStorage,
+    control_plane: &ControlPlane,
     aggregate: &WorkRunAggregateProjection,
 ) -> Result<Vec<ApiManagedAppRunConfig>, ApiError> {
     aggregate
         .runs
         .iter()
         .filter_map(|run| {
-            let record = match storage.load_managed_app_run_config_for_work_run(&run.id.0) {
+            let record = match control_plane.load_managed_app_run_config_for_work_run(&run.id) {
                 Ok(Some(record)) => record,
                 Ok(None) => return None,
                 Err(_) => return Some(Err(service_unavailable())),
@@ -1424,11 +1340,6 @@ fn credential_error(error: &CredentialReferenceError) -> ApiError {
     }
 }
 
-/// FLOW-100.3: the `ProductSession` continue permission gate entry. Only a
-/// signed-in user actor is gated; service and system actors pass through.
-/// The returned approval is `Some` exactly when the session is
-/// device-anchored and the gate approved its continuation (FLOW-100.4 uses
-/// it as the device dispatch trigger).
 fn product_session_turn_gate(
     storage: &mut SqliteStorage,
     actor: &Actor,
@@ -1441,8 +1352,6 @@ fn product_session_turn_gate(
         .map_err(|error| device_session_gate_error(&error))
 }
 
-/// Maps one gate denial onto the central gate wire error code
-/// (`OCCUPANCY_REQUIRED` / `ACCESS_DENIED` / `BINDING_NOT_VISIBLE`).
 fn device_session_gate_error(error: &DeviceSessionGateDenial) -> ApiError {
     ApiError::new(
         error.http_status(),
@@ -1451,10 +1360,6 @@ fn device_session_gate_error(error: &DeviceSessionGateDenial) -> ApiError {
     )
 }
 
-/// Maps one Quick device dispatch failure onto the wire error codes. The
-/// committed Chat turn stays queued and an exact retry re-runs the dispatch,
-/// so a temporary failure presents as service unavailability while a dead
-/// anchor or conflicting dispatch presents as wrong state.
 fn quick_device_dispatch_error(error: &QuickDeviceDispatchError) -> ApiError {
     match error.kind() {
         QuickDeviceDispatchErrorKind::InvalidInput => ApiError::new(
@@ -1475,11 +1380,6 @@ fn quick_device_dispatch_error(error: &QuickDeviceDispatchError) -> ApiError {
     }
 }
 
-/// Maps one `StrongFlow` device routing failure onto the wire error codes. The
-/// committed Delivery advance stays durable and an exact retry re-runs the
-/// routing, so a temporary failure presents as service unavailability, a
-/// gate denial carries the central gate wire code, and a dead anchor or
-/// conflicting dispatch presents as wrong state.
 fn strongflow_device_dispatch_error(error: &StrongflowDeviceDispatchError) -> ApiError {
     match error.kind() {
         StrongflowDeviceDispatchErrorKind::InvalidInput => ApiError::new(
@@ -1948,6 +1848,8 @@ fn page_annotation_candidate(
     candidate: &winwincode_api::generated::CollaborationPageAnnotationCandidate,
 ) -> Result<PageAnnotationCandidateIdentity, ApiError> {
     Ok(PageAnnotationCandidateIdentity {
+        candidate_id: candidate.candidate_id.clone(),
+        snapshot_id: candidate.snapshot_id.clone(),
         delivery_id: candidate.delivery_id.clone(),
         delivery_spec_id: candidate.delivery_spec_id.clone(),
         delivery_spec_revision: u64::try_from(candidate.delivery_spec_revision)
@@ -2069,9 +1971,9 @@ mod tests {
             goal: "test".to_owned(),
             job_id: ExecutionJobId(job_id.to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T09:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1,
-                max_runtime_seconds: 1,
+                max_runtime_seconds: Some(1),
             },
             payload_digest: Sha256Digest(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000"

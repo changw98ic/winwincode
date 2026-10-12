@@ -269,7 +269,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
                 ..Default::default()
             },
             trace: None,
-            submit_change_batch: false,
+            start: TurnStartOptions::default(),
         })
         .await
         .expect("recovered turn should start");

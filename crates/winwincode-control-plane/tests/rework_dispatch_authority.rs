@@ -127,13 +127,11 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
         .unwrap();
     consumer.work_item_id = auth.work_item_id().clone();
     consumer.state = winwincode_domain::WorkRunState::Running;
-    // Test the canonical aggregate gate directly: an active reader blocks retirement.
     assert!(
         busy.work_run_aggregate
             .start_verification(auth.work_item_id())
             .is_err()
     );
-    // The same seal cannot retire the candidate twice or mutate its input revision.
     assert!(auth.dispatch_aggregate(&accepted.delivery).is_err());
     assert_eq!(
         accepted.delivery.snapshot().session_bindings,
@@ -204,9 +202,9 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
             write_mode: ExecutionWorkspaceWriteMode::Candidate,
         },
         limits: winwincode_execution_port::generated::ExecutionLimits {
-            deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+            deadline_at: Some(Instant("2026-08-25T12:00:00.000Z".into())),
             max_artifact_bytes: 10_000,
-            max_runtime_seconds: 60,
+            max_runtime_seconds: Some(60),
         },
         managed_app_run_config: None,
     };

@@ -26,8 +26,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/task-entry-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the view-models, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -65,7 +63,6 @@ const { mountTaskRunPage } = taskRunPageModule
 
 const FIXED_NOW = () => '2026-09-04T00:02:00.000Z'
 
-/** Settle one async model read (repository list, task create, identity read). */
 function flush() {
   return new Promise(resolvePromise => setTimeout(resolvePromise, 0))
 }
@@ -125,7 +122,6 @@ function repositoriesFake(byDevice) {
   }
 }
 
-/** One deterministic task port: every create records and can fail once. */
 function taskPortFake() {
   const calls = []
   let sequence = 0
@@ -414,7 +410,6 @@ class FakeElement {
 
   set value(next) {
     if (this.tagName === 'SELECT') {
-      // A select keeps only values one of its options names, like the DOM.
       const match = this.children.some(option => option.getAttribute('value') === next)
       this.attributes.set('value', match ? next : '')
       return
@@ -685,7 +680,7 @@ function detailedIdentity() {
           deliverySpecRevision: 1,
           workRunId: projection.workRun.id,
           sessionBindingId: 'binding-1',
-          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          candidateRef: `refs/winwincode/candidates/${'c'.repeat(40)}`,
           type: 'command',
           sourceRef: 'cmd:node --test',
           createdAt: FIXED_NOW(),
@@ -790,7 +785,8 @@ test('the production run identity port joins the canonical WorkItem detail cut',
     deliverySpecRevision: 1,
     workRunId: runId,
     sessionBindingId: 'binding-1',
-    candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+    candidateId: 'cnd_00000000000000000000000042',
+    snapshotId: 'snap_00000000000000000000000042',
     type: 'command',
     sourceRef: 'cmd:node --test',
     createdAt: FIXED_NOW(),
@@ -869,8 +865,10 @@ test('the production run identity port joins the canonical WorkItem detail cut',
           attention: [],
           evidence: [evidence],
           currentCandidate: {
+            candidateId: 'cnd_00000000000000000000000042',
+            candidateDigest: `sha256:${'c'.repeat(64)}`,
             candidateCommitId,
-            candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+            candidateRef: `refs/winwincode/candidates/${'c'.repeat(40)}`,
             candidateTreeId,
             deliverySpecId: 'spec-login',
             deliverySpecRevision: 1,
@@ -892,7 +890,7 @@ test('the production run identity port joins the canonical WorkItem detail cut',
       async listDeviceCandidates() {
         return [{
           localCandidateReceiptId: 'lcr_00000000000000000000000042',
-          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          candidateRef: `refs/winwincode/candidates/${'c'.repeat(40)}`,
           repositoryBindingId: 'rbd_00000000000000000000000042',
           candidateCommit: deviceCandidateCommit,
           localRefName: 'refs/winwincode/candidates/42',
@@ -1188,12 +1186,12 @@ test('the run projection follows the served device binding and Candidate apply h
         clientId: servedClientId,
         repositoryBindingId: servedBindingId,
         candidate: {
-          candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+          candidateRef: `refs/winwincode/candidates/${'a'.repeat(40)}`,
           state: 'branch_created',
           branchName: 'winwincode/task/candidate',
           history: [{
             localApplyReceiptId: 'lap_00000000000000000000000001',
-            candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+            candidateRef: `refs/winwincode/candidates/${'a'.repeat(40)}`,
             repositoryBindingId: servedBindingId,
             targetBranch: 'winwincode/task/candidate',
             expectedHead: 'abc1234',
@@ -1264,7 +1262,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   })
   await fixture.model.start()
 
-  // Design page 05: back link left, 流程与记录 display slot right.
   const back = byClass(rootElement, 'wwc-task-run-back')
   assert.equal(back.textContent, '返回看板')
   assert.equal(
@@ -1286,7 +1283,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   )
   assert.match(visibleText(byClass(rootElement, 'wwc-task-run-description')), /Ship the occupancy gate/u)
 
-  // The StrongFlow-owned actions stay visible but disabled: no fake success.
   const approve = byClass(rootElement, 'wwc-task-run-approve')
   assert.equal(approve.textContent, '批准方案并执行')
   assert.equal(approve.disabled, true)
@@ -1295,7 +1291,6 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   assert.equal(requestChange.textContent, '提出修改')
   assert.equal(requestChange.disabled, true)
 
-  // The identity table stays collapsed behind the design-05 row.
   const identityToggle = byClass(rootElement, 'wwc-task-run-identity-toggle')
   assert.equal(identityToggle.textContent, '展开运行详情 · 12 项')
   const rowsContainer = byClass(rootElement, 'wwc-task-run-rows')
@@ -1356,7 +1351,7 @@ test('the run page links to preview only from a served candidate projection', as
         ...projection,
         deliveryId: 'dlv_00000000000000000000000042',
         candidate: {
-          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          candidateRef: `refs/winwincode/candidates/${'c'.repeat(40)}`,
           candidateCommitId: 'a'.repeat(40),
           candidateTreeId: 'b'.repeat(40),
           diffSha256: `sha256:${'d'.repeat(64)}`,

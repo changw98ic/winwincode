@@ -317,6 +317,7 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
         &delivery,
         &winwincode_storage::delivery_candidate_source(&source),
         &foreign_artifact_outcome,
+        winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
     )
     .expect_err("candidate source must be named by the accepted terminal outcome");
 
@@ -324,6 +325,7 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
         &delivery,
         &winwincode_storage::delivery_candidate_source(&source),
         &outcome,
+        winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
     )
     .expect("candidate from rebuilt source");
     assert_eq!(candidate.base_commit_id(), base_commit);

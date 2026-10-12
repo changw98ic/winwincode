@@ -100,11 +100,6 @@
       "pattern": "^[1-9][0-9]{0,19}$",
       "description": "Monotonically increasing decimal token encoded as a string to preserve 64-bit precision."
     },
-    "ExecutionSequence": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
     "ExecutionAckSequence": {
       "type": "integer",
       "minimum": 0,
@@ -123,12 +118,38 @@
         "SEQUENCE_GAP",
         "MESSAGE_CONFLICT",
         "ARTIFACT_DIGEST_MISMATCH",
+        "SNAPSHOT_BINDING_MISSING",
+        "SNAPSHOT_BINDING_MISMATCH",
         "MODEL_STREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_INVALID",
+        "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+        "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+        "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+        "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+        "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+        "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+        "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
+        "DEVICE_PROVIDER_CONNECTION_FAILED",
+        "DEVICE_PROVIDER_UPSTREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_REJECTED",
+        "DEVICE_PROVIDER_RATE_LIMITED",
+        "DEVICE_PROVIDER_UNAVAILABLE",
+        "DEVICE_PROVIDER_INVALID_CONFIGURATION",
+        "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED",
+        "DEVICE_PROVIDER_TRANSPORT_FAILED",
+        "DEVICE_PROVIDER_RESPONSE_TOO_LARGE",
+        "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED",
+        "DEVICE_MODEL_IDENTITY_CONFLICT",
+        "DEVICE_MODEL_PAUSED",
+        "DEVICE_MODEL_INTERRUPTED",
+        "DEVICE_JEV_UNAVAILABLE",
         "INPUT_CLOSED",
         "APPROVAL_DENIED",
         "CANCELLED",
         "EXECUTION_FAILED",
-        "INFRASTRUCTURE_ERROR"
+        "INFRASTRUCTURE_ERROR",
+        "CANDIDATE_UNCHANGED",
+        "CANDIDATE_PREPARATION_FAILED"
       ]
     },
     "ExecutionPortError": {
@@ -405,12 +426,28 @@
       "additionalProperties": false,
       "properties": {
         "deadlineAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
+          "description": "Null explicitly means no runtime deadline. Must be null together with maxRuntimeSeconds.",
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxRuntimeSeconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 604800
+          "description": "Null explicitly means no runtime deadline. Must be null together with deadlineAt.",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 604800
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxArtifactBytes": {
           "type": "integer",
@@ -422,6 +459,31 @@
         "deadlineAt",
         "maxRuntimeSeconds",
         "maxArtifactBytes"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "maxRuntimeSeconds": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deadlineAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "deadlineAt": {
+                "$ref": "./domain.schema.json#/$defs/Instant"
+              }
+            }
+          }
+        }
       ]
     },
     "ExecutionJob": {
@@ -572,7 +634,7 @@
           "$ref": "#/$defs/ExecutionEventId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "occurredAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -734,6 +796,7 @@
       "type": "string",
       "enum": [
         "sandbox_escalation",
+        "mcp_permission",
         "network_access",
         "filesystem_write"
       ]
@@ -838,20 +901,40 @@
           "maximum": 9007199254740991
         },
         "tokens": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 9007199254740991
         },
         "costMicrounits": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "knownTokens": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "accountingStatus": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
         }
       },
       "required": [
         "runtimeMillis",
         "tokens",
-        "costMicrounits"
+        "costMicrounits",
+        "knownTokens",
+        "accountingStatus"
       ]
     },
     "ExecutionOutcome": {
@@ -961,6 +1044,11 @@
         },
         "capabilities": {
           "$ref": "#/$defs/WorkerCapabilitySet"
+        },
+        "usageAccountingVersion": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 2
         }
       },
       "required": [
@@ -972,7 +1060,8 @@
         "workerId",
         "workerInstanceId",
         "startedAt",
-        "capabilities"
+        "capabilities",
+        "usageAccountingVersion"
       ],
       "title": "worker.register",
       "description": "Registers one stable Worker identity and one process-boot identity.",
@@ -1049,54 +1138,6 @@
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command"
     },
-    "WorkerCapabilitiesMessage": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "worker.capabilities"
-        },
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ExecutionMessageId"
-        },
-        "sentAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
-        },
-        "workerId": {
-          "$ref": "./domain.schema.json#/$defs/WorkerId"
-        },
-        "workerInstanceId": {
-          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
-        },
-        "observedAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "capabilities": {
-          "$ref": "#/$defs/WorkerCapabilitySet"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "sentAt",
-        "requestId",
-        "workerId",
-        "workerInstanceId",
-        "observedAt",
-        "capabilities"
-      ],
-      "title": "worker.capabilities",
-      "description": "Replaces the registered capability snapshot for the current Worker instance.",
-      "x-direction": "worker-to-control-plane",
-      "x-authority": "worker-registry"
-    },
     "WorkerHeartbeatMessage": {
       "type": "object",
       "additionalProperties": false,
@@ -1120,7 +1161,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "observedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -1177,7 +1218,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "status": {
           "type": "string",
@@ -1250,6 +1291,9 @@
               "type": "null"
             }
           ]
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -1448,7 +1492,7 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
@@ -1603,6 +1647,13 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
+        },
+        "replacesArtifactId": {
+          "$ref": "./domain.schema.json#/$defs/ArtifactId",
+          "description": "Replaces an unfinished upload of identical candidate bytes under the same authority, or retains its completed reference. Uses a new artifact and message identity."
         }
       },
       "required": [
@@ -1647,7 +1698,7 @@
           "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "payload": {
           "$ref": "#/$defs/EncodedPayload"
@@ -1657,6 +1708,9 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -1709,13 +1763,17 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "retainedArtifact": {
+          "$ref": "#/$defs/ArtifactReference",
+          "description": "An already complete predecessor retained instead of uploading it again. Only returned for a replacement open, with ackSequence zero."
         }
       },
       "required": [
@@ -1863,7 +1921,7 @@
           "$ref": "#/$defs/ModelExchangeId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "payload": {
           "$ref": "#/$defs/EncodedPayload"
@@ -1927,7 +1985,7 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
@@ -1949,7 +2007,7 @@
         "sessionIdentity"
       ],
       "title": "model.ack",
-      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command",
       "allOf": [
@@ -2046,6 +2104,10 @@
         },
         "allowEmpty": {
           "type": "boolean"
+        },
+        "allowOther": {
+          "type": "boolean",
+          "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation."
         },
         "expiresAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -2522,9 +2584,6 @@
           "$ref": "#/$defs/WorkerRegistrationResultMessage"
         },
         {
-          "$ref": "#/$defs/WorkerCapabilitiesMessage"
-        },
-        {
           "$ref": "#/$defs/WorkerHeartbeatMessage"
         },
         {
@@ -2598,6 +2657,15 @@
         },
         {
           "$ref": "#/$defs/ActionEnforcementReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotVerificationDispatchMessage"
         }
       ]
     },
@@ -2643,7 +2711,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "diffSha256": {
           "type": "string",
@@ -2679,6 +2747,96 @@
         "requiresFullReverification",
         "targets"
       ]
+    },
+    "SnapshotFreezeReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "receiptId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "baseCommitId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "baseTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "candidateCommitId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "candidateTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "contentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "validationSeal": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "frozenAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptId",
+        "requestId",
+        "candidateId",
+        "workRunId",
+        "workerId",
+        "workerInstanceId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "frozenAt"
+      ],
+      "description": "Worker-owned exact execution fact for one freeze request. Control Plane validates the Candidate and receipt, then allocates the product SnapshotId; workers cannot allocate or carry that identity.",
+      "title": "snapshot.freeze_receipt",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
     },
     "SessionBindingMessage": {
       "type": "object",
@@ -2755,6 +2913,9 @@
         },
         "fencingToken": {
           "$ref": "#/$defs/FencingToken"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "description": "Authoritative WorkerSession-to-CodexThread binding and secret-free immutable runtime context for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
@@ -5759,27 +5920,42 @@
           "maximum": 3
         },
         "maxObserverCalls": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 4
         },
         "maxPrimaryModelCalls": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 8
         },
         "maxTotalTokens": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 10000000
         },
         "maxTotalCostMicrounits": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 9007199254740991
         },
         "maxWallTimeMillis": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1000,
           "maximum": 3600000
         },
@@ -5804,7 +5980,7 @@
         "maxChangeBatches",
         "maxContextPackBytes"
       ],
-      "description": "Immutable upper bounds for one repair loop. maxRepairRounds is canonically fixed at three; Observer calls, primary-model calls, tokens, cost, wall time, ChangeBatches, and serialized context bytes are audited independently."
+      "description": "Immutable bounds for one repair loop. Null usage, elapsed-time and call limits are unbounded. Structural repair rounds, batches and context bytes remain bounded."
     },
     "RepairLoopCounters": {
       "type": "object",
@@ -5818,17 +5994,17 @@
         "observerCalls": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 4
+          "maximum": 9007199254740991
         },
         "primaryModelCalls": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 8
+          "maximum": 9007199254740991
         },
         "totalTokens": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 10000000
+          "maximum": 9007199254740991
         },
         "totalCostMicrounits": {
           "type": "integer",
@@ -5838,7 +6014,7 @@
         "elapsedMillis": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 3600000
+          "maximum": 9007199254740991
         },
         "changeBatches": {
           "type": "integer",
@@ -7596,7 +7772,7 @@
           "$ref": "#/$defs/DebugProbeIdentity"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "kind": {
           "$ref": "#/$defs/ProbeExecutionEventKind"
@@ -7680,7 +7856,7 @@
           "$ref": "#/$defs/DebugProbeRoundAuthority"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "kind": {
           "$ref": "#/$defs/ProbeRoundEventKind"
@@ -8869,7 +9045,7 @@
           "$ref": "#/$defs/DebugSessionStatus"
         },
         "eventSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "lastEventDigest": {
           "$ref": "./domain.schema.json#/$defs/Sha256Digest"
@@ -9564,7 +9740,7 @@
           "$ref": "#/$defs/DebugHypothesisLedgerEventKind"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "authority": {
           "$ref": "#/$defs/DebugProbeRoundAuthority"
@@ -10233,10 +10409,22 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "deviceTarget": {
           "$ref": "#/$defs/ExecutionDeviceTarget"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
+        },
+        "workPlan": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItem"
+          },
+          "description": "Control Plane-owned task DAG for this WorkContract revision. The dispatched workItem must be an identical node in this plan."
         }
       },
       "required": [
@@ -10299,6 +10487,164 @@
         "clientId",
         "repositoryBindingId",
         "userId"
+      ]
+    },
+    "SnapshotFreezeRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "candidate": {
+          "$ref": "./domain.schema.json#/$defs/Candidate"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "baseTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "contentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "candidate",
+        "repositoryId",
+        "lease",
+        "baseTreeId",
+        "contentDigest",
+        "dispatch"
+      ],
+      "title": "snapshot.freeze_request",
+      "description": "Materializes and protects one sealed Candidate for the exact planned dispatch, without starting execution. Control Plane allocates Snapshot identity after receipt acceptance.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "SnapshotFreezeReceiptMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_receipt"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receipt": {
+          "$ref": "#/$defs/SnapshotFreezeReceipt"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "receipt",
+        "lease"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "description": "Returns exact Worker freeze facts for one durable Control Plane request.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "SnapshotVerificationDispatchMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.verify"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "snapshot": {
+          "$ref": "./domain.schema.json#/$defs/Snapshot"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "dispatch",
+        "snapshot"
+      ],
+      "title": "snapshot.verify",
+      "description": "Starts the exact planned verification only after Control Plane has committed this canonical Snapshot and binding.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "CoreToolRuntimeFactPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Original payload-free Codex Core tool fact carried by a lease-bound runtime.event. The source cursor is independent of the Worker transport sequence.",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "winwincode.core-tool-fact.v1"
+        },
+        "sourceThreadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sourceSequence": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
+        },
+        "factJson": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sourceThreadId",
+        "sourceSequence",
+        "factJson"
       ]
     }
   }

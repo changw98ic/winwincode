@@ -31,10 +31,12 @@ const expectedKinds = [
   'action.enforcement_receipt',
   'worker.register',
   'worker.registration_result',
-  'worker.capabilities',
   'worker.heartbeat',
   'worker.heartbeat_ack',
   'job.dispatch',
+  'snapshot.freeze_request',
+  'snapshot.freeze_receipt',
+  'snapshot.verify',
   'job.dispatch_result',
   'session.binding',
   'lease.renew',
@@ -60,6 +62,8 @@ const expectedKinds = [
 const domainDefinitions = [
   'ApprovalId',
   'ArtifactId',
+  'Candidate',
+  'CandidateId',
   'ChangeBatchId',
   'ChatAttachment',
   'CodexThreadId',
@@ -68,6 +72,8 @@ const domainDefinitions = [
   'DebugSessionId',
   'EvidenceId',
   'ExecutionJobId',
+  'ExecutionSequence',
+  'GitObjectId',
   'InputRequestId',
   'Instant',
   'InteractiveInputChoiceId',
@@ -88,6 +94,8 @@ const domainDefinitions = [
   'SessionBindingSourceIdentity',
   'SessionIdentity',
   'Sha256Digest',
+  'Snapshot',
+  'SnapshotId',
   'UserActor',
   'WorkContract',
   'WorkContractId',
@@ -99,6 +107,30 @@ const domainDefinitions = [
   'WorkerSessionId',
   'WorkspaceRevision',
 ]
+
+function snapshotFreezeReceiptFixture() {
+  return {
+    schemaVersion: 'winwincode/v1',
+    receiptId: `req_${'A'.repeat(26)}`,
+    requestId: `req_${'B'.repeat(26)}`,
+    candidateId: `cnd_${'A'.repeat(26)}`,
+    workRunId: `wrn_${'A'.repeat(26)}`,
+    workerId: `wrk_${'A'.repeat(26)}`,
+    workerInstanceId: `wki_${'A'.repeat(26)}`,
+    leaseId: `lse_${'A'.repeat(26)}`,
+    attempt: 1,
+    fencingToken: '7',
+    repositoryId: `rep_${'A'.repeat(26)}`,
+    baseCommitId: 'a'.repeat(40),
+    baseTreeId: 'b'.repeat(40),
+    candidateCommitId: 'c'.repeat(40),
+    candidateTreeId: 'd'.repeat(40),
+    diffSha256: `sha256:${'1'.repeat(64)}`,
+    contentDigest: `sha256:${'2'.repeat(64)}`,
+    validationSeal: `sha256:${'3'.repeat(64)}`,
+    frozenAt: '2026-09-24T09:10:11.123Z',
+  }
+}
 
 function json(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
@@ -133,6 +165,25 @@ function visit(node, callback, path = '#') {
   callback(node, path)
   for (const [key, value] of Object.entries(node)) visit(value, callback, `${path}/${key}`)
 }
+
+test('model failure codes validate as terminal chunks and preserve legacy records', () => {
+  const validate = validator(json(schemaPath), 'ModelChunkMessage')
+  const original = json(validFixturePath).messages.find(message => message.kind === 'model.chunk')
+  for (const code of ['MODEL_STREAM_FAILED', 'DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID',
+    'DEVICE_PROVIDER_SSE_FRAMING_INVALID', 'DEVICE_PROVIDER_SSE_EVENT_INVALID',
+    'DEVICE_PROVIDER_RESPONSE_INCOMPLETE', 'DEVICE_PROVIDER_STREAM_CONVERSION_FAILED']) {
+    const message = structuredClone(original)
+    delete message.payload
+    message.isFinal = true
+    message.error = { code, message: code, retryable: false }
+    assert.equal(validate(message), true, JSON.stringify(validate.errors))
+  }
+  const invalid = structuredClone(original)
+  delete invalid.payload
+  invalid.isFinal = true
+  invalid.error = { code: 'DEVICE_PROVIDER_UNREGISTERED_FAILURE', message: 'unexpected', retryable: false }
+  assert.equal(validate(invalid), false)
+})
 
 function messageDefinitions(schema) {
   return schema.$defs.ExecutionPortMessage.oneOf.map(({ $ref }) => {
@@ -176,6 +227,60 @@ test('ExecutionPort publishes one closed transport-neutral message union', () =>
     externalDefinitions.add(node.$ref.slice(node.$ref.lastIndexOf('/') + 1))
   })
   assert.deepEqual([...externalDefinitions].sort(), domainDefinitions)
+})
+
+test('Worker Snapshot freeze receipt reports exact facts without allocating SnapshotId', () => {
+  const schema = json(schemaPath)
+  const definition = schema.$defs.SnapshotFreezeReceipt
+  const validate = validator(schema, 'SnapshotFreezeReceipt')
+  const receipt = snapshotFreezeReceiptFixture()
+
+  assert.equal(definition['x-direction'], 'worker-to-control-plane')
+  assert.equal(definition['x-authority'], 'lease-write')
+  assert.equal(definition.properties.snapshotId, undefined)
+  assert.equal(definition.required.includes('snapshotId'), false)
+  assert.equal(validate(receipt), true, JSON.stringify(validate.errors))
+
+  for (const missing of [
+    'requestId',
+    'candidateId',
+    'workRunId',
+    'candidateTreeId',
+    'contentDigest',
+    'validationSeal',
+  ]) {
+    const candidate = structuredClone(receipt)
+    delete candidate[missing]
+    assert.equal(validate(candidate), false, `freeze receipt accepted missing ${missing}`)
+  }
+
+  assert.equal(
+    validate({ ...receipt, snapshotId: `snap_${'A'.repeat(26)}` }),
+    false,
+    'Worker freeze receipt must not allocate or carry product SnapshotId',
+  )
+})
+
+test('freeze transport requires the exact Candidate and lease-shaped facts', () => {
+  const schema = json(schemaPath)
+  const validate = validator(schema)
+  const messages = json(validFixturePath).messages
+  for (const kind of ['snapshot.freeze_request', 'snapshot.freeze_receipt']) {
+    const message = messages.find(message => message.kind === kind)
+    assert.equal(validate(message), true, JSON.stringify(validate.errors))
+    for (const field of ['messageId', 'lease', kind.endsWith('request') ? 'candidate' : 'receipt']) {
+      const missing = structuredClone(message)
+      delete missing[field]
+      assert.equal(validate(missing), false, `${kind} accepted missing ${field}`)
+    }
+    assert.equal(validate({ ...message, snapshotId: `snap_${'A'.repeat(26)}` }), false)
+    const malformed = structuredClone(message)
+    malformed.lease.attempt = 0
+    assert.equal(validate(malformed), false)
+  }
+  const legacy = structuredClone(messages.find(message => message.kind === 'snapshot.freeze_request'))
+  legacy.candidate.candidateRef = `git-candidate:sha256:${'a'.repeat(64)}`
+  assert.equal(validate(legacy), false, 'freeze request accepted a legacy Candidate reference')
 })
 
 test('ExecutionPort accepts a positive sample for every message kind', () => {
@@ -307,7 +412,7 @@ test('ExecutionPort workspace write mode distinguishes readers from writers', ()
   assert.equal(validate(dispatch), false)
 })
 
-test('ExecutionPort requires measured safe-integer usage only for succeeded outcomes', () => {
+test('ExecutionPort requires explicit safe-integer accounting for succeeded outcomes', () => {
   const validate = validator(json(schemaPath))
   const fixture = json(validFixturePath)
   const succeeded = fixture.messages.find(message => message.kind === 'job.outcome')
@@ -316,6 +421,16 @@ test('ExecutionPort requires measured safe-integer usage only for succeeded outc
   const missingUsage = structuredClone(succeeded)
   delete missingUsage.outcome.usage
   assert.equal(validate(missingUsage), false, 'succeeded outcome requires usage')
+
+  const unknownUsage = structuredClone(succeeded)
+  unknownUsage.outcome.usage = {
+    accountingStatus: 'unknown',
+    tokens: null,
+    knownTokens: 48,
+    costMicrounits: null,
+    runtimeMillis: 1000,
+  }
+  assert.equal(validate(unknownUsage), true, 'successful execution can retain unknown accounting')
 
   const unsafeUsage = structuredClone(succeeded)
   unsafeUsage.outcome.usage.tokens = 9_007_199_254_740_992
@@ -358,6 +473,7 @@ test('ExecutionPort makes every job-scoped Worker write lease-bound', () => {
       'model.open',
       'runtime.event',
       'session.binding',
+      'snapshot.freeze_receipt',
     ],
   )
   for (const definition of workerLeaseWrites) {
@@ -489,7 +605,7 @@ function deliveryReworkExecutionScope(evidenceRefIds) {
     attempt: 1,
     reworkAuthorization: {
       authorizationDigest: `sha256:${'a'.repeat(64)}`,
-      candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+      candidateRef: `refs/winwincode/candidates/${'a'.repeat(64)}`,
       diffSha256: 'a'.repeat(64),
       sourceCandidateCommitId: 'a'.repeat(64),
       sourceCandidateTreeId: 'a'.repeat(64),
@@ -1175,12 +1291,15 @@ test('ChangeBatch contracts have one generated closed and bounded schema surface
   }
   const validateCounters = validator(schema, 'RepairLoopCounters')
   assert.equal(validateCounters(counters), true, JSON.stringify(validateCounters.errors))
+  for (const field of ['maxObserverCalls', 'maxPrimaryModelCalls', 'maxTotalTokens', 'maxTotalCostMicrounits', 'maxWallTimeMillis']) {
+    assert.equal(validateBudget({ ...budget, [field]: null }), true, field)
+  }
+  for (const field of ['observerCalls', 'primaryModelCalls', 'totalTokens', 'elapsedMillis']) {
+    assert.equal(validateCounters({ ...counters, [field]: 9_007_199_254_740_991 }), true, field)
+    assert.equal(validateCounters({ ...counters, [field]: 9_007_199_254_740_992 }), false, field)
+  }
   for (const [field, value] of [
     ['repairRounds', 4],
-    ['observerCalls', 5],
-    ['primaryModelCalls', 9],
-    ['totalTokens', 10_000_001],
-    ['elapsedMillis', 3_600_001],
     ['changeBatches', 5],
     ['contextPackBytes', 131_073],
   ]) {
@@ -1748,7 +1867,7 @@ test('HTTP rework input names a bounded canonical WorkItem and exact candidate h
     deliveryId: 'dlv_01J00000000000000000000000',
     dispatchProfile: 'remediator',
     rework: {
-      candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+      candidateRef: `refs/winwincode/candidates/${'a'.repeat(64)}`,
       diffSha256: 'c'.repeat(64), targets: [target],
     },
   }

@@ -215,17 +215,29 @@ impl ExecServerHarness {
         F: FnMut(&JSONRPCMessage) -> bool,
     {
         let deadline = Instant::now() + EVENT_TIMEOUT;
+        let mut last_error_code = None;
         loop {
             let now = Instant::now();
             if now >= deadline {
                 return Err(anyhow!(
-                    "timed out waiting for matching exec-server event after {EVENT_TIMEOUT:?}"
+                    "timed out waiting for matching exec-server event after {EVENT_TIMEOUT:?}; last unmatched JSON-RPC error code: {last_error_code:?}"
                 ));
             }
             let remaining = deadline.duration_since(now);
-            let event = self.next_event_with_timeout(remaining).await?;
+            let event = self
+                .next_event_with_timeout(remaining)
+                .await
+                .map_err(|error| match last_error_code {
+                    Some(code) => error.context(format!(
+                        "last unmatched exec-server JSON-RPC error code: {code}"
+                    )),
+                    None => error,
+                })?;
             if predicate(&event) {
                 return Ok(event);
+            }
+            if let JSONRPCMessage::Error(error) = event {
+                last_error_code = Some(error.error.code);
             }
         }
     }

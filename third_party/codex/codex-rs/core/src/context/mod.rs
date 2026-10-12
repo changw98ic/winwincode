@@ -3,6 +3,7 @@
 mod approved_command_prefix_saved;
 mod apps_instructions;
 mod available_plugins_instructions;
+mod code_mode_result_unavailable;
 mod contextual_user_message;
 mod current_time_reminder;
 mod environment_context;
@@ -34,6 +35,8 @@ mod recommended_plugins_instructions;
 mod rollout_budget;
 mod subagent_notification;
 mod token_budget_context;
+mod tool_diagnostics;
+mod tool_receipts;
 mod turn_aborted;
 mod user_instructions;
 mod user_shell_command;
@@ -93,3 +96,15 @@ pub(crate) use token_budget_context::TokenBudgetReminder;
 pub(crate) use turn_aborted::TurnAborted;
 pub(crate) use user_instructions::UserInstructions;
 pub(crate) use user_shell_command::UserShellCommand;
+
+pub(crate) use code_mode_result_unavailable::CodeModeResultUnavailable;
+pub(crate) use tool_receipts::ToolReceipt;
+pub(crate) use tool_receipts::ToolReceipts;
+
+#[cfg(test)]
+mod tool_receipts_tests;
+
+pub(crate) use tool_diagnostics::ToolDiagnosticFeedback;
+
+#[cfg(test)]
+mod tool_diagnostics_tests;

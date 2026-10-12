@@ -10,6 +10,7 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml"]
 
 [dependencies]
+winwincode-network = { workspace = true, features = ["journal"] }
 winwincode-api.workspace = true
 winwincode-provider.workspace = true
 base64.workspace = true
@@ -21,14 +22,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# RFC 3339 stamps for exchange envelopes and durable cursors; the same
-# formatting dependency the server side already uses. The `parsing` feature
-# is required locally to compare stored code expiry stamps against the wall
-# clock when answering access challenges.
 time = { workspace = true, features = ["parsing"] }
-# Direct path dependency on purpose: `winwincode-client-port` is not part of
-# `[workspace.dependencies]`, matching how `winwincode-server` and
-# `winwincode-local` reference sibling crates.
 winwincode-client-port = { path = "../winwincode-client-port" }
 tokio = { workspace = true, features = ["io-util", "macros", "net"] }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", features = ["rustls-tls-native-roots"] }
@@ -37,11 +31,8 @@ ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
 [lints]
 workspace = true
 
-# Cross-validation (WORKER-200.2): the managed-session config this crate's
-# supervisor writes must be accepted by the fail-closed reader of the real
-# `winwincode-worker --managed-session` entry, so the reader runs against
-# supervisor-written files in the launch tests.
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 rcgen.workspace = true
 tokio-rustls.workspace = true
 winwincode-worker = { path = "../winwincode-worker" }

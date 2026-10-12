@@ -1,8 +1,6 @@
+#![allow(
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded process execution seam for already-sealed `DebugProbe` commands.
-
-#![allow(
     dead_code,
     reason = "D2 defines the closed process seam; D9 supplies its only production host adapter"
 )]
@@ -31,7 +29,6 @@ const MAX_OUTPUT_BYTES: usize = 16_777_216;
 const DEFAULT_TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const DEFAULT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Stable internal reason why a process request was rejected or could not run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeProcessErrorKind {
     InvalidProbeId,
@@ -51,7 +48,6 @@ pub(crate) enum ProbeProcessErrorKind {
     SpawnFailed,
 }
 
-/// Secret-safe process boundary failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeProcessError {
     kind: ProbeProcessErrorKind,
@@ -77,7 +73,6 @@ impl fmt::Display for ProbeProcessError {
 
 impl std::error::Error for ProbeProcessError {}
 
-/// Per-process bounds applied after the scheduler has reserved round budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeProcessLimits {
     timeout: Duration,
@@ -139,7 +134,6 @@ impl ProbeProcessLimits {
     }
 }
 
-/// Resource declarations that require a host broker instead of raw child access.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ProbeExternalResources {
     network: bool,
@@ -171,7 +165,6 @@ impl ProbeExternalResources {
     }
 }
 
-/// OS properties already proven by the process host selected for this request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeHostGuarantees {
     read_only_workspace: bool,
@@ -207,7 +200,6 @@ impl ProbeHostGuarantees {
     }
 }
 
-/// One exact host-owned command template. Request arguments never extend it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeCommandTemplate {
     executable: PathBuf,
@@ -236,7 +228,6 @@ impl ProbeCommandTemplate {
     }
 }
 
-/// Host-owned executable, environment, resource, and sandbox policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeHostPolicy {
     command_templates: Vec<ProbeCommandTemplate>,
@@ -267,7 +258,6 @@ impl ProbeHostPolicy {
     }
 }
 
-/// Untrusted scheduler projection before the process module seals it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeProcessSpec {
     probe_id: String,
@@ -323,7 +313,6 @@ impl ProbeProcessSpec {
     }
 }
 
-/// Opaque authority accepted by the process runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SealedProbeProcess {
     probe_id: String,
@@ -569,7 +558,6 @@ fn validate_environment(
     Ok(())
 }
 
-/// Cancellation authority shared by scheduler replacement, `JobCancel`, and timeout routing.
 #[derive(Clone, Debug)]
 pub(crate) struct ProbeCancellation {
     cancelled: Arc<AtomicBool>,
@@ -599,7 +587,6 @@ impl Default for ProbeCancellation {
     }
 }
 
-/// Opaque host containment authority; production adapters must bind more than a reusable PID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeContainmentId(String);
 
@@ -610,7 +597,6 @@ impl ProbeContainmentId {
     }
 }
 
-/// Hosted child plus its exact process-containment authority.
 pub(crate) struct HostedProbeProcess {
     child: Child,
     containment: ProbeContainmentId,
@@ -626,18 +612,12 @@ impl HostedProbeProcess {
     }
 }
 
-/// Signal requested against an exact host containment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeProcessSignal {
     Terminate,
     Kill,
 }
 
-/// Platform adapter which owns actual filesystem, network, and descendant isolation.
-///
-/// This module deliberately provides no production implementation. D9 must supply one
-/// which validates the opaque containment identity before every signal and proves the
-/// guarantees used to seal the request. The fixture adapter lives only under `cfg(test)`.
 pub(crate) trait ProbeProcessHost: Send + Sync {
     fn spawn(&self, process: &SealedProbeProcess) -> Result<HostedProbeProcess, ProbeProcessError>;
 
@@ -653,7 +633,6 @@ pub(crate) trait ProbeProcessHost: Send + Sync {
     ) -> Result<bool, ProbeProcessError>;
 }
 
-/// Terminal internal outcome consumed by the scheduler's durable receipt writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeProcessTermination {
     Exited,
@@ -664,8 +643,6 @@ pub(crate) enum ProbeProcessTermination {
     CleanupFailed,
 }
 
-/// Bounded process result. It owns bytes only until [`Self::retain`] writes
-/// their exact Artifacts before crossing the public runner seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeProcessReceipt {
     termination: ProbeProcessTermination,
@@ -738,8 +715,6 @@ impl ProbeProcessReceipt {
         self.cleanup_confirmed
     }
 
-    /// Consumes private output bytes by atomically retaining their Artifacts
-    /// and exact terminal receipt.
     pub(crate) fn retain(
         self,
         completion: &ProbeExecutionCompletion,
@@ -797,7 +772,6 @@ enum ProbeOutputStream {
     Stderr,
 }
 
-/// Executes only opaque requests already sealed after the scheduler's durable intent.
 pub(crate) struct ProbeProcessRuntime {
     host: Arc<dyn ProbeProcessHost>,
 }
@@ -1568,6 +1542,12 @@ fn main() {
             .status()
             .expect("compile process fixture");
         assert!(status.success(), "compile process fixture");
+        assert!(
+            std::process::Command::new(&executable)
+                .status()
+                .expect("initialize process fixture")
+                .success()
+        );
         let root = root.canonicalize().expect("canonical process root");
         (
             executable

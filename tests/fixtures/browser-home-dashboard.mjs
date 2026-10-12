@@ -2,11 +2,6 @@
 
 import { mountWinWinCodeClient } from '/module/application.js'
 
-// Deterministic UI-504 Home dashboard.  The injected Control Plane facade serves
-// two authorized repository Scopes whose Deliveries and decisions differ, so the
-// suite can prove a Scope switch re-reads and re-renders the dashboard in
-// isolation.  SECRET_MARKER is planted inside one served Delivery requirement and
-// must never reach the DOM, the URL, or browser storage.
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
 const identity = {
@@ -169,7 +164,6 @@ const workspace = new Map([
     sessions: [],
     approvals: [],
   }],
-  // A Scope that was never used: the dashboard must offer the first-use entry.
   [repositoryThree.repositoryId, {
     repository: repositoryThree,
     deliveries: [],
@@ -325,7 +319,6 @@ function dashboard() {
       .filter(node => node.hidden !== true)
       .map(node => node.getAttribute('href')),
     firstUse: {
-      // Design page 04 removed the first-use block; absent means hidden.
       hidden: document.querySelector('.wwc-home-first-use')?.hidden ?? true,
       links: [...(document.querySelector('.wwc-home-first-use')?.querySelectorAll('a') ?? [])]
         .map(node => node.getAttribute('href')),
@@ -354,9 +347,6 @@ globalThis.openHome = async path => {
     const next = dashboard()
     if (!next.present) return false
     if (repositoryId === null) return true
-    // The dashboard of the requested Scope is on screen only once every card
-    // link carries its repository identity. Delivery cards render no action
-    // link at all, so only non-null hrefs are checked.
     return next.firstUse.hidden === false
       || next.actions.every(action => action.href === null
         || action.href.includes(repositoryId))

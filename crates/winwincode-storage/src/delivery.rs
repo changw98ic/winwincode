@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Community storage adapters for Delivery-owned durable facts.
-
 use winwincode_delivery::{
     application::{
         session_binding::{
@@ -90,10 +88,6 @@ pub fn delivery_candidate_source(
     }
 }
 
-/// Reconstructs source-hunk origins from two validated Git diffs.
-///
-/// # Errors
-/// Rejects foreign lineage, ambiguous mappings, or changes outside a source hunk.
 pub fn delivery_rework_candidate_source(
     resolver: &dyn crate::GitSourceResolver,
     previous: &ValidatedGitSourceArtifact,
@@ -111,7 +105,10 @@ pub fn delivery_rework_candidate_source(
     for path in delta.changed_paths() {
         let before = resolver.candidate_diff(previous, path.path())?;
         let after = resolver.candidate_diff(delta, path.path())?;
-        let origins = crate::git_source::rework_hunk_origins(before.bytes(), after.bytes())?;
+        let origins = winwincode_domain::rework_hunk_origins(before.bytes(), after.bytes())
+            .map_err(|_| {
+                crate::ArtifactError::conflict("replacement hunk escapes its source scope")
+            })?;
         for hunk in input
             .changed_hunks
             .iter_mut()

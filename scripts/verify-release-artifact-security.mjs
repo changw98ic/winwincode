@@ -358,9 +358,6 @@ function scanBinaryCredentialSegment(bytes, label) {
     if (match !== null) findings.push(binaryCredentialFinding(rule, match.index))
   }
 
-  // Executables commonly contain adjacent error/help strings and credential-detector regex
-  // vocabulary without NUL separators. For opaque token forms, require a decimal digit in the
-  // payload. Exact sensitive build inputs are independently matched byte-for-byte below.
   const opaqueRules = [
     ['text.bearer', /\bBearer\s+(?!\[REDACTED\]|<redacted>)([A-Za-z0-9._~+/=-]{12,})/giu],
     ['text.provider-token', /\b((?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|npm_[A-Za-z0-9]{20,}))\b/gu],

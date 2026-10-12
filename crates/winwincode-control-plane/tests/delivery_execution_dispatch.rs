@@ -97,9 +97,9 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
                 winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
         },
         limits: ExecutionLimits {
-            deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+            deadline_at: Some(Instant("2026-08-25T12:00:00.000Z".into())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         managed_app_run_config: None,
     }
@@ -121,6 +121,17 @@ fn pending_execution(seed: u64) -> PendingDeliveryExecution {
     )
     .expect("prepared execution job");
     let input = job.work_input.as_ref().expect("execution input");
+    assert_eq!(
+        input.work_plan.as_deref(),
+        Some(
+            transition
+                .delivery
+                .snapshot()
+                .work_run_aggregate
+                .items
+                .as_slice()
+        )
+    );
     assert_eq!(
         input.delivery_spec_id,
         transition.delivery.snapshot().spec.id.0
@@ -577,6 +588,50 @@ type ConfigMutation = fn(&mut DeliveryExecutionConfig);
 type IntentMutation = fn(&mut ExecutionIntent);
 
 #[test]
+fn goal_schema_limit_is_a_nonretryable_request_error_before_dispatch() {
+    let seed = 14;
+    let request_id = RequestId(canonical_id("req", seed));
+    for characters in [20_000, 20_001] {
+        let mut transition = workrun_dispatch(seed);
+        dispatch_intent_mut(&mut transition).goal = "目".repeat(characters);
+        let mut snapshot = transition.delivery.clone().into_snapshot();
+        snapshot.work_run_aggregate.items[0].goal = "目".repeat(characters);
+        transition.delivery = Delivery::try_from_snapshot(snapshot).expect("matching item goal");
+        let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
+            panic!("dispatch intent");
+        };
+        let prepared = prepare_workrun_start(
+            &request_id,
+            &transition.delivery.snapshot().work_run_aggregate,
+            &transition.delivery.snapshot().spec,
+            intent,
+            execution_config(seed),
+        );
+        if characters == 20_000 {
+            assert_eq!(
+                prepared
+                    .expect("schema limit accepts Unicode characters")
+                    .goal
+                    .len(),
+                60_000
+            );
+        } else {
+            let error = prepared.expect_err("goal exceeds canonical schema");
+            assert!(error.to_string().contains("executionJob.goal"));
+            let public = winwincode_control_plane::DeliveryApplicationError::Execution(error);
+            assert_eq!(
+                public.code(),
+                winwincode_api::generated::ErrorCode::InvalidRequest
+            );
+            assert!(
+                !public.retryable(),
+                "invalid fields must not be retried as a service outage"
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_execution_job_config_fails_before_pending_publication() {
     let seed = 11;
     let request_id = RequestId(canonical_id("req", seed));
@@ -679,10 +734,10 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
             config.workspace.checkout_revision.clear();
         }),
         ("deadlineAt", |config| {
-            config.limits.deadline_at = Instant("2026-08-25T12:00:00Z".into());
+            config.limits.deadline_at = Some(Instant("2026-08-25T12:00:00Z".into()));
         }),
         ("maxRuntimeSeconds", |config| {
-            config.limits.max_runtime_seconds = 604_801;
+            config.limits.max_runtime_seconds = Some(604_801);
         }),
         ("maxArtifactBytes", |config| {
             config.limits.max_artifact_bytes = 1_099_511_627_777;
@@ -703,7 +758,7 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
         long_checkout,
     );
     let mut zero_limits = execution_config(seed);
-    zero_limits.limits.max_runtime_seconds = 0;
+    zero_limits.limits.max_runtime_seconds = Some(0);
     zero_limits.limits.max_artifact_bytes = -1;
     assert_prepare_rejected(
         "limit minima",

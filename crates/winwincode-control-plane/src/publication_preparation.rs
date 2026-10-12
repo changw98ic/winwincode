@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Current Delivery facts → secret-safe review-package Artifact → Publication authority.
-
 use std::fmt;
 
 use serde::Serialize;
@@ -40,7 +38,6 @@ const REVIEW_PACKAGE_PROTOCOL: &str = "winwincode.github-review-package.v1";
 const REVIEW_PACKAGE_MEDIA_TYPE: &str = "application/vnd.winwincode.github-review-package+json";
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Failure before one exact Publication authority can be returned.
 #[derive(Debug)]
 pub enum PublicationPreparationError {
     Storage(StorageError),
@@ -82,7 +79,6 @@ impl From<StrongFlowProjectionError> for PublicationPreparationError {
     }
 }
 
-/// One deterministic review package and the Publication authority sealed to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedPublication {
     authorization: PublicationAuthorization,
@@ -127,7 +123,6 @@ struct ReviewPackage<'facts> {
     approval: ReviewPackageApproval<'facts>,
 }
 
-/// Publication-safe Delivery facts. Runtime sessions remain outside the GitHub review package.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewPackageDelivery<'facts> {
@@ -293,18 +288,6 @@ struct StoredReviewPackage {
 }
 
 impl ControlPlane {
-    /// Rebuilds the current publishable Delivery facts, persists one exact
-    /// secret-safe review package as an Artifact, and seals Publication
-    /// authority to that package digest.
-    ///
-    /// Exact repeats replay the same Artifact metadata and bytes. No caller can
-    /// supply an approval, verdict, target, package digest, or storage provenance.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing or stale Delivery/candidate, non-passing verdict,
-    /// absent exact human approval, invalid repository scope, or Artifact
-    /// storage conflict/corruption.
     pub fn prepare_publication(
         &mut self,
         scope: &RepositoryScope,
@@ -460,7 +443,7 @@ fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-fn derived_id(prefix: &str, namespace: &str, digest: &Sha256Digest) -> String {
+pub(crate) fn derived_id(prefix: &str, namespace: &str, digest: &Sha256Digest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(namespace.as_bytes());
     hasher.update([0]);

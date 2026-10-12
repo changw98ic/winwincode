@@ -659,7 +659,14 @@ async fn startup_draft_handoff_recognizes_late_user_input_as_new_protected_view(
     assert_eq!(app.chat_widget.composer_text_with_pending(), "x");
     while let Ok(event) = app_event_rx.try_recv() {
         assert!(
-            !matches!(event, AppEvent::CodexOp(Op::UserInputAnswer { .. })),
+            !matches!(
+                event,
+                AppEvent::CodexOp(Op::UserInputAnswer { .. })
+                    | AppEvent::SubmitThreadOp {
+                        op: Op::UserInputAnswer { .. },
+                        ..
+                    }
+            ),
             "showing the protected user input request must not submit an answer: {event:?}"
         );
     }

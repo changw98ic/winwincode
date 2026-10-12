@@ -1,0 +1,343 @@
+[
+  {
+    "name": "unknown inference retries",
+    "failure": {
+      "kind": "transport_interrupted",
+      "acceptance": "unknown",
+      "phase": "response_body",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 5000
+  },
+  {
+    "name": "unknown mutation reconciles",
+    "failure": {
+      "kind": "transport_interrupted",
+      "acceptance": "unknown",
+      "phase": "response_body",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "reconcile_first",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "reconcile"
+  },
+  {
+    "name": "trusted not sent exceeds inference budget",
+    "failure": {
+      "kind": "connection_unavailable",
+      "acceptance": "not_sent",
+      "phase": "connect",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 4,
+    "connectionAttempt": 50,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 60000
+  },
+  {
+    "name": "received timeout retries exact request",
+    "failure": {
+      "kind": "timeout",
+      "acceptance": "response_received",
+      "phase": "response_headers",
+      "httpStatus": 408,
+      "retryAfterMs": null
+    },
+    "replay": "replay_exact",
+    "attempt": 2,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 10000
+  },
+  {
+    "name": "cooldown is a lower bound",
+    "failure": {
+      "kind": "rate_limited",
+      "acceptance": "response_received",
+      "phase": "response_headers",
+      "httpStatus": 429,
+      "retryAfterMs": 1000
+    },
+    "replay": "replay_exact",
+    "attempt": 2,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 10000
+  },
+  {
+    "name": "long cooldown defers instead of retrying early",
+    "failure": {
+      "kind": "rate_limited",
+      "acceptance": "response_received",
+      "phase": "response_headers",
+      "httpStatus": 429,
+      "retryAfterMs": 600000
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "deferred_until",
+    "delayMs": 600000
+  },
+  {
+    "name": "budget stops inference requests",
+    "failure": {
+      "kind": "server_transient",
+      "acceptance": "response_received",
+      "phase": "response_headers",
+      "httpStatus": 503,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 4,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "invalid TLS never retries",
+    "failure": {
+      "kind": "tls_invalid",
+      "acceptance": "not_sent",
+      "phase": "connect",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 1,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "SSE truncation retries inference",
+    "failure": {
+      "kind": "stream_incomplete",
+      "acceptance": "response_received",
+      "phase": "stream",
+      "httpStatus": 200,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 3,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 20000
+  },
+  {
+    "name": "received protocol failure retries inference",
+    "failure": {
+      "kind": "protocol_invalid",
+      "acceptance": "response_received",
+      "phase": "decode",
+      "httpStatus": 200,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 5000
+  },
+  {
+    "name": "cancelled never retries",
+    "failure": {
+      "kind": "cancelled",
+      "acceptance": "unknown",
+      "phase": "response_body",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "replay_exact",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "authentication requires credential recovery",
+    "failure": {
+      "kind": "authentication",
+      "acceptance": "response_received",
+      "phase": "response_headers",
+      "httpStatus": 401,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "unknown protocol failure retries inference",
+    "failure": {
+      "kind": "protocol_invalid",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 5000
+  },
+  {
+    "name": "protocol failures share the finite attempt budget",
+    "failure": {
+      "kind": "protocol_invalid",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 4,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "unknown protocol mutation requires reconciliation",
+    "failure": {
+      "kind": "protocol_invalid",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "reconcile_first",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "reconcile"
+  },
+  {
+    "name": "identity integrity failure never retries",
+    "failure": {
+      "kind": "integrity_invalid",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "local invalid request never retries",
+    "failure": {
+      "kind": "request_invalid",
+      "acceptance": "not_sent",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "expired authority never retries",
+    "failure": {
+      "kind": "authority_expired",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "unavailable attempt storage never retries",
+    "failure": {
+      "kind": "storage_unavailable",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "retry_inference",
+    "attempt": 1,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "stop"
+  },
+  {
+    "name": "exact control timeout survives repeated failures",
+    "failure": {
+      "kind": "timeout",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": null,
+      "retryAfterMs": null
+    },
+    "replay": "replay_exact",
+    "attempt": 20,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 60000
+  },
+  {
+    "name": "exact control server_transient survives repeated failures",
+    "failure": {
+      "kind": "server_transient",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": 503,
+      "retryAfterMs": null
+    },
+    "replay": "replay_exact",
+    "attempt": 20,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 60000
+  },
+  {
+    "name": "exact control protocol_invalid survives repeated failures",
+    "failure": {
+      "kind": "protocol_invalid",
+      "acceptance": "unknown",
+      "phase": "response_headers",
+      "httpStatus": 200,
+      "retryAfterMs": null
+    },
+    "replay": "replay_exact",
+    "attempt": 20,
+    "connectionAttempt": 0,
+    "maxAttempts": 4,
+    "action": "retry_after",
+    "delayMs": 60000
+  }
+]

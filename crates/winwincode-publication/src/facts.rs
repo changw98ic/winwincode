@@ -23,11 +23,6 @@ pub struct PublicationTarget {
 }
 
 impl PublicationTarget {
-    /// Builds one canonical GitHub pull-request target.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed repository or branch identity.
     pub fn try_github(
         repository: impl Into<String>,
         base_branch: impl Into<String>,
@@ -109,11 +104,6 @@ pub struct PublicationSourceIssue {
 }
 
 impl PublicationSourceIssue {
-    /// Builds one canonical GitHub issue source.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed repository or issue number.
     pub fn try_github(repository: impl Into<String>, number: u64) -> Result<Self, String> {
         let source = Self {
             schema_version: DELIVERY_FACT_SCHEMA_VERSION,
@@ -165,10 +155,10 @@ impl PublicationSourceIssue {
     }
 }
 
-/// Immutable identity stored with one trusted publication intent/result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicationFactBinding {
+    candidate_digest: Sha256Digest,
     delivery_id: DeliveryId,
     delivery_revision: u64,
     delivery_spec_id: String,
@@ -182,11 +172,6 @@ pub struct PublicationFactBinding {
 }
 
 impl PublicationFactBinding {
-    /// Builds the immutable identity shared by publication intent and result facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects incomplete or malformed Delivery, candidate, verdict, approval, or target facts.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         delivery_id: DeliveryId,
@@ -194,6 +179,7 @@ impl PublicationFactBinding {
         delivery_spec_id: impl Into<String>,
         delivery_spec_revision: u64,
         candidate_ref: impl Into<String>,
+        candidate_digest: Sha256Digest,
         diff_sha256: impl Into<String>,
         verdict_id: impl Into<String>,
         approval_id: AttentionItemId,
@@ -201,6 +187,7 @@ impl PublicationFactBinding {
         target_sha256: impl Into<String>,
     ) -> Result<Self, String> {
         let fact = Self {
+            candidate_digest,
             delivery_id,
             delivery_revision,
             delivery_spec_id: delivery_spec_id.into(),
@@ -225,7 +212,11 @@ impl PublicationFactBinding {
             || !portable(&self.delivery_spec_id, 200)
             || !portable(&self.verdict_id, 200)
             || !canonical_prefixed_id(&self.approval_id.0, "att_")
-            || candidate_digest(&self.candidate_ref).is_none()
+            || !self
+                .candidate_ref
+                .strip_prefix("refs/winwincode/candidates/")
+                .is_some_and(git_object)
+            || !canonical_sha256(&self.candidate_digest)
             || !lowercase_sha256(&self.diff_sha256)
             || !lowercase_sha256(&self.approval_review_set_sha256)
             || !lowercase_sha256(&self.target_sha256)
@@ -302,11 +293,6 @@ pub struct PublicationResourceFact {
 }
 
 impl PublicationResourceFact {
-    /// Builds one secret-safe provider resource identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed repository or resource number.
     pub fn try_new(
         kind: PublicationResourceKind,
         repository: impl Into<String>,
@@ -345,7 +331,6 @@ impl PublicationResourceFact {
     }
 }
 
-/// Safe publication result fields supplied by the publication owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicationResultFact {
@@ -359,11 +344,6 @@ pub struct PublicationResultFact {
 }
 
 impl PublicationResultFact {
-    /// Builds one secret-safe publication projection fact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid publication identity, state, revision, timestamp, binding, or resource.
     pub fn try_new(
         publication_id: PublicationId,
         revision: Revision,
@@ -459,14 +439,6 @@ pub struct PublicationAuthorization {
 }
 
 impl PublicationAuthorization {
-    /// Seals one adapter-confirmed current Delivery, candidate, Artifact, approval, and target.
-    ///
-    /// This is a trusted Rust application seam, not a wire DTO: callers must derive every
-    /// argument from current durable facts before invoking the publication coordinator.
-    ///
-    /// # Errors
-    ///
-    /// Rejects incomplete, stale, cross-target, or non-canonical fact sets.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_current_facts(
         binding: PublicationFactBinding,
@@ -479,8 +451,7 @@ impl PublicationAuthorization {
         approved_at_millis: u64,
         repository_scope_sha256: Sha256Digest,
     ) -> Result<Self, String> {
-        let candidate_digest = candidate_digest(binding.candidate_ref())
-            .ok_or_else(|| "publication candidate reference is invalid".to_owned())?;
+        let candidate_digest = binding.candidate_digest.clone();
         let candidate_commit_id = candidate_commit_id.into();
         let artifact_id = artifact_id.into();
         let approved_by = approved_by.into();
@@ -522,8 +493,7 @@ impl PublicationAuthorization {
         self.binding.validate()?;
         self.source.validate()?;
         self.target.validate()?;
-        let expected_candidate_digest = candidate_digest(self.binding.candidate_ref())
-            .ok_or_else(|| "publication candidate reference is invalid".to_owned())?;
+        let expected_candidate_digest = self.binding.candidate_digest.clone();
         let expected_provider_key = format!(
             "github:pull-request:{}",
             canonical_sha256_json(&(self.binding.delivery_id(), &self.source, &self.target,)).0
@@ -543,6 +513,8 @@ impl PublicationAuthorization {
         if self.binding.target_sha256() != raw_sha256_json(&self.target)
             || self.candidate_digest != expected_candidate_digest
             || !git_object(&self.candidate_commit_id)
+            || self.binding.candidate_ref
+                != format!("refs/winwincode/candidates/{}", self.candidate_commit_id)
             || !canonical_prefixed_id(&self.artifact_id, "art_")
             || !canonical_sha256(&self.artifact_digest)
             || !canonical_prefixed_id(&self.approved_by, "usr_")
@@ -692,13 +664,6 @@ pub(crate) fn canonical_sha256(value: &Sha256Digest) -> bool {
         .0
         .strip_prefix("sha256:")
         .is_some_and(lowercase_sha256)
-}
-
-pub(crate) fn candidate_digest(value: &str) -> Option<Sha256Digest> {
-    value
-        .strip_prefix("git-candidate:sha256:")
-        .filter(|digest| lowercase_sha256(digest))
-        .map(|digest| Sha256Digest(format!("sha256:{digest}")))
 }
 
 pub(crate) fn raw_sha256_json(value: &impl Serialize) -> String {

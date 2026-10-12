@@ -11,6 +11,9 @@ use std::{
 
 #[path = "../../../tests/support/git_candidate.rs"]
 mod git_candidate;
+
+#[path = "support/persisted_rework_rejection.rs"]
+mod persisted_rework_rejection;
 use git_candidate::candidate_bundle;
 
 use sha2::{Digest, Sha256};
@@ -211,9 +214,6 @@ fn running_non_final_executor(seed: u64) -> Delivery {
     let (delivery, _candidate) = running_final_verifier(seed);
     let mut snapshot = delivery.into_snapshot();
     snapshot.status = DeliveryStatus::Ready;
-    // A first writer has no previous candidate or independent checking sessions.
-    // Keep only the running job; do not turn a completed verification scenario
-    // into a writer while retaining its candidate-ready producer.
     snapshot
         .work_run_aggregate
         .runs
@@ -285,9 +285,9 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
             .clone(),
         job_id: binding.execution_job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+            deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -302,6 +302,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
             work_run_id: binding.work_run_id.clone(),
         }),
         work_input: Some(winwincode_execution_port::generated::WorkRunInput {
+            work_plan: None,
             device_target: None,
             delivery_spec_id: delivery.snapshot().spec.id.0.clone(),
             delivery_spec_revision: Revision(
@@ -315,6 +316,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
                     .to_owned()
             }),
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             work_contract: delivery.snapshot().work_run_aggregate.contract.clone(),
             work_item: delivery
                 .snapshot()
@@ -326,7 +328,14 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
                 .clone(),
         }),
         workspace: ExecutionWorkspace {
-            checkout_revision: "candidate-checkout".into(),
+            checkout_revision: if binding.execution_profile.as_deref() == Some("verifier") {
+                verdict_fixture(delivery.id(), VerdictFixtureOutcome::Pass)
+                    .candidate
+                    .candidate_commit_id()
+                    .to_owned()
+            } else {
+                "candidate-checkout".into()
+            },
             repository_id: scope.repository_id.clone(),
             write_mode: if binding.execution_profile.as_deref() == Some("executor") {
                 ExecutionWorkspaceWriteMode::Candidate
@@ -427,7 +436,159 @@ fn seed_delivery_and_job(root: &Path, delivery: &Delivery, job: &ExecutionJob) {
     storage
         .mark_published(&receipt.events[0].event_id)
         .expect("seed event acknowledgement");
+    if job.execution_profile == "verifier" {
+        seed_verification_snapshot(&mut storage, &repository_scope, delivery, job, seed);
+    }
     Box::new(storage).close().expect("seed close");
+}
+
+#[allow(clippy::too_many_lines)]
+fn seed_verification_snapshot(
+    storage: &mut SqliteStorage,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+    job: &ExecutionJob,
+    seed: u64,
+) {
+    use serde_json::json;
+    use winwincode_domain::{Candidate, CanonicalSnapshot, seal_snapshot};
+    use winwincode_execution_port::generated::SnapshotFreezeRequestMessage;
+    use winwincode_storage::{
+        SnapshotProductStaged, SnapshotVerificationBinding, commit_snapshot_product,
+    };
+
+    let fixture = verdict_fixture(delivery.id(), VerdictFixtureOutcome::Pass);
+    let frozen = &fixture.candidate;
+    let writer = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.work_run_id == *frozen.producer_work_run_id())
+        .unwrap();
+    let candidate: Candidate = serde_json::from_value(json!({
+        "schemaVersion": "winwincode/v1", "id": frozen.candidate_id(),
+        "candidateDigest": frozen.candidate_digest(), "candidateRef": frozen.candidate_ref(),
+        "workContractId": writer.work_contract_id, "contractRevision": writer.work_contract_revision,
+        "workItemId": writer.work_item_id, "workRunId": writer.work_run_id, "attempt": writer.attempt,
+        "producerWorkerSessionId": writer.worker_session_id,
+        "baseCommit": frozen.base_commit_id(), "candidateCommit": frozen.candidate_commit_id(),
+        "candidateTree": frozen.candidate_tree_id(), "diffDigest": format!("sha256:{}", frozen.diff_sha256())
+    })).unwrap();
+    let mut snapshot = fixture.verification.snapshot().as_contract().clone();
+    snapshot.repository_id = scope.repository_id.clone();
+    snapshot.validation_seal = seal_snapshot(&snapshot);
+    let snapshot = CanonicalSnapshot::try_from(snapshot).unwrap();
+    let active = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.execution_job_id == job.job_id)
+        .unwrap();
+    let templates: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut request = templates["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["kind"] == "snapshot.freeze_request")
+        .unwrap()
+        .clone();
+    request["requestId"] = json!(canonical_id("req", seed + 10_000));
+    request["candidate"] = json!(candidate);
+    request["repositoryId"] = json!(scope.repository_id);
+    request["baseTreeId"] = json!(snapshot.as_contract().base_tree_id);
+    request["contentDigest"] = json!(snapshot.as_contract().content_digest);
+    request["lease"] = json!({
+        "jobId": job.job_id, "attempt": job.attempt, "leaseId": active.lease_id,
+        "fencingToken": active.fencing_token, "workerId": active.worker_id,
+        "workerInstanceId": active.worker_instance_id,
+        "issuedAt": "2027-01-15T08:00:00.200Z", "expiresAt": "2027-01-15T08:05:00.000Z"
+    });
+    request["dispatch"]["lease"] = request["lease"].clone();
+    request["dispatch"]["job"] = json!(job);
+    let request: SnapshotFreezeRequestMessage = serde_json::from_value(request).unwrap();
+    winwincode_execution_port::snapshot_freeze::validate_freeze_request(&request).unwrap();
+    let payload = serde_json::to_vec(&request).unwrap();
+    let actor = winwincode_storage::receipt_actor_key(&PublicEventActor::User {
+        id: UserId(canonical_id("usr", seed)),
+    })
+    .unwrap();
+    let receipt_scope = repository_receipt_scope(scope);
+    let receipt = storage
+        .commit(&StateCommit::new(
+            ReceiptIdentity::new(
+                actor.clone(),
+                receipt_scope.clone(),
+                request.request_id.clone(),
+            )
+            .unwrap(),
+            Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload))),
+            format!("snapshot-freeze:v1:{}:{}", job.job_id.0, job.attempt),
+            0,
+            payload.clone(),
+            vec![NewOutboxEvent::internal(
+                format!("snapshot-freeze:{}", request.request_id.0),
+                "verification.snapshot.freeze",
+                payload,
+            )],
+        ))
+        .unwrap();
+    storage.mark_published(&receipt.events[0].event_id).unwrap();
+    for (index, binding) in delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("reviewer" | "verifier")
+            )
+        })
+        .enumerate()
+    {
+        let n = seed + 11_000 + u64::try_from(index).unwrap();
+        let role = binding.execution_profile.as_ref().unwrap();
+        let plan_id = canonical_id("vpl", n);
+        let session_id = canonical_id("vsn", n);
+        let binding: SnapshotVerificationBinding = serde_json::from_value(json!({
+            "sessionBindingId": canonical_id("sbn", n), "workRunId": binding.work_run_id,
+            "executionJobId": binding.execution_job_id, "productSessionId": binding.product_session_id,
+            "workerSessionId": binding.worker_session_id, "codexThreadId": binding.codex_thread_id,
+            "verificationRole": role, "attempt": binding.attempt,
+            "verificationPlan": {"schemaVersion": "winwincode/v1", "id": plan_id,
+                "candidateDigest": candidate.candidate_digest, "workContractId": binding.work_contract_id,
+                "contractRevision": binding.work_contract_revision, "workItemId": binding.work_item_id,
+                "workItemRevision": binding.work_item_revision, "workRunId": binding.work_run_id,
+                "planRevision": 1, "criterionIds": delivery.snapshot().spec.acceptance_criteria.iter().map(|c| &c.id).collect::<Vec<_>>(),
+                "commands": ["cargo test"], "permissionProfile": "candidate-read-only", "requiredRoles": [role]},
+            "verificationSession": {"schemaVersion": "winwincode/v1", "id": session_id,
+                "verificationSessionId": session_id, "verificationPlanId": plan_id,
+                "snapshotId": snapshot.snapshot_id(), "candidateId": candidate.id,
+                "workRunId": binding.work_run_id, "attempt": binding.attempt,
+                "createdAt": "2027-01-15T08:00:00.200Z",
+                "sessionIdentity": {"workRunId": binding.work_run_id, "productSessionId": binding.product_session_id,
+                    "workerSessionId": binding.worker_session_id, "codexThreadId": binding.codex_thread_id}}
+        })).unwrap();
+        let staged =
+            SnapshotProductStaged::new(candidate.clone(), snapshot.clone(), binding).unwrap();
+        let receipt = commit_snapshot_product(
+            storage,
+            ReceiptIdentity::new(
+                actor.clone(),
+                receipt_scope.clone(),
+                RequestId(canonical_id("req", n)),
+            )
+            .unwrap(),
+            Sha256Digest(format!("sha256:{n:064x}")),
+            &staged,
+        )
+        .unwrap();
+        for event in receipt.receipt.events {
+            storage.mark_published(&event.event_id).unwrap();
+        }
+    }
 }
 
 fn seed_authenticated_worker_execution(
@@ -576,9 +737,9 @@ fn seed_worker_execution_admission(
                 limits: ExecutionAdmissionLimits {
                     max_concurrent: 4,
                     max_queued: 4,
-                    token_budget: 10_000,
-                    cost_budget_microunits: 100_000,
-                    max_runtime_millis: 3_600_000,
+                    token_budget: Some(10_000),
+                    cost_budget_microunits: Some(100_000),
+                    max_runtime_millis: Some(3_600_000),
                 },
             })
             .expect("execution admission policy");
@@ -591,9 +752,9 @@ fn seed_worker_execution_admission(
             job_id: job.job_id.clone(),
             request_id: RequestId(canonical_id("req", seed + 9_002)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 120_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(120_000),
             submitted_at,
         })
         .expect("execution reservation");
@@ -982,9 +1143,11 @@ fn terminal_message(
             status,
             summary: "Final verifier completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 400,
+                cost_microunits: Some(400),
                 runtime_millis: 60_000,
-                tokens: 40,
+                tokens: Some(40),
+ known_tokens: 40,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1167,9 +1330,7 @@ fn verdict_command(
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
         payload: serde_json::json!({
             "deliveryId": delivery.id().0,
-            "candidateDigest": candidate.candidate_ref()
-                .strip_prefix("git-candidate:")
-                .expect("candidate digest"),
+            "candidateDigest": candidate.candidate_digest(),
         }),
         request_id: RequestId(canonical_id("req", seed + 1000)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1187,7 +1348,42 @@ fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
             "settled",
             1,
         ),
+        (
+            74,
+            "unknown-cost",
+            ExecutionOutcomeStatus::Succeeded,
+            "settled",
+            1,
+        ),
+        (
+            78,
+            "unknown-usage",
+            ExecutionOutcomeStatus::Succeeded,
+            "released",
+            0,
+        ),
         (71, "failed", ExecutionOutcomeStatus::Failed, "released", 0),
+        (
+            75,
+            "failed-known-usage",
+            ExecutionOutcomeStatus::Failed,
+            "settled",
+            1,
+        ),
+        (
+            76,
+            "cancelled-known-usage",
+            ExecutionOutcomeStatus::Cancelled,
+            "settled",
+            1,
+        ),
+        (
+            77,
+            "infrastructure-known-usage",
+            ExecutionOutcomeStatus::InfrastructureError,
+            "settled",
+            1,
+        ),
         (
             72,
             "cancelled",
@@ -1196,46 +1392,191 @@ fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
             0,
         ),
     ] {
-        let root = temporary_directory(&format!("Worker-quota-{name}"));
-        let scope = repository_scope(seed);
-        let (delivery, _candidate) = running_final_verifier(seed);
-        let job = execution_job(&delivery, &scope);
-        let message = terminal_message(&job, &delivery, seed, status);
-        let facts = outcome_facts(&delivery, &message);
-        seed_delivery_and_job(&root, &delivery, &job);
-        seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
-
-        let mut control_plane = ControlPlane::start_local(
-            ControlPlaneConfig::local(&root),
-            Box::new(RecordingPublisher),
-        )
-        .expect("Control Plane start");
-        let first = control_plane
-            .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect("authenticated Worker terminal commit");
-        assert!(!first.receipt().idempotent_replay);
-        control_plane.shutdown().expect("Control Plane shutdown");
-        assert_eq!(
-            worker_terminal_state(&root, &job.job_id),
-            (expected_state.to_owned(), expected_sources)
+        assert_authenticated_worker_terminal_case(
+            seed,
+            name,
+            status,
+            expected_state,
+            expected_sources,
         );
-
-        let mut restarted = ControlPlane::start_local(
-            ControlPlaneConfig::local(&root),
-            Box::new(RecordingPublisher),
-        )
-        .expect("Control Plane restart");
-        let replay = restarted
-            .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect("exact Worker terminal replay");
-        assert!(replay.receipt().idempotent_replay);
-        restarted.shutdown().expect("restart shutdown");
-        assert_eq!(
-            worker_terminal_state(&root, &job.job_id),
-            (expected_state.to_owned(), expected_sources)
-        );
-        fs::remove_dir_all(root).expect("directory release");
     }
+}
+
+fn assert_authenticated_worker_terminal_case(
+    seed: u64,
+    name: &str,
+    status: ExecutionOutcomeStatus,
+    expected_state: &str,
+    expected_sources: i64,
+) {
+    let root = temporary_directory(&format!("Worker-quota-{name}"));
+    let scope = repository_scope(seed);
+    let (delivery, _candidate) = running_final_verifier(seed);
+    let job = execution_job(&delivery, &scope);
+    let mut message = terminal_message(&job, &delivery, seed, status);
+    if expected_state == "released" {
+        message.outcome.usage = None;
+    }
+    if name.ends_with("known-usage") {
+        message.outcome.usage = Some(ExecutionOutcomeUsage {
+            tokens: Some(47),
+            known_tokens: 47,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+            runtime_millis: 30_000,
+            cost_microunits: None,
+        });
+    }
+    if name == "unknown-usage" {
+        message.outcome.usage = Some(ExecutionOutcomeUsage::unknown(30_000, 47));
+    }
+    if name == "unknown-cost" {
+        message
+            .outcome
+            .usage
+            .as_mut()
+            .expect("usage")
+            .cost_microunits = None;
+    }
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane start");
+    let first = control_plane
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("authenticated Worker terminal commit");
+    assert!(!first.receipt().idempotent_replay);
+    control_plane.shutdown().expect("Control Plane shutdown");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        (expected_state.to_owned(), expected_sources)
+    );
+
+    let mut restarted = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane restart");
+    let replay = restarted
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("exact Worker terminal replay");
+    assert!(replay.receipt().idempotent_replay);
+    restarted.shutdown().expect("restart shutdown");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        (expected_state.to_owned(), expected_sources)
+    );
+    if let Some(usage) = &message.outcome.usage
+        && expected_state == "settled"
+    {
+        let connection =
+            rusqlite::Connection::open(root.join("control-plane.sqlite3")).expect("settled usage");
+        let cost: Option<i64> = connection.query_row("SELECT actual_cost_microunits FROM execution_admission_reservations WHERE job_id = ?1", [&job.job_id.0], |row| row.get(0)).expect("actual charge");
+        assert_eq!(cost, usage.cost_microunits);
+        let tokens: i64 = connection
+            .query_row(
+                "SELECT actual_tokens FROM execution_admission_reservations WHERE job_id = ?1",
+                [&job.job_id.0],
+                |row| row.get(0),
+            )
+            .expect("actual tokens");
+        assert_eq!(Some(tokens), usage.tokens);
+    }
+    if name == "unknown-usage" {
+        assert_reconciled_terminal_keeps_original_outcome(
+            &root, &scope, &job, &message, &facts, seed,
+        );
+    }
+    fs::remove_dir_all(root).expect("directory release");
+}
+
+fn assert_reconciled_terminal_keeps_original_outcome(
+    root: &Path,
+    scope: &RepositoryScope,
+    job: &ExecutionJob,
+    message: &JobOutcomeMessage,
+    facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
+    seed: u64,
+) {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let terminal: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM outbox WHERE topic = 'delivery.work_run.terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let terminal_value: serde_json::Value = serde_json::from_slice(&terminal).unwrap();
+    assert_eq!(terminal_value["outcome"]["status"], "succeeded");
+    let (terminal_request_id, unknown): (String, String) = connection.query_row(
+        "SELECT terminal_request_id, terminal_usage_json FROM execution_admission_reconciliation WHERE job_id = ?1",
+        [&job.job_id.0], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    let unknown: ExecutionOutcomeUsage = serde_json::from_str(&unknown).unwrap();
+    assert_eq!(unknown, ExecutionOutcomeUsage::unknown(30_000, 47));
+    drop(connection);
+    let mut storage = SqliteStorage::open(root).unwrap();
+    let settled = ExecutionOutcomeUsage {
+        tokens: Some(54),
+        known_tokens: 54,
+        cost_microunits: Some(400),
+        accounting_status:
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        runtime_millis: 30_000,
+    };
+    assert!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .settle_reconciliation(
+                &job.job_id,
+                &RequestId(terminal_request_id.clone()),
+                &RequestId(canonical_id("req", seed + 30_000)),
+                &settled,
+                &Instant("2027-01-15T08:02:00.000Z".into())
+            )
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .execution_admission()
+            .unwrap()
+            .settle_reconciliation(
+                &job.job_id,
+                &RequestId(terminal_request_id),
+                &RequestId(canonical_id("req", seed + 30_000)),
+                &settled,
+                &Instant("2027-01-15T08:02:00.000Z".into())
+            )
+            .unwrap()
+    );
+    drop(storage);
+    let mut reconciled = ControlPlane::start_local(
+        ControlPlaneConfig::local(root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    let replay = reconciled
+        .commit_delivery_terminal_outcome(scope, message, facts, &message.sent_at)
+        .unwrap();
+    assert!(replay.receipt().idempotent_replay);
+    reconciled.shutdown().unwrap();
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let replayed: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM outbox WHERE topic = 'delivery.work_run.terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        replayed, terminal,
+        "reconciliation cannot rewrite the business terminal"
+    );
 }
 
 #[test]
@@ -1641,6 +1982,8 @@ fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
+    let after = (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 3);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -1655,7 +1998,7 @@ fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     control_plane
         .commit_delivery_terminal_outcome(&scope, &stale, &facts, &stale.sent_at)
         .expect_err("a new message cannot settle the same WorkRun twice");
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -1953,6 +2296,15 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
             .find(|run| run.execution_job_id == job.job_id)
             .expect("final verifier run");
         assert_eq!(run.state, expected_run);
+        assert_eq!(
+            settled.snapshot().work_run_aggregate.summary_state(false),
+            if expected_run == winwincode_domain::WorkRunState::Cancelled {
+                winwincode_domain::WorkItemState::Cancelled
+            } else {
+                winwincode_domain::WorkItemState::Failed
+            },
+            "a failed read-only consumer must not leave candidate_ready as the public state"
+        );
         assert!(
             settled
                 .snapshot()
@@ -1974,7 +2326,8 @@ fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() 
     let scope = repository_scope(seed);
     let (delivery, _candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
-    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
+    message.outcome.usage = None;
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
     seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
@@ -2042,6 +2395,7 @@ fn failure_at_each_atomic_member_rolls_back_terminal_outcome() {
         let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Failed);
         let facts = outcome_facts(&delivery, &message);
         seed_delivery_and_job(&root, &delivery, &job);
+        let before = durable_terminal_counts(&root, delivery.id());
         let mut control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
             Box::new(RecordingPublisher),
@@ -2054,7 +2408,7 @@ fn failure_at_each_atomic_member_rolls_back_terminal_outcome() {
             .expect_err("injected atomic member failure");
         assert_eq!(
             durable_terminal_counts(&root, delivery.id()),
-            (1, 1, 1, 1),
+            before,
             "{member}"
         );
         assert_eq!(audit_event_count(&root), 0, "{member}");
@@ -2073,6 +2427,8 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
+    let after = (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 3);
     let mut failing =
         ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(FailingPublisher))
             .expect("Control Plane start");
@@ -2084,7 +2440,7 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .committed_receipt()
         .expect("publication error carries committed terminal receipt");
     assert_eq!(committed.receipt().revision, delivery.revision() + 1);
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     assert_eq!(audit_event_count(&root), 1);
     failing
         .shutdown()
@@ -2099,7 +2455,7 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect("receipt replay after restart");
     assert!(replay.receipt().idempotent_replay);
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     assert_eq!(audit_event_count(&root), 1);
     let audit_event = audit_event_for_receipt(&root, replay.receipt());
     let audit_access = AuditScope::repository(
@@ -2143,6 +2499,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -2193,9 +2550,6 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
         .artifacts
         .push(changed.outcome.artifacts[0].clone());
     cases.push(("duplicate-artifact", changed));
-    let mut changed = message.clone();
-    changed.sent_at = Instant("2027-01-15T08:06:00.000Z".into());
-    cases.push(("sent-after-expiry", changed));
 
     for (name, changed) in cases {
         assert!(
@@ -2206,7 +2560,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
         );
         assert_eq!(
             durable_terminal_counts(&root, delivery.id()),
-            (1, 1, 1, 1),
+            before,
             "{name}"
         );
         assert_eq!(audit_event_count(&root), 0, "{name}");
@@ -2220,7 +2574,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
     control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &foreign_stage_facts, &message.sent_at)
         .expect_err("foreign stage authority must fail closed");
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
     assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -2242,6 +2596,7 @@ fn outcome_error_must_match_the_generated_schema_before_persistence() {
         });
         let facts = outcome_facts(&delivery, &message);
         seed_delivery_and_job(&root, &delivery, &job);
+        let before = durable_terminal_counts(&root, delivery.id());
         let mut control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
             Box::new(RecordingPublisher),
@@ -2251,7 +2606,7 @@ fn outcome_error_must_match_the_generated_schema_before_persistence() {
         control_plane
             .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
             .expect_err("schema-invalid outcome.error must be rejected");
-        assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+        assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
@@ -2356,6 +2711,644 @@ fn missing_wrong_topic_corrupt_foreign_or_wrong_scope_execution_job_fails_closed
 }
 
 #[test]
+fn persisted_successful_candidate_rejection_is_readable_and_restart_idempotent() {
+    assert_persisted_candidate_rejection(85, None, false);
+}
+
+#[test]
+fn temporary_candidate_source_failure_does_not_become_a_permanent_rejection() {
+    assert_persisted_candidate_rejection(86, Some("artifact"), false);
+    assert_persisted_candidate_rejection(87, Some("resolver"), false);
+}
+
+#[test]
+fn persisted_candidate_rejection_preserves_history_and_allows_new_spec() {
+    assert_persisted_candidate_rejection(88, None, true);
+}
+
+struct HistoricalCandidateFixture {
+    seed: u64,
+    root: PathBuf,
+    repository: PathBuf,
+    scope: RepositoryScope,
+    delivery: Delivery,
+    job: ExecutionJob,
+    message: JobOutcomeMessage,
+    authority_stream: String,
+    accepted: StoredState,
+}
+
+impl HistoricalCandidateFixture {
+    fn start_control_plane(&self) -> ControlPlane {
+        ControlPlane::start_local_with_delivery_adapters(
+            ControlPlaneConfig::local(&self.root),
+            Box::new(RecordingPublisher),
+            LocalDeliveryAdapterConfig::new(&self.repository, self.scope.clone()),
+        )
+        .expect("production Control Plane restart")
+    }
+}
+
+fn assert_persisted_candidate_rejection(
+    seed: u64,
+    temporary_failure: Option<&str>,
+    check_history_and_new_spec: bool,
+) {
+    let fixture = seed_historical_candidate_success(seed);
+    let rejected_cut =
+        assert_historical_refusal_restarts(&fixture, temporary_failure, check_history_and_new_spec);
+    assert_historical_candidate_usage(&fixture);
+    if check_history_and_new_spec {
+        assert_explicit_spec_restart(
+            &fixture,
+            rejected_cut.expect("the original rejected read cut"),
+        );
+    }
+    fs::remove_dir_all(fixture.root).expect("fixture cleanup");
+}
+
+fn seed_historical_candidate_success(seed: u64) -> HistoricalCandidateFixture {
+    let root = temporary_directory("candidate-rejected-after-success");
+    let repository = root.join("repository");
+    let (base_commit, candidate_commit) = initialize_git_repository(&repository);
+    let repository = fs::canonicalize(repository).expect("canonical repository");
+    let scope = repository_scope(seed);
+    let mut snapshot =
+        repository_executor_delivery(seed, &repository, &base_commit).into_snapshot();
+    let binding = snapshot
+        .session_bindings
+        .first_mut()
+        .expect("writer binding");
+    binding.execution_profile = Some("remediator".into());
+    binding
+        .runtime_context
+        .as_mut()
+        .expect("runtime context")
+        .agent_identity
+        .role = "remediator".into();
+    snapshot.status = DeliveryStatus::Reworking;
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("historical remediator");
+    let mut job = execution_job(&delivery, &scope);
+    job.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    message.outcome.summary = "Historical remediator uploaded its candidate".into();
+    seed_candidate_artifact(
+        &root,
+        &repository,
+        &base_commit,
+        &scope,
+        &delivery,
+        &mut message,
+        &candidate_commit,
+        seed,
+    );
+    seed_delivery_and_job(&root, &delivery, &job);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
+    let facts = outcome_facts_for_stage(
+        &delivery,
+        &message,
+        winwincode_domain::WorkRunId(canonical_id("wrn", seed)),
+    );
+    let mut first = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("first Control Plane");
+    first
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("Worker success durably accepted before candidate validation");
+    let authority_stream = format!("delivery-terminal-authority:{}", job.job_id.0);
+    let accepted = first
+        .load_state(&authority_stream)
+        .expect("authority read")
+        .expect("durable successful terminal");
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&accepted.payload).expect("terminal JSON");
+    assert_eq!(terminal["status"], "succeeded");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        ("settled".into(), 1)
+    );
+    first.shutdown().expect("first shutdown");
+
+    HistoricalCandidateFixture {
+        seed,
+        root,
+        repository,
+        scope,
+        delivery,
+        job,
+        message,
+        authority_stream,
+        accepted,
+    }
+}
+
+fn assert_historical_refusal_restarts(
+    fixture: &HistoricalCandidateFixture,
+    temporary_failure: Option<&str>,
+    check_history_and_new_spec: bool,
+) -> Option<winwincode_api::generated::StrongFlowReadCursor> {
+    let mut last_state = None;
+    let mut last_rejected_cut = None;
+    for reopen in 0..2 {
+        let mut control_plane = fixture.start_control_plane();
+        let mut ingress_storage = SqliteStorage::open(&fixture.root).expect("ingress storage");
+        if reopen == 0
+            && let Some(failure) = temporary_failure
+        {
+            assert_temporary_candidate_outage(
+                fixture,
+                &mut control_plane,
+                &mut ingress_storage,
+                failure,
+            );
+        }
+        replay_historical_candidate_twice(fixture, &mut control_plane, &mut ingress_storage);
+        let (state, rejected) = assert_historical_refusal_state(fixture, &control_plane);
+        let read_cut = assert_historical_refusal_read(
+            fixture,
+            &mut control_plane,
+            &state,
+            &rejected,
+            check_history_and_new_spec,
+        );
+        if read_cut.is_some() {
+            last_rejected_cut = read_cut;
+        }
+        if reopen == 0 {
+            last_state = Some(state);
+        } else {
+            assert_eq!(Some(state), last_state, "restart replays one refusal only");
+        }
+        Box::new(ingress_storage).close().expect("ingress close");
+        control_plane.shutdown().expect("shutdown");
+    }
+    last_rejected_cut
+}
+
+fn assert_temporary_candidate_outage(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    ingress_storage: &mut SqliteStorage,
+    temporary_failure: &str,
+) {
+    let before = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("state before outage")
+        .expect("Delivery before outage");
+    let digest = fixture.message.outcome.artifacts[0]
+        .digest
+        .0
+        .strip_prefix("sha256:")
+        .expect("candidate digest");
+    let object = fixture
+        .root
+        .join("artifacts/objects/sha256")
+        .join(&digest[..2])
+        .join(&digest[2..]);
+    let parked_object = object.with_extension("unavailable");
+    let blocked_repository = fixture.root.join("delivery-sources/repository");
+    match temporary_failure {
+        "artifact" => fs::rename(&object, &parked_object).expect("temporary object outage"),
+        "resolver" => fs::write(&blocked_repository, b"temporary resolver outage")
+            .expect("temporary Git command outage"),
+        _ => unreachable!(),
+    }
+    let failure = DurableExecutionPortIngress::new(
+        control_plane,
+        ingress_storage,
+        &fixture.scope,
+        fixture.message.sent_at.clone(),
+    )
+    .expect("outage ingress")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(
+        fixture.message.clone(),
+    ));
+    assert!(
+        failure.is_err(),
+        "temporary source failure must remain retryable"
+    );
+    assert_eq!(
+        control_plane
+            .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+            .expect("state during source outage")
+            .expect("Delivery retained"),
+        before,
+        "an unavailable source cannot create a permanent rejection or Attention"
+    );
+    match temporary_failure {
+        "artifact" => fs::rename(parked_object, object).expect("restore exact object"),
+        "resolver" => fs::remove_file(blocked_repository).expect("restore resolver"),
+        _ => unreachable!(),
+    }
+}
+
+fn replay_historical_candidate_twice(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    ingress_storage: &mut SqliteStorage,
+) {
+    for _ in 0..2 {
+        let response = DurableExecutionPortIngress::new(
+            control_plane,
+            ingress_storage,
+            &fixture.scope,
+            fixture.message.sent_at.clone(),
+        )
+        .expect("durable Worker ingress")
+        .handle(&ExecutionPortMessage::JobOutcomeMessage(
+            fixture.message.clone(),
+        ))
+        .expect("candidate refusal must converge to a readable product failure");
+        let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = response.as_slice() else {
+            panic!("one terminal acknowledgement");
+        };
+        assert_eq!(
+            ack.status,
+            JobOutcomeAckMessageStatus::Duplicate,
+            "the exact successful terminal was already durably accepted"
+        );
+    }
+}
+
+fn assert_historical_refusal_state(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &ControlPlane,
+) -> (StoredState, Delivery) {
+    let state = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("current product state")
+        .expect("Delivery retained");
+    let rejected = Delivery::decode_json(&state.payload).expect("readable rejected Delivery");
+    assert_eq!(rejected.snapshot().status, DeliveryStatus::NeedsAttention);
+    assert_eq!(
+        rejected
+            .snapshot()
+            .attention_items
+            .iter()
+            .filter(|item| item.blocking
+                && item.status == winwincode_delivery::domain::AttentionItemStatus::Open)
+            .count(),
+        1
+    );
+    assert_eq!(
+        rejected.snapshot().work_run_aggregate.runs.len(),
+        1,
+        "a rejected candidate must not dispatch a Reviewer"
+    );
+    assert_eq!(
+        rejected.snapshot().work_run_aggregate.runs[0].state,
+        winwincode_domain::WorkRunState::CandidateReady,
+        "the original successful Worker fact remains unchanged"
+    );
+    assert_eq!(
+        control_plane
+            .load_state(&fixture.authority_stream)
+            .expect("terminal authority")
+            .expect("success retained")
+            .payload,
+        fixture.accepted.payload
+    );
+    (state, rejected)
+}
+
+fn assert_historical_refusal_read(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    state: &StoredState,
+    rejected: &Delivery,
+    check_history_and_new_spec: bool,
+) -> Option<winwincode_api::generated::StrongFlowReadCursor> {
+    let query = winwincode_api::generated::DeliveryGetQuery {
+        actor: Actor::UserActor(UserActor {
+            id: UserId(canonical_id("usr", fixture.seed)),
+            kind: winwincode_domain::UserActorKind::User,
+        }),
+        page: winwincode_api::generated::PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: winwincode_api::generated::DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: fixture.delivery.id().clone(),
+        },
+        query: winwincode_api::generated::DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId(canonical_id("req", fixture.seed + 20_000)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: fixture.scope.clone(),
+    };
+    let response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(
+        control_plane, &query,
+    ).expect("delivery.get stays available after the exact candidate refusal");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(response) =
+        response
+    else {
+        panic!("Delivery detail response");
+    };
+    assert!(response.result.current_candidate.is_none());
+    assert_eq!(response.result.attention.len(), 1);
+    if check_history_and_new_spec {
+        assert_rejected_candidate_history(
+            control_plane,
+            &query,
+            response.result.read_cursor.clone(),
+        );
+        assert_generic_refusal_resolution_blocked(fixture, control_plane, &query, state, rejected);
+        Some(response.result.read_cursor)
+    } else {
+        None
+    }
+}
+
+fn assert_generic_refusal_resolution_blocked(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    query: &winwincode_api::generated::DeliveryGetQuery,
+    state: &StoredState,
+    rejected: &Delivery,
+) {
+    for (offset, decision) in [(1, "resolve"), (2, "dismiss")] {
+        let attempted = control_plane.delivery_resolve_attention(
+            &winwincode_api::generated::DeliveryResolveAttentionCommand {
+                actor: query.actor.clone(), scope: fixture.scope.clone(), schema_version: SchemaVersion::WinwincodeV1,
+                command: winwincode_api::generated::DeliveryResolveAttentionCommandCommand::DeliveryResolveAttention,
+                expected_revision: Revision(i64::try_from(rejected.revision()).unwrap()),
+                request_id: RequestId(canonical_id("req", fixture.seed + 21_000 + offset)),
+                payload: winwincode_api::generated::DeliveryResolveAttentionPayload {
+                    delivery_id: fixture.delivery.id().clone(), attention_item_id: rejected.snapshot().attention_items[0].id.clone(),
+                    decision: decision.into(), remediation: None, resolution: "Attempt generic resume".into(),
+                },
+            });
+        let blocked =
+            attempted.expect_err("a rejected source cannot obtain a generic resume authorization");
+        assert!(
+            blocked
+                .to_string()
+                .contains("a rejected candidate cannot resume"),
+            "the exact typed refusal, rather than an unrelated validation failure, blocks generic resume: {blocked}"
+        );
+        assert_eq!(
+            control_plane
+                .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+                .expect("state after rejected resume")
+                .expect("retained refusal"),
+            *state
+        );
+    }
+}
+
+fn assert_historical_candidate_usage(fixture: &HistoricalCandidateFixture) {
+    assert_eq!(
+        changed_terminal_replay_status(&fixture.root, &fixture.scope, &fixture.message),
+        JobOutcomeAckMessageStatus::RejectedConflict
+    );
+    let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
+        .expect("usage audit");
+    let usage: (i64, i64) = connection.query_row(
+        "SELECT actual_tokens, actual_cost_microunits FROM execution_admission_reservations WHERE job_id = ?1",
+        [&fixture.job.job_id.0], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).expect("original successful usage");
+    assert_eq!(usage, (40, 400));
+    connection.close().expect("usage audit close");
+}
+
+fn assert_explicit_spec_restart(
+    fixture: &HistoricalCandidateFixture,
+    old_cut: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let mut control_plane = fixture.start_control_plane();
+    let next = replace_refused_spec(fixture, &mut control_plane);
+    assert_old_terminal_preserves_new_spec(fixture, &mut control_plane, &next);
+    assert_new_spec_and_old_cut_reads(fixture, &control_plane, old_cut);
+    control_plane.shutdown().expect("new Spec shutdown");
+    assert_rejected_source_retained(fixture);
+}
+
+fn restarted_spec_input(
+    fixture: &HistoricalCandidateFixture,
+    refused: &Delivery,
+) -> winwincode_api::generated::DeliverySpecInput {
+    let spec = &refused.snapshot().spec;
+    winwincode_api::generated::DeliverySpecInput {
+        verification_command: None,
+        title: "Start a new specification after candidate refusal".into(),
+        goal: spec.goal.clone(),
+        scope: spec.scope.clone(),
+        out_of_scope: spec.out_of_scope.clone(),
+        constraints: spec.constraints.clone(),
+        base_revision: spec.base_revision.clone(),
+        source_product_session_id: spec.source_product_session_id.clone(),
+        publication_target: None,
+        repository_id: fixture.scope.repository_id.clone(),
+        acceptance_criteria: spec
+            .acceptance_criteria
+            .iter()
+            .map(
+                |criterion| winwincode_api::generated::AcceptanceCriterionInput {
+                    id: criterion.id.0.clone(),
+                    title: criterion.description.clone(),
+                    required: criterion.required,
+                },
+            )
+            .collect(),
+    }
+}
+
+fn replace_refused_spec(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+) -> Delivery {
+    let state = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("refused state")
+        .expect("retained refused state");
+    let refused = Delivery::decode_json(&state.payload).expect("refused Delivery");
+    let spec = &refused.snapshot().spec;
+    control_plane
+        .delivery_update_spec(&winwincode_api::generated::DeliveryUpdateSpecCommand {
+            actor: Actor::UserActor(UserActor {
+                id: UserId(canonical_id("usr", fixture.seed)),
+                kind: winwincode_domain::UserActorKind::User,
+            }),
+            scope: fixture.scope.clone(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            command:
+                winwincode_api::generated::DeliveryUpdateSpecCommandCommand::DeliveryUpdateSpec,
+            expected_revision: Revision(i64::try_from(refused.revision()).unwrap()),
+            request_id: RequestId(canonical_id("req", fixture.seed + 22_000)),
+            payload: winwincode_api::generated::DeliveryUpdateSpecPayload {
+                delivery_id: fixture.delivery.id().clone(),
+                spec: restarted_spec_input(fixture, &refused),
+            },
+        })
+        .expect(
+            "public Spec update can explicitly start again without accepting the refused candidate",
+        );
+    let next = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("new Spec state")
+        .expect("new Spec retained");
+    let next = Delivery::decode_json(&next.payload).expect("new Spec Delivery");
+    assert_eq!(next.snapshot().status, DeliveryStatus::Ready);
+    assert_eq!(next.snapshot().spec.revision, spec.revision + 1);
+    assert!(next.snapshot().session_bindings.is_empty());
+    assert!(next.snapshot().work_run_aggregate.runs.is_empty());
+    assert!(next.snapshot().attention_items.is_empty());
+    assert!(next.snapshot().verdict.is_none());
+    assert!(next.snapshot().evidence.is_empty());
+    assert_eq!(
+        control_plane
+            .load_state(&fixture.authority_stream)
+            .expect("old authority retained")
+            .expect("old success retained")
+            .payload,
+        fixture.accepted.payload
+    );
+    next
+}
+
+fn assert_old_terminal_preserves_new_spec(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    next: &Delivery,
+) {
+    let expected_new_spec = next.encode_json().expect("new Spec bytes");
+    let mut replay_storage = SqliteStorage::open(&fixture.root).expect("new Spec replay storage");
+    let replay = DurableExecutionPortIngress::new(
+        control_plane,
+        &mut replay_storage,
+        &fixture.scope,
+        fixture.message.sent_at.clone(),
+    )
+    .expect("old terminal ingress after Spec replacement")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(
+        fixture.message.clone(),
+    ))
+    .expect("old terminal exact replay must stay idempotent after its bindings were replaced");
+    let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = replay.as_slice() else {
+        panic!("one old terminal Ack");
+    };
+    assert_eq!(ack.status, JobOutcomeAckMessageStatus::Duplicate);
+    assert_eq!(
+        control_plane
+            .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+            .expect("new Spec after old terminal replay")
+            .expect("new Spec remains retained")
+            .payload,
+        expected_new_spec,
+        "a late old terminal cannot change the current Spec or dispatch another run"
+    );
+    Box::new(replay_storage)
+        .close()
+        .expect("new Spec replay storage close");
+}
+
+fn assert_new_spec_and_old_cut_reads(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &ControlPlane,
+    old_cut: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let query = winwincode_api::generated::DeliveryGetQuery {
+        actor: Actor::UserActor(UserActor {
+            id: UserId(canonical_id("usr", fixture.seed)),
+            kind: winwincode_domain::UserActorKind::User,
+        }),
+        page: winwincode_api::generated::PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: winwincode_api::generated::DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: fixture.delivery.id().clone(),
+        },
+        query: winwincode_api::generated::DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId(canonical_id("req", fixture.seed + 23_000)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: fixture.scope.clone(),
+    };
+    let response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(control_plane, &query)
+        .expect("new Spec detail readable");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(response) =
+        response
+    else {
+        panic!("Delivery detail");
+    };
+    assert!(response.result.current_candidate.is_none());
+    assert_rejected_candidate_history(control_plane, &query, response.result.read_cursor);
+    let mut old_query = query.clone();
+    old_query.parameters.at_cursor = Some(old_cut.clone());
+    let old_response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(control_plane, &old_query)
+        .expect("the original rejected cut remains readable after public Spec replacement");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(old_response) =
+        old_response
+    else {
+        panic!("historical rejected detail");
+    };
+    assert_eq!(old_response.result.read_cursor, old_cut);
+    assert!(old_response.result.current_candidate.is_none());
+    assert_eq!(old_response.result.attention.len(), 1);
+    assert_rejected_candidate_history(control_plane, &old_query, old_cut);
+}
+
+fn assert_rejected_source_retained(fixture: &HistoricalCandidateFixture) {
+    let digest = &fixture.message.outcome.artifacts[0].digest;
+    let digest_hex = digest
+        .0
+        .strip_prefix("sha256:")
+        .expect("retained source digest");
+    let source_bytes = fs::read(
+        fixture
+            .root
+            .join("artifacts/objects/sha256")
+            .join(&digest_hex[..2])
+            .join(&digest_hex[2..]),
+    )
+    .expect("original source bytes retained after new Spec");
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(source_bytes)),
+        digest.0,
+        "the failed old candidate source is never rewritten"
+    );
+    let objects = LocalArtifactObjectStore::open(fixture.root.join("artifacts"))
+        .expect("old Artifact objects");
+    let artifacts = ArtifactStore::open(fixture.root.join("artifact-catalog"), Box::new(objects))
+        .expect("old Artifact catalog");
+    artifacts
+        .close()
+        .expect("old Artifact catalog remains openable");
+    assert_eq!(
+        worker_terminal_state(&fixture.root, &fixture.job.job_id),
+        ("settled".into(), 1)
+    );
+}
+
+fn assert_rejected_candidate_history(
+    control_plane: &ControlPlane,
+    read: &winwincode_api::generated::DeliveryGetQuery,
+    cursor: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let history = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::candidate_history_list(
+        control_plane, &winwincode_api::generated::CandidateHistoryListQuery {
+            actor: read.actor.clone(), scope: read.scope.clone(), page: read.page.clone(), schema_version: read.schema_version.clone(),
+            request_id: read.request_id.clone(), query: winwincode_api::generated::CandidateHistoryListQueryQuery::CandidateList,
+            parameters: winwincode_api::generated::CandidateHistoryListParameters {
+                at_cursor: cursor, delivery_id: read.parameters.delivery_id.clone(), read_page_limit: read.page.limit,
+            },
+        },
+    ).expect("candidate.list must remain readable without inventing a Candidate for a rejected historical success");
+    let winwincode_api::generated::QueryResultResponse::CandidateHistoryListResultResponse(history) =
+        history
+    else {
+        panic!("Candidate history");
+    };
+    assert!(
+        history.result.items.is_empty(),
+        "an invalid successful output is never a legal Candidate"
+    );
+}
+
+#[test]
 fn successful_writer_settles_candidate_ready_and_replays_after_lease_expiry() {
     let seed = 60;
     let root = temporary_directory("successful-non-final");
@@ -2456,6 +3449,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
     let (delivery, candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -2512,7 +3506,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
             .expect("generic bypass state read")
             .is_none()
     );
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }

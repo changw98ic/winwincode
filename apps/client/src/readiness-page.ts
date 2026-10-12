@@ -17,10 +17,6 @@ export interface ReadinessFixTarget {
 export interface ReadinessPageOptions {
   readonly root: HTMLElement
   readonly model: ReadinessViewModel
-  /**
-   * Presentation-only fix entries; the application builds them from the current Scope
-   * and the checked item facts.
-   */
   readonly fixTarget: (item: ReadinessItemState) => ReadinessFixTarget | null
 }
 
@@ -92,7 +88,6 @@ function checkedText(item: ReadinessItemState): string | null {
   return `检查于 ${formatInstant(item.checkedAt)}`
 }
 
-/** Mount the first-run checklist panel against its read-only view-model facts. */
 export function mountReadinessPage(options: ReadinessPageOptions): ReadinessPage {
   const document = options.root.ownerDocument
   const section = element(document, 'section', 'wwc-readiness')
@@ -157,8 +152,6 @@ export function mountReadinessPage(options: ReadinessPageOptions): ReadinessPage
 
   function render(state: ReadinessViewModelState): void {
     if (closed) return
-    // Design page 02: readiness is onboarding. Once every check passes the
-    // section disappears instead of occupying a row on work surfaces.
     section.hidden = state.status === 'ready'
     summary.textContent = summaryText(state)
     toggle.setAttribute('aria-expanded', state.collapsed ? 'false' : 'true')

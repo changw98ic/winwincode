@@ -1,12 +1,12 @@
+#![recursion_limit = "256"]
 // SPDX-License-Identifier: Apache-2.0
 
-#![recursion_limit = "256"]
-
-//! Standalone Execution Worker process entrypoint.
+mod shutdown_signal;
 
 use std::env;
 use std::fs;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -64,16 +64,13 @@ fn print_identity() {
     }
 }
 
-/// Identity and locality inputs the two entries differ on. Everything the
-/// execution loop needs beyond this (TLS trust root, helper release,
-/// provider model selection, action signing, execution envelope) stays on
-/// the existing process environment for both entries.
 struct WorkerBootstrap {
     exit_after_work: bool,
     worker_id: WorkerId,
     worker_instance_id: WorkerInstanceId,
     started_at: Instant,
     data_directory: PathBuf,
+    execution_workspace_directory: Option<PathBuf>,
     provider_directory: PathBuf,
     source_directory: PathBuf,
     server_origin: String,
@@ -101,6 +98,7 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
         started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
         data_directory: PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?),
+        execution_workspace_directory: None,
         provider_directory: PathBuf::from(required("WWC_DEVICE_PROVIDER_DIRECTORY")?),
         source_directory: PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?),
         server_origin: required("WWC_WORKER_SERVER_ORIGIN")?,
@@ -110,12 +108,21 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
     Box::pin(run_worker(bootstrap)).await
 }
 
-/// Managed entry (plan §14.4): identity and locality come only from the
-/// local mode-0600 config file written by the Device Client. The execution
-/// loop below is the exact `--remote` machinery over the same
-/// `serverOrigin` `ExecutionPort` exchange; nothing is read from or decided
-/// by the Server beyond that existing protocol.
+fn await_managed_start_gate(
+    mut input: impl std::io::Read,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut release = [0u8; 1];
+    input.read_exact(&mut release)?;
+    if release != [1] {
+        return Err("managed start gate rejected".into());
+    }
+    Ok(())
+}
+
 async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if env::var("WWC_MANAGED_START_GATE").as_deref() == Ok("1") {
+        await_managed_start_gate(std::io::stdin())?;
+    }
     let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
     let credential = WorkerSessionCredential::load(&config.worker_credential_path)?;
     eprintln!(
@@ -136,6 +143,7 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
         worker_instance_id: config.worker_instance_id.clone(),
         started_at: now_instant()?,
         data_directory: config.data_directory.clone(),
+        execution_workspace_directory: config.execution_workspace_directory.clone(),
         provider_directory: config.provider_directory.clone(),
         source_directory: config.source_directory.clone(),
         server_origin: config.server_origin.clone(),
@@ -148,22 +156,64 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
     .await
 }
 
-/// The shared execution main loop. Both entries run the same registration,
-/// control drain, heartbeat, and Codex drive cycles over
-/// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
+async fn register_until_active<Port, Codex>(
+    worker: &mut WorkerMain<Port, Codex>,
+    handle: &RemoteWorkerTransportHandle,
+    started_at: &Instant,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Port: winwincode_codex::WorkerExecutionPort,
+    Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
+{
+    while worker.lifecycle() == WorkerLifecycleState::Booting
+        || worker.lifecycle() == WorkerLifecycleState::Registering
+    {
+        if let Err(error) = Box::pin(worker.start(started_at.clone())).await {
+            eprintln!(
+                "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
+                error.code,
+                error.reason,
+                worker.lifecycle()
+            );
+        }
+        if let Some(error) = worker
+            .transport_failure()
+            .or_else(|| worker.required_delivery_failure())
+        {
+            return Err(error.into());
+        }
+        Box::pin(drain_controls(worker, handle)).await?;
+        if let Some(error) = handle.terminal_error() {
+            return Err(error.into());
+        }
+        if worker.lifecycle() != WorkerLifecycleState::Active {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the composition owns registration, control delivery, and bounded shutdown"
+)]
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
+    let mut interrupt = shutdown_signal::WorkerInterrupt::new()?;
     let WorkerBootstrap {
         exit_after_work,
         worker_id,
         worker_instance_id,
         started_at,
         data_directory,
+        execution_workspace_directory,
         provider_directory,
         source_directory,
         server_origin,
         credential_path,
         model_route,
     } = bootstrap;
+    #[cfg(feature = "test-support")]
+    winwincode_worker::mechanism_timing::configure(data_directory.join("mechanism-timing.jsonl"));
     let capabilities = worker_capabilities()?;
     let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
     let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
@@ -176,6 +226,12 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker_instance_id.clone(),
         Duration::from_secs(15),
     )?;
+    let _accounting_reconciler = port.spawn_accounting_reconciler(
+        provider_directory.clone(),
+        ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
+            "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
+        )?)?)?,
+    );
     let codex = production_codex(
         &data_directory,
         &provider_directory,
@@ -186,16 +242,22 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     )?;
     let validation_artifacts =
         DurableValidationArtifactStore::open(data_directory.join("worker-validation-artifacts"))?;
-    let workspaces =
-        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
-            .with_validation_artifact_port(validation_artifacts);
+    let workspaces = match execution_workspace_directory {
+        Some(root) => JobWorkspaceRuntime::open_partitioned(root, &source_directory)?,
+        None => {
+            JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
+        }
+    }
+    .with_validation_artifact_port(validation_artifacts);
     let config = WorkerConfig {
         worker_id,
         worker_instance_id: worker_instance_id.clone(),
         started_at: started_at.clone(),
         capabilities,
     };
-    let intake_log = data_directory.join("codex-runtime").join("model-intake.log");
+    let intake_log = data_directory
+        .join("codex-runtime")
+        .join("model-intake.log");
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
         .with_device_providers(&provider_directory)?
         .with_observer_mode(observer_mode)
@@ -205,59 +267,72 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker = worker.with_observation_model(observation_model);
     }
 
-    while worker.lifecycle() == WorkerLifecycleState::Booting
-        || worker.lifecycle() == WorkerLifecycleState::Registering
-    {
-        match Box::pin(worker.start(started_at.clone())).await {
-            Ok(()) => {
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-            }
-            Err(error) => {
-                // Secret-safe lifecycle category only: a Device StrongFlow
-                // Worker that silently retries registration forever is
-                // indistinguishable from a hung process in production logs.
-                eprintln!(
-                    "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
-                    error.code,
-                    error.reason,
-                    worker.lifecycle()
-                );
-            }
+    let registration = tokio::select! {
+        result = Box::pin(register_until_active(&mut worker, &handle, &started_at)) => Some(result),
+        () = interrupt.wait() => None,
+    };
+    match registration {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Err(error);
         }
-        if worker.lifecycle() != WorkerLifecycleState::Active {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        None => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Ok(());
         }
     }
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
+    drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            _ = heartbeat.tick() => {
-                let now = now_instant()?;
-                if Box::pin(worker.heartbeat(now.clone())).await.is_ok() {
-                    Box::pin(drain_controls(&mut worker, &handle)).await?;
-                }
-            }
+            () = interrupt.wait() => break,
             _ = drive.tick() => {
-                let now = now_instant()?;
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                // Retry pending Worker→Server evidence every drive tick so a
-                // Server restart / Connection-refused window cannot strand
-                // runtime.event / artifact.chunk / JobOutcome in the outbox.
-                if worker.lifecycle() == WorkerLifecycleState::Active
-                    && Box::pin(worker.flush_durable_outbox()).await.is_err()
-                    && env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!("winwincode-worker: durable outbox flush retry failed");
+                let step = async {
+                if worker.transport_failure().is_some() { return Ok(true); }
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_entry", &serde_json::json!({}));
+                if let Some(error) = Box::pin(worker.drive_with_controls(&handle, now_instant)).await? {
+                    if !observed_drive_failures.contains(&error.code) {
+                        observed_drive_failures.push(error.code);
+                        if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
+                            let diagnostic = if error.code == winwincode_worker::WorkerErrorCode::RuntimeTraceMismatch {
+                                error.reason.as_str()
+                            } else { "" };
+                            let _ = writeln!(log, "component=worker stage=drive code={:?} {diagnostic}", error.code);
+                        }
+                    }
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
+                    }
                 }
-                let _ = Box::pin(worker.poll_codex(now)).await;
-                if exit_after_work && worker.work_drained() { break; }
+                #[cfg(feature = "test-support")]
+                winwincode_worker::mechanism_timing::record("drive_exit", &serde_json::json!({}));
+                Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                if result? { break; }
             }
+        }
+        if handle.terminal_error().is_some()
+            || worker.transport_failure().is_some()
+            || (worker.required_delivery_failure().is_some() && worker.active_jobs().is_empty())
+        {
+            break;
         }
     }
     let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+    if let Some(error) = handle.terminal_error() {
+        return Err(error.into());
+    }
+    if let Some(error) = worker
+        .transport_failure()
+        .or_else(|| worker.required_delivery_failure())
+    {
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -269,47 +344,7 @@ where
     Port: winwincode_codex::WorkerExecutionPort,
     Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
 {
-    while let Some((delivery_id, message)) = handle.next_control()? {
-        match worker.accept_control(&message, now_instant()?).await {
-            Ok(()) => handle.confirm(delivery_id)?,
-            Err(error) => {
-                if env::var_os("WWC_DEBUG_REMOTE_WORKER").is_some() {
-                    let kind = serde_json::to_value(&message)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("kind")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    eprintln!(
-                        "remote Worker control rejected: kind={kind}; category={:?}",
-                        error.code
-                    );
-                }
-                handle.retry(&delivery_id)?;
-                if error.code == winwincode_worker::WorkerErrorCode::ExecutionPort {
-                    return Ok(());
-                }
-                // Keep the process alive while durable Worker→Server evidence
-                // is still pending. Exiting here after a Server restart or a
-                // transient control reject strands verification frames that
-                // never reach the Control Plane verdict path.
-                if worker.has_pending_durable_evidence() {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!(
-                            "remote Worker control rejected with pending durable evidence; retrying kind category={:?}",
-                            error.code
-                        );
-                    }
-                    return Ok(());
-                }
-                return Err(Box::new(error));
-            }
-        }
-    }
-    Ok(())
+    worker.drain_controls(handle, now_instant).await
 }
 
 fn production_codex(
@@ -328,6 +363,17 @@ fn production_codex(
     let extensions = store.restore_extensions(&data_directory.join("codex-runtime/kernel-home"))?;
     let mut discovered_capabilities = Vec::new();
     for server in extensions {
+        for operation in winwincode_execution_port::mcp_resource::McpResourceOperation::ALL {
+            discovered_capabilities.push(
+                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp_resource(
+                    &server.server,
+                    operation,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                )?,
+            );
+        }
         for tool in server.tools {
             discovered_capabilities.push(
                 winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp(
@@ -368,14 +414,112 @@ fn production_codex(
         execution_mode,
         observer_mode,
     };
-    Ok(
-        ProductionCodexAdapter::open(ProductionCodexConfig::try_new(options)?)?
-            .with_device_extensions(provider_directory.to_path_buf())?,
-    )
+    let mut config = ProductionCodexConfig::try_new(options)?;
+    match env::var("WWC_WORKER_APPROVAL_OWNER").as_deref() {
+        Ok("execution_port") => config = config.with_host_action_approvals(),
+        Ok("core") | Err(env::VarError::NotPresent) => {}
+        _ => return Err("invalid Worker approval owner".into()),
+    }
+    if let Some(value) = env::var_os("WWC_BENCHMARK_SEALED_TOOLS") {
+        if value != "1" {
+            return Err("invalid benchmark sealed tools".into());
+        }
+        config = config.with_sealed_benchmark_tools();
+    }
+    if let Some(effort) = env::var_os("WWC_WORKER_MODEL_REASONING_EFFORT") {
+        config =
+            config.with_reasoning_effort(effort.to_str().ok_or("invalid reasoning effort")?)?;
+    }
+    if let Some(settings) = configured_fusion(env::var_os("WWC_WORKER_FUSION").as_deref())? {
+        config = config.with_fusion(settings)?;
+    }
+    let judge = env::var_os("WWC_WORKER_JEV_JUDGE");
+    let context = env::var_os("WWC_WORKER_JEV_CONTEXT");
+    let file = env::var_os("WWC_DEVICE_JEV_SETTINGS_FILE");
+    if let Some(provider) = configured_jev_judge(&store, judge.as_deref(), file.as_deref())? {
+        config = config.with_jev_judge(provider)?;
+    }
+    if let Some(settings) = configured_jev_context(
+        &store,
+        context.as_deref(),
+        if judge.is_some() && context.is_none() {
+            None
+        } else {
+            file.as_deref()
+        },
+    )? {
+        config = config.with_jev_context(settings)?;
+    }
+    Ok(ProductionCodexAdapter::open(config)?
+        .with_device_extensions(provider_directory.to_path_buf())?)
 }
 
-/// Canonical model route used when no managed config override exists —
-/// identical to the previous hardcoded `--remote` value.
+fn configured_fusion(
+    profile: Option<&std::ffi::OsStr>,
+) -> Result<
+    Option<winwincode_execution_port::agent_config::AgentFusionSettings>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let settings = serde_json::from_str(profile.to_str().ok_or("invalid Fusion profile")?)
+        .map_err(|_| "invalid Fusion profile")?;
+    winwincode_execution_port::agent_config::validate_fusion_settings(&settings)
+        .map_err(|_| "invalid Fusion members")?;
+    Ok(Some(settings))
+}
+
+fn configured_jev_judge(
+    store: &winwincode_provider::DeviceProviderStore,
+    profile: Option<&std::ffi::OsStr>,
+    settings_file: Option<&std::ffi::OsStr>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let provider = profile.to_str().ok_or("invalid JEV Judge provider")?;
+    if provider.is_empty()
+        || provider.len() > 200
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        return Err("invalid JEV Judge provider".into());
+    }
+    if let Some(path) = settings_file {
+        store.import_jev_settings(std::path::Path::new(path), provider)?;
+    }
+    store.resolve_jev_settings(provider)?;
+    Ok(Some(provider.to_owned()))
+}
+
+fn configured_jev_context(
+    store: &winwincode_provider::DeviceProviderStore,
+    profile: Option<&std::ffi::OsStr>,
+    settings_file: Option<&std::ffi::OsStr>,
+) -> Result<
+    Option<winwincode_execution_port::agent_config::AgentJevContextSettings>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(profile) = profile else {
+        if settings_file.is_some() {
+            return Err("JEV settings file requires WWC_WORKER_JEV_CONTEXT".into());
+        }
+        return Ok(None);
+    };
+    let settings: winwincode_execution_port::agent_config::AgentJevContextSettings =
+        serde_json::from_str(profile.to_str().ok_or("invalid JEV context profile")?)
+            .map_err(|_| "invalid JEV context profile")?;
+    winwincode_execution_port::jev_decision::validate_policy(&settings.policy)
+        .map_err(|_| "invalid JEV context policy")?;
+    if let Some(path) = settings_file {
+        store.import_jev_settings(std::path::Path::new(path), &settings.provider)?;
+    }
+    store.resolve_jev_settings(&settings.provider)?;
+    Ok(Some(settings))
+}
+
 fn default_model_route() -> ModelGatewayRoute {
     ModelGatewayRoute {
         capability: "reasoning".to_owned(),
@@ -520,6 +664,255 @@ mod tests {
         ExecutionMode, ObserverMode, configured_observation_model,
         released_worker_execution_mode_required,
     };
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "registration integration uses the released helper and persistent adapter for both transport failure classes"
+    )]
+    async fn registration_returns_permanent_worker_failure_and_retries_only_transient_transport() {
+        use super::*;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use winwincode_codex::{ExecutionPortFailureKind, WorkerExecutionPort};
+        use winwincode_execution_port::generated::{ExecutionPortMessage, WorkerRegisterMessage};
+        struct FailingPort {
+            permanent: bool,
+            calls: Arc<AtomicUsize>,
+        }
+        impl WorkerExecutionPort for FailingPort {
+            type Error = std::io::Error;
+            async fn send(&mut self, _: ExecutionPortMessage) -> Result<(), Self::Error> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::from(if self.permanent {
+                    std::io::ErrorKind::InvalidInput
+                } else {
+                    std::io::ErrorKind::ConnectionRefused
+                }))
+            }
+            fn failure_kind(error: &Self::Error) -> ExecutionPortFailureKind {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    ExecutionPortFailureKind::MessageRejected
+                } else {
+                    ExecutionPortFailureKind::Unavailable
+                }
+            }
+        }
+        for permanent in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let executable = env::current_exe().unwrap();
+            let helper = executable
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("winwincode-kernel-helper");
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../tests/fixtures/contracts/execution-port.valid.json"
+            ))
+            .unwrap();
+            let register: WorkerRegisterMessage = serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "worker.register")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            let config = ProductionCodexConfig::try_new(ProductionCodexOptions {
+                data_directory: root.path().join("codex"),
+                helper_executable: helper.clone(),
+                helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper).unwrap(),
+                provider: "local-fixture".into(),
+                model: "local-fixture".into(),
+                gateway_route: default_model_route(),
+                registered_capabilities: register.capabilities.clone(),
+                discovered_capabilities: Vec::new(),
+                action_signing_key: ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
+                execution_envelope: ExecutionEnvelopeToken {
+                    version: 1,
+                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                },
+                execution_mode: ExecutionMode::React,
+                observer_mode: ObserverMode::Off,
+            })
+            .unwrap();
+            let adapter = ProductionCodexAdapter::open(config).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            fs::create_dir_all(root.path().join("sources")).unwrap();
+            let runtime = JobWorkspaceRuntime::open(
+                root.path().join("workspaces"),
+                root.path().join("sources"),
+            )
+            .unwrap();
+            let mut worker = WorkerMain::new(
+                WorkerConfig {
+                    worker_id: register.worker_id,
+                    worker_instance_id: register.worker_instance_id,
+                    started_at: register.started_at,
+                    capabilities: register.capabilities,
+                },
+                FailingPort {
+                    permanent,
+                    calls: Arc::clone(&calls),
+                },
+                adapter,
+                runtime,
+            );
+            let handle = RemoteWorkerTransportHandle::empty_for_test();
+            let result = tokio::time::timeout(
+                Duration::from_millis(800),
+                Box::pin(register_until_active(
+                    &mut worker,
+                    &handle,
+                    &register.sent_at,
+                )),
+            )
+            .await;
+            if permanent {
+                let error = result
+                    .expect("permanent refusal must exit the registration loop")
+                    .unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<winwincode_worker::WorkerError>()
+                        .unwrap()
+                        .code,
+                    winwincode_worker::WorkerErrorCode::ExecutionMessageRejected
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(!worker.has_pending_durable_evidence());
+            } else {
+                assert!(result.is_err(), "a transient disconnect remains retryable");
+                assert!(calls.load(Ordering::SeqCst) >= 2);
+                assert!(worker.required_delivery_failure().is_none());
+            }
+            assert_eq!(worker.lifecycle(), WorkerLifecycleState::Registering);
+        }
+    }
+
+    #[test]
+    fn managed_start_gate_requires_the_registered_parent_release() {
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(Vec::<u8>::new())).is_err());
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![0])).is_err());
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![1])).is_ok());
+    }
+
+    #[test]
+    fn fusion_startup_validates_exact_members_without_echoing_input() {
+        use std::ffi::OsStr;
+        assert!(super::configured_fusion(None).unwrap().is_none());
+        let mut profile = serde_json::json!({"members":[
+            {"id":"glm","provider":"zhipu-glm","model":"glm-5.3-flash","reasoning":"max"},
+            {"id":"mimo","provider":"xiaomi-mimo","model":"mimo-v2.6-pro","reasoning":"max"},
+            {"id":"ds","provider":"deepseek","model":"deepseek-flash","reasoning":"max"},
+            {"id":"qwen","provider":"qwen","model":"qwen3.8-flash","reasoning":"max"}
+        ]});
+        let parse = |value: &serde_json::Value| {
+            super::configured_fusion(Some(OsStr::new(&value.to_string())))
+        };
+        let settings = parse(&profile).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), profile);
+        profile["members"][1] = profile["members"][0].clone();
+        assert!(parse(&profile).is_err());
+        for input in ["", "private-key", "{\"apiKey\":\"private-key\"}"] {
+            let error = super::configured_fusion(Some(OsStr::new(input))).unwrap_err();
+            assert!(!error.to_string().contains("private-key"));
+        }
+    }
+
+    #[test]
+    fn jev_startup_requires_private_matching_settings() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use winwincode_provider::DeviceProviderStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
+        let path = directory.path().join("jev.toml");
+        let text = "providerId = 'device-jev'\nendpoint = 'https://nli.invalid/score'\napiKey = 'test-private-key'\ntimeoutMs = 1000\nretries = 0\n";
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profile = serde_json::json!({
+            "provider": "device-jev",
+            "policy": {
+                "version": "jev-policy.v1", "minimumConfidence": 0.55,
+                "pinThreshold": 0.9, "keepThreshold": 0.75, "compactThreshold": 0.75,
+                "dropThreshold": 0.9, "taskMemoryThreshold": 0.4,
+                "projectMemoryThreshold": 0.6, "longTermMemoryThreshold": 0.8,
+            }
+        });
+        let serialized = profile.to_string();
+        let profile_arg = Some(OsStr::new(&serialized));
+        let configure = |profile, file| super::configured_jev_context(&store, profile, file);
+        assert!(configure(None, None).unwrap().is_none());
+        assert!(configure(None, Some(path.as_os_str())).is_err());
+        assert!(configure(profile_arg, None).is_err());
+        assert!(configure(Some(OsStr::new("")), Some(path.as_os_str())).is_err());
+        let configured = configure(profile_arg, Some(path.as_os_str()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(configured.provider, "device-jev");
+        assert_eq!(
+            super::configured_jev_judge(&store, Some(OsStr::new("device-jev")), None).unwrap(),
+            Some("device-jev".into())
+        );
+        assert!(
+            super::configured_jev_judge(&store, Some(OsStr::new("other-provider")), None).is_err()
+        );
+        assert!(
+            super::configured_jev_judge(&store, Some(OsStr::new("device-jev\n")), None).is_err()
+        );
+        assert!(
+            super::configured_jev_judge(&store, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(configure(profile_arg, None).unwrap(), Some(configured));
+        let mut invalid = profile.clone();
+        invalid["apiKey"] = "do-not-print-this".into();
+        let invalid_secret = invalid.to_string();
+        let error = configure(Some(OsStr::new(&invalid_secret)), None).unwrap_err();
+        assert!(!error.to_string().contains("do-not-print-this"));
+        invalid = profile;
+        invalid["policy"]["dropThreshold"] = 2.0.into();
+        let invalid_policy = invalid.to_string();
+        assert!(configure(Some(OsStr::new(&invalid_policy)), None).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("link.toml");
+        symlink(&path, &link).unwrap();
+        assert!(configure(profile_arg, Some(link.as_os_str())).is_err());
+        for bad in [
+            text.replace("device-jev", "other-provider"),
+            "broken secret".into(),
+            "x".repeat(65_537),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
+            assert_eq!(
+                store
+                    .resolve_jev_settings("device-jev")
+                    .unwrap()
+                    .api_key
+                    .as_deref(),
+                Some("test-private-key")
+            );
+        }
+        drop(store);
+        let reopened = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
+        assert!(
+            super::configured_jev_context(&reopened, profile_arg, None)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn execution_modes_fail_closed_until_debug_probe_routing_exists() {

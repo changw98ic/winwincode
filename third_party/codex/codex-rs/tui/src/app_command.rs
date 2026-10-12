@@ -75,6 +75,7 @@ pub(crate) enum AppCommand {
     },
     UserInputAnswer {
         id: String,
+        call_id: String,
         response: ToolRequestUserInputResponse,
     },
     RequestPermissionsResponse {
@@ -204,8 +205,16 @@ impl AppCommand {
         }
     }
 
-    pub(crate) fn user_input_answer(id: String, response: ToolRequestUserInputResponse) -> Self {
-        Self::UserInputAnswer { id, response }
+    pub(crate) fn user_input_answer(
+        id: String,
+        call_id: String,
+        response: ToolRequestUserInputResponse,
+    ) -> Self {
+        Self::UserInputAnswer {
+            id,
+            call_id,
+            response,
+        }
     }
 
     pub(crate) fn request_permissions_response(

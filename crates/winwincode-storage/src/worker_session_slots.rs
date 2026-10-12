@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable `WorkerSession` slot ownership joined to existing Worker, lease, and
-//! execution-admission authority.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -80,7 +77,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS worker_session_slots_active_thread
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MAX_ATTEMPT: u64 = 1_000;
 
-/// Per-process resource ceiling for all active `WorkerSession` slots.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotResourceLimits {
     pub max_memory_bytes: u64,
@@ -88,7 +84,6 @@ pub struct WorkerSlotResourceLimits {
     pub max_processes: u64,
 }
 
-/// Resource reservation retained by one active slot.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotResources {
     pub memory_bytes: u64,
@@ -96,7 +91,6 @@ pub struct WorkerSlotResources {
     pub process_slots: u64,
 }
 
-/// Exact authority required for every slot-local mutation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotAuthority {
     pub worker_id: WorkerId,
@@ -109,7 +103,6 @@ pub struct WorkerSlotAuthority {
     pub fencing_token: FencingToken,
 }
 
-/// Durable slot lifecycle.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerSlotState {
@@ -152,7 +145,6 @@ impl WorkerSlotState {
     }
 }
 
-/// Opens one slot after joining Worker, lease, and admission authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotOpenRequest {
     pub authority: WorkerSlotAuthority,
@@ -161,7 +153,6 @@ pub struct WorkerSlotOpenRequest {
     pub opened_at: Instant,
 }
 
-/// Advances exactly one session-local event stream cursor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotEventAdvance {
     pub authority: WorkerSlotAuthority,
@@ -171,7 +162,6 @@ pub struct WorkerSlotEventAdvance {
     pub observed_at: Instant,
 }
 
-/// Requests cancellation for exactly one active session slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotCancellation {
     pub authority: WorkerSlotAuthority,
@@ -180,7 +170,6 @@ pub struct WorkerSlotCancellation {
     pub requested_at: Instant,
 }
 
-/// Terminal result for one slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotCloseRequest {
     pub authority: WorkerSlotAuthority,
@@ -190,7 +179,6 @@ pub struct WorkerSlotCloseRequest {
     pub closed_at: Instant,
 }
 
-/// Reconciles all old-process slots after a Worker process replacement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotRecoveryRequest {
     pub worker_id: WorkerId,
@@ -199,7 +187,6 @@ pub struct WorkerSlotRecoveryRequest {
     pub recovered_at: Instant,
 }
 
-/// Complete durable `WorkerSession` slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotRecord {
     pub authority: WorkerSlotAuthority,
@@ -213,14 +200,12 @@ pub struct WorkerSlotRecord {
     pub terminal_at: Option<Instant>,
 }
 
-/// Replay-safe slot mutation result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotReceipt {
     pub slot: WorkerSlotRecord,
     pub replayed: bool,
 }
 
-/// Restart action applied to one old-process slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum WorkerSlotRecoveryAction {
@@ -228,14 +213,12 @@ pub enum WorkerSlotRecoveryAction {
     Failed { slot: WorkerSlotRecord },
 }
 
-/// Replay-safe, deterministic restart reconciliation result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkerSlotRecoveryReceipt {
     pub actions: Vec<WorkerSlotRecoveryAction>,
     pub replayed: bool,
 }
 
-/// Current authoritative slot/resource capacity for one Worker process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerSlotCapacity {
     pub max_slots: u64,
@@ -245,7 +228,6 @@ pub struct WorkerSlotCapacity {
     pub reserved: WorkerSlotResources,
 }
 
-/// Stable slot failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSlotErrorCode {
     InvalidInput,
@@ -263,7 +245,6 @@ pub enum WorkerSlotErrorCode {
     Adapter,
 }
 
-/// Worker slot failure with a stable machine-readable code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSlotError {
     code: WorkerSlotErrorCode,
@@ -300,17 +281,11 @@ impl fmt::Display for WorkerSlotError {
 
 impl std::error::Error for WorkerSlotError {}
 
-/// Durable `WorkerSession` slot manager.
 pub struct WorkerSessionSlots<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the slot manager over existing registry/admission tables.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the slot schema cannot be prepared.
     pub fn worker_session_slots(&mut self) -> Result<WorkerSessionSlots<'_>, WorkerSlotError> {
         WorkerSessionSlots::new(self)
     }
@@ -323,12 +298,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         Ok(slots)
     }
 
-    /// Configures immutable process-local resource limits. Exact repeats are
-    /// idempotent; a changed limit is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/current-instance mismatches and `SQLite` failures.
     pub fn configure_resources(
         &mut self,
         worker_id: &WorkerId,
@@ -372,12 +341,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         Ok(true)
     }
 
-    /// Atomically opens one slot after checking current Worker, lease,
-    /// execution-admission, slot-count, and local resource authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects identity/capacity/resource conflicts and `SQLite` failures.
     pub fn open(
         &mut self,
         request: &WorkerSlotOpenRequest,
@@ -450,12 +413,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         Ok(receipt)
     }
 
-    /// Advances one slot-local event cursor by exactly one position.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-slot authority, gaps/duplicates, terminal slots, and
-    /// `SQLite` failures.
     pub fn advance_event_cursor(
         &mut self,
         request: &WorkerSlotEventAdvance,
@@ -479,7 +436,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.observed_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.event_cursor != request.expected_cursor
             || request.next_cursor != request.expected_cursor + 1
         {
@@ -521,12 +478,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         })
     }
 
-    /// Marks exactly one running slot as cancelling without affecting sibling
-    /// slots or releasing its resources before acknowledgement.
-    ///
-    /// # Errors
-    ///
-    /// Rejects authority/revision/state conflicts and `SQLite` failures.
     pub fn request_cancellation(
         &mut self,
         request: &WorkerSlotCancellation,
@@ -550,7 +501,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.requested_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.revision != request.expected_revision {
             return Err(revision_conflict(
                 request.expected_revision,
@@ -595,11 +546,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         })
     }
 
-    /// Closes one slot and releases its slot/resource capacity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects authority/revision/outcome conflicts and `SQLite` failures.
     pub fn close(
         &mut self,
         request: &WorkerSlotCloseRequest,
@@ -623,7 +569,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.closed_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.revision != request.expected_revision {
             return Err(revision_conflict(
                 request.expected_revision,
@@ -676,15 +622,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         })
     }
 
-    /// Reconciles every active slot owned by an older process instance. A slot
-    /// is recovered only when the existing lease registry already holds a
-    /// newer exact lease for the same Job and new Worker instance; otherwise
-    /// it is durably marked `recovery_failed` and releases capacity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-current Workers, changed replays, resource exhaustion, and
-    /// `SQLite` failures.
     pub fn reconcile_restart(
         &mut self,
         request: &WorkerSlotRecoveryRequest,
@@ -784,11 +721,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         Ok(receipt)
     }
 
-    /// Loads one `WorkerSession` slot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identity and `SQLite` failures.
     pub fn load(
         &self,
         worker_session_id: &WorkerSessionId,
@@ -800,12 +732,6 @@ impl<'storage> WorkerSessionSlots<'storage> {
         )
     }
 
-    /// Returns authoritative capacity computed from durable active slots.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-current Workers, missing limits, corrupt usage, and
-    /// `SQLite` failures.
     pub fn capacity(
         &self,
         worker_id: &WorkerId,
@@ -947,7 +873,6 @@ struct CurrentLease {
     worker_instance_id: WorkerInstanceId,
     attempt: u64,
     fencing_token: FencingToken,
-    issued_at: Instant,
     expires_at: Instant,
 }
 
@@ -990,10 +915,6 @@ fn require_current_worker(
             "Worker process instance is no longer current",
         ));
     }
-    // `registered` is a live process that already joined the Registry.
-    // Device StrongFlow Workers claim identity-bound jobs on the registration
-    // exchange before any heartbeat; treating `registered` as unhealthy left
-    // those jobs queued forever. Terminal health states still refuse slots.
     if require_healthy && health != "healthy" && health != "registered" {
         return Err(WorkerSlotError::new(
             WorkerSlotErrorCode::WorkerNotHealthy,
@@ -1034,6 +955,27 @@ fn require_lease_authority(
     Ok(())
 }
 
+fn require_retained_lease_identity(
+    connection: &Connection,
+    authority: &WorkerSlotAuthority,
+) -> Result<(), WorkerSlotError> {
+    let lease = crate::execution_registry::load_lease_in_transaction(connection, &authority.job_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| WorkerSlotError::invalid("execution lease does not exist"))?;
+    if lease.lease_id != authority.lease_id
+        || lease.worker_id != authority.worker_id
+        || lease.worker_instance_id != authority.worker_instance_id
+        || lease.attempt != authority.attempt
+        || lease.fencing_token != authority.fencing_token
+    {
+        return Err(WorkerSlotError::new(
+            WorkerSlotErrorCode::LeaseMismatch,
+            "Worker slot observation differs from its execution identity",
+        ));
+    }
+    Ok(())
+}
+
 fn load_current_lease(
     connection: &Connection,
     job_id: &ExecutionJobId,
@@ -1041,7 +983,7 @@ fn load_current_lease(
     connection
         .query_row(
             "SELECT leases.lease_id, leases.worker_id, leases.worker_instance_id,
-                    leases.attempt, leases.fencing_token, leases.issued_at, leases.expires_at
+                    leases.attempt, leases.fencing_token, leases.expires_at
              FROM execution_leases AS leases
              WHERE leases.job_id = ?1
                AND NOT EXISTS (
@@ -1058,8 +1000,7 @@ fn load_current_lease(
                     attempt: u64::try_from(attempt)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, attempt))?,
                     fencing_token: FencingToken(row.get(4)?),
-                    issued_at: Instant(row.get(5)?),
-                    expires_at: Instant(row.get(6)?),
+                    expires_at: Instant(row.get(5)?),
                 })
             },
         )
@@ -1420,34 +1361,22 @@ fn require_active_slot(
     Ok(slot)
 }
 
-pub(crate) fn require_running_slot_authority(
+pub(crate) fn require_retained_slot_authority(
     connection: &Connection,
     authority: &WorkerSlotAuthority,
-    lease_issued_at: &Instant,
-    lease_expires_at: &Instant,
-    observed_at: &Instant,
-    require_healthy: bool,
 ) -> Result<WorkerSlotRecord, WorkerSlotError> {
     require_current_worker(
         connection,
         &authority.worker_id,
         &authority.worker_instance_id,
-        require_healthy,
+        false,
     )?;
-    require_lease_authority(connection, authority, observed_at)?;
-    let lease = load_current_lease(connection, &authority.job_id)?
-        .ok_or_else(|| WorkerSlotError::invalid("execution lease does not exist"))?;
-    if lease.issued_at != *lease_issued_at || lease.expires_at != *lease_expires_at {
+    let slot = load_slot_in_transaction(connection, &authority.worker_session_id)?
+        .ok_or_else(|| WorkerSlotError::invalid("Worker slot does not exist"))?;
+    if slot.authority != *authority {
         return Err(WorkerSlotError::new(
             WorkerSlotErrorCode::LeaseMismatch,
-            "Worker slot lease time does not match durable authority",
-        ));
-    }
-    let slot = require_active_slot(connection, authority)?;
-    if slot.state != WorkerSlotState::Running {
-        return Err(WorkerSlotError::new(
-            WorkerSlotErrorCode::StateConflict,
-            "Worker slot is not running",
+            "Worker message does not match its retained slot identity",
         ));
     }
     Ok(slot)

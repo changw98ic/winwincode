@@ -104,37 +104,36 @@ pub(super) fn completion_state(
     scope: &mut v8::PinScope<'_, '_>,
     pending_promise: Option<&v8::Global<v8::Promise>>,
 ) -> CompletionState {
-    let stored_value_writes = scope
-        .get_slot::<RuntimeState>()
-        .map(|state| state.stored_value_writes.clone())
-        .unwrap_or_default();
-
-    let Some(pending_promise) = pending_promise else {
-        return CompletionState::Completed {
-            stored_value_writes,
-            error_text: None,
-        };
-    };
-
-    let promise = v8::Local::new(scope, pending_promise);
-    match promise.state() {
-        v8::PromiseState::Pending => CompletionState::Pending,
-        v8::PromiseState::Fulfilled => CompletionState::Completed {
-            stored_value_writes,
-            error_text: None,
-        },
-        v8::PromiseState::Rejected => {
-            let result = promise.result(scope);
-            let error_text = if is_exit_exception(scope, result) {
-                None
-            } else {
-                Some(value_to_error_text(scope, result))
-            };
-            CompletionState::Completed {
-                stored_value_writes,
-                error_text,
+    #[cfg(test)]
+    let allocations = super::mechanism_regression_tests::CompletionAllocationProbe::new();
+    let error_text = if let Some(pending_promise) = pending_promise {
+        let promise = v8::Local::new(scope, pending_promise);
+        match promise.state() {
+            v8::PromiseState::Pending => {
+                #[cfg(test)]
+                allocations.record_pending();
+                return CompletionState::Pending;
+            }
+            v8::PromiseState::Fulfilled => None,
+            v8::PromiseState::Rejected => {
+                let result = promise.result(scope);
+                if is_exit_exception(scope, result) {
+                    None
+                } else {
+                    Some(value_to_error_text(scope, result))
+                }
             }
         }
+    } else {
+        None
+    };
+    let stored_value_writes = scope
+        .get_slot_mut::<RuntimeState>()
+        .map(|state| std::mem::take(&mut state.stored_value_writes))
+        .unwrap_or_default();
+    CompletionState::Completed {
+        stored_value_writes,
+        error_text,
     }
 }
 

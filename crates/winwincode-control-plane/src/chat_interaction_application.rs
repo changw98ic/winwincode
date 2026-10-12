@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable application boundary for Chat input and approval interactions.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -61,7 +59,6 @@ const APPROVAL_CHANGED_TOPIC: &str = "approval.changed.v1";
 const WORKER_RECEIPT_ACTOR_ID: &str = "sys_00000000000000000000000001";
 const MAX_DECISION_REASON_BYTES: usize = 2_000;
 
-/// Canonical Approval fact used only to rebuild the collaboration Inbox.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct CollaborationApprovalSourceRecord {
     pub projection: ApprovalProjection,
@@ -69,7 +66,6 @@ pub(crate) struct CollaborationApprovalSourceRecord {
     pub delivery_id: Option<winwincode_domain::DeliveryId>,
 }
 
-/// One scope-wide Approval cut and its exact durable catalog guard.
 pub(crate) struct CollaborationApprovalSourceSnapshot {
     pub revision: u64,
     pub snapshot_sha256: Sha256Digest,
@@ -77,7 +73,6 @@ pub(crate) struct CollaborationApprovalSourceSnapshot {
     pub approvals: Vec<CollaborationApprovalSourceRecord>,
 }
 
-/// Exact Control Plane facts supplied with one Worker input request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerInteractionAuthority {
     pub execution_scope: ExecutionQueueScope,
@@ -87,21 +82,18 @@ pub struct WorkerInteractionAuthority {
     pub worker_slot_revision: u64,
 }
 
-/// Records one typed Worker input request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordInputInteractionCommand {
     pub authority: WorkerInteractionAuthority,
     pub request: InputRequestMessage,
 }
 
-/// Records one typed Worker approval request after its Gate fact exists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordApprovalInteractionCommand {
     pub public_scope: PublicEventScope,
     pub request: ApprovalRequestMessage,
 }
 
-/// Whether this exact call changed the public interaction snapshot.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatInteractionWriteStatus {
@@ -109,7 +101,6 @@ pub enum ChatInteractionWriteStatus {
     Duplicate,
 }
 
-/// Replay-safe result of accepting a Worker interaction request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatInteractionMutationReceipt {
     pub status: ChatInteractionWriteStatus,
@@ -118,8 +109,6 @@ pub struct ChatInteractionMutationReceipt {
     pub replayed: bool,
 }
 
-/// Durable result plus the exact Worker response. Replays deterministically
-/// rebuild it from the command and durable authority without storing the value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputRespondMutationReceipt {
     pub current_revision: Revision,
@@ -130,8 +119,6 @@ pub struct InputRespondMutationReceipt {
     pub replayed: bool,
 }
 
-/// Durable result plus the exact Worker decision. Replays deterministically
-/// rebuild it from the command and durable authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalDecideMutationReceipt {
     pub current_revision: Revision,
@@ -142,14 +129,12 @@ pub struct ApprovalDecideMutationReceipt {
     pub replayed: bool,
 }
 
-/// Stable outbound delivery failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerInteractionDeliveryErrorKind {
     Unavailable,
     Rejected,
 }
 
-/// Bounded failure returned by the canonical Control Plane-to-Worker port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerInteractionDeliveryError {
     kind: WorkerInteractionDeliveryErrorKind,
@@ -179,23 +164,13 @@ impl fmt::Display for WorkerInteractionDeliveryError {
 
 impl std::error::Error for WorkerInteractionDeliveryError {}
 
-/// Unique outbound seam for replay-stable Control Plane-to-Worker messages.
-/// Implementations route by the exact binding and treat a stable `messageId`
-/// duplicate as already delivered.
 pub trait WorkerInteractionOutboundPort: Send {
-    /// Delivers one canonical `ExecutionPort` message.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when the exact Worker route is unavailable
-    /// or rejects the message.
     fn deliver(
         &mut self,
         message: &ExecutionPortMessage,
     ) -> Result<(), WorkerInteractionDeliveryError>;
 }
 
-/// Stable application failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatInteractionServiceErrorCode {
     InvalidInput,
@@ -212,7 +187,6 @@ pub enum ChatInteractionServiceErrorCode {
     Storage,
 }
 
-/// Fail-closed durable Chat interaction error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatInteractionServiceError {
     code: ChatInteractionServiceErrorCode,
@@ -234,8 +208,6 @@ impl fmt::Display for ChatInteractionServiceError {
 
 impl std::error::Error for ChatInteractionServiceError {}
 
-/// Durable application service for Worker requests, browser decisions, and
-/// restart-stable interaction queries.
 pub struct ChatInteractionService<'storage> {
     storage: &'storage mut dyn ProductSessionPersistence,
     output_gate: CredentialLeakGate,
@@ -261,13 +233,6 @@ impl<'storage> ChatInteractionService<'storage> {
         }
     }
 
-    /// Persists one Worker `input.request`, its receipt, and its public
-    /// invalidation in one transaction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale runtime authority, conflicting replay, unsafe public
-    /// output, or corrupt durable state before writing.
     pub fn record_input(
         &mut self,
         command: &RecordInputInteractionCommand,
@@ -276,18 +241,6 @@ impl<'storage> ChatInteractionService<'storage> {
         self.record_input_at(command, &sent_at)
     }
 
-    /// Persists one Worker input request using the Server's trusted ingress
-    /// clock for lease validation.
-    ///
-    /// The Worker `sentAt` remains part of the receipt identity and public
-    /// event fact, but it is never the authority used to decide whether the
-    /// current lease is still valid. Exact receipt replay is resolved before
-    /// this trusted-time check, so a response remains replayable after expiry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale runtime authority, conflicting replay, unsafe public
-    /// output, or corrupt durable state before writing.
     pub fn record_input_at(
         &mut self,
         command: &RecordInputInteractionCommand,
@@ -340,13 +293,6 @@ impl<'storage> ChatInteractionService<'storage> {
         )
     }
 
-    /// Persists one Worker `approval.request` after re-reading the existing
-    /// pending Gate fact and current runtime authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, terminal, stale, cross-scope, or mismatched Gate and
-    /// Worker facts before writing.
     pub fn record_approval(
         &mut self,
         command: &RecordApprovalInteractionCommand,
@@ -355,13 +301,6 @@ impl<'storage> ChatInteractionService<'storage> {
         self.record_approval_at(command, &sent_at)
     }
 
-    /// Persists one Worker approval request using the Server's trusted ingress
-    /// clock for Gate and runtime lease validation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, terminal, stale, cross-scope, or mismatched Gate and
-    /// Worker facts before writing.
     pub fn record_approval_at(
         &mut self,
         command: &RecordApprovalInteractionCommand,
@@ -441,13 +380,6 @@ impl<'storage> ChatInteractionService<'storage> {
         )
     }
 
-    /// Applies one generated `input.respond` command and returns the public
-    /// result plus a replay-stable `ExecutionPort` response.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched actor scope, interaction revision, runtime binding,
-    /// current lease, or `ProductSession` authority.
     pub fn respond_input(
         &mut self,
         context: &ProductSessionCommandContext,
@@ -518,13 +450,6 @@ impl<'storage> ChatInteractionService<'storage> {
         Ok(receipt)
     }
 
-    /// Applies one generated `approval.decide` command. The Chat snapshot is
-    /// the primary state and the canonical Gate state is one secondary CAS
-    /// mutation in the same receipt transaction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale binding, actor, Gate, lease, revision, or request replay.
     pub fn decide_approval(
         &mut self,
         context: &ProductSessionCommandContext,
@@ -628,11 +553,6 @@ impl<'storage> ChatInteractionService<'storage> {
         Ok(receipt)
     }
 
-    /// Runs `session.interactions.list` against one restart-restored snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn interactions(
         &self,
         scope: &ReceiptScopeKey,
@@ -645,11 +565,6 @@ impl<'storage> ChatInteractionService<'storage> {
             .map_err(projection_error)
     }
 
-    /// Runs `approval.get` against one restart-restored snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn approval_get(
         &self,
         scope: &ReceiptScopeKey,
@@ -662,11 +577,6 @@ impl<'storage> ChatInteractionService<'storage> {
             .map_err(projection_error)
     }
 
-    /// Runs `approval.list` against one restart-restored snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn approval_list(
         &self,
         scope: &ReceiptScopeKey,
@@ -685,12 +595,6 @@ impl<'storage> ChatInteractionService<'storage> {
         authority: &PersistedInteractionAuthority,
         now: &Instant,
     ) -> Result<(), ChatInteractionServiceError> {
-        if now.0 < authority.lease.issued_at.0 || now.0 >= authority.lease.expires_at.0 {
-            return Err(error(
-                ChatInteractionServiceErrorCode::Expired,
-                "Worker lease is outside its accepted time window",
-            ));
-        }
         let current = self
             .storage
             .load_worker_interaction_source(
@@ -700,7 +604,38 @@ impl<'storage> ChatInteractionService<'storage> {
             )
             .map_err(storage_error)?
             .ok_or_else(|| authority_mismatch("current Worker authority does not exist"))?;
+        if now.0 < current.2.issued_at.0 || now.0 >= current.2.expires_at.0 {
+            return Err(error(
+                ChatInteractionServiceErrorCode::Expired,
+                "Worker lease is outside its accepted time window",
+            ));
+        }
+        if current.2.expires_at != authority.lease.expires_at {
+            let mut period = current.2.clone();
+            period.expires_at.clone_from(&authority.lease.expires_at);
+            let proven = self
+                .storage
+                .load_live_lease_for_period(&period, now)
+                .map_err(storage_error)?;
+            if proven.as_ref() != Some(&current.2) {
+                return Err(authority_mismatch(
+                    "Worker interaction lease period is unproven",
+                ));
+            }
+        }
         require_current_source(authority, &current.0, &current.1, &current.2)?;
+        if authority.product_session_revision.is_none() {
+            let gate = authority
+                .gate_authority
+                .as_ref()
+                .ok_or_else(|| authority_mismatch("WorkRun interaction requires a sealed Gate"))?;
+            return crate::gate_interaction_service::require_workrun_binding(
+                self.storage,
+                scope,
+                gate,
+            )
+            .map_err(|_| authority_mismatch("WorkRun interaction binding is no longer current"));
+        }
         let session = ProductSessionService::new(self.storage)
             .get(scope, &authority.execution_scope.product_session_id)
             .map_err(product_session_error)?
@@ -932,8 +867,6 @@ impl<'storage> ChatInteractionService<'storage> {
     }
 }
 
-/// Generated HTTP adapter. Server composition injects only the durable ports
-/// and trusted clock.
 pub struct ChatInteractionApiService<'storage, 'clock, 'outbound> {
     service: ChatInteractionService<'storage>,
     clock: &'clock mut dyn ProductSessionApiClock,
@@ -954,11 +887,6 @@ impl<'storage, 'clock, 'outbound> ChatInteractionApiService<'storage, 'clock, 'o
         }
     }
 
-    /// Executes generated `input.respond`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a validation, durable-state, or Worker-delivery failure.
     pub fn respond_input(
         &mut self,
         command: InputRespondCommand,
@@ -995,11 +923,6 @@ impl<'storage, 'clock, 'outbound> ChatInteractionApiService<'storage, 'clock, 'o
         })
     }
 
-    /// Executes generated `approval.decide`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a validation, durable-state, or Worker-delivery failure.
     pub fn decide_approval(
         &mut self,
         command: ApprovalDecideCommand,
@@ -1036,11 +959,6 @@ impl<'storage, 'clock, 'outbound> ChatInteractionApiService<'storage, 'clock, 'o
         })
     }
 
-    /// Executes generated `session.interactions.list`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn interactions(
         &mut self,
         query: &ChatInteractionListQuery,
@@ -1049,11 +967,6 @@ impl<'storage, 'clock, 'outbound> ChatInteractionApiService<'storage, 'clock, 'o
         self.service.interactions(&scope, query, &self.clock.now())
     }
 
-    /// Executes generated `approval.get`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn approval_get(
         &mut self,
         query: &ApprovalGetQuery,
@@ -1062,11 +975,6 @@ impl<'storage, 'clock, 'outbound> ChatInteractionApiService<'storage, 'clock, 'o
         self.service.approval_get(&scope, query, &self.clock.now())
     }
 
-    /// Executes generated `approval.list`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded query, storage, or durable-state failure.
     pub fn approval_list(
         &mut self,
         query: &ApprovalListQuery,
@@ -1089,7 +997,8 @@ struct WorkerCommandContext {
 struct PersistedInteractionAuthority {
     execution_scope: ExecutionQueueScope,
     worker_pool_id: WorkerPoolId,
-    product_session_revision: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    product_session_revision: Option<u64>,
     job_revision: u64,
     worker_slot_revision: u64,
     runtime: WorkerSlotAuthority,
@@ -1285,7 +1194,7 @@ fn persisted_authority_from_input(
     Ok(PersistedInteractionAuthority {
         execution_scope: command.authority.execution_scope.clone(),
         worker_pool_id: command.authority.worker_pool_id.clone(),
-        product_session_revision: command.authority.product_session_revision,
+        product_session_revision: Some(command.authority.product_session_revision),
         job_revision: command.authority.job_revision,
         worker_slot_revision: command.authority.worker_slot_revision,
         runtime,
@@ -1388,7 +1297,6 @@ fn require_current_source(
         || i64::try_from(lease.attempt).ok() != Some(expected.lease.attempt)
         || lease.fencing_token != expected.lease.fencing_token
         || lease.issued_at != expected.lease.issued_at
-        || lease.expires_at != expected.lease.expires_at
     {
         return Err(authority_mismatch(
             "Worker slot, lease, fence, or reservation is no longer current",
@@ -1402,7 +1310,7 @@ fn require_product_session(
     authority: &PersistedInteractionAuthority,
 ) -> Result<(), ChatInteractionServiceError> {
     let session = record.session();
-    if session.revision() != authority.product_session_revision
+    if Some(session.revision()) != authority.product_session_revision
         || session.id() != &authority.execution_scope.product_session_id
         || session.project_id() != &authority.execution_scope.project_id
         || session.repository_id() != &authority.execution_scope.repository_id
@@ -1754,11 +1662,6 @@ fn encode_catalog(
         .map_err(|error| corrupt(format!("Chat interaction state cannot be encoded: {error}")))
 }
 
-/// Loads one complete, secret-safe Approval cut for collaboration projection.
-///
-/// # Errors
-///
-/// Rejects corrupt projection/authority joins or unavailable durable storage.
 pub(crate) fn collaboration_approval_snapshot(
     storage: &dyn ProductSessionPersistence,
     scope: &ReceiptScopeKey,

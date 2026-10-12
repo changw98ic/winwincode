@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device-owned Skills and MCP configuration. Only metadata leaves this store.
-
 use crate::{DeviceProviderError, DeviceProviderStore, mcp_connection};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{OptionalExtension, params};
@@ -22,6 +20,7 @@ use winwincode_api::generated::{
 
 const CONTEXT: &str = "winwincode.device-extensions.v1";
 const MAX_SKILL_BYTES: usize = 1_048_576;
+const BENCHMARK_MCP_PREFIX: &str = "benchmark_public_smoke_";
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -85,13 +84,9 @@ struct ExtensionEntry {
     projection: String,
 }
 
-/// The exact tested MCP tools installed in the installed task configuration.
 pub struct InstalledMcpTools {
-    /// Configured MCP server identifier.
     pub server: String,
-    /// Configuration digest, binding the capability version to its settings.
     pub digest: String,
-    /// Only these discovered tools may be exposed and authorized.
     pub tools: Vec<String>,
 }
 
@@ -115,10 +110,6 @@ impl DeviceProviderStore {
         )?)
     }
 
-    /// Lists confirmed Device metadata, never MCP credentials or Skill file contents.
-    ///
-    /// # Errors
-    /// Rejects corrupt stored configuration.
     pub fn extension_snapshot(
         &self,
         node: &str,
@@ -145,10 +136,6 @@ impl DeviceProviderStore {
         })
     }
 
-    /// Applies one encrypted, revision-bound operation and durably records its receipt.
-    ///
-    /// # Errors
-    /// Rejects changed retries, wrong Device identities and unavailable storage.
     pub fn apply_extension(
         &mut self,
         node: &str,
@@ -244,7 +231,6 @@ impl DeviceProviderStore {
         projection: &T,
     ) -> Result<DeviceExtensionOutcome, DeviceProviderError> {
         let projection = serde_json::to_string(projection)?;
-        // Leave room for the envelope/receipt within ClientControl's 256 KiB frame limit.
         let retained_bytes: i64 = self.connection.query_row(
             "SELECT coalesce(sum(length(CAST(projection AS BLOB))),0) FROM extensions WHERE kind!=?1 OR id!=?2",
             params![kind.name(), id], |row| row.get(0),
@@ -416,11 +402,6 @@ impl DeviceProviderStore {
         }
     }
 
-    /// Restores the last installed task snapshot after a Worker restart.
-    /// New tasks must call `refresh_extensions` before opening their Core session.
-    ///
-    /// # Errors
-    /// Rejects corrupt snapshots, symlink paths and unsafe filesystem permissions.
     pub fn restore_extensions(
         &self,
         home: &Path,
@@ -435,16 +416,34 @@ impl DeviceProviderStore {
         materialize_extensions(home, &entries)
     }
 
-    /// Installs current Device extensions at an idle task boundary, removing old Skill files.
-    /// In-flight tasks keep their installed snapshot until they finish, including on restart.
-    ///
-    /// # Errors
-    /// Rejects corrupt configuration or unsafe filesystem paths.
     pub fn refresh_extensions(
         &self,
         home: &Path,
     ) -> Result<Vec<InstalledMcpTools>, DeviceProviderError> {
         let entries = self.extension_entries()?;
+        materialize_extensions(home, &entries)
+    }
+
+    pub fn refresh_benchmark_extensions(
+        &self,
+        home: &Path,
+        server: &str,
+    ) -> Result<Vec<InstalledMcpTools>, DeviceProviderError> {
+        if !valid_id(server)
+            || !server.starts_with(BENCHMARK_MCP_PREFIX)
+            || server.len() == BENCHMARK_MCP_PREFIX.len()
+        {
+            return Err(DeviceProviderError);
+        }
+        let entries = self
+            .extension_entries()?
+            .into_iter()
+            .filter(|entry| {
+                entry.kind != "mcp"
+                    || !entry.id.starts_with(BENCHMARK_MCP_PREFIX)
+                    || entry.id == server
+            })
+            .collect::<Vec<_>>();
         materialize_extensions(home, &entries)
     }
 
@@ -470,8 +469,6 @@ fn materialize_extensions(
     entries: &[ExtensionEntry],
 ) -> Result<Vec<InstalledMcpTools>, DeviceProviderError> {
     private_directory(home)?;
-    // This directory belongs to the Worker. Rebuild it even on recovery so a
-    // crash during the previous installation cannot leave stale Skill files.
     let skills = home.join("skills");
     private_directory(&skills)?;
     fs::remove_dir_all(&skills)?;
@@ -527,8 +524,9 @@ fn materialize_extensions(
                 let mut config = mcp_connection::validate(&entry.data)?;
                 config.enabled = true;
                 config.enabled_tools = Some(projection.tool_names.clone());
-                config.startup_timeout_sec = Some(std::time::Duration::from_secs(15));
-                config.tool_timeout_sec = Some(std::time::Duration::from_mins(1));
+                if std::env::var("WWC_BENCHMARK_SEALED_TOOLS").as_deref() == Ok("1") {
+                    config.tool_timeout_sec = Some(std::time::Duration::ZERO);
+                }
                 servers.insert(entry.id.clone(), config);
                 capabilities.push(InstalledMcpTools {
                     server: entry.id.clone(),

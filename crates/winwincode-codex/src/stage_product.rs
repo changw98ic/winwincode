@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `StrongFlow` role policy and strict semantic stage-product preparation.
-//!
-//! This module deliberately stops before durable identity allocation. It
-//! validates one already-authenticated [`ExecutionJob`], prepares the exact
-//! Codex Core role policy, and converts a final Planner assistant message into
-//! one canonical semantic product. The production adapter remains responsible
-//! for assigning the lease-bound runtime event identity and retaining it in its
-//! existing outbox before delivery.
-
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -23,19 +17,14 @@ use winwincode_kernel::{
     RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
 };
 
-/// Media type consumed by the production Planning-to-PlanReview authority.
 pub const PLANNER_SOLUTION_MEDIA_TYPE: &str = "application/vnd.winwincode.planner-solution+json";
 
-/// Protocol consumed by the production Solution Review authority.
 pub const PLANNER_SOLUTION_PROTOCOL: &str = "winwincode.planner-solution.v1";
 
-/// JSON media type consumed by the verification verdict authority.
 pub const VERIFICATION_JSON_MEDIA_TYPE: &str = "application/json";
 
-/// First read-only verification event protocol.
 pub const VERIFICATION_SESSION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
 
-/// Final independent verification result protocol.
 pub const VERIFICATION_RESULT_PROTOCOL: &str = "winwincode.independent-verification-result.v1";
 
 const ROLE_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -46,10 +35,6 @@ const DELEGATED_EXECUTOR_INSTRUCTIONS: &str = "Produce only one bounded ChangeBa
 const DELEGATED_REMEDIATOR_INSTRUCTIONS: &str = "Produce only one bounded Repair proposal from reviewed findings in the read-only candidate workspace. Return the canonical RepairEnvelope, ChangeBatch proposal, and content-addressed Artifact references. Do not modify workspace files, apply the repair, broaden scope, approve, or verify your own work.";
 const DEBUG_PROBE_DEVELOPER_INSTRUCTIONS: &str = "Investigate the current failure from the read-only candidate workspace. Produce one bounded DebugProbePlan with explicit hypotheses, commands, paths, resource claims, budgets, and a round completion rule. Do not modify candidate files, apply a fix, install or upgrade dependencies, approve, or verify final delivery.";
 
-/// Fixed structured-output schema for the generated canonical
-/// `ChangeBatchProposal` DTO. Bounds and closed fields mirror the execution
-/// port contract; the schema is constructed in Rust so a turn never reads a
-/// mutable repository schema file at runtime.
 #[must_use]
 pub fn change_batch_proposal_json_schema() -> Value {
     json!({
@@ -88,7 +73,6 @@ pub fn change_batch_proposal_json_schema() -> Value {
     })
 }
 
-/// Stable stage-product failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StageProductErrorCode {
     InvalidJob,
@@ -98,13 +82,6 @@ pub enum StageProductErrorCode {
     NonCanonicalOutput,
 }
 
-/// Seals every role- and workspace-relevant Job field used to open a Codex
-/// session. The production adapter persists this digest beside the run and
-/// requires an exact match before it reuses or resumes the session.
-///
-/// # Errors
-///
-/// Returns a bounded error if the generated Job cannot be canonically encoded.
 pub fn stage_product_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, StageProductError> {
     let bytes = serde_json::to_vec(job).map_err(|_| {
         StageProductError::new(
@@ -115,12 +92,6 @@ pub fn stage_product_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, Stag
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
-/// Seals the immutable logical Job fields shared by replacement attempts.
-///
-/// # Errors
-///
-/// Returns a bounded error if the generated Job cannot be canonically encoded
-/// or its required attempt field is absent from the generated representation.
 pub fn stage_product_logical_job_digest(
     job: &ExecutionJob,
 ) -> Result<Sha256Digest, StageProductError> {
@@ -142,9 +113,6 @@ pub fn stage_product_logical_job_digest(
             "ExecutionJob logical replacement authority has no attempt",
         ));
     }
-    // A replacement is a new run and attempt of the same logical work.  Run
-    // identity is deliberately carried by the exact digest, not this logical
-    // digest, so a successor can be checked against its predecessor.
     if let Some(scope) = object.get_mut("scope").and_then(Value::as_object_mut) {
         scope.remove("attempt");
         scope.remove("workRunId");
@@ -158,7 +126,6 @@ pub fn stage_product_logical_job_digest(
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 
-/// Bounded failure which never retains the rejected model output.
 #[derive(Debug, Eq, PartialEq)]
 pub struct StageProductError {
     code: StageProductErrorCode,
@@ -170,7 +137,6 @@ impl StageProductError {
         Self { code, message }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> StageProductErrorCode {
         self.code
@@ -185,7 +151,6 @@ impl fmt::Display for StageProductError {
 
 impl std::error::Error for StageProductError {}
 
-/// Semantic payload ready for lease-bound runtime event identity allocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedStageProduct {
     category: ExecutionEventCategory,
@@ -222,16 +187,6 @@ impl PreparedStageProduct {
     }
 }
 
-/// Returns the canonical Codex Core role policy for one authenticated Job.
-///
-/// Product-session chat jobs intentionally return `None`. `WorkRun` jobs
-/// must use one known `StrongFlow` role and cannot silently fall back to a
-/// process-wide permission profile.
-///
-/// # Errors
-///
-/// Rejects a `StrongFlow` role on a `ProductSession` job or an unknown role on a
-/// `WorkRun` job.
 pub fn role_session_policy(
     job: &ExecutionJob,
     execution_mode: RoleExecutionMode,
@@ -295,16 +250,11 @@ pub fn role_session_policy(
     }
 }
 
-/// Result of the sole persisted role-policy migration entry.
 pub(crate) struct MigratedRoleSessionPolicy {
     pub policy: Option<RoleSessionPolicy>,
     pub migrated: bool,
 }
 
-/// Converts one durable pre-v2 role policy to the generated canonical v2
-/// shape. Version 1 is accepted only here and always becomes `React` before
-/// the caller saves the containing record. Runtime policy parsing never calls
-/// this function.
 pub(crate) fn migrate_persisted_role_session_policy_v1(
     job: &ExecutionJob,
     persisted: Option<&Value>,
@@ -410,16 +360,25 @@ const fn role_policy_workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) 
     }
 }
 
-/// Builds the exact first-turn prompt from the sealed typed Job input.
-///
-/// `ProductSession` Chat keeps its original goal. `WorkRun` turns receive
-/// the canonical `workInput` JSON plus role-specific final-output rules, so a
-/// restart never has to query mutable Delivery state or hide JSON in `goal`.
-///
-/// # Errors
-///
-/// Rejects a missing, oversized, role-incompatible or internally inconsistent
-/// `WorkRun` input.
+pub fn snapshot_bound_prompt(
+    job: &ExecutionJob,
+    snapshot_id: Option<&winwincode_domain::SnapshotId>,
+) -> Result<String, StageProductError> {
+    if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+        &job.execution_profile,
+        snapshot_id,
+    ) {
+        return Err(invalid_job());
+    }
+    let mut prompt = stage_product_prompt(job)?;
+    if let Some(snapshot_id) = snapshot_id {
+        prompt.push_str("\nRuntime verification binding: snapshotId=");
+        prompt.push_str(&snapshot_id.0);
+        prompt.push_str(". All judgments and evidence apply only to this frozen input.\n");
+    }
+    Ok(prompt)
+}
+
 pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
     match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(_) => {
@@ -438,7 +397,11 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                 "planner" => concat!(
                     "Return only canonical JSON using protocol ",
                     "winwincode.planner-solution.v1 and schemaVersion 1. ",
-                    "Every task proposal acceptanceCriterionIds value must come from workInput."
+                    "Every task proposal acceptanceCriterionIds value must come from workInput. ",
+                    "Return solution (id, summary, approach, components, connections), architectureDiagram ",
+                    "(kind system-architecture), processDiagram (kind process-flow), risks, unresolvedItems, ",
+                    "and taskProposals (id, title, goal, acceptanceCriterionIds, blockedByTaskIds). ",
+                    "Use the supplied JSON schema for all nested fields."
                 ),
                 "executor" | "remediator" => concat!(
                     "Apply the requested source change in the assigned checkout. ",
@@ -462,14 +425,10 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "command, cite the original exec_command call ID, not the write_stdin poll. ",
                     "Evidence references contain only source_id; the Worker derives their type ",
                     "from its saved Command/Test events. Do not supply a type or event_id. ",
-                    "Return compact JSON with exactly this field order and shape (replace all ",
-                    "capitalized values with actual input or observed evidence): ",
-                    "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
-                    "\"delivery_spec_id\":\"DELIVERY_SPEC_ID\",\"delivery_spec_revision\":1,",
-                    "\"candidate_ref\":\"CANDIDATE_REF\",\"findings\":[{",
-                    "\"finding_id\":\"UNIQUE_FINDING_ID\",\"criterion_id\":\"CRITERION_ID\",",
-                    "\"verdict\":\"pass\",\"explanation\":\"OBSERVED_RESULT\",",
-                    "\"evidence_sources\":[{\"source_id\":\"FUNCTION_CALL_ID\"}]}]}. ",
+                    "The JSON object fields are protocol, delivery_spec_id, delivery_spec_revision, ",
+                    "candidate_ref and findings. Each finding contains finding_id (choose a unique ID), ",
+                    "criterion_id, verdict, explanation (describe the actual result), and evidence_sources ",
+                    "(objects with only source_id copied from observed tool receipts). ",
                     "Copy delivery_spec_id and delivery_spec_revision from workInput.deliverySpecId ",
                     "and workInput.deliverySpecRevision, not the WorkContract identity. ",
                     "Include exactly one finding per assigned criterion, use pass or fail based ",
@@ -477,7 +436,7 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "A pass must cite successful checks of the assigned criterion; a failed assigned ",
                     "check means fail. Do not cite failed exploratory commands as proof of a pass. ",
                     "A nonzero exit is failing evidence for every criterion using that command; do not infer passes from partial progress. ",
-                    "No Markdown fences, whitespace outside strings, extra fields, or trailing text."
+                    "No Markdown fences, extra fields, or trailing text."
                 ),
                 "requirements" | "solution" => {
                     "Use only the sealed Delivery specification and report the requested stage result."
@@ -521,6 +480,60 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
             Ok(prompt)
         }
     }
+}
+
+#[must_use]
+pub fn planner_solution_json_schema() -> Value {
+    fn object(properties: Value) -> Value {
+        let required = properties
+            .as_object()
+            .expect("static schema object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        Value::Object(serde_json::Map::from_iter([
+            ("type".into(), Value::String("object".into())),
+            ("additionalProperties".into(), Value::Bool(false)),
+            ("properties".into(), properties),
+            ("required".into(), serde_json::json!(required)),
+        ]))
+    }
+    fn array(items: Value) -> Value {
+        Value::Object(serde_json::Map::from_iter([
+            ("type".into(), Value::String("array".into())),
+            ("items".into(), items),
+        ]))
+    }
+    let text = serde_json::json!({"type":"string"});
+    let nullable_text = serde_json::json!({"type":["string","null"]});
+    let boolean = serde_json::json!({"type":"boolean"});
+    let connection = object(serde_json::json!({"id":text,"from":text,"to":text,"label":text}));
+    let component = object(
+        serde_json::json!({"id":text,"label":text,"responsibility":text,
+        "kind":{"type":"string","enum":["component","data-store","external"]},
+        "trustBoundary":nullable_text,"unresolved":boolean,"repositoryPathPrefixes":array(text.clone())}),
+    );
+    let node = object(
+        serde_json::json!({"id":text,"label":text,"description":text,
+        "kind":{"type":"string","enum":["interaction","delivery-control","execution","repository","component","data-store","decision","external","stage"]},
+        "trustBoundary":nullable_text,"unresolved":boolean}),
+    );
+    let diagram = |kind: &str| {
+        object(serde_json::json!({"id":text,"title":text,
+        "kind":{"type":"string","enum":[kind]},"nodes":array(node.clone()),"edges":array(connection.clone())}))
+    };
+    let solution = object(
+        serde_json::json!({"id":text,"summary":text,"approach":array(text.clone()),
+        "components":array(component),"connections":array(connection.clone())}),
+    );
+    let proposal = object(serde_json::json!({"id":text,"title":text,"goal":text,
+        "acceptanceCriterionIds":array(text.clone()),"blockedByTaskIds":array(text.clone())}));
+    object(
+        serde_json::json!({"schemaVersion":{"type":"integer","enum":[1]},
+        "protocol":{"type":"string","enum":[PLANNER_SOLUTION_PROTOCOL]},"solution":solution,
+        "architectureDiagram":diagram("system-architecture"),"processDiagram":diagram("process-flow"),
+        "risks":array(text.clone()),"unresolvedItems":array(text),"taskProposals":array(proposal)}),
+    )
 }
 
 fn chat_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
@@ -703,18 +716,6 @@ fn unique_texts(values: &[String], required: bool) -> bool {
         && values.iter().collect::<HashSet<_>>().len() == values.len()
 }
 
-/// Converts the Planner's exact final assistant message into the one semantic
-/// Structured internal planning activity emitted by the Worker.
-///
-/// Durable event identity, sequence, occurrence time, lease, session and
-/// Worker authority are intentionally absent. The Codex outbox owns those
-/// facts and must add them only after this semantic payload succeeds.
-///
-/// # Errors
-///
-/// Rejects non-Planner jobs, malformed or oversized JSON, unknown fields,
-/// another schema/protocol, and any byte representation which does not equal
-/// the canonical serializer output.
 pub fn prepare_planner_solution_activity(
     job: &ExecutionJob,
     final_message: &[u8],
@@ -734,8 +735,9 @@ pub fn prepare_planner_solution_activity(
     if final_message.is_empty() || final_message.len() > MAX_PLANNER_SOLUTION_BYTES {
         return Err(invalid_output());
     }
+    let raw = std::str::from_utf8(final_message).map_err(|_| invalid_output())?;
     let product: PlannerSolutionV1 =
-        serde_json::from_slice(final_message).map_err(|_| invalid_output())?;
+        crate::structured_result::decode(raw).map_err(|()| invalid_output())?;
     if product.schema_version != PLANNER_SOLUTION_SCHEMA_VERSION
         || product.protocol != PLANNER_SOLUTION_PROTOCOL
         || !product.has_required_content()
@@ -744,12 +746,6 @@ pub fn prepare_planner_solution_activity(
         return Err(invalid_output());
     }
     let canonical = serde_json::to_vec(&product).map_err(|_| invalid_output())?;
-    if canonical != final_message {
-        return Err(StageProductError::new(
-            StageProductErrorCode::NonCanonicalOutput,
-            "Planner final response is not canonical JSON",
-        ));
-    }
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&canonical)));
     Ok(PreparedStageProduct {
         category: ExecutionEventCategory::Activity,
@@ -760,12 +756,6 @@ pub fn prepare_planner_solution_activity(
     })
 }
 
-/// Prepares the first verification Lifecycle product for the exact frozen
-/// candidate. The adapter emits this before command evidence or a final result.
-///
-/// # Errors
-///
-/// Rejects non-verification roles and malformed candidate references.
 pub fn prepare_verification_policy_attestation(
     job: &ExecutionJob,
     candidate_ref: &str,
@@ -788,7 +778,6 @@ pub fn prepare_verification_policy_attestation(
     )
 }
 
-/// Stable command outcome retained as direct verification evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationEvidenceStatus {
@@ -800,19 +789,12 @@ pub enum VerificationEvidenceStatus {
     InfrastructureError,
 }
 
-/// Direct evidence category derived from the completed Codex command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerificationEvidenceKind {
     Command,
     Test,
 }
 
-/// Prepares a direct Command evidence product from one already-observed Codex
-/// `ExecCommandEnd` outcome. Callers may not use model prose as evidence.
-///
-/// # Errors
-///
-/// Rejects non-verification roles and exit codes outside the transport range.
 pub fn prepare_verification_command_evidence(
     job: &ExecutionJob,
     kind: VerificationEvidenceKind,
@@ -832,13 +814,6 @@ pub fn prepare_verification_command_evidence(
     )
 }
 
-/// Prepares direct command/test evidence and binds it to the exact diagnostic
-/// Artifact reference retained for the same command.
-///
-/// # Errors
-///
-/// Returns an error when the job is not a verification role or any evidence
-/// field exceeds the bounded stage-product contract.
 pub fn prepare_verification_command_evidence_with_artifact(
     job: &ExecutionJob,
     kind: VerificationEvidenceKind,
@@ -871,16 +846,17 @@ pub fn prepare_verification_command_evidence_with_artifact(
     )
 }
 
-/// Converts the verification role's final assistant message into the strict
-/// result Activity consumed by the production verdict authority.
-///
-/// # Errors
-///
-/// Rejects another role, malformed/noncanonical JSON, unknown fields, stale
-/// protocol shape, malformed candidate identity, or an empty finding set.
 pub fn prepare_verification_result_activity(
     job: &ExecutionJob,
     final_message: &[u8],
+) -> Result<PreparedStageProduct, StageProductError> {
+    prepare_verification_result_activity_for_fusion(job, final_message, None)
+}
+
+pub fn prepare_verification_result_activity_for_fusion(
+    job: &ExecutionJob,
+    final_message: &[u8],
+    expected_claim_keys: Option<&[String]>,
 ) -> Result<PreparedStageProduct, StageProductError> {
     ensure_verification_role(job)?;
     if final_message.is_empty() || final_message.len() > MAX_PLANNER_SOLUTION_BYTES {
@@ -890,6 +866,7 @@ pub fn prepare_verification_result_activity(
         serde_json::from_slice(final_message).map_err(|_| invalid_output())?;
     if !result.is_structurally_valid()
         || !verification_matches_work_run_input(&result, validate_work_run_input(job)?)
+        || !fusion_investigations_match(&result, expected_claim_keys)
     {
         return Err(invalid_output());
     }
@@ -907,6 +884,33 @@ pub fn prepare_verification_result_activity(
         bytes: canonical,
         summary: "verification role produced a canonical independent result",
     })
+}
+
+fn fusion_investigations_match(
+    result: &VerificationResultV1,
+    expected_claim_keys: Option<&[String]>,
+) -> bool {
+    let Some(expected_claim_keys) = expected_claim_keys else {
+        return result.fusion_investigations.is_none();
+    };
+    if expected_claim_keys.is_empty() {
+        return result
+            .fusion_investigations
+            .as_ref()
+            .is_none_or(Vec::is_empty);
+    }
+    let expected: BTreeSet<_> = expected_claim_keys.iter().map(String::as_str).collect();
+    if expected.len() != expected_claim_keys.len() {
+        return false;
+    }
+    let Some(investigations) = result.fusion_investigations.as_ref() else {
+        return false;
+    };
+    let actual: BTreeSet<_> = investigations
+        .iter()
+        .map(|investigation| investigation.claim_key.as_str())
+        .collect();
+    actual.len() == investigations.len() && actual == expected
 }
 
 fn ensure_verification_role(job: &ExecutionJob) -> Result<(), StageProductError> {
@@ -948,8 +952,13 @@ fn prepare_json_product<T: Serialize>(
 
 fn valid_candidate_ref(value: &str) -> bool {
     value
-        .strip_prefix("git-candidate:sha256:")
-        .is_some_and(valid_sha256)
+        .strip_prefix("refs/winwincode/candidates/")
+        .is_some_and(|commit| {
+            matches!(commit.len(), 40 | 64)
+                && commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn valid_sha256(digest: &str) -> bool {
@@ -1228,6 +1237,8 @@ struct VerificationResultV1 {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<VerificationFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fusion_investigations: Option<Vec<FusionInvestigation>>,
 }
 
 impl VerificationResultV1 {
@@ -1238,7 +1249,39 @@ impl VerificationResultV1 {
             && valid_candidate_ref(&self.candidate_ref)
             && !self.findings.is_empty()
             && self.findings.iter().all(VerificationFinding::is_valid)
+            && self
+                .fusion_investigations
+                .as_ref()
+                .is_none_or(|investigations| {
+                    investigations.iter().all(FusionInvestigation::is_valid)
+                })
     }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FusionInvestigation {
+    claim_key: String,
+    status: FusionInvestigationStatus,
+    evidence_sources: Vec<VerificationEvidenceSource>,
+}
+
+impl FusionInvestigation {
+    fn is_valid(&self) -> bool {
+        bounded_text(&self.claim_key)
+            && !self.evidence_sources.is_empty()
+            && self
+                .evidence_sources
+                .iter()
+                .all(VerificationEvidenceSource::is_valid)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FusionInvestigationStatus {
+    Investigated,
+    Unresolved,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1389,13 +1432,12 @@ mod tests {
         "}"
     );
 
-    const CANDIDATE_REF: &str =
-        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CANDIDATE_REF: &str = "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const VERIFICATION_RESULT_JSON: &str = concat!(
         "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
         "\"delivery_spec_id\":\"spec-fixture\",",
         "\"delivery_spec_revision\":2,",
-        "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+        "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-reviewer-fixture\",",
         "\"criterion_id\":\"crt_00000000000000000000000001\",",
@@ -1473,9 +1515,9 @@ mod tests {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+                deadline_at: Some(Instant("2026-08-28T00:00:00Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -1490,11 +1532,13 @@ mod tests {
                 work_run_id: run_id,
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: candidate_role.then(|| CANDIDATE_REF.to_owned()),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),
@@ -1512,6 +1556,22 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn runtime_prompt_requires_and_preserves_canonical_snapshot_binding() {
+        let reviewer = delivery_job("reviewer");
+        let snapshot = winwincode_domain::SnapshotId("snap_01J00000000000000000000001".to_owned());
+        assert!(snapshot_bound_prompt(&reviewer, None).is_err());
+        let prompt = snapshot_bound_prompt(&reviewer, Some(&snapshot)).unwrap();
+        assert!(prompt.starts_with(&stage_product_prompt(&reviewer).unwrap()));
+        assert!(prompt.contains(&format!("snapshotId={}", snapshot.0)));
+        let writer = delivery_job("executor");
+        assert!(snapshot_bound_prompt(&writer, Some(&snapshot)).is_err());
+        assert_eq!(
+            snapshot_bound_prompt(&writer, None).unwrap(),
+            stage_product_prompt(&writer).unwrap()
+        );
     }
 
     #[test]
@@ -1795,19 +1855,39 @@ mod tests {
     }
 
     #[test]
-    fn planner_product_rejects_another_role_and_noncanonical_bytes() {
+    fn planner_representation_variants_have_the_same_canonical_product() {
+        let job = delivery_job("planner");
+        let expected = prepare_planner_solution_activity(&job, PLANNER_JSON.as_bytes()).unwrap();
+        let value: Value = serde_json::from_str(PLANNER_JSON).unwrap();
+        for message in [
+            format!("{PLANNER_JSON}\n"),
+            serde_json::to_string_pretty(&value).unwrap(),
+            format!("\u{feff}Result [1]:\n```JSON\n{PLANNER_JSON}\n```   \nDone."),
+        ] {
+            assert_eq!(
+                prepare_planner_solution_activity(&job, message.as_bytes()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn planner_product_rejects_another_role_duplicate_fields_and_foreign_input() {
         let role_error =
             prepare_planner_solution_activity(&delivery_job("executor"), PLANNER_JSON.as_bytes())
                 .expect_err("executor cannot publish a Planner product");
         assert_eq!(role_error.code(), StageProductErrorCode::InvalidRole);
 
-        let spaced = format!(" {PLANNER_JSON}");
-        let canonical_error =
-            prepare_planner_solution_activity(&delivery_job("planner"), spaced.as_bytes())
-                .expect_err("noncanonical JSON is rejected");
+        let duplicate = PLANNER_JSON.replacen(
+            "\"schemaVersion\":1",
+            "\"schemaVersion\":1,\"schemaVersion\":1",
+            1,
+        );
         assert_eq!(
-            canonical_error.code(),
-            StageProductErrorCode::NonCanonicalOutput
+            prepare_planner_solution_activity(&delivery_job("planner"), duplicate.as_bytes())
+                .unwrap_err()
+                .code(),
+            StageProductErrorCode::InvalidOutput
         );
 
         let foreign_criterion =
@@ -1886,7 +1966,7 @@ mod tests {
 
     #[test]
     fn delegated_change_batch_schema_is_closed_and_bounded() {
-        fn collect_keywords(value: &Value, keywords: &mut std::collections::BTreeSet<String>) {
+        fn collect_keywords(value: &Value, keywords: &mut BTreeSet<String>) {
             let Some(object) = value.as_object() else {
                 return;
             };
@@ -1922,7 +2002,7 @@ mod tests {
             schema["properties"]["acceptanceCriteriaIds"]["items"]["pattern"],
             "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
         );
-        let mut keywords = std::collections::BTreeSet::new();
+        let mut keywords = BTreeSet::new();
         collect_keywords(&schema, &mut keywords);
         assert!(keywords.iter().all(|keyword| matches!(
             keyword.as_str(),
@@ -1952,7 +2032,7 @@ mod tests {
                 "{\"protocol\":\"winwincode.verification-session-policy.v1\",",
                 "\"workspace_mode\":\"candidate-read-only\",",
                 "\"permission_profile\":\"candidate-read-only-restricted\",",
-                "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+                "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
             )
             .as_bytes()
         );
@@ -1987,6 +2067,19 @@ mod tests {
     }
 
     #[test]
+    fn fusion_review_with_no_claims_keeps_the_independent_result_valid() {
+        let mut result: VerificationResultV1 =
+            serde_json::from_str(VERIFICATION_RESULT_JSON).expect("verification result");
+        result.fusion_investigations = Some(Vec::new());
+        assert!(result.is_structurally_valid());
+        assert!(fusion_investigations_match(&result, Some(&[])));
+        assert!(!fusion_investigations_match(
+            &result,
+            Some(&["missing-claim".to_owned()])
+        ));
+    }
+
+    #[test]
     fn verification_prompt_supplies_result_fields_and_source_spec_identity() {
         let executor = stage_product_prompt(&delivery_job("executor")).unwrap();
         assert!(executor.starts_with("Goal:\nYou are the executor for this WorkRun."));
@@ -2014,7 +2107,20 @@ mod tests {
             "evidence_sources",
             "source_id",
         ] {
-            assert!(prompt.contains(&format!("\"{field}\":")), "{field}");
+            assert!(prompt.contains(field), "{field}");
+        }
+        for placeholder in [
+            "UNIQUE_FINDING_ID",
+            "FUNCTION_CALL_ID",
+            "OBSERVED_RESULT",
+            "DELIVERY_SPEC_ID",
+            "CANDIDATE_REF",
+            "CRITERION_ID",
+        ] {
+            assert!(
+                !prompt.contains(placeholder),
+                "literal placeholder {placeholder}"
+            );
         }
         assert!(
             prepare_verification_result_activity(&job, VERIFICATION_RESULT_JSON.as_bytes())
@@ -2052,12 +2158,12 @@ mod tests {
 
         let candidate_error = prepare_verification_policy_attestation(
             &delivery_job("verifier"),
-            "git-candidate:sha256:ABCDEF",
+            "refs/winwincode/candidates/ABCDEF",
         )
         .expect_err("malformed candidate");
         assert_eq!(candidate_error.code(), StageProductErrorCode::InvalidOutput);
 
-        let foreign_candidate = format!("git-candidate:sha256:{}", "b".repeat(64));
+        let foreign_candidate = format!("refs/winwincode/candidates/{}", "b".repeat(64));
         let foreign_error =
             prepare_verification_policy_attestation(&delivery_job("verifier"), &foreign_candidate)
                 .expect_err("well-shaped foreign candidate must fail");

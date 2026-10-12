@@ -1,23 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local device-client `SQLite` store holding the eleven local tables from
-//! plan section 8, the two CLIENT-200.2 tables (`connect_code_state`,
-//! `client_connection_policy`) for the dynamic connect code and the local
-//! lock/new-connection policy, and the two CLIENT-300.3 tables
-//! (`occupancy_mirror`, `occupancy_release_intents`) for the durable
-//! occupancy mirror and its release intents. The `worker_process_registry`
-//! table (plan section 8.2) is the durable one-session-one-worker process
-//! registry driven by the local supervisor ([`crate::supervisor`]).
-//!
-//! The open sequence, migration style, transaction discipline, and the
-//! static-SQL-only rule deliberately mirror `crates/winwincode-storage`, the
-//! authoritative local-`SQLite` storage adapter in this repository.
-//!
-//! Local-data boundary: rows in `repository_path_mapping` (and every other
-//! absolute local path stored in worker/candidate tables) never leave the
-//! device. Only the tables consumed by the `ClientControlPort` exchange —
-//! `client_outbox` and the `client_inbox_cursor` — feed server traffic.
-
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
@@ -39,47 +21,22 @@ use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientToServerEnvelope, ClientToServerMessage,
 };
 
-/// Current schema version of the local device-client database. Version 2
-/// added the server-issued `client_node_id` column to `device_identity`
-/// (plan 17.1 enrollment adoption). Version 3 added the two CLIENT-200.2
-/// tables (`connect_code_state`, `client_connection_policy`) holding the
-/// durable state of the dynamic connect code and the local lock/new-connection
-/// policy. Version 4 (CLIENT-300.3) reshaped `occupancy_mirror` into the
-/// singleton authoritative occupancy mirror (lease, fencing token, holder,
-/// mirror revision, acknowledgement stamp) and added the
-/// `occupancy_release_intents` table. Version 5 (WORKER-100.2) added the
-/// nullable `exit_code` column to `worker_process_registry` so a terminal
-/// observation (exited/crashed) keeps the exit status next to the state.
-/// Version 6 (GIT-100.2) extended `candidate_local_refs` into the full
-/// device-local candidate registry: the product-level `candidate_ref`, the
-/// frozen `candidate_commit`, and the `retained_at` stamp joined the row, and
-/// `local_state` froze onto the plan 15 `LocalCandidateState` vocabulary. No
-/// version-1 through version-5 database ever shipped, so older databases fail
-/// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
-/// stop-intent/receipt table, including the stop reason in its command
-/// identity.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 7;
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(1);
-/// Largest integer exactly representable where it matters for wire cursors;
-/// matches the durable-cursor bound used by `winwincode-storage`.
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ID_BYTES: usize = 200;
 const MAX_URL_BYTES: usize = 2048;
 const MAX_PATH_BYTES: usize = 4096;
 
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-// SQLite's default busy timeout accumulates requested sleeps and is not a
-// wall-clock deadline. The open-only handler reads this thread-local
-// monotonic deadline on every busy callback.
 thread_local! {
     static SQLITE_OPEN_BUSY_DEADLINE: Cell<Option<StdInstant>> = const { Cell::new(None) };
 }
 
-/// Stable error categories exposed by the device-client store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceStoreErrorKind {
     InvalidInput,
@@ -89,7 +46,6 @@ pub enum DeviceStoreErrorKind {
     Adapter,
 }
 
-/// Device-client store failure with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceStoreError {
     kind: DeviceStoreErrorKind,
@@ -176,48 +132,25 @@ fn require_non_empty(value: &str, label: &str, max_bytes: usize) -> Result<(), D
     Ok(())
 }
 
-/// One local path-mapping row (plan section 8.1).
-///
-/// LOCAL ONLY: `canonical_path`, `git_common_directory`, and every other
-/// absolute path in this record are never uploaded to any server. The stable
-/// `repository_binding_id` is the only server-visible identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathMappingRecord {
     pub repository_binding_id: String,
     pub canonical_path: String,
     pub git_common_directory: Option<String>,
-    /// RFC 3339 timestamp of the last successful canonicalization, or `None`
-    /// before the first successful scan.
     pub last_canonicalized_at: Option<String>,
-    /// Local lifecycle vocabulary owned by later device-client lanes.
     pub local_state: String,
 }
 
-/// One local repository scan projection row (`repository_local_state`,
-/// plan section 8).
-///
-/// LOCAL ONLY: like [`PathMappingRecord`], this row never leaves the device.
-/// Only the digest-bearing safe projection of these facts rides the
-/// `client.repository.upsert` / `client.repository.status` frames; the
-/// absolute path never does. Availability uses the plan 13.5 seven-state
-/// vocabulary in its wire spelling (`available`, `dirty`, `unavailable`,
-/// `moved`, `invalid_git`, `permission_denied`, `scan_failed`); the dirty
-/// state uses `clean` / `dirty`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryLocalStateRecord {
     pub repository_binding_id: String,
     pub dirty_state: RepositoryDirtyState,
     pub availability: RepositoryAvailability,
-    /// Last observed HEAD commit; empty before the first commit (an unborn
-    /// branch) and `None` when the last scan could not read it.
     pub head_commit: Option<String>,
-    /// RFC 3339 stamp of the scan that produced this projection.
     pub last_scanned_at: Option<String>,
-    /// RFC 3339 stamp of the last write to this row.
     pub updated_at: String,
 }
 
-/// One durable pending (or published) client-to-server envelope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientOutboxEntry {
     pub outbox_sequence: u64,
@@ -225,61 +158,38 @@ pub struct ClientOutboxEntry {
     pub client_node_id: String,
     pub client_instance_id: String,
     pub envelope_sequence: u64,
-    /// Wire `kind` string from the `ClientControlPort` contract.
     pub kind: String,
-    /// Canonical `serde_json` encoding of the full `ClientToServerEnvelope`.
     pub payload: Vec<u8>,
     pub occurred_at: String,
 }
 
-/// One strictly forward-only server-to-client replay cursor update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientInboxCursorUpdate {
     pub server_profile_id: String,
     pub last_sequence: u64,
     pub last_message_id: Option<String>,
-    /// RFC 3339 timestamp supplied by the caller's clock.
     pub updated_at: String,
 }
 
-/// Durable state of the currently published dynamic connect code
-/// (CLIENT-200.2, plan 11.3).
-///
-/// LOCAL ONLY: the plaintext code never persists — this record carries the
-/// `sha256:` digest plus the metadata needed to answer
-/// `client.access.challenge` with the code-generation verdict.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeStateRecord {
     pub connect_code_id: String,
-    /// `sha256:` digest of the 8-digit plaintext code.
     pub code_digest: String,
-    /// Monotonic publication generation; a refresh replaces the row with
-    /// `generation + 1`, invalidating every older generation.
     pub generation: u64,
-    /// `clientInstanceId` of the process that published the code.
     pub issued_by_instance_id: String,
-    /// RFC 3339 expiry of the code (default 120 seconds after issuance).
     pub expires_at: String,
-    /// Lifecycle state (`active`, or `revoked` after a local disable).
     pub state: ConnectCodeState,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// Durable local connection policy (CLIENT-200.2, plan 11.1/12.1).
-///
-/// Mirrored into every `client.hello` / `client.heartbeat` report and
-/// enforced against `client.access.challenge`: while the node is locked or
-/// new connections are disabled, every challenge is rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionPolicyRecord {
     pub accepting_connections: bool,
     pub lock_state: ClientLockState,
-    /// RFC 3339 timestamp of the last policy change.
     pub updated_at: String,
 }
 
-/// One durable server-to-client replay cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientInboxCursor {
     pub server_profile_id: String,
@@ -288,40 +198,18 @@ pub struct ClientInboxCursor {
     pub updated_at: String,
 }
 
-/// The durable occupancy mirror (CLIENT-300.3, plan 12.2/12.6/18.3).
-///
-/// The device-local execution projection of the Control Plane's occupancy
-/// lease. Only `client.occupancy.offer` and `client.occupancy.force_fence`
-/// may write it (never a release), and every write bumps
-/// [`OccupancyMirrorRecord::mirror_revision`], so commands authorized under
-/// a previous revision are invalidated. The row survives disconnects and
-/// restarts; while it exists, every fenced command is checked against its
-/// lease/token identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyMirrorRecord {
     pub occupancy_lease_id: String,
-    /// Fencing token of the mirrored lease (wire `occupancyFencingToken`).
     pub fencing_token: u64,
-    /// Occupying user from the offer. `None` when the mirror was advanced by
-    /// a `client.occupancy.force_fence` that superseded a foreign lease and
-    /// carried no holder fact.
     pub holder_user_id: Option<String>,
-    /// Locally monotonic revision, bumped on every mirror advance; the value
-    /// reported back as the ack's `mirrorRevision`/`expectedRevision`.
     pub mirror_revision: u64,
-    /// Claim that created the lease (`None` under the same force-fence
-    /// condition as [`OccupancyMirrorRecord::holder_user_id`]).
     pub claim_request_id: Option<String>,
     pub idle_expires_at: Option<String>,
-    /// RFC 3339 stamp of when this mirror revision was persisted.
     pub acknowledged_at: String,
-    /// RFC 3339 stamp of the last mirror write.
     pub updated_at: String,
 }
 
-/// Facts of one mirror advance (an offer, or the new stamp of a
-/// force-fence). The store assigns the monotonic mirror revision inside the
-/// write transaction; callers cannot forge one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyMirrorUpdate {
     pub occupancy_lease_id: String,
@@ -329,56 +217,32 @@ pub struct OccupancyMirrorUpdate {
     pub holder_user_id: Option<String>,
     pub claim_request_id: Option<String>,
     pub idle_expires_at: Option<String>,
-    /// RFC 3339 stamp written to both `acknowledged_at` and `updated_at`.
     pub acknowledged_at: String,
 }
 
-/// Outcome of one mirror-advance attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OccupancyMirrorAdvance {
-    /// The mirror advanced to the update's lease/token at a new revision.
     Advanced(OccupancyMirrorRecord),
-    /// The identical lease/token mirror was already persisted (an
-    /// idempotent replay of the same offer or force-fence); the stored
-    /// record is returned unchanged and the revision does not move.
     Unchanged(OccupancyMirrorRecord),
 }
 
-/// One durable release intent (CLIENT-300.3, plan 12.4).
-///
-/// The daemon records the requested mode plus the affected worker-session
-/// count when `client.occupancy.release` passes the fencing stamp; actually
-/// stopping worker processes belongs to the worker epic and reconciles from
-/// these rows after a restart. The release command's `idempotencyKey` is
-/// the primary key, so a server replay never records the intent twice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupancyReleaseIntentRecord {
-    /// Idempotency key of the release command that produced the intent.
     pub idempotency_key: String,
-    /// Message id of the release frame being answered.
     pub command_message_id: String,
     pub occupancy_lease_id: String,
     pub fencing_token: u64,
     pub mode: ClientOccupancyReleaseMode,
-    /// Worker sessions bound to the lease when the intent was recorded.
     pub affected_worker_sessions: u64,
-    /// RFC 3339 stamp of the recording.
     pub recorded_at: String,
 }
 
-/// Outcome of one release-intent write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OccupancyReleaseIntentOutcome {
-    /// A new intent row was persisted.
     Recorded(OccupancyReleaseIntentRecord),
-    /// The idempotency key already recorded an intent (a replayed release
-    /// command); the stored row is returned unchanged.
     Duplicate(OccupancyReleaseIntentRecord),
 }
 
-/// Durable intent and terminal receipt for one `client.worker.stop` command.
-/// The row is written before touching the worker process and completed only
-/// after the supervisor has persisted the terminal process state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerStopIntentRecord {
     pub command_message_id: String,
@@ -400,56 +264,28 @@ pub enum WorkerStopIntentOutcome {
     Duplicate(WorkerStopIntentRecord),
 }
 
-/// One durable worker-process registry row (plan section 8.2, WORKER-100.2).
-///
-/// LOCAL ONLY: `data_directory` (and every other absolute local path in this
-/// record) never leaves the device — the `ClientControlPort` frames carry
-/// only identities and state vocabulary.
-///
-/// A PID alone is never sufficient (PIDs are reused): every row additionally
-/// binds `process_start_identity`, the platform's process-boot identity, so
-/// a stale row can never be mistaken for a live process after PID reuse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerProcessRecord {
-    /// The one `WorkerSession` this process authenticates (primary key).
     pub worker_session_id: String,
-    /// Stable Worker identity reused across replacement boots of the same
-    /// session.
     pub worker_id: String,
-    /// Identity of this exact process boot; fresh on every launch.
     pub worker_instance_id: String,
-    /// OS process id of the supervised child.
     pub pid: u32,
-    /// Platform process-boot identity binding the pid (e.g. the process
-    /// start time); the supervisor owns the platform encoding.
     pub process_start_identity: String,
     pub repository_binding_id: String,
     pub occupancy_lease_id: String,
     pub launch_grant_id: String,
     pub data_directory: String,
-    /// Local lifecycle state (`running`, `exited`, `crashed`, `missing`).
     pub state: String,
-    /// Exit status of the terminal observation, when the platform supplied
-    /// one (`None` while running, for signal deaths, and for unobserved
-    /// exits recorded as `missing`).
     pub exit_code: Option<i64>,
-    /// RFC 3339 stamp of the last state observation.
     pub last_observed_at: String,
 }
 
-/// The exchange sender stream the durable outbox is currently bound to.
-///
-/// The `ClientControlPort` contract keys the client-to-server sequence
-/// stream by `clientNodeId` (`sequence 按 clientNodeId 分流`), so outbox
-/// trait operations scope their SQL by node; the bound `clientInstanceId`
-/// stamps newly appended rows for the current process launch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct OutboxStream {
     client_node_id: String,
     client_instance_id: String,
 }
 
-/// Local `SQLite` implementation of the device-client store.
 pub struct DeviceStore {
     connection: Option<Connection>,
     read_connection: Mutex<Connection>,
@@ -458,12 +294,43 @@ pub struct DeviceStore {
 }
 
 impl DeviceStore {
-    /// Opens the local database and applies all schema migrations before return.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the directory, connection,
-    /// durability settings, or schema migration cannot be prepared.
+    pub fn record_command_result(
+        &mut self,
+        result: &winwincode_client_port::messages::ClientCommandAckPayload,
+    ) -> Result<(), DeviceStoreError> {
+        let payload = serde_json::to_vec(result)
+            .map_err(|_| DeviceStoreError::invalid("invalid command receipt"))?;
+        self.connection()?
+            .execute(
+                "INSERT INTO server_command_results (command_message_id, payload) VALUES (?1, ?2)
+             ON CONFLICT(command_message_id) DO UPDATE SET payload = excluded.payload",
+                params![result.command_message_id, payload],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub fn command_result(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<winwincode_client_port::messages::ClientCommandAckPayload>, DeviceStoreError>
+    {
+        let payload: Option<Vec<u8>> = self
+            .connection()?
+            .query_row(
+                "SELECT payload FROM server_command_results WHERE command_message_id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        payload
+            .map(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| DeviceStoreError::adapter("invalid stored command receipt"))
+            })
+            .transpose()
+    }
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, DeviceStoreError> {
         let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
         let data_directory = data_directory.as_ref();
@@ -474,10 +341,6 @@ impl DeviceStore {
             DeviceStoreError::adapter(format!("failed to resolve the data directory: {error}"))
         })?;
         let database_path = canonical_data_directory.join(DATABASE_FILE_NAME);
-        // SQLite schema and journal-mode setup acquire database-wide locks.
-        // Serialize only callers opening the same canonical database;
-        // unrelated stores must not consume one another's bounded
-        // initialization window.
         let open_lock = sqlite_open_lock(&database_path, open_deadline)?;
         let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_deadline)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -510,13 +373,20 @@ impl DeviceStore {
         read_connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
+
+        #[cfg(test)]
+        worker_report_pending_migration_tests::before_pending_report_prepare_for_test(
+            open_deadline,
+        );
+
+        set_open_busy_deadline(&connection, open_deadline)?;
+        prepare_worker_report_pending(&mut connection)?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(sql_error)?;
         read_connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(sql_error)?;
-
         Ok(Self {
             connection: Some(connection),
             read_connection: Mutex::new(read_connection),
@@ -525,11 +395,6 @@ impl DeviceStore {
         })
     }
 
-    /// Deterministically closes the store and checkpoints its write-ahead log.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when checkpointing or close fails.
     pub fn close(self) -> Result<(), DeviceStoreError> {
         let DeviceStore {
             mut connection,
@@ -568,13 +433,6 @@ impl DeviceStore {
             .ok_or_else(DeviceStoreError::closed)
     }
 
-    /// Inserts or replaces one local path-mapping row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong identity, path, or local state value, and an adapter-neutral
-    /// error when the write fails or the store is closed.
     pub fn put_path_mapping(&mut self, record: &PathMappingRecord) -> Result<(), DeviceStoreError> {
         require_non_empty(
             &record.repository_binding_id,
@@ -613,12 +471,6 @@ impl DeviceStore {
         transaction.commit().map_err(sql_error)
     }
 
-    /// Loads one local path-mapping row by its repository binding id.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn path_mapping(
         &self,
         repository_binding_id: &str,
@@ -635,12 +487,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Loads every local path-mapping row in binding-id order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn path_mappings(&self) -> Result<Vec<PathMappingRecord>, DeviceStoreError> {
         let mut statement = self
             .connection()?
@@ -656,12 +502,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Deletes one local path-mapping row.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the delete fails or the store is
-    /// closed.
     pub fn delete_path_mapping(
         &mut self,
         repository_binding_id: &str,
@@ -676,13 +516,6 @@ impl DeviceStore {
         Ok(changed > 0)
     }
 
-    /// Inserts or replaces one local repository scan projection row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong binding id or update stamp, and an adapter-neutral error when
-    /// the write fails or the store is closed.
     pub fn put_repository_local_state(
         &mut self,
         record: &RepositoryLocalStateRecord,
@@ -723,12 +556,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Loads one local repository scan projection row by its binding id.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails, the store is
-    /// closed, or a stored row disagrees with its schema vocabulary.
     pub fn repository_local_state(
         &self,
         repository_binding_id: &str,
@@ -745,12 +572,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Loads every local repository scan projection row in binding-id order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails, the store is
-    /// closed, or a stored row disagrees with its schema vocabulary.
     pub fn repository_local_states(
         &self,
     ) -> Result<Vec<RepositoryLocalStateRecord>, DeviceStoreError> {
@@ -768,16 +589,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Deletes one repository binding atomically: the path-mapping row and
-    /// its scan projection row disappear together or not at all.
-    ///
-    /// Returns whether the binding existed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty binding id
-    /// and an adapter-neutral error when the delete fails or the store is
-    /// closed.
     pub fn delete_repository_binding(
         &mut self,
         repository_binding_id: &str,
@@ -803,18 +614,6 @@ impl DeviceStore {
         Ok(changed > 0)
     }
 
-    /// Advances the durable server-to-client replay cursor for one server.
-    ///
-    /// The cursor is strictly forward-only: an update whose
-    /// [`ClientInboxCursorUpdate::last_sequence`] is below the stored position
-    /// is rejected, and an update at the stored position is accepted only
-    /// when it names the same message id (idempotent replay).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::Conflict`] for a backwards or diverging
-    /// update and an adapter-neutral error when the write fails or the store
-    /// is closed.
     pub fn advance_inbox_cursor(
         &mut self,
         update: &ClientInboxCursorUpdate,
@@ -881,12 +680,6 @@ impl DeviceStore {
         transaction.commit().map_err(sql_error)
     }
 
-    /// Loads one durable server-to-client replay cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn inbox_cursor(
         &self,
         server_profile_id: &str,
@@ -917,20 +710,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Appends one pending client-to-server envelope.
-    ///
-    /// The envelope is stored as its canonical `serde_json` encoding together
-    /// with the queried envelope frame fields. The per-sender
-    /// `sequence` must be strictly greater than every stored sequence for the
-    /// same `clientNodeId`/`clientInstanceId` pair, mirroring the wire
-    /// contract's replay protection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for a foreign schema
-    /// version or an empty identity, [`DeviceStoreErrorKind::Conflict`] for a
-    /// duplicate `messageId` or a non-advancing per-sender sequence, and an
-    /// adapter-neutral error when the write fails or the store is closed.
     pub fn append_outbox_envelope(
         &mut self,
         envelope: &ClientToServerEnvelope,
@@ -985,12 +764,6 @@ impl DeviceStore {
             .map_err(|_| DeviceStoreError::adapter("outbox sequence is negative"))
     }
 
-    /// Loads unpublished client-to-server envelopes in durable order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn pending_outbox_envelopes(&self) -> Result<Vec<ClientOutboxEntry>, DeviceStoreError> {
         let mut statement = self
             .connection()?
@@ -1006,13 +779,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Marks one envelope as published by its message id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::NotFound`] when the message id is
-    /// unknown, and an adapter-neutral error when the write fails or the
-    /// store is closed.
     pub fn mark_outbox_published(&mut self, message_id: &str) -> Result<(), DeviceStoreError> {
         require_non_empty(message_id, "message id", MAX_ID_BYTES)?;
         let changed = self
@@ -1030,16 +796,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Loads the durable state of the currently published connect code.
-    ///
-    /// The plaintext code is never stored; only this digest-bearing record
-    /// survives a restart so challenges stay answerable across process
-    /// launches.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails, the store is
-    /// closed, or the stored row disagrees with its schema vocabulary.
     pub fn connect_code_state(&self) -> Result<Option<ConnectCodeStateRecord>, DeviceStoreError> {
         self.connection()?
             .query_row(
@@ -1053,19 +809,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Replaces the durable connect-code state with the next publication.
-    ///
-    /// The replacement is generation-monotonic: a record whose
-    /// [`ConnectCodeStateRecord::generation`] does not strictly advance past
-    /// the stored generation is rejected, so two racing publishers can never
-    /// end up with colliding generations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong field, [`DeviceStoreErrorKind::Conflict`] for a
-    /// non-advancing generation, and an adapter-neutral error when the write
-    /// fails or the store is closed.
     pub fn replace_connect_code_state(
         &mut self,
         record: &ConnectCodeStateRecord,
@@ -1123,38 +866,6 @@ impl DeviceStore {
         transaction.commit().map_err(sql_error)
     }
 
-    /// Marks the stored connect code `revoked` (the local disable). A no-op
-    /// returning `false` when no active code exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the write fails or the store is
-    /// closed.
-    pub fn revoke_connect_code_state(
-        &mut self,
-        revoked_at: &str,
-    ) -> Result<bool, DeviceStoreError> {
-        require_non_empty(revoked_at, "revoked at", MAX_ID_BYTES)?;
-        let changed = self
-            .connection_mut()?
-            .execute(
-                "UPDATE connect_code_state SET state = 'revoked', updated_at = ?1 \
-                 WHERE singleton = 1 AND state = 'active'",
-                params![revoked_at],
-            )
-            .map_err(sql_error)?;
-        Ok(changed > 0)
-    }
-
-    /// Loads the durable local connection policy.
-    ///
-    /// `None` before the first policy write; callers default to accepting
-    /// connections with an unlocked node.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn connection_policy(&self) -> Result<Option<ConnectionPolicyRecord>, DeviceStoreError> {
         self.connection()?
             .query_row(
@@ -1175,14 +886,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Persists the local connection policy (lock state plus whether new
-    /// connections are accepted).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty timestamp
-    /// and an adapter-neutral error when the write fails or the store is
-    /// closed.
     pub fn put_connection_policy(
         &mut self,
         record: &ConnectionPolicyRecord,
@@ -1208,41 +911,11 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Reads the durable occupancy mirror.
-    ///
-    /// `None` while no mirror is set: the device holds no occupancy and
-    /// every fenced command fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails, the store is
-    /// closed, or the stored row disagrees with its schema vocabulary.
     pub fn occupancy_mirror(&self) -> Result<Option<OccupancyMirrorRecord>, DeviceStoreError> {
         let connection = self.connection()?;
         read_occupancy_mirror(connection)
     }
 
-    /// Advances the occupancy mirror to `update` (CLIENT-300.3).
-    ///
-    /// Only `client.occupancy.offer` and `client.occupancy.force_fence` may
-    /// call this. The advance is strictly token-monotonic: with a mirror
-    /// present, the update's fencing token must be greater than the stored
-    /// token, otherwise the write is refused as a conflict and the mirror
-    /// never rolls back. An update naming the exact stored lease/token pair
-    /// is the idempotent replay of the same mirror fact: nothing is written
-    /// and [`OccupancyMirrorAdvance::Unchanged`] returns the stored record
-    /// (a different holder for the same lease/token pair is still a
-    /// conflict). Every real advance assigns
-    /// [`OccupancyMirrorRecord::mirror_revision`] `= stored + 1` (or `1`
-    /// when no mirror existed) inside the write transaction, invalidating
-    /// every intent authorized under the previous revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong identity, [`DeviceStoreErrorKind::Conflict`] for a
-    /// non-advancing or diverging update, and an adapter-neutral error when
-    /// the write fails or the store is closed.
     pub fn advance_occupancy_mirror(
         &mut self,
         update: &OccupancyMirrorUpdate,
@@ -1290,15 +963,6 @@ impl DeviceStore {
         Ok(advance)
     }
 
-    /// Counts the worker sessions in the local process registry that are
-    /// bound to one occupancy lease — the "affected workers" figure recorded
-    /// with a release intent. Worker supervision itself belongs to the
-    /// worker epic.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn count_lease_worker_sessions(
         &self,
         occupancy_lease_id: &str,
@@ -1316,15 +980,6 @@ impl DeviceStore {
         u64::try_from(count).map_err(|_| DeviceStoreError::adapter("worker count is negative"))
     }
 
-    /// Inserts or replaces one worker-process registry row (plan 8.2),
-    /// keyed by `worker_session_id` — the one-session-one-worker invariant
-    /// makes the session id the natural primary key.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong identity, path, state, or timestamp field and an
-    /// adapter-neutral error when the write fails or the store is closed.
     pub fn put_worker_process(
         &mut self,
         record: &WorkerProcessRecord,
@@ -1369,12 +1024,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Loads one worker-process registry row by its worker session id.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn worker_process(
         &self,
         worker_session_id: &str,
@@ -1395,12 +1044,6 @@ impl DeviceStore {
             .map_err(sql_error)
     }
 
-    /// Loads every worker-process registry row in worker-session order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn worker_processes(&self) -> Result<Vec<WorkerProcessRecord>, DeviceStoreError> {
         let mut statement = self
             .connection()?
@@ -1417,13 +1060,48 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Loads every worker-process registry row bound to one occupancy lease,
-    /// in worker-session order — the affected-worker scan for a release.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
+    pub fn worker_report_candidates(
+        &self,
+        family: &str,
+        lease: Option<&str>,
+    ) -> Result<Vec<WorkerProcessRecord>, DeviceStoreError> {
+        if !matches!(family, "reconcile" | "exit") {
+            return Err(DeviceStoreError::adapter("unknown worker report family"));
+        }
+        let active = if family == "reconcile" {
+            "SELECT worker_session_id FROM worker_process_registry WHERE state NOT IN ('exited','crashed','missing') AND (?2 IS NULL OR occupancy_lease_id=?2) UNION "
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT worker_session_id,worker_id,worker_instance_id,pid,process_start_identity,repository_binding_id,occupancy_lease_id,launch_grant_id,data_directory,state,exit_code,last_observed_at FROM worker_process_registry WHERE worker_session_id IN ({active}SELECT worker_session_id FROM worker_report_pending WHERE family=?1) AND (?2 IS NULL OR occupancy_lease_id=?2) ORDER BY worker_session_id"
+        );
+        let mut stmt = self.connection()?.prepare(&sql).map_err(sql_error)?;
+        stmt.query_map(params![family, lease], row_to_worker_process)
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+
+    pub fn worker_report_queued(
+        &mut self,
+        family: &str,
+        record: &WorkerProcessRecord,
+    ) -> Result<(), DeviceStoreError> {
+        if !matches!(family, "reconcile" | "exit") {
+            return Err(DeviceStoreError::adapter("unknown worker report family"));
+        }
+        self.connection_mut()?.execute("DELETE FROM worker_report_pending WHERE family=?1 AND worker_session_id=?2 AND EXISTS (
+            SELECT 1 FROM worker_process_registry WHERE worker_session_id=?2 AND worker_instance_id=?3 AND pid=?4 AND process_start_identity=?5 AND occupancy_lease_id=?6 AND state=?7 AND exit_code IS ?8)",
+            params![family, record.worker_session_id, record.worker_instance_id, i64::from(record.pid), record.process_start_identity, record.occupancy_lease_id, record.state, record.exit_code]).map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub fn has_running_worker_for_lease(&self, lease: &str) -> Result<bool, DeviceStoreError> {
+        require_non_empty(lease, "occupancy lease id", MAX_ID_BYTES)?;
+        self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM worker_process_registry WHERE state='running' AND occupancy_lease_id=?1)", [lease], |row| row.get(0)).map_err(sql_error)
+    }
+
     pub fn worker_processes_for_lease(
         &self,
         occupancy_lease_id: &str,
@@ -1445,13 +1123,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Counts the registry rows in one lifecycle state (the live
-    /// `runningWorkerSessions` capacity fact comes from `running`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty state and
-    /// an adapter-neutral error when the read fails or the store is closed.
     pub fn count_worker_processes_in_state(&self, state: &str) -> Result<u64, DeviceStoreError> {
         require_non_empty(state, "worker state", MAX_ID_BYTES)?;
         let count: i64 = self
@@ -1465,15 +1136,6 @@ impl DeviceStore {
         u64::try_from(count).map_err(|_| DeviceStoreError::adapter("worker count is negative"))
     }
 
-    /// Moves one worker-process registry row to `state` with an optional
-    /// exit code, refreshing its observation stamp. Answers whether a row
-    /// was updated.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty session
-    /// id, state, or timestamp and an adapter-neutral error when the write
-    /// fails or the store is closed.
     pub fn mark_worker_process_state(
         &mut self,
         worker_session_id: &str,
@@ -1496,14 +1158,6 @@ impl DeviceStore {
         Ok(changed > 0)
     }
 
-    /// Records one release intent (idempotent by the release command's
-    /// idempotency key), answering whether the row is new or a duplicate.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong field and an adapter-neutral error when the write fails or
-    /// the store is closed.
     pub fn record_occupancy_release_intent(
         &mut self,
         intent: &OccupancyReleaseIntentRecord,
@@ -1542,12 +1196,6 @@ impl DeviceStore {
         Ok(OccupancyReleaseIntentOutcome::Recorded(intent.clone()))
     }
 
-    /// Loads one release intent by its release command idempotency key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn occupancy_release_intent(
         &self,
         idempotency_key: &str,
@@ -1557,12 +1205,6 @@ impl DeviceStore {
         read_release_intent(connection, idempotency_key)
     }
 
-    /// Loads every recorded release intent in recording order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn occupancy_release_intents(
         &self,
     ) -> Result<Vec<OccupancyReleaseIntentRecord>, DeviceStoreError> {
@@ -1580,15 +1222,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Records the stop intent before any local process action. Replays are
-    /// accepted only when every command identity field except the transport
-    /// envelope id matches the durable row; the idempotency key is the stable
-    /// command identity across downlink redelivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the intent is invalid, conflicts with an existing
-    /// identity, or cannot be committed to the durable store.
     pub fn record_worker_stop_intent(
         &mut self,
         intent: &WorkerStopIntentRecord,
@@ -1647,12 +1280,6 @@ impl DeviceStore {
         Ok(WorkerStopIntentOutcome::Recorded(intent.clone()))
     }
 
-    /// Loads a worker stop intent and its optional terminal receipt.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the command identity is invalid or the store
-    /// cannot be queried.
     pub fn worker_stop_intent(
         &self,
         command_message_id: &str,
@@ -1665,12 +1292,6 @@ impl DeviceStore {
         read_worker_stop_intent(self.connection()?, command_message_id)
     }
 
-    /// Loads one stop intent by its stable idempotency key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the idempotency key is invalid or the store
-    /// cannot be queried.
     pub fn worker_stop_intent_by_idempotency(
         &self,
         idempotency_key: &str,
@@ -1679,12 +1300,6 @@ impl DeviceStore {
         read_worker_stop_intent_by_idempotency(self.connection()?, idempotency_key)
     }
 
-    /// Loads stop intents that were authorized and recorded before their
-    /// terminal receipt was committed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable store cannot be queried.
     pub fn pending_worker_stop_intents(
         &self,
     ) -> Result<Vec<WorkerStopIntentRecord>, DeviceStoreError> {
@@ -1703,14 +1318,6 @@ impl DeviceStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 
-    /// Persists the serialized command receipt after the supervisor has
-    /// completed the process-group stop. A different second receipt is a
-    /// conflict, while the same receipt is an idempotent replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the receipt is invalid, the intent is missing or
-    /// conflicting, or the durable store cannot commit the receipt.
     pub fn complete_worker_stop_intent(
         &mut self,
         command_message_id: &str,
@@ -1757,20 +1364,6 @@ impl DeviceStore {
 }
 
 impl DeviceStore {
-    /// Binds the durable outbox to one sender stream: `clientNodeId` scopes
-    /// every [`FrameOutbox`] operation (the contract keys the sequence stream
-    /// by node), and `clientInstanceId` stamps newly appended rows for this
-    /// process launch.
-    ///
-    /// Must be called once per store before the daemon uses the outbox trait
-    /// operations; unbound calls fail with
-    /// [`DeviceStoreErrorKind::InvalidInput`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty node or
-    /// instance identity and [`DeviceStoreErrorKind::Closed`] after the store
-    /// closed.
     pub fn bind_outbox_stream(
         &mut self,
         client_node_id: &str,
@@ -1786,28 +1379,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Re-keys the enrolled sender stream after the enrollment exchange:
-    /// every acknowledged (published) row of the placeholder stream is copied
-    /// under the server-assigned node id at the same stream sequence, the
-    /// copies are marked published, and the outbox stream rebinds to the
-    /// enrolled node.
-    ///
-    /// The server credits the settled enroll frames to the assigned `cnd_`
-    /// stream, so the copies keep the node sequence continuous: the next
-    /// appended frame continues at the sequence the server expects. Pending
-    /// (unacknowledged) placeholder rows stay untouched on the placeholder
-    /// stream; the daemon enqueues nothing but the enroll before the
-    /// adoption, so none exist in the exchange flow.
-    ///
-    /// Refused when the enrolled node already has rows, so a replayed
-    /// adoption can never duplicate the stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty node
-    /// identity and an adapter-neutral error when the store is closed, a
-    /// stored row disagrees with its encoded envelope, the enrolled stream
-    /// already exists, or the write fails.
     pub fn adopt_enrolled_stream(
         &mut self,
         placeholder_node_id: &str,
@@ -1913,13 +1484,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Inserts or replaces one server profile row.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
-    /// overlong identifier, URL, or display name, and an adapter-neutral
-    /// error when the write fails or the store is closed.
     pub fn upsert_server_profile(
         &mut self,
         record: &ServerProfileRecord,
@@ -1957,12 +1521,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Loads one server profile row by its identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the read fails or the store is
-    /// closed.
     pub fn server_profile(
         &self,
         server_profile_id: &str,
@@ -1996,7 +1554,6 @@ impl DeviceStore {
     }
 }
 
-/// One durable server profile row (`server_profile` table).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerProfileRecord {
     pub server_profile_id: String,
@@ -2006,37 +1563,22 @@ pub struct ServerProfileRecord {
     pub last_connected_at: Option<String>,
 }
 
-/// The durable sender-outbox adapter over the `client_outbox` table.
-///
-/// Mapping decisions (the eleven-table schema is frozen, so the adapter
-/// derives everything the [`FrameOutbox`] contract needs from existing
-/// columns):
-///
-/// - The stream scope is `clientNodeId` (`sequence 按 clientNodeId 分流`):
-///   snapshot cursors and retained frames aggregate every row of the bound
-///   node, whatever `clientInstanceId` produced it, and new rows carry the
-///   bound launch instance.
-/// - The `published` column doubles as the compaction marker: the peer
-///   acknowledgement watermark is the highest `published` envelope sequence,
-///   and [`CompactingOutbox::compact_through`] moves rows out of the delivery
-///   set by marking them published. Rows are retained after compaction so
-///   both durable cursors (acknowledgement and high-water mark) survive even
-///   a fully compacted stream; retention pruning is owned by a later lane.
-/// - `StoredFrame` rows are reconstructed from the stored canonical envelope
-///   bytes; the payload digest is re-derived from the decoded envelope so it
-///   always matches the digest convention both exchange peers compare.
 impl FrameOutbox for DeviceStore {
     type Error = DeviceStoreError;
 
     fn load(&mut self) -> Result<Option<OutboxSnapshot>, Self::Error> {
-        let stream = self.outbox_stream()?;
-        let connection = self.connection()?;
+        let stream = self.outbox_stream()?.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sql_error)?;
         let (ack_sequence, highest_sequence) =
-            outbox_stream_cursor(connection, &stream.client_node_id)?;
+            outbox_stream_cursor(&transaction, &stream.client_node_id)?;
         let Some(highest_sequence) = highest_sequence else {
+            transaction.commit().map_err(sql_error)?;
             return Ok(None);
         };
-        let mut statement = connection
+        let mut statement = transaction
             .prepare(
                 "SELECT message_id, envelope_sequence, kind, payload, occurred_at \
                  FROM client_outbox \
@@ -2068,6 +1610,8 @@ impl FrameOutbox for DeviceStore {
                 &occurred_at,
             )?);
         }
+        drop(statement);
+        transaction.commit().map_err(sql_error)?;
         Ok(Some(OutboxSnapshot {
             ack_sequence: ack_sequence.unwrap_or(0),
             highest_sequence,
@@ -2192,9 +1736,6 @@ impl CompactingOutbox for DeviceStore {
     }
 }
 
-/// Reads the durable node-stream cursors: `(acknowledgement, highest)`.
-///
-/// `None` means the node stream has no rows yet.
 fn outbox_stream_cursor(
     connection: &Connection,
     client_node_id: &str,
@@ -2223,7 +1764,6 @@ fn outbox_stream_cursor(
     Ok((to_cursor(acknowledgement)?, to_cursor(highest)?))
 }
 
-/// Inserts one pending (unpublished) outbox row inside an open transaction.
 fn insert_outbox_row(
     transaction: &rusqlite::Transaction<'_>,
     envelope: &ClientToServerEnvelope,
@@ -2262,14 +1802,12 @@ fn insert_outbox_row(
     Ok(())
 }
 
-/// Converts a wire sequence into its SQLite integer encoding.
 fn i64_prefix(sequence: u64) -> Result<i64, DeviceStoreError> {
     i64::try_from(sequence).map_err(|_| {
         DeviceStoreError::adapter("outbox sequence is outside the SQLite integer range")
     })
 }
 
-/// Decodes one stored canonical envelope, rejecting foreign schema versions.
 fn decode_outbox_envelope(payload: &[u8]) -> Result<ClientToServerEnvelope, DeviceStoreError> {
     let envelope: ClientToServerEnvelope = serde_json::from_slice(payload).map_err(|error| {
         DeviceStoreError::invalid(format!("stored envelope is corrupt: {error}"))
@@ -2282,7 +1820,6 @@ fn decode_outbox_envelope(payload: &[u8]) -> Result<ClientToServerEnvelope, Devi
     Ok(envelope)
 }
 
-/// Extracts the wire `kind` string of one typed message.
 pub(crate) fn envelope_kind(message: &ClientToServerMessage) -> Result<String, DeviceStoreError> {
     let value = serde_json::to_value(message)
         .map_err(|error| DeviceStoreError::invalid(format!("message is not encodable: {error}")))?;
@@ -2293,10 +1830,6 @@ pub(crate) fn envelope_kind(message: &ClientToServerMessage) -> Result<String, D
         .ok_or_else(|| DeviceStoreError::invalid("encoded message carries no kind string"))
 }
 
-/// Rebuilds one [`StoredFrame`] from an unpublished `client_outbox` row,
-/// re-deriving the payload digest from the stored canonical envelope and
-/// fail-closing on any disagreement between the row columns and the decoded
-/// envelope.
 fn stored_frame_from_row(
     client_node_id: &str,
     message_id: &str,
@@ -2359,7 +1892,6 @@ fn row_to_repository_local_state(
     })
 }
 
-/// The wire/storage spelling of one plan 13.5 availability state.
 #[must_use]
 pub const fn availability_wire_name(availability: RepositoryAvailability) -> &'static str {
     match availability {
@@ -2373,8 +1905,6 @@ pub const fn availability_wire_name(availability: RepositoryAvailability) -> &'s
     }
 }
 
-/// Parses one stored availability value, fail-closing on an unknown
-/// vocabulary.
 fn parse_availability_wire_name(value: &str) -> rusqlite::Result<RepositoryAvailability> {
     match value {
         "available" => Ok(RepositoryAvailability::Available),
@@ -2392,7 +1922,6 @@ fn parse_availability_wire_name(value: &str) -> rusqlite::Result<RepositoryAvail
     }
 }
 
-/// The wire/storage spelling of one repository dirty state.
 #[must_use]
 pub const fn dirty_state_wire_name(dirty_state: RepositoryDirtyState) -> &'static str {
     match dirty_state {
@@ -2401,8 +1930,6 @@ pub const fn dirty_state_wire_name(dirty_state: RepositoryDirtyState) -> &'stati
     }
 }
 
-/// Parses one stored dirty-state value, fail-closing on an unknown
-/// vocabulary.
 fn parse_dirty_state_wire_name(value: &str) -> rusqlite::Result<RepositoryDirtyState> {
     match value {
         "clean" => Ok(RepositoryDirtyState::Clean),
@@ -2530,7 +2057,6 @@ const fn lock_state_to_str(state: ClientLockState) -> &'static str {
     }
 }
 
-/// Validates the durable connect-code record fields before any write.
 fn validate_connect_code_record(record: &ConnectCodeStateRecord) -> Result<(), DeviceStoreError> {
     require_non_empty(&record.connect_code_id, "connect code id", MAX_ID_BYTES)?;
     require_non_empty(&record.code_digest, "connect code digest", MAX_ID_BYTES)?;
@@ -2550,7 +2076,6 @@ fn validate_connect_code_record(record: &ConnectCodeStateRecord) -> Result<(), D
     Ok(())
 }
 
-/// Reads the occupancy mirror through any connection or open transaction.
 fn read_occupancy_mirror(
     connection: &Connection,
 ) -> Result<Option<OccupancyMirrorRecord>, DeviceStoreError> {
@@ -2567,7 +2092,6 @@ fn read_occupancy_mirror(
         .map_err(sql_error)
 }
 
-/// Writes the singleton occupancy mirror row inside an open transaction.
 fn write_occupancy_mirror(
     transaction: &rusqlite::Transaction<'_>,
     record: &OccupancyMirrorRecord,
@@ -2607,8 +2131,6 @@ fn write_occupancy_mirror(
     Ok(())
 }
 
-/// Builds the stored shape of one mirror advance; the caller assigns the
-/// monotonic revision.
 fn mirror_record_from_update(update: &OccupancyMirrorUpdate) -> OccupancyMirrorRecord {
     OccupancyMirrorRecord {
         occupancy_lease_id: update.occupancy_lease_id.clone(),
@@ -2622,7 +2144,6 @@ fn mirror_record_from_update(update: &OccupancyMirrorUpdate) -> OccupancyMirrorR
     }
 }
 
-/// Reads one release-intent row through any connection or transaction.
 fn read_release_intent(
     connection: &Connection,
     idempotency_key: &str,
@@ -2792,7 +2313,6 @@ fn parse_release_mode(value: &str) -> rusqlite::Result<ClientOccupancyReleaseMod
     }
 }
 
-/// Validates one mirror update before any write.
 fn validate_mirror_update(update: &OccupancyMirrorUpdate) -> Result<(), DeviceStoreError> {
     require_non_empty(
         &update.occupancy_lease_id,
@@ -2814,7 +2334,6 @@ fn validate_mirror_update(update: &OccupancyMirrorUpdate) -> Result<(), DeviceSt
     Ok(())
 }
 
-/// Validates one release-intent record before any write.
 fn validate_release_intent(intent: &OccupancyReleaseIntentRecord) -> Result<(), DeviceStoreError> {
     require_non_empty(&intent.idempotency_key, "idempotency key", MAX_ID_BYTES)?;
     require_non_empty(
@@ -2876,7 +2395,6 @@ fn validate_worker_stop_intent(intent: &WorkerStopIntentRecord) -> Result<(), De
     Ok(())
 }
 
-/// Validates one worker-process registry record before any write.
 fn validate_worker_process_record(record: &WorkerProcessRecord) -> Result<(), DeviceStoreError> {
     require_non_empty(&record.worker_session_id, "worker session id", MAX_ID_BYTES)?;
     require_non_empty(&record.worker_id, "worker id", MAX_ID_BYTES)?;
@@ -3115,8 +2633,7 @@ CREATE TABLE client_inbox_cursor (
 );
 -- CLIENT-200.2 (plan 11.3): local state of the currently published dynamic
 -- connect code. The plaintext code never persists; only its sha256 digest
--- plus the metadata needed to answer client.access.challenge survive a
--- restart. A refresh replaces the single row at generation + 1.
+-- and publication metadata survive a restart. A refresh replaces the single row at generation + 1.
 CREATE TABLE connect_code_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     connect_code_id TEXT NOT NULL,
@@ -3129,8 +2646,7 @@ CREATE TABLE connect_code_state (
     updated_at TEXT NOT NULL
 );
 -- CLIENT-200.2 (plan 11.1/12.1): durable local connection policy, mirrored
--- into client.hello / client.heartbeat and enforced against
--- client.access.challenge.
+-- into client.hello / client.heartbeat for Server-owned access policy.
 CREATE TABLE client_connection_policy (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     accepting_connections INTEGER NOT NULL CHECK (accepting_connections IN (0, 1)),
@@ -3139,19 +2655,164 @@ CREATE TABLE client_connection_policy (
 );
 ";
 
+const WORKER_REPORT_PENDING_MARKER: &str = "worker-report-pending-v1";
+const WORKER_LAUNCH_REPORT_PENDING_MARKER: &str = "worker-launch-report-pending-v1";
+const WORKER_REPORT_MIGRATION_SCHEMA: &str =
+    "CREATE TABLE worker_report_migration (migration_key TEXT PRIMARY KEY NOT NULL)";
+type WorkerReportSchemaDefinition = (&'static str, &'static str, &'static str);
+const WORKER_REPORT_SCHEMA: &[WorkerReportSchemaDefinition] = &[
+    ("index", "worker_process_registry_state_lease", "CREATE INDEX worker_process_registry_state_lease ON worker_process_registry(state,occupancy_lease_id)"),
+    ("index", "worker_process_registry_active", "CREATE INDEX worker_process_registry_active ON worker_process_registry(occupancy_lease_id,worker_session_id) WHERE state NOT IN ('exited','crashed','missing')"),
+    ("table", "worker_report_pending", "CREATE TABLE worker_report_pending (worker_session_id TEXT NOT NULL, family TEXT NOT NULL, PRIMARY KEY(family,worker_session_id))"),
+    ("trigger", "worker_report_after_insert", "CREATE TRIGGER worker_report_after_insert AFTER INSERT ON worker_process_registry BEGIN
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'reconcile' WHERE NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='reconcile' AND worker_session_id=NEW.worker_session_id);
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'exit' WHERE NEW.state IN ('exited','crashed','missing') AND NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='exit' AND worker_session_id=NEW.worker_session_id); END"),
+    ("trigger", "worker_report_after_update", "CREATE TRIGGER worker_report_after_update AFTER UPDATE ON worker_process_registry WHEN OLD.worker_instance_id != NEW.worker_instance_id OR OLD.state != NEW.state OR OLD.exit_code IS NOT NEW.exit_code BEGIN
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'reconcile' WHERE NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='reconcile' AND worker_session_id=NEW.worker_session_id);
+            INSERT INTO worker_report_pending SELECT NEW.worker_session_id,'exit' WHERE NEW.state IN ('exited','crashed','missing') AND NOT EXISTS (SELECT 1 FROM worker_report_pending WHERE family='exit' AND worker_session_id=NEW.worker_session_id); END"),
+];
+const WORKER_LAUNCH_REPORT_SCHEMA: &[WorkerReportSchemaDefinition] = &[
+    ("table", "worker_launch_report_pending", "CREATE TABLE worker_launch_report_pending (launch_grant_id TEXT PRIMARY KEY NOT NULL)"),
+    ("trigger", "worker_launch_report_after_insert", "CREATE TRIGGER worker_launch_report_after_insert AFTER INSERT ON worker_launch_receipts BEGIN
+            INSERT OR IGNORE INTO worker_launch_report_pending VALUES (NEW.launch_grant_id); END"),
+];
+
+fn worker_report_schema_sql(
+    transaction: &rusqlite::Transaction<'_>,
+    kind: &str,
+    name: &str,
+) -> Result<Option<String>, DeviceStoreError> {
+    transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+            params![kind, name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn normalized_worker_report_sql(sql: &str) -> String {
+    sql.trim()
+        .trim_end_matches(';')
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" IF NOT EXISTS", "")
+}
+
+fn validate_worker_report_schema(
+    transaction: &rusqlite::Transaction<'_>,
+    definitions: &[WorkerReportSchemaDefinition],
+) -> Result<(), DeviceStoreError> {
+    for (kind, name, expected) in definitions {
+        if worker_report_schema_sql(transaction, kind, name)?
+            .as_deref()
+            .map(normalized_worker_report_sql)
+            != Some(normalized_worker_report_sql(expected))
+        {
+            return Err(DeviceStoreError::adapter(format!(
+                "worker report schema {name} is not canonical"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn install_worker_report_schema(
+    transaction: &rusqlite::Transaction<'_>,
+    definitions: &[WorkerReportSchemaDefinition],
+) -> Result<(), DeviceStoreError> {
+    for (kind, name, definition) in definitions {
+        if worker_report_schema_sql(transaction, kind, name)?.is_none() {
+            transaction.execute_batch(definition).map_err(sql_error)?;
+        }
+    }
+    validate_worker_report_schema(transaction, definitions)
+}
+
+fn worker_report_marker_present(
+    transaction: &rusqlite::Transaction<'_>,
+    marker: &str,
+) -> Result<bool, DeviceStoreError> {
+    transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM worker_report_migration WHERE migration_key=?1)",
+            [marker],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)
+}
+
+fn prepare_worker_report_pending(connection: &mut Connection) -> Result<(), DeviceStoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let marker_table =
+        worker_report_schema_sql(&transaction, "table", "worker_report_migration")?.is_some();
+    let (report_applied, launch_applied) = if marker_table {
+        validate_worker_report_schema(
+            &transaction,
+            &[(
+                "table",
+                "worker_report_migration",
+                WORKER_REPORT_MIGRATION_SCHEMA,
+            )],
+        )?;
+        (
+            worker_report_marker_present(&transaction, WORKER_REPORT_PENDING_MARKER)?,
+            worker_report_marker_present(&transaction, WORKER_LAUNCH_REPORT_PENDING_MARKER)?,
+        )
+    } else {
+        (false, false)
+    };
+    if report_applied {
+        validate_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
+    }
+    if launch_applied {
+        validate_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
+    }
+    if !marker_table {
+        transaction
+            .execute_batch(WORKER_REPORT_MIGRATION_SCHEMA)
+            .map_err(sql_error)?;
+    }
+    if !report_applied {
+        install_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
+        transaction.execute_batch("INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'reconcile' FROM worker_process_registry;
+            INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'exit' FROM worker_process_registry WHERE state IN ('exited','crashed','missing');").map_err(sql_error)?;
+        transaction
+            .execute(
+                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
+                [WORKER_REPORT_PENDING_MARKER],
+            )
+            .map_err(sql_error)?;
+    }
+    if !launch_applied {
+        install_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
+        transaction.execute_batch("INSERT OR IGNORE INTO worker_launch_report_pending SELECT launch_grant_id FROM worker_launch_receipts;").map_err(sql_error)?;
+        transaction
+            .execute(
+                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
+                [WORKER_LAUNCH_REPORT_PENDING_MARKER],
+            )
+            .map_err(sql_error)?;
+    }
+    transaction.commit().map_err(sql_error)
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError> {
-    let version = connection
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 6 | CLIENT_STORE_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 6 | 7 | 8 | CLIENT_STORE_SCHEMA_VERSION) {
         return Err(DeviceStoreError::adapter(format!(
             "unsupported schema version {version}"
         )));
     }
-
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sql_error)?;
     if version == 0 {
         transaction.execute_batch(STORE_SCHEMA).map_err(sql_error)?;
     } else if version == 6 {
@@ -3179,6 +2840,14 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
             )
             .map_err(sql_error)?;
     }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS server_command_results (
+            command_message_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL
+        );
+        DROP TABLE IF EXISTS device_credential_rotations;",
+        )
+        .map_err(sql_error)?;
     validate_store_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
@@ -3196,11 +2865,12 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
     Ok(())
 }
 
-/// Canonical tables, their static `PRAGMA table_info` query, and their
-/// canonical column names, validated after creation and before every open
-/// serves traffic. The pragma queries are static per table so the adapter
-/// keeps the no-dynamic-SQL-identifier rule of `winwincode-storage`.
 const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
+    (
+        "server_command_results",
+        "PRAGMA table_info(server_command_results)",
+        &["command_message_id", "payload"],
+    ),
     (
         "device_identity",
         "PRAGMA table_info(device_identity)",
@@ -3487,3 +3157,373 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Dev
             DeviceStoreError::adapter("SQLite device client open exceeded its five-second limit")
         })
 }
+
+impl DeviceStore {
+    pub fn worker_launch_receipt(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<Vec<u8>>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT receipt_payload FROM worker_launch_receipts WHERE launch_grant_id=?1",
+                [grant_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)
+    }
+    pub fn worker_launch_receipts(&self) -> Result<Vec<Vec<u8>>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare("SELECT receipt_payload FROM worker_launch_receipts ORDER BY launch_grant_id")
+            .map_err(sql_error)?;
+        statement
+            .query_map([], |row| row.get(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+    pub fn pending_worker_launch_receipts(
+        &self,
+    ) -> Result<Vec<(String, Vec<u8>)>, DeviceStoreError> {
+        let mut statement = self.connection()?.prepare("SELECT r.launch_grant_id,r.receipt_payload FROM worker_launch_report_pending p JOIN worker_launch_receipts r ON r.launch_grant_id=p.launch_grant_id ORDER BY r.launch_grant_id").map_err(sql_error)?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+
+    pub fn worker_launch_report_queued(&mut self, grant: &str) -> Result<(), DeviceStoreError> {
+        self.connection_mut()?
+            .execute(
+                "DELETE FROM worker_launch_report_pending WHERE launch_grant_id=?1",
+                [grant],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub fn retain_worker_launch_receipt(
+        &mut self,
+        grant_id: &str,
+        session_id: &str,
+        status: &str,
+        key: &str,
+        payload: &[u8],
+        now: &str,
+    ) -> Result<(), DeviceStoreError> {
+        if let Some(existing) = self.worker_launch_receipt(grant_id)? {
+            return if existing == payload {
+                Ok(())
+            } else {
+                Err(DeviceStoreError::conflict("Worker launch receipt differs"))
+            };
+        }
+        self.connection()?
+            .execute(
+                "INSERT INTO worker_launch_receipts VALUES (?1,?2,?3,?4,?5,?6)",
+                params![grant_id, session_id, status, key, payload, now],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod migration_concurrency_tests {
+    use super::{CLIENT_STORE_SCHEMA_VERSION, STORE_SCHEMA, apply_migrations};
+    use rusqlite::{Connection, TransactionBehavior};
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant as StdInstant};
+
+    static WAITING_FOR_SCHEMA_LOCK: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn migration_reads_version_after_acquiring_the_database_lock() {
+        let root =
+            std::env::temp_dir().join(format!("wwc-device-schema-race-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create fixture");
+        let path = root.join("device-client.sqlite3");
+        let mut first = Connection::open(&path).expect("first connection");
+        first
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("WAL");
+        let transaction = first
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("hold schema lock");
+        WAITING_FOR_SCHEMA_LOCK.store(false, Ordering::SeqCst);
+        let second = std::thread::spawn(move || {
+            let mut connection = Connection::open(path).expect("second connection");
+            connection
+                .busy_handler(Some(|attempt| {
+                    WAITING_FOR_SCHEMA_LOCK.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(1));
+                    attempt < 2_000
+                }))
+                .expect("observe lock contention");
+            apply_migrations(&mut connection)
+        });
+        let deadline = StdInstant::now() + Duration::from_secs(2);
+        while !WAITING_FOR_SCHEMA_LOCK.load(Ordering::SeqCst) && StdInstant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            WAITING_FOR_SCHEMA_LOCK.load(Ordering::SeqCst),
+            "second initializer must contend"
+        );
+        transaction
+            .execute_batch(STORE_SCHEMA)
+            .expect("first initializer creates schema");
+        transaction
+            .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
+            .expect("version");
+        transaction.commit().expect("first initializer commits");
+        second
+            .join()
+            .expect("second thread")
+            .expect("second initializer must reread committed version");
+        drop(first);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod outbox_read_cut_tests {
+    use super::{DeviceStore, DeviceStoreError};
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::time::Duration;
+    use winwincode_client_port::exchange::{
+        CompactingOutbox, FrameCodec, FrameOutbox, OutboxSession, OutboxSnapshot, StoredFrame,
+    };
+    use winwincode_client_port::messages::{
+        CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
+        ClientToServerMessage, CommandContext,
+    };
+
+    type CommitResult = Result<(), String>;
+
+    struct TraceGate {
+        start: Sender<()>,
+        committed: Receiver<CommitResult>,
+    }
+
+    thread_local! {
+        static LOAD_GATE: RefCell<Option<TraceGate>> = const { RefCell::new(None) };
+        static TRACE_RESULT: RefCell<Option<CommitResult>> = const { RefCell::new(None) };
+    }
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        Append,
+        Compact,
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        reader: DeviceStore,
+        writer: DeviceStore,
+    }
+
+    struct RaceCapture {
+        first: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        later: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        trace: Option<CommitResult>,
+        writer: CommitResult,
+    }
+
+    fn frame(sequence: u64) -> StoredFrame {
+        let envelope = ClientToServerEnvelope {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            message_id: format!("read-cut-{sequence}"),
+            client_node_id: "read-cut-node".to_owned(),
+            client_instance_id: "read-cut-instance".to_owned(),
+            sequence,
+            occurred_at: "2026-10-09T00:00:00.000Z".to_owned(),
+            message: ClientToServerMessage::RepositoryRemoved(ClientRepositoryRemovedPayload {
+                command: CommandContext {
+                    expected_revision: 0,
+                    idempotency_key: format!("read-cut-idempotency-{sequence}"),
+                },
+                repository_binding_id: "read-cut-binding".to_owned(),
+            }),
+        };
+        FrameCodec::default()
+            .encode_envelope(&envelope)
+            .expect("encode canonical fixture frame")
+    }
+
+    fn bind(store: &mut DeviceStore) {
+        store
+            .bind_outbox_stream("read-cut-node", "read-cut-instance")
+            .expect("bind canonical fixture stream");
+    }
+
+    fn fixture(mutation: Mutation) -> Fixture {
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "wwc-outbox-read-cut-{}-{suffix}",
+            std::process::id()
+        ));
+        let mut reader = DeviceStore::open(&root).expect("open fixture reader");
+        bind(&mut reader);
+        let session = OutboxSession::new();
+        for sequence in 1..=14 {
+            session
+                .enqueue(&mut reader, sequence, &frame(sequence))
+                .expect("retain canonical seed frame");
+        }
+        if matches!(mutation, Mutation::Append) {
+            session
+                .acknowledge(&mut reader, 14)
+                .expect("acknowledge seed frames");
+        }
+        let mut writer = DeviceStore::open(&root).expect("pre-open writer before reader cut");
+        bind(&mut writer);
+        Fixture {
+            root,
+            reader,
+            writer,
+        }
+    }
+
+    fn trace_pending_frames(event: &TraceEvent<'_>) {
+        let TraceEvent::Stmt(_, sql) = event else {
+            return;
+        };
+        if !sql.starts_with("SELECT message_id, envelope_sequence, kind, payload, occurred_at")
+            || !sql.contains("published = 0")
+        {
+            return;
+        }
+        let Some(gate) = LOAD_GATE.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let committed = gate
+            .start
+            .send(())
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                gate.committed
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?
+            });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = Some(committed));
+    }
+
+    fn mutate(writer: &mut DeviceStore, mutation: Mutation) -> CommitResult {
+        match mutation {
+            Mutation::Append => OutboxSession::new()
+                .enqueue(writer, 15, &frame(15))
+                .map(|_| ())
+                .map_err(|error| format!("atomic append failed: {error:?}")),
+            Mutation::Compact => writer
+                .compact_through(14)
+                .map(|_| ())
+                .map_err(|error| format!("atomic compaction failed: {error:?}")),
+        }
+    }
+
+    fn capture_race(mutation: Mutation) -> RaceCapture {
+        let Fixture {
+            root,
+            mut reader,
+            mut writer,
+        } = fixture(mutation);
+        let (start_tx, start_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let join_handle = std::thread::spawn(move || {
+            let committed = start_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())
+                .and_then(|()| mutate(&mut writer, mutation));
+            let _ = committed_tx.send(committed.clone());
+            (writer, committed)
+        });
+        LOAD_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(TraceGate {
+                start: start_tx,
+                committed: committed_rx,
+            });
+        });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = None);
+        reader.connection().expect("reader connection").trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event| trace_pending_frames(&event)),
+        );
+        let first = FrameOutbox::load(&mut reader);
+        reader
+            .connection()
+            .expect("reader connection after load")
+            .trace_v2(TraceEventCodes::empty(), None);
+        LOAD_GATE.with(|slot| drop(slot.borrow_mut().take()));
+        let trace = TRACE_RESULT.with(|slot| slot.borrow_mut().take());
+        let (writer_store, writer_result) = join_handle.join().expect("join fixture writer");
+        let later = FrameOutbox::load(&mut reader);
+        writer_store.close().expect("close writer after reader cut");
+        reader.close().expect("close reader fixture");
+        fs::remove_dir_all(root).expect("remove closed fixture");
+        RaceCapture {
+            first,
+            later,
+            trace,
+            writer: writer_result,
+        }
+    }
+
+    fn snapshots(capture: RaceCapture) -> (OutboxSnapshot, OutboxSnapshot) {
+        assert_eq!(
+            capture.trace,
+            Some(Ok(())),
+            "pending SELECT must wait until the other connection has committed"
+        );
+        capture.writer.expect("writer mutation must commit");
+        let first = capture.first.expect("load pinned cut").expect("seed rows");
+        let later = capture
+            .later
+            .expect("load fresh cut")
+            .expect("durable rows");
+        later.validate().expect("fresh load must remain valid");
+        (first, later)
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_append() {
+        let (first, later) = snapshots(capture_race(Mutation::Append));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during append");
+        assert_eq!(first.ack_sequence, 14);
+        assert_eq!(first.highest_sequence, 14);
+        assert!(first.frames.is_empty());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 15);
+        assert_eq!(later.frames, vec![frame(15)]);
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_compaction() {
+        let (first, later) = snapshots(capture_race(Mutation::Compact));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during compaction");
+        assert_eq!(first.ack_sequence, 0);
+        assert_eq!(first.highest_sequence, 14);
+        assert_eq!(first.frames, (1..=14).map(frame).collect::<Vec<_>>());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 14);
+        assert!(later.frames.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[path = "worker_report_pending_migration_tests.rs"]
+mod worker_report_pending_migration_tests;

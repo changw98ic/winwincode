@@ -376,6 +376,10 @@ fn rejected_registry_claim_rolls_back_queue_and_scheduler_receipts() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "renewal, takeover deadline, and fenced replay share one persisted job"
+)]
 fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
     let root = directory("work-run-replacement");
     let mut storage = SqliteStorage::open(&root).expect("storage");
@@ -396,7 +400,44 @@ fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
         first.job.work_run_id,
         Some(WorkRunId("wrn_01J00000000000000000000000".into()))
     );
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                job_id: first.lease.job_id.clone(),
+                lease_id: first.lease.lease_id.clone(),
+                worker_id: first.lease.worker_id.clone(),
+                worker_instance_id: first.lease.worker_instance_id.clone(),
+                attempt: first.lease.attempt,
+                fencing_token: first.lease.fencing_token.clone(),
+                prior_expires_at: first.lease.expires_at.clone(),
+                expires_at: at(58),
+                sent_at: at(20),
+                message_id: ExecutionMessageId(id("xmsg", 799)),
+                request_id: RequestId(id("req", 799)),
+            })
+            .expect("renew predecessor before process restart")
+            .status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
     let second_instance = register_replacement_instance(&mut storage, 2);
+    assert!(
+        storage
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next(&RepositorySchedulerClaimRequest {
+                scope: repository(),
+                request_id: RequestId(id("req", 798)),
+                scheduler_generation: "boot-b".into(),
+                worker_id: worker_id.clone(),
+                worker_instance_id: second_instance.clone(),
+                issued_at: at(51),
+                expires_at: at(59),
+            })
+            .expect("live renewed predecessor cannot be replaced")
+            .is_none()
+    );
     let second = storage
         .repository_scheduler()
         .expect("scheduler")
@@ -406,7 +447,7 @@ fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
             scheduler_generation: "boot-b".into(),
             worker_id: worker_id.clone(),
             worker_instance_id: second_instance,
-            issued_at: at(51),
+            issued_at: at(58),
             expires_at: at(59),
         })
         .expect("replacement claim")
@@ -424,7 +465,7 @@ fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
             attempt: first.lease.attempt,
             fencing_token: first.lease.fencing_token.clone(),
             outcome: ExecutionLeaseTerminalOutcome::Completed,
-            terminal_at: at(52),
+            terminal_at: at(59),
             request_id: RequestId(id("req", 702)),
         })
         .expect_err("old lease must be fenced");

@@ -35,16 +35,11 @@ test('backup lane owns one module with a frozen CLI seam', () => {
 
 test('snapshots are consistent cuts from VACUUM INTO, never file-level cold copies', () => {
   const backupModule = read(backupModulePath)
-  // The snapshot statement itself.
   assert.match(backupModule, /"VACUUM INTO \?1"/)
-  // The intermediate target is renamed into place only after verification.
   assert.match(backupModule, /const VACUUM_TMP_SUFFIX: &str = "\.vacuum-tmp";/)
   assert.match(backupModule, /fs::rename\(vacuum_tmp, snapshot_path\)/)
-  // Snapshot creation refuses a damaged source instead of sealing it.
   assert.match(backupModule, /backup\.unhealthy-source/)
   assert.match(backupModule, /PRAGMA quick_check/)
-  // Cold copies appear only on the restore side, where the source is a
-  // sealed snapshot file, never a live database.
   assert.match(backupModule, /fn place_snapshot\(/)
   const snapshotFunction = backupModule.slice(
     backupModule.indexOf('fn create_snapshot('),
@@ -57,9 +52,7 @@ test('server backup covers the sidecar layout dynamically and gates the product 
   const backupModule = read(backupModulePath)
   assert.match(backupModule, /const CONTROL_PLANE_DATABASE: &str = "control-plane";/)
   assert.match(backupModule, /const DEVICE_CLIENT_DATABASE: &str = "device-client";/)
-  // Server discovery walks every *.sqlite3 sidecar in the data directory.
   assert.match(backupModule, /strip_suffix\("\.sqlite3"\)/)
-  // The product database restores only versions the storage adapter accepts.
   assert.match(
     backupModule,
     /const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = 6;/,
@@ -68,7 +61,6 @@ test('server backup covers the sidecar layout dynamically and gates the product 
     backupModule,
     /const SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS: \[i64; 5\] = \[1, 2, 3, 4, 5\];/,
   )
-  // The device gate reuses the canonical client-store constant.
   assert.match(
     backupModule,
     /winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION/,
@@ -98,9 +90,6 @@ test('schema version constants stay locked to the canonical storage sources', ()
   assert.ok(storageSupported, 'storage supported migration set found')
   for (const version of storageSupported[1].split('|').map((value) => value.trim())) {
     if (version === '0') {
-      // Version 0 means "create fresh" at startup. Restore deliberately
-      // refuses it: restoring an empty product database would silently wipe
-      // durable state, so only migrated schema versions restore.
       assert.doesNotMatch(
         backupModule,
         /MIGRATABLE_VERSIONS: \[i64; \d+\] = \[0,/,
@@ -119,18 +108,15 @@ test('schema version constants stay locked to the canonical storage sources', ()
   assert.ok(declaredDevice, 'device gate uses the canonical constant')
   const deviceVersion = deviceStore.match(/CLIENT_STORE_SCHEMA_VERSION: i64 = (\d+);/)
   assert.ok(deviceVersion, 'device store schema version declared')
-  assert.equal(deviceVersion[1], '6', 'device store stays at schema v6 (candidate registry wave)')
+  assert.equal(deviceVersion[1], '9', 'device store uses schema v9 (command receipts without device rotation)')
 })
 
 test('restore fails closed on unsupported schema versions before touching targets', () => {
   const backupModule = read(backupModulePath)
   assert.match(backupModule, /restore\.unsupported-schema-version/)
   assert.match(backupModule, /restore\.store-mismatch/)
-  // Verification runs before any placement and re-reads user_version.
   assert.match(backupModule, /fn verify_backup_directory\(/)
   assert.match(backupModule, /PRAGMA user_version/)
-  // Placement is an atomic rename after the credential re-bind, with the
-  // replaced database's stale WAL sidecars removed first.
   assert.match(backupModule, /const RESTORE_TMP_SUFFIX: &str = "\.restore-tmp";/)
   assert.match(backupModule, /for suffix in \["-wal", "-shm"\]/)
   assert.match(backupModule, /fs::rename\(&restore_tmp, &target\)/)
@@ -138,21 +124,15 @@ test('restore fails closed on unsupported schema versions before touching target
 
 test('backup artifacts carry no plaintext credential material', () => {
   const backupModule = read(backupModulePath)
-  // The device credential column is zeroed in the snapshot.
   assert.match(backupModule, /UPDATE device_credential SET credential_secret = zeroblob\(32\)/)
   assert.match(backupModule, /backup\.secret-detected/)
-  // Verify re-checks the redaction contract on every verify run.
   assert.match(backupModule, /fn credential_redaction_finding\(/)
   assert.match(backupModule, /快照携带明文设备凭据/)
-  // Marker scan aligned with the evidence-export secret scanner.
   assert.match(backupModule, /wwc_session=/)
   assert.match(backupModule, /authorization:bearer/)
-  // Restore re-binds the live credential by digest; cross-device restore is
-  // refused because the backup carries no credential material.
   assert.match(backupModule, /fn rebind_device_credentials\(/)
   assert.match(backupModule, /restore\.credential-mismatch/)
   assert.match(backupModule, /restore\.device-credential-unavailable/)
-  // Snapshot files land owner-only, never world readable.
   assert.match(backupModule, /fn set_owner_only_permissions\(/)
   assert.match(backupModule, /fn set_directory_permissions\(/)
 })
@@ -162,10 +142,8 @@ test('repair stays read-only by default, applies bounded actions only, and leave
   assert.match(backupModule, /const REPAIR_LOG_FILE: &str = "backup-repair-log\.jsonl";/)
   assert.match(backupModule, /fn diagnose_database\(/)
   assert.match(backupModule, /PRAGMA integrity_check/)
-  // Only the allowlisted bounded actions exist.
   assert.match(backupModule, /"wal-checkpoint"/)
   assert.match(backupModule, /"stale-temp-cleanup"/)
-  // Damage beyond the bounds is never rewritten; the answer is restore.
   assert.match(backupModule, /有界修复不改写数据，请从备份恢复/)
 })
 

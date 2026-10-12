@@ -1,21 +1,16 @@
-
-# Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
 .beads/proxieddb/
 
-# JavaScript / TypeScript
 node_modules/
 dist/
 .cache/
 *.tgz
 .client-build.lock
 
-# Rust
 target/
 
-# Coverage and test output
 coverage/
 test-results/
 playwright-report/
@@ -25,24 +20,22 @@ release-artifact-security-report.json
 server-data/
 publication-secrets/
 source-repositories/
+fusion-benchmark-tasks/agent-benchmark-submissions/
+fusion-benchmark-tasks/agent-benchmark-tasks/
 
-# Local configuration and credentials
 .env
 .env.*
 !.env.example
 *.log
 
-# Editors and operating systems
 .DS_Store
 .idea/
 .vscode/
 
-# Generated local API test credentials
 /fixture-cert.pem
 /fixture-key.pem
 /openssl.cnf
 
-# Local browser-review artifacts and beads machine state
 .playwright-mcp/
 .tmp-ui-review/
 .codegraph/

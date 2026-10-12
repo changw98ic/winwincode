@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact Evidence detail reads with closed Artifact availability.
-
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
@@ -71,7 +69,8 @@ struct EvidenceSelector<'query> {
     at_cursor: &'query StrongFlowReadCursor,
     read_page_limit: i64,
     evidence_id: &'query EvidenceId,
-    candidate_ref: &'query str,
+    candidate_id: &'query winwincode_domain::CandidateId,
+    snapshot_id: &'query winwincode_domain::SnapshotId,
     work_run_id: WorkRunId,
     session_binding_id: &'query str,
     evidence_type: &'query str,
@@ -98,7 +97,8 @@ pub(super) fn get(
             at_cursor: &query.parameters.at_cursor,
             read_page_limit: query.parameters.read_page_limit,
             evidence_id: &query.parameters.evidence_id,
-            candidate_ref: &query.parameters.candidate_ref,
+            candidate_id: &query.parameters.candidate_id,
+            snapshot_id: &query.parameters.snapshot_id,
             work_run_id: query.parameters.work_run_id.clone(),
             session_binding_id: &query.parameters.session_binding_id,
             evidence_type: &query.parameters.type_value,
@@ -246,7 +246,8 @@ fn selector(binding: &EvidenceReadBinding) -> EvidenceSelector<'_> {
         at_cursor: &binding.at_cursor,
         read_page_limit: binding.read_page_limit,
         evidence_id: &binding.evidence_id,
-        candidate_ref: &binding.candidate_ref,
+        candidate_id: &binding.candidate_id,
+        snapshot_id: &binding.snapshot_id,
         work_run_id: WorkRunId(binding.work_run_id.0.clone()),
         session_binding_id: &binding.session_binding_id,
         evidence_type: &binding.type_value,
@@ -342,7 +343,7 @@ fn resolve_bound_evidence(
             "accepted Evidence source facts cannot be reconstructed exactly".to_owned(),
         )
     })?;
-    if authority.candidate.candidate_ref() != evidence.candidate_ref {
+    if *authority.candidate.candidate_id() != evidence.candidate_id {
         return Err(StrongFlowProjectionError::CandidateStale(
             "Evidence Candidate binding is stale".to_owned(),
         ));
@@ -382,7 +383,8 @@ fn validate_selector(
             )
         })?;
     if &evidence.delivery_id != selector.delivery_id
-        || evidence.candidate_ref != selector.candidate_ref
+        || &evidence.candidate_id != selector.candidate_id
+        || &evidence.snapshot_id != selector.snapshot_id
         || selector.work_run_id.0 != evidence.work_run_id.0
         || evidence.session_binding_id.0 != selector.session_binding_id
         || evidence_type != selector.evidence_type
@@ -452,11 +454,18 @@ fn resolve_artifacts(
             "Evidence runtime ledger is missing".to_owned(),
         ));
     };
-    let ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
+    let mut ledger = decode_runtime_ledger_state(&stored, &stream_id).map_err(|_| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "Evidence runtime ledger is not canonical".to_owned(),
         )
     })?;
+    crate::runtime_event_transaction::hydrate_runtime_ledger(storage, &mut ledger).map_err(
+        |_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "Evidence runtime history is not canonical".to_owned(),
+            )
+        },
+    )?;
     let terminal = load_successful_terminal_authority(storage, delivery, &binding.execution_job_id)
         .map_err(|_| {
             StrongFlowProjectionError::TrustedFactsUnavailable(
@@ -656,7 +665,8 @@ fn resolve_artifacts(
             media_type: record.media_type().to_owned(),
             preview_mode: preview_mode(record.media_type()),
             provenance: EvidenceArtifactProvenanceProjection {
-                candidate_ref: evidence.candidate_ref.clone(),
+                candidate_id: evidence.candidate_id.clone(),
+                snapshot_id: evidence.snapshot_id.clone(),
                 delivery_id: evidence.delivery_id.clone(),
                 delivery_revision: winwincode_domain::Revision(
                     i64::try_from(delivery.revision()).map_err(|_| {
@@ -738,7 +748,8 @@ fn resolve_page_annotation_source(
         || annotation.candidate.delivery_id != *delivery.id()
         || annotation.candidate.delivery_spec_id != evidence.delivery_spec_id.0
         || annotation.candidate.delivery_spec_revision != evidence.delivery_spec_revision
-        || annotation.candidate.candidate_ref != evidence.candidate_ref
+        || annotation.candidate.candidate_id != evidence.candidate_id
+        || annotation.candidate.snapshot_id != evidence.snapshot_id
         || annotation.candidate.work_run_id != evidence.work_run_id
         || annotation.candidate.session_binding_id != evidence.session_binding_id.0
         || annotation.body.trim().is_empty()
@@ -904,7 +915,8 @@ fn resolve_page_annotation_artifact_ref(
             media_type: record.media_type().to_owned(),
             preview_mode: preview_mode(record.media_type()),
             provenance: EvidenceArtifactProvenanceProjection {
-                candidate_ref: evidence.candidate_ref.clone(),
+                candidate_id: evidence.candidate_id.clone(),
+                snapshot_id: evidence.snapshot_id.clone(),
                 delivery_id: evidence.delivery_id.clone(),
                 delivery_revision: winwincode_domain::Revision(
                     i64::try_from(delivery.revision()).map_err(|_| {
@@ -1264,8 +1276,6 @@ mod tests {
         bytes: Vec<u8>,
     }
 
-    // Write the persisted Command/Test stage source directly to exercise the
-    // binding seam.
     #[allow(clippy::too_many_lines)]
     fn fixture(corruption: Corruption) -> Fixture {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -1425,6 +1435,7 @@ mod tests {
         ));
         let ledger = crate::runtime_event_transaction::RuntimeLedgerState {
             schema_version: 1,
+            event_chain_digest: String::new(),
             delivery_id: Some(delivery.id().clone()),
             work_item_id: None,
             work_run_id: Some(binding.work_run_id.clone()),
@@ -1566,7 +1577,8 @@ mod tests {
             delivery_spec_revision: delivery.snapshot().spec.revision,
             work_run_id: binding.work_run_id.clone(),
             session_binding_id: binding.id.clone(),
-            candidate_ref: "git-candidate:fixture".into(),
+            candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::Test,
             source_ref: format!("runtime_event:{}", event_id.0),
             created_at_millis: 1_800_000_000_020,

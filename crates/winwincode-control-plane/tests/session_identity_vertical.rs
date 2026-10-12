@@ -153,9 +153,9 @@ mod session_binding_fixture {
                     write_mode: ExecutionWorkspaceWriteMode::Candidate,
                 },
                 limits: ExecutionLimits {
-                    deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+                    deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
                     max_artifact_bytes: 10_000_000,
-                    max_runtime_seconds: 3_600,
+                    max_runtime_seconds: Some(3_600),
                 },
                 managed_app_run_config: None,
             },
@@ -294,6 +294,7 @@ mod session_binding_fixture {
             worker_session_id: worker_session_id.clone(),
         };
         let message = SessionBindingMessage {
+            snapshot_id: None,
             attempt: 1,
             bound_at: Instant("2027-01-15T08:00:06.000Z".into()),
             codex_thread_id: session_identity.codex_thread_id.clone(),
@@ -1544,9 +1545,9 @@ mod session_binding_fixture {
             goal: "ProductSession runtime projection".into(),
             job_id: job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+                deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
                 max_artifact_bytes: 10_000_000,
-                max_runtime_seconds: 3_600,
+                max_runtime_seconds: Some(3_600),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
             scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
@@ -1658,8 +1659,6 @@ mod session_binding_fixture {
         ));
         drop(captured);
 
-        // A later task in the same conversation starts its own ACK sequence,
-        // while the public resource revision continues monotonically.
         let mut next_job = job.clone();
         next_job.job_id = ExecutionJobId(canonical_id("job", seed + 1));
         let mut next_command = command.clone();

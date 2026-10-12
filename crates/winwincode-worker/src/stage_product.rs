@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `StrongFlow` candidate Artifact preparation at the Worker workspace boundary.
-//!
-//! This module freezes and re-verifies the actual detached Git checkout before
-//! it exposes canonical candidate bytes. Durable Artifact/message identity and
-//! acknowledgement remain owned by the Worker outbox.
-
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
@@ -17,11 +11,10 @@ use winwincode_execution_port::generated::{
     ArtifactDescriptor, ArtifactKind, ExecutionScope, ExecutionWorkspaceWriteMode,
 };
 
-use crate::workspace::{CandidateSnapshot, WorkerWorkspace, WorkspaceError, WorkspaceProvenance};
+use crate::workspace::{CandidateFreezeFact, WorkerWorkspace, WorkspaceError, WorkspaceProvenance};
 use crate::{ActiveJob, ActiveJobLifecycle};
 use winwincode_codex::RoleExecutionMode;
 
-/// Stable candidate preparation failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateProductErrorCode {
     InvalidLifecycle,
@@ -29,24 +22,43 @@ pub enum CandidateProductErrorCode {
     InvalidScope,
     AuthorityMismatch,
     Workspace,
+    UnchangedCandidate,
 }
 
-/// Bounded failure which does not retain repository content.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CandidateProductError {
     code: CandidateProductErrorCode,
     message: &'static str,
+    workspace_cause: Option<crate::workspace::WorkspaceErrorCode>,
 }
 
 impl CandidateProductError {
     const fn new(code: CandidateProductErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            workspace_cause: None,
+        }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn code(&self) -> CandidateProductErrorCode {
         self.code
+    }
+
+    #[must_use]
+    pub const fn cause_code(&self) -> &'static str {
+        if let Some(cause) = self.workspace_cause {
+            return cause.as_str();
+        }
+        match self.code {
+            CandidateProductErrorCode::InvalidLifecycle => "CANDIDATE_INVALID_LIFECYCLE",
+            CandidateProductErrorCode::InvalidRole => "CANDIDATE_INVALID_ROLE",
+            CandidateProductErrorCode::InvalidScope => "CANDIDATE_INVALID_SCOPE",
+            CandidateProductErrorCode::AuthorityMismatch => "CANDIDATE_AUTHORITY_MISMATCH",
+            CandidateProductErrorCode::Workspace => "CANDIDATE_WORKSPACE",
+            CandidateProductErrorCode::UnchangedCandidate => "WORKSPACE_UNCHANGED_CANDIDATE",
+        }
     }
 }
 
@@ -59,18 +71,24 @@ impl fmt::Display for CandidateProductError {
 impl std::error::Error for CandidateProductError {}
 
 impl From<WorkspaceError> for CandidateProductError {
-    fn from(_: WorkspaceError) -> Self {
-        Self::new(
-            CandidateProductErrorCode::Workspace,
+    fn from(error: WorkspaceError) -> Self {
+        let mut failure = Self::new(
+            if error.code() == crate::workspace::WorkspaceErrorCode::UnchangedCandidate {
+                CandidateProductErrorCode::UnchangedCandidate
+            } else {
+                CandidateProductErrorCode::Workspace
+            },
             "candidate workspace snapshot or verification failed",
-        )
+        );
+        failure.workspace_cause = Some(error.code());
+        failure
     }
 }
 
-/// Verified candidate bytes ready for durable Artifact identity allocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedCandidateArtifact {
-    snapshot: CandidateSnapshot,
+    snapshot_id: Option<winwincode_domain::SnapshotId>,
+    freeze_fact: CandidateFreezeFact,
     bytes: Vec<u8>,
     digest: Sha256Digest,
     size_bytes: i64,
@@ -84,26 +102,21 @@ pub struct PreparedCandidateArtifact {
 }
 
 impl PreparedCandidateArtifact {
-    /// Exact detached Git candidate facts used to build the manifest.
     #[must_use]
-    pub const fn snapshot(&self) -> &CandidateSnapshot {
-        &self.snapshot
+    pub const fn freeze_fact(&self) -> &CandidateFreezeFact {
+        &self.freeze_fact
     }
 
-    /// Canonical candidate manifest bytes.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Digest of the canonical candidate manifest bytes.
     #[must_use]
     pub const fn digest(&self) -> &Sha256Digest {
         &self.digest
     }
 
-    /// Builds the exact descriptor after the outbox has allocated a durable
-    /// Artifact identity.
     #[must_use]
     pub fn descriptor(&self, artifact_id: ArtifactId) -> ArtifactDescriptor {
         ArtifactDescriptor {
@@ -126,10 +139,10 @@ impl PreparedCandidateArtifact {
         }
     }
 
-    /// Consumes the verified snapshot into the exact durable upload intent.
     #[must_use]
     pub fn into_upload(self, created_at: winwincode_domain::Instant) -> CandidateArtifactUpload {
         CandidateArtifactUpload {
+            snapshot_id: self.snapshot_id,
             job_digest: self.job_digest,
             logical_job_digest: self.logical_job_digest,
             execution_profile: self.execution_profile,
@@ -145,17 +158,7 @@ impl PreparedCandidateArtifact {
     }
 }
 
-/// Freezes the executor/remediator checkout into one verified Git candidate.
-///
-/// The active Job and workspace authority are checked before Git is mutated.
-/// A cancelling Job is rejected, which prevents a post-cancel candidate from
-/// entering the Artifact outbox.
-///
-/// # Errors
-///
-/// Rejects another lifecycle, role or scope, a workspace from another exact
-/// attempt/session, unchanged or invalid Git state, and a manifest whose size
-/// cannot be represented by the `ExecutionPort` descriptor.
+#[allow(clippy::too_many_lines)]
 pub fn prepare_candidate_artifact(
     active: &ActiveJob,
     workspace: &mut WorkerWorkspace,
@@ -212,41 +215,181 @@ pub fn prepare_candidate_artifact(
     }
     let provenance = candidate_workspace_provenance(active, workspace)?;
 
-    let snapshot = workspace
-        .snapshot_candidate()
+    if active.job.execution_profile == "remediator" {
+        let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope else {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework scope missing",
+            ));
+        };
+        let rework = scope.rework_authorization.as_ref().ok_or_else(|| {
+            CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework authorization missing",
+            )
+        })?;
+        let head =
+            crate::workspace::git_text(workspace.layout().checkout(), &["rev-parse", "HEAD"])?;
+        let head_tree = crate::workspace::git_text(
+            workspace.layout().checkout(),
+            &["rev-parse", "HEAD^{tree}"],
+        )?;
+        if workspace.source_commit_id() != rework.source_candidate_commit_id
+            || head != rework.source_candidate_commit_id
+            || head_tree != rework.source_candidate_tree_id
+            || !rework.requires_full_reverification
+        {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::AuthorityMismatch,
+                "rework source differs from its sealed authority",
+            ));
+        }
+    }
+
+    let freeze_fact = workspace
+        .freeze_candidate()
         .map_err(CandidateProductError::from)?;
     workspace
-        .verify_candidate(&snapshot)
+        .verify_candidate(&freeze_fact)
         .map_err(CandidateProductError::from)?;
-    if snapshot.repository_id != active.job.workspace.repository_id
-        || snapshot.checkout_revision != active.job.workspace.checkout_revision
-        || snapshot.provenance != provenance
+    if freeze_fact.repository_id() != &active.job.workspace.repository_id
+        || freeze_fact.checkout_revision() != active.job.workspace.checkout_revision
+        || freeze_fact.provenance() != &provenance
     {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::AuthorityMismatch,
             "candidate snapshot does not match its Job workspace",
         ));
     }
+    validate_rework_paths(active, workspace, &freeze_fact)?;
     let bytes = if active.job.execution_profile == "codex-chat" {
         crate::workspace::git_output(
             workspace.layout().checkout(),
-            &["archive", "--format=zip", &snapshot.candidate_commit_id],
+            &["archive", "--format=zip", freeze_fact.candidate_commit_id()],
         )?
     } else {
-        snapshot.manifest_bytes().to_vec()
+        freeze_fact.manifest_bytes().to_vec()
     };
-    prepared_artifact(active, snapshot, bytes)
+    prepared_artifact(active, freeze_fact, bytes)
 }
 
-/// Captures the already-frozen candidate from a read-only verification
-/// checkout. The verifier receives its own Artifact authority and ACK, while
-/// the bytes remain the exact candidate manifest observed by that stage.
-///
-/// # Errors
-///
-/// Rejects a non-running or non-verification Job, a writable workspace, a
-/// missing sealed stage input, a dirty/foreign checkout, or invalid artifact
-/// identity facts.
+fn validate_rework_paths(
+    active: &ActiveJob,
+    workspace: &WorkerWorkspace,
+    freeze_fact: &CandidateFreezeFact,
+) -> Result<(), CandidateProductError> {
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope
+        && let Some(rework) = &scope.rework_authorization
+    {
+        if freeze_fact.source_commit_id() != rework.source_candidate_commit_id {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework candidate does not start from its sealed source commit",
+            ));
+        }
+        let paths = crate::workspace::git_output(
+            workspace.layout().checkout(),
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                freeze_fact.source_commit_id(),
+                freeze_fact.candidate_commit_id(),
+                "--",
+            ],
+        )?;
+        if freeze_fact.source_tree_id() != rework.source_candidate_tree_id
+            || paths
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .any(|path| {
+                    !rework
+                        .targets
+                        .iter()
+                        .any(|target| target.file_path.as_bytes() == path)
+                })
+        {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework candidate changes paths outside its sealed authorization",
+            ));
+        }
+        let source_parent = format!("{}^1", rework.source_candidate_commit_id);
+        let source_range = format!("{source_parent}..{}", rework.source_candidate_commit_id);
+        let replacement_range = format!(
+            "{}..{}",
+            rework.source_candidate_commit_id,
+            freeze_fact.candidate_commit_id()
+        );
+        for path in paths
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let path = std::str::from_utf8(path).map_err(|_| {
+                CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate path is not UTF-8",
+                )
+            })?;
+            let targets = rework
+                .targets
+                .iter()
+                .filter(|target| target.file_path == path)
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return Err(CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes paths outside its sealed authorization",
+                ));
+            }
+            let source_diff =
+                candidate_path_diff(workspace.layout().checkout(), &source_range, path)?;
+            let replacement_diff =
+                candidate_path_diff(workspace.layout().checkout(), &replacement_range, path)?;
+            let origins = winwincode_domain::rework_hunk_origins(&source_diff, &replacement_diff)
+                .map_err(|_| {
+                CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes hunks outside its sealed authorization",
+                )
+            })?;
+            if origins.iter().any(|(_, source_hunk)| {
+                !targets
+                    .iter()
+                    .any(|target| target.source_hunk_sha256 == *source_hunk)
+            }) {
+                return Err(CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes hunks outside its sealed authorization",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn candidate_path_diff(
+    repository: &std::path::Path,
+    revision_range: &str,
+    path: &str,
+) -> Result<Vec<u8>, CandidateProductError> {
+    crate::workspace::git_output(
+        repository,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            revision_range,
+            "--",
+            path,
+        ],
+    )
+    .map_err(CandidateProductError::from)
+}
+
 pub fn prepare_verification_artifact(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,
@@ -280,28 +423,28 @@ pub fn prepare_verification_artifact(
             )
         })?;
     let provenance = candidate_workspace_provenance(active, workspace)?;
-    let snapshot = workspace
-        .snapshot_verification()
+    let facts = workspace
+        .freeze_verification()
         .map_err(CandidateProductError::from)?;
     workspace
-        .verify_verification(&snapshot)
+        .verify_candidate(&facts)
         .map_err(CandidateProductError::from)?;
-    if snapshot.repository_id != active.job.workspace.repository_id
-        || snapshot.checkout_revision != active.job.workspace.checkout_revision
-        || snapshot.provenance != provenance
+    if facts.repository_id() != &active.job.workspace.repository_id
+        || facts.checkout_revision() != active.job.workspace.checkout_revision
+        || facts.provenance() != &provenance
     {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::AuthorityMismatch,
             "verification snapshot does not match its Job workspace",
         ));
     }
-    let bytes = snapshot.manifest_bytes().to_vec();
-    prepared_artifact(active, snapshot, bytes)
+    let bytes = facts.manifest_bytes().to_vec();
+    prepared_artifact(active, facts, bytes)
 }
 
 fn prepared_artifact(
     active: &ActiveJob,
-    snapshot: CandidateSnapshot,
+    freeze_fact: CandidateFreezeFact,
     bytes: Vec<u8>,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
     let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
@@ -334,7 +477,8 @@ fn prepared_artifact(
         )
     })?;
     Ok(PreparedCandidateArtifact {
-        snapshot,
+        snapshot_id: active.snapshot_id.clone(),
+        freeze_fact,
         bytes,
         digest,
         size_bytes,

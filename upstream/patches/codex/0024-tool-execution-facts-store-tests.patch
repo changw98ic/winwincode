@@ -1,0 +1,457 @@
+diff --git a/codex-rs/state/src/runtime/tool_execution_tests.rs b/codex-rs/state/src/runtime/tool_execution_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_execution_tests.rs
+@@ -0,0 +1,452 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_protocol::ThreadId;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++use std::sync::Arc;
++
++async fn setup() -> (Arc<StateRuntime>, ToolRequestIdentity) {
++    let home = unique_temp_dir();
++    let runtime = StateRuntime::init(
++        crate::SqliteConfig::new_for_testing(home.as_path().abs()),
++        "test".into(),
++    )
++    .await
++    .unwrap();
++    let request = ToolRequestIdentity {
++        thread_id: ThreadId::new().to_string(),
++        logical_id: "call-1".into(),
++        turn_id: "turn-1".into(),
++        scope_id: "origin-scope".into(),
++        cell_id: Some("cell-1".into()),
++        parent_call_id: Some("exec-1".into()),
++        tool_name: "functions.shell".into(),
++        source: "code_mode".into(),
++        binding: "original-input-digest".into(),
++    };
++    (runtime, request)
++}
++
++async fn observe(runtime: &StateRuntime, request: &ToolRequestIdentity) -> ToolExecutionFact {
++    let ToolRequestObservation::New(fact) = runtime.observe_tool_request(request).await.unwrap()
++    else {
++        panic!("new observation")
++    };
++    fact
++}
++
++#[tokio::test]
++async fn competing_connections_claim_once_and_transport_replay_does_not_add_observations() {
++    let (runtime, request) = setup().await;
++    let other = StateRuntime::init(runtime.sqlite().clone(), "other".into())
++        .await
++        .unwrap();
++    let (a, b) = tokio::join!(
++        runtime.observe_tool_request(&request),
++        other.observe_tool_request(&request)
++    );
++    let (a, b) = (a.unwrap(), b.unwrap());
++    let fact = match (a, b) {
++        (ToolRequestObservation::New(fact), ToolRequestObservation::Replay(replayed))
++        | (ToolRequestObservation::Replay(replayed), ToolRequestObservation::New(fact)) => {
++            assert_eq!(fact, replayed);
++            fact
++        }
++        result => panic!("unexpected observations: {result:?}"),
++    };
++    let (a, b) = tokio::join!(
++        runtime.claim_tool_attempt(
++            fact.request_sequence,
++            "attempt-a",
++            "owner-a",
++            "effective",
++            "{}"
++        ),
++        other.claim_tool_attempt(
++            fact.request_sequence,
++            "attempt-b",
++            "owner-b",
++            "effective",
++            "{}"
++        )
++    );
++    let receipts = [a.unwrap(), b.unwrap()];
++    assert_eq!(
++        receipts
++            .iter()
++            .filter(|r| matches!(r, ToolAttemptClaim::Claimed(_)))
++            .count(),
++        1
++    );
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&request.thread_id, 0, 200)
++            .await
++            .unwrap()
++            .len(),
++        2
++    );
++    let mut new_request = request.clone();
++    new_request.logical_id = "call-2".into();
++    observe(&runtime, &new_request).await;
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&request.thread_id, 0, 200)
++            .await
++            .unwrap()
++            .len(),
++        3
++    );
++}
++
++#[tokio::test]
++async fn same_id_with_changed_input_or_parent_is_a_conflict() {
++    let (runtime, request) = setup().await;
++    observe(&runtime, &request).await;
++    for changed in [
++        ToolRequestIdentity {
++            binding: "different".into(),
++            ..request.clone()
++        },
++        ToolRequestIdentity {
++            parent_call_id: Some("other-parent".into()),
++            ..request.clone()
++        },
++    ] {
++        assert_eq!(
++            runtime.observe_tool_request(&changed).await.unwrap(),
++            ToolRequestObservation::IdentityConflict
++        );
++    }
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&request.thread_id, 0, 200)
++            .await
++            .unwrap()
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn restart_after_claim_never_grants_a_second_dispatch() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    let claim = runtime
++        .claim_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "old-owner",
++            "effective",
++            "{}",
++        )
++        .await
++        .unwrap();
++    let ToolAttemptClaim::Claimed(claimed) = claim else {
++        panic!("claim")
++    };
++    let reopened = StateRuntime::init(runtime.sqlite().clone(), "new".into())
++        .await
++        .unwrap();
++    assert_eq!(
++        reopened
++            .claim_tool_attempt(
++                fact.request_sequence,
++                "second-attempt",
++                "new-owner",
++                "effective",
++                "{}"
++            )
++            .await
++            .unwrap(),
++        ToolAttemptClaim::Existing(claimed)
++    );
++    assert!(
++        reopened
++            .complete_tool_attempt(
++                fact.request_sequence,
++                "attempt",
++                "new-owner",
++                ToolExecutionStatus::Completed,
++                Some("forged")
++            )
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn successful_execution_survives_hook_rejection_and_result_cleanup() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    runtime
++        .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
++        .await
++        .unwrap();
++    runtime
++        .complete_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolExecutionStatus::Completed,
++            Some("private-result"),
++        )
++        .await
++        .unwrap();
++    runtime
++        .decide_tool_output(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolOutputDisposition::Rejected,
++            Some("hook blocked"),
++        )
++        .await
++        .unwrap();
++    let events = runtime
++        .list_tool_fact_events(&request.thread_id, 0, 200)
++        .await
++        .unwrap();
++    let receipt = events.last().unwrap().fact.attempt.as_ref().unwrap();
++    assert_eq!(
++        (receipt.execution, receipt.disposition, receipt.delivery),
++        (
++            ToolExecutionStatus::Completed,
++            ToolOutputDisposition::Rejected,
++            ToolOutputDelivery::Pending
++        )
++    );
++    assert!(
++        !serde_json::to_string(&events.last().unwrap().fact)
++            .unwrap()
++            .contains("private-result")
++    );
++    assert!(
++        runtime
++            .offer_tool_output(fact.request_sequence, "attempt", "owner")
++            .await
++            .is_err()
++    );
++    let results = runtime
++        .read_tool_results(fact.request_sequence)
++        .await
++        .unwrap();
++    assert_eq!(
++        (results.execution, results.accepted, results.rejection),
++        (
++            Some("private-result".into()),
++            None,
++            Some("hook blocked".into())
++        )
++    );
++    runtime
++        .forget_tool_results(fact.request_sequence)
++        .await
++        .unwrap();
++    let ToolRequestObservation::Replay(recovered) =
++        runtime.observe_tool_request(&request).await.unwrap()
++    else {
++        panic!("receipt")
++    };
++    let after = recovered.attempt.unwrap();
++    assert_eq!(
++        (
++            after.execution,
++            after.disposition,
++            after.execution_result_retained
++        ),
++        (
++            ToolExecutionStatus::Completed,
++            ToolOutputDisposition::Rejected,
++            false
++        )
++    );
++}
++
++#[tokio::test]
++async fn result_commit_and_output_offer_have_distinct_recovery_states() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    runtime
++        .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
++        .await
++        .unwrap();
++    runtime
++        .complete_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolExecutionStatus::Completed,
++            Some("raw"),
++        )
++        .await
++        .unwrap();
++    runtime
++        .decide_tool_output(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolOutputDisposition::Accepted,
++            Some("accepted"),
++        )
++        .await
++        .unwrap();
++    let before = runtime
++        .list_tool_fact_events(&request.thread_id, 0, 200)
++        .await
++        .unwrap();
++    assert_eq!(
++        before
++            .last()
++            .unwrap()
++            .fact
++            .attempt
++            .as_ref()
++            .unwrap()
++            .delivery,
++        ToolOutputDelivery::Pending
++    );
++    runtime
++        .offer_tool_output(fact.request_sequence, "attempt", "owner")
++        .await
++        .unwrap();
++    runtime
++        .offer_tool_output(fact.request_sequence, "attempt", "owner")
++        .await
++        .unwrap();
++    let after = runtime
++        .list_tool_fact_events(&request.thread_id, before.last().unwrap().sequence, 1)
++        .await
++        .unwrap();
++    assert_eq!(after.len(), 1);
++    assert_eq!(
++        after[0].fact.attempt.as_ref().unwrap().delivery,
++        ToolOutputDelivery::Offered
++    );
++    let results = runtime
++        .read_tool_results(fact.request_sequence)
++        .await
++        .unwrap();
++    assert_eq!(
++        (results.execution, results.accepted),
++        (Some("raw".into()), Some("accepted".into()))
++    );
++}
++
++#[tokio::test]
++async fn unknown_effects_cannot_be_accepted_or_reexecuted() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    runtime
++        .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
++        .await
++        .unwrap();
++    runtime
++        .complete_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolExecutionStatus::Uncertain,
++            None,
++        )
++        .await
++        .unwrap();
++    assert!(
++        runtime
++            .decide_tool_output(
++                fact.request_sequence,
++                "attempt",
++                "owner",
++                ToolOutputDisposition::Accepted,
++                Some("unverified")
++            )
++            .await
++            .is_err()
++    );
++    assert!(matches!(
++        runtime
++            .claim_tool_attempt(fact.request_sequence, "new", "owner", "effective", "{}")
++            .await
++            .unwrap(),
++        ToolAttemptClaim::Existing(_)
++    ));
++}
++
++#[tokio::test]
++async fn oversize_results_keep_receipts_and_thread_deletion_removes_all_facts() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    runtime
++        .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
++        .await
++        .unwrap();
++    let body = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
++    runtime
++        .complete_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "owner",
++            ToolExecutionStatus::Completed,
++            Some(&body),
++        )
++        .await
++        .unwrap();
++    assert!(
++        runtime
++            .read_tool_results(fact.request_sequence)
++            .await
++            .unwrap()
++            .execution
++            .is_none()
++    );
++    runtime
++        .delete_thread(ThreadId::from_string(&request.thread_id).unwrap())
++        .await
++        .unwrap();
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&request.thread_id, 0, 200)
++            .await
++            .unwrap(),
++        Vec::new()
++    );
++    assert!(
++        runtime
++            .read_tool_results(fact.request_sequence)
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn denied_observation_cannot_be_claimed_or_counted_again() {
++    let (runtime, request) = setup().await;
++    let fact = observe(&runtime, &request).await;
++    runtime
++        .deny_tool_request(fact.request_sequence)
++        .await
++        .unwrap();
++    let ToolAttemptClaim::Existing(denied) = runtime
++        .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
++        .await
++        .unwrap()
++    else {
++        panic!("denied request cannot dispatch")
++    };
++    assert_eq!(denied.resolution, crate::ToolRequestResolution::Denied);
++    assert_eq!(denied.attempt, None);
++    assert!(matches!(
++        runtime.observe_tool_request(&request).await.unwrap(),
++        ToolRequestObservation::Replay(_)
++    ));
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&request.thread_id, 0, 200)
++            .await
++            .unwrap()
++            .len(),
++        2
++    );
++}

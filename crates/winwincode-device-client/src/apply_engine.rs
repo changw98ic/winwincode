@@ -1,66 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The target-branch safe apply engine (GIT-100.4, plan 15.4/15.5).
-//!
-//! One call integrates a retained candidate in an isolated worktree, then
-//! updates the target branch and, when selected, its bound clean checkout:
-//!
-//! 1. **Preflight** (fail closed, in order): request shapes, the candidate
-//!    registry row (identity match, non-terminal), the occupancy fencing
-//!    stamp ([`FencingGuard::authorize_command`] over
-//!    [`FencedCommandKind::CandidateApply`]), the binding's canonical
-//!    checkout ([`ConfinedRoot`]), the candidate ref through Git, the
-//!    `expectedHead == target HEAD` equality, the dirty policy of the
-//!    user's working tree, and the guard against a target branch that is
-//!    checked out in another worktree.
-//! 2. **Isolated execution**: a detached *integration worktree* is created
-//!    from the validated target tip inside a device-local integration root —
-//!    never inside the user's checkout — and the requested strategy
-//!    (`fast_forward`, `cherry_pick`, `merge`) runs there. A conflict stops
-//!    inside the integration worktree; the conflict artifact (the worktree
-//!    plus a machine-readable summary) stays in the isolated directory.
-//! 3. **Atomic target ref update**: the produced commit is published with a
-//!    compare-and-swap `git update-ref refs/heads/<target> <new>
-//!    <expectedHead>` — Git itself refuses when the branch moved during the
-//!    apply, which answers the drift case (`base_stale`) without a race.
-//!    The bound checkout uses Git's worktree-aware fast-forward instead;
-//!    other checked-out worktrees remain protected.
-//! 4. **Durable record**: the result enters the outbox before the registry transitions to
-//!    `applied` (success) or `failed` (every fail-closed result, retryable),
-//!    and one `client.candidate.apply_result` frame carrying the
-//!    `LocalApplyReceipt` is appended to the durable outbox. Every attempt
-//!    settles exactly one receipt with a fresh `lar_` id — a retry appends a
-//!    new receipt instead of rewriting history; a pending successful receipt
-//!    replays unchanged after restart, matching the Control Plane's
-//!    append-only ledger (GIT-100.6).
-//!
-//! Result-code mapping (the frozen ten-code vocabulary): `candidate_missing`
-//! (unmapped binding, vanished checkout, absent or drifted candidate ref),
-//! `base_stale` (target branch absent, HEAD ≠ `expectedHead`, or CAS drift),
-//! `working_tree_dirty` (the user's tree violates the dirty policy),
-//! `merge_conflict` (isolated worktree reported unmerged paths, with the
-//! conflict artifact reference), `permission_denied` (the operating system
-//! refused the local Git work), `failed` (every other execution failure,
-//! including a non-fast-forward candidate under the `fast_forward` strategy
-//! and a target branch checked out in another worktree), `applied` (success, with
-//! `resulting_commit`). `retained`, `branch_created`, and `discarded` are
-//! not produced by this engine: branch creation belongs to the
-//! `candidate_branch` engine (GIT-100.3) and discarding is the later discard
-//! path — requesting [`ApplyStrategy::CreateBranch`] here is refused as
-//! invalid input.
-//!
-//! Refusals versus settled failures: malformed input, an unknown or terminal
-//! candidate, and a rejected fencing stamp refuse the command *before any
-//! local action* ([`CandidateApplyError`], no receipt, nothing to retry
-//! beyond re-fencing); every attempt that actually reached Git settles into
-//! a receipt whose failure code is retryable by design.
-//!
-//! Local-data boundary: the integration root, checkout paths, and conflict
-//! artifact files never leave the device. The wire receipt carries only
-//! stable identities; the conflict artifact reference is an opaque
-//! device-local reference (validated server-side to never be a filesystem
-//! path).
-
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -87,85 +26,43 @@ use crate::identity::generate_prefixed_id;
 use crate::path_confinement::ConfinedRoot;
 use crate::store::{DeviceStore, DeviceStoreError};
 
-/// Ref message stamped onto the atomic target ref update.
 const APPLY_REF_MESSAGE_PREFIX: &str = "winwincode: apply candidate";
 
-/// Committer identity of the commits this engine creates. The device client
-/// is honestly the committer; a cherry-pick preserves the candidate commit's
-/// original author, and a merge commit's author is the device client.
 const COMMITTER_NAME: &str = "WinWinCode Device Client";
 const COMMITTER_EMAIL: &str = "device-client@winwincode.invalid";
 
-/// Device-local directory (under the caller's integration root) holding the
-/// per-attempt integration worktrees, keyed by
-/// `<candidate id>/<apply receipt id>`. Conflict artifacts are kept here;
-/// every other attempt removes its directory when it finishes.
 const ARTIFACT_DIRECTORY: &str = "conflict-artifacts";
 
-/// Machine-readable summary written next to a kept conflict worktree.
 const CONFLICT_SUMMARY_FILE: &str = "conflict.json";
 
-/// Subdirectory of one attempt holding the integration worktree itself.
 const WORKTREE_DIRECTORY: &str = "worktree";
 const INTEGRATION_DIRECTORY: &str = "candidate-integrations";
 
-/// Stable refs created for multi-candidate verification. They are deliberately
-/// outside the applyable candidate namespace: only a fresh verifier pass may
-/// promote the combined commit to `refs/winwincode/candidates/*`.
 pub const INTEGRATION_REF_PREFIX: &str = "refs/winwincode/integrations/";
 
 const MAX_ID_BYTES: usize = 200;
 const MAX_BRANCH_BYTES: usize = 200;
 
-/// One apply command: apply the candidate named by `candidate_ref` (the
-/// stable `refs/winwincode/candidates/<commit>` reference) onto
-/// `target_branch`, which must still sit exactly at `expected_head`.
-///
-/// The occupancy lease id and fencing token stamp the command the same way
-/// every other fenced device command does (plan 12.6). The strategy is
-/// explicit; [`ApplyStrategy::CreateBranch`] is refused here because branch
-/// creation is the separate GIT-100.3 engine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateApplyRequest {
-    /// Repository binding the candidate and target branch live in.
     pub repository_binding_id: String,
-    /// Stable candidate reference
-    /// (`refs/winwincode/candidates/<candidate commit>`).
     pub candidate_ref: String,
-    /// Target branch to update (`refs/heads/<target branch>`).
     pub target_branch: String,
-    /// Expected target HEAD the apply is validated against.
     pub expected_head: String,
-    /// Delivery strategy of this attempt.
     pub strategy: ApplyStrategy,
-    /// Occupancy lease id stamping the command.
     pub occupancy_lease_id: String,
-    /// Occupancy fencing token stamping the command.
     pub occupancy_fencing_token: u64,
 }
 
-/// Stable apply-engine failure categories for the *refusals* — commands that
-/// never reached Git and therefore never settled a receipt. Everything that
-/// reached Git is a settled [`ApplyResult`] on the returned receipt instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateApplyErrorKind {
-    /// The request violated the frozen shapes, or asked this engine for the
-    /// branch-creation strategy.
     InvalidInput,
-    /// The occupancy stamp (or a mid-flight re-check of it) was rejected:
-    /// the command is refused before any local action and may be retried
-    /// once the occupancy is re-established.
     FencingRejected(FencingRejection),
-    /// No retained registry row exists for the candidate reference.
     UnknownCandidate,
-    /// The candidate already reached its `applied` or `discarded` terminal.
     TerminalCandidate,
-    /// The durable store failed. When this happens after the target ref
-    /// moved, the state is truthful-but-unreported and a retry re-settles it.
     Store,
 }
 
-/// Apply-engine refusal with an adapter-neutral category.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateApplyError {
     kind: CandidateApplyErrorKind,
@@ -208,7 +105,6 @@ impl CandidateApplyError {
         }
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> CandidateApplyErrorKind {
         self.kind
@@ -240,42 +136,31 @@ impl From<crate::candidate_registry::CandidateRegistryError> for CandidateApplyE
     }
 }
 
-/// The durable outcome of one settled apply attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateApplyOutcome {
-    /// The immutable receipt of this attempt (identical to the receipt
-    /// inside the durable `client.candidate.apply_result` frame).
     pub receipt: LocalApplyReceipt,
-    /// Outbox sequence of the `client.candidate.apply_result` frame.
     pub frame_sequence: u64,
 }
 
-/// One local composition request for independently produced Peer candidates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateIntegrationRequest {
     pub repository_binding_id: String,
-    /// Ordered stable candidate refs. Order is part of the integration digest.
     pub source_candidate_refs: Vec<String>,
-    /// Exact commit on which the combined candidate is built.
     pub expected_head: String,
     pub occupancy_lease_id: String,
     pub occupancy_fencing_token: u64,
 }
 
-/// A combined commit that is stable and checkoutable but not yet applyable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedCandidateIntegration {
     pub integration_ref: String,
     pub integration_commit: String,
     pub integration_digest: String,
     pub source_candidate_refs: Vec<String>,
-    /// Always true. The verifier must inspect the combined commit itself.
     pub requires_integration_verification: bool,
-    /// Always false. Per-task verdicts cannot settle the combined delivery.
     pub task_level_verdicts_authorize_delivery: bool,
 }
 
-/// A conflict is preserved only under the device-local integration root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateIntegrationConflict {
     pub conflict_artifact_ref: String,
@@ -288,29 +173,24 @@ pub enum CandidateIntegrationOutcome {
     Conflict(CandidateIntegrationConflict),
 }
 
-/// Where an operator runs one recovery command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryCommandDirectory {
     Repository,
     IsolatedRecoveryWorktree,
 }
 
-/// One argv-safe Git command. Callers render arguments without a shell.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRecoveryCommand {
     pub directory: RecoveryCommandDirectory,
     pub arguments: Vec<String>,
 }
 
-/// Reset-free recovery plan for a successful apply receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRecoveryGuidance {
     pub recovery_branch: String,
     pub commands: Vec<GitRecoveryCommand>,
 }
 
-/// What one settled attempt concluded. A settled attempt always becomes
-/// exactly one receipt.
 struct SettledAttempt {
     result: ApplyResult,
     resulting_commit: Option<String>,
@@ -329,34 +209,11 @@ impl SettledAttempt {
     }
 }
 
-/// Why one attempt stopped: either a settled outcome that becomes a receipt,
-/// or a fencing re-check that lost between authorization and execution —
-/// nothing ran, so nothing settles.
 enum AttemptStop {
     Fencing(FencingRejection),
     Settled(SettledAttempt),
 }
 
-/// Applies one retained candidate onto its target branch (the full vertical).
-///
-/// See the module documentation for the whole sequence. Every failure is
-/// fail closed: the user's working tree is only ever read, and the target
-/// branch is only ever changed by the final compare-and-swap ref update of
-/// a successful apply. Every settled failure is retryable with a fresh
-/// attempt.
-///
-/// # Errors
-///
-/// Returns [`CandidateApplyErrorKind::InvalidInput`] for a malformed request
-/// or the branch-creation strategy,
-/// [`CandidateApplyErrorKind::UnknownCandidate`] when no retained registry
-/// row matches the candidate reference,
-/// [`CandidateApplyErrorKind::TerminalCandidate`] when the candidate already
-/// ended, [`CandidateApplyErrorKind::FencingRejected`] when the occupancy
-/// stamp is not current, and [`CandidateApplyErrorKind::Store`] for durable
-/// failures. Every other outcome — including `candidate_missing`,
-/// `base_stale`, `working_tree_dirty`, `merge_conflict`,
-/// `permission_denied`, and `failed` — is a settled receipt, not an error.
 pub fn apply_candidate_to_branch(
     daemon: &mut DeviceDaemon,
     request: &CandidateApplyRequest,
@@ -384,8 +241,6 @@ pub fn apply_candidate_to_branch(
         AttemptStop::Settled(settled) => settled,
     };
 
-    // Persist the result before the terminal registry transition so a pending
-    // successful receipt can restore that transition during downlink replay.
     let target_state = if settled.result == ApplyResult::Applied {
         "applied"
     } else {
@@ -459,19 +314,6 @@ fn pending_apply_result(
     Ok(None)
 }
 
-/// Combines two or more retained Peer candidates in a detached worktree.
-///
-/// The resulting ref is stable and can be checked out by the verifier, but it
-/// is intentionally not entered into the candidate registry. Consequently the
-/// apply engine rejects it until independent integration verification freezes
-/// and retains a fresh canonical candidate.
-///
-/// # Errors
-///
-/// Rejects malformed or duplicate refs, stale occupancy, missing/drifted
-/// candidates, an unknown base commit, and Git/storage failures. A Git content
-/// conflict is returned as [`CandidateIntegrationOutcome::Conflict`] so the
-/// isolated artifact can be inspected without touching the user's worktree.
 pub fn integrate_candidates_for_verification(
     daemon: &mut DeviceDaemon,
     request: &CandidateIntegrationRequest,
@@ -702,16 +544,6 @@ fn pin_integration_ref(
     }
 }
 
-/// Builds explicit recovery steps without moving or rewriting any ref.
-///
-/// `git read-tree` runs only in a newly created isolated worktree and the
-/// final command creates a new reverse commit whose tree matches the pre-apply
-/// `expectedHead` tree.
-///
-/// # Errors
-///
-/// Rejects malformed facts on a successful receipt. Non-success receipts need
-/// no recovery and return `None`.
 pub fn candidate_recovery_guidance(
     receipt: &LocalApplyReceipt,
 ) -> Result<Option<CandidateRecoveryGuidance>, CandidateApplyError> {
@@ -780,7 +612,6 @@ pub fn candidate_recovery_guidance(
     }))
 }
 
-/// Authorizes the command's occupancy stamp against the durable mirror.
 fn authorize_fencing(
     daemon: &mut DeviceDaemon,
     request: &CandidateApplyRequest,
@@ -811,9 +642,6 @@ fn authorize_integration_fencing(
     }
 }
 
-/// Loads the registry row for the request and enforces the candidate
-/// identity (the device-side mirror of the server ledger's settlement
-/// binding check) and the non-terminal lifecycle.
 fn load_candidate_for_request(
     store: &mut DeviceStore,
     request: &CandidateApplyRequest,
@@ -878,10 +706,6 @@ fn load_integration_candidates(
     Ok(records)
 }
 
-/// Runs the preflight checks and, when they pass, the isolated integration
-/// worktree execution. Read-only against the user's checkout; the only write
-/// anywhere outside the integration root is the final compare-and-swap ref
-/// update of a successful apply.
 fn run_attempt(
     store: &mut DeviceStore,
     record: &CandidateLocalRefRecord,
@@ -890,13 +714,11 @@ fn run_attempt(
     receipt_id: &str,
     ticket: &FencingTicket,
 ) -> AttemptStop {
-    // Preflight: the binding resolves to a canonical, confined checkout.
     let repository = match resolve_binding_checkout(store, &request.repository_binding_id) {
         Ok(repository) => repository,
         Err(settled) => return AttemptStop::Settled(settled),
     };
 
-    // Preflight: the candidate ref still resolves to the frozen commit.
     match read_git_ref(&repository, &request.candidate_ref) {
         Ok(None) => {
             return AttemptStop::Settled(SettledAttempt::refused(
@@ -916,7 +738,6 @@ fn run_attempt(
         }
     }
 
-    // Preflight: the target branch sits exactly at the expected head.
     let target_ref = format!("refs/heads/{}", request.target_branch);
     let current_head = match read_git_ref(&repository, &target_ref) {
         Ok(None) => {
@@ -940,7 +761,6 @@ fn run_attempt(
         ));
     }
 
-    // Preflight: the user's working tree satisfies the dirty policy.
     match working_tree_dirty(&repository) {
         Ok(false) => {}
         Ok(true) => {
@@ -954,8 +774,6 @@ fn run_attempt(
         }
     }
 
-    // Only this bound checkout can be updated through Git's worktree-aware
-    // fast-forward. A branch checked out elsewhere remains protected.
     match worktrees_holding(&repository, &target_ref) {
         Ok(count) if count > 0 && !(count == 1 && is_current_branch(&repository, &target_ref)) => {
             return AttemptStop::Settled(SettledAttempt::refused(
@@ -969,8 +787,6 @@ fn run_attempt(
         }
     }
 
-    // The check-then-execute window closes here: a mirror advance after the
-    // authorization above strands this attempt before anything ran.
     let guard = match FencingGuard::from_store(store) {
         Ok(guard) => guard,
         Err(error) => {
@@ -994,7 +810,6 @@ fn run_attempt(
     )
 }
 
-/// Resolves the binding's canonical checkout and proves it confined.
 fn resolve_binding_checkout(
     store: &mut DeviceStore,
     repository_binding_id: &str,
@@ -1018,9 +833,6 @@ fn resolve_binding_checkout(
             "the bound checkout no longer exists on this device",
         ));
     }
-    // The stored mapping must be the canonical spelling it was registered
-    // as: fail closed on anything else instead of running Git in an
-    // unproven directory.
     match ConfinedRoot::new(&path) {
         Ok(_) => Ok(path),
         Err(error) => Err(SettledAttempt::refused(
@@ -1030,9 +842,6 @@ fn resolve_binding_checkout(
     }
 }
 
-/// Creates the detached integration worktree from the validated target tip,
-/// runs the strategy inside it, and publishes the result (or keeps the
-/// conflict artifact, or cleans the attempt up).
 fn execute_in_integration_worktree(
     repository: &Path,
     record: &CandidateLocalRefRecord,
@@ -1052,9 +861,6 @@ fn execute_in_integration_worktree(
             "the integration attempt directory",
         ));
     }
-    // Detached at the validated tip: the integration worktree shares the
-    // repository's object database but owns its own index and working
-    // files, so nothing the strategy does can reach the user's checkout.
     let attach_status = git_command(repository)
         .args([
             "worktree",
@@ -1113,14 +919,11 @@ fn execute_in_integration_worktree(
     AttemptStop::Settled(settled)
 }
 
-/// Runs the requested strategy inside the integration worktree. `Ok` carries
-/// the resulting commit (the integration worktree's new HEAD).
 fn run_strategy(
     worktree: &Path,
     request: &CandidateApplyRequest,
 ) -> Result<String, SettledAttempt> {
     match request.strategy {
-        // Refused in validation; kept total for exhaustiveness.
         ApplyStrategy::CreateBranch => Err(SettledAttempt::refused(
             ApplyResult::Failed,
             "branch creation belongs to the candidate branch engine",
@@ -1132,8 +935,6 @@ fn run_strategy(
         }
         ApplyStrategy::CherryPick => {
             let mut command = git_command(worktree);
-            // The cherry-pick preserves the candidate commit's original
-            // author; only the committer identity is the device client.
             command.env("GIT_COMMITTER_NAME", COMMITTER_NAME);
             command.env("GIT_COMMITTER_EMAIL", COMMITTER_EMAIL);
             command.args(["cherry-pick", "--", &request.candidate_ref]);
@@ -1141,7 +942,6 @@ fn run_strategy(
         }
         ApplyStrategy::Merge => {
             let mut command = git_command(worktree);
-            // A merge commit is authored and committed by the device client.
             command.env("GIT_COMMITTER_NAME", COMMITTER_NAME);
             command.env("GIT_COMMITTER_EMAIL", COMMITTER_EMAIL);
             command.env("GIT_AUTHOR_NAME", COMMITTER_NAME);
@@ -1167,10 +967,6 @@ fn run_strategy(
         })
 }
 
-/// Classifies one commit-producing Git step: unmerged paths mean
-/// `merge_conflict`, an operating-system permission refusal means
-/// `permission_denied`, and everything else is `failed` with the local-only
-/// Git detail.
 fn finish_commit_step(
     worktree: &Path,
     mut command: Command,
@@ -1203,10 +999,6 @@ fn finish_commit_step(
     ))
 }
 
-/// Publishes the integration commit with the compare-and-swap target ref
-/// update: `update-ref <target> <resulting> <expectedHead>` — Git refuses
-/// when the branch moved during the apply, closing the drift window. Either
-/// way the integration worktree has served its purpose and is cleaned up.
 fn publish_resulting_commit(
     repository: &Path,
     request: &CandidateApplyRequest,
@@ -1279,10 +1071,6 @@ fn is_current_branch(repository: &Path, target_ref: &str) -> bool {
         })
 }
 
-/// Keeps the conflicted integration worktree as the conflict artifact: the
-/// machine-readable summary is written next to it and the opaque artifact
-/// reference is stamped onto the settlement. Nothing is ever written into
-/// the user's checkout.
 fn keep_conflict_artifact(
     worktree: &Path,
     attempt_directory: &Path,
@@ -1315,10 +1103,6 @@ fn keep_conflict_artifact(
     ));
 }
 
-/// Removes one finished attempt's integration worktree and directory. The
-/// user's checkout is never touched; best-effort cleanup never masks the
-/// settled result. The emptied per-candidate parent directory is pruned
-/// too, so a finished candidate leaves nothing behind at all.
 fn cleanup_attempt(repository: &Path, attempt_directory: &Path, worktree: &Path) {
     let _ = git_command(repository)
         .args(["worktree", "remove", "--force", "--"])
@@ -1334,7 +1118,6 @@ fn cleanup_attempt(repository: &Path, attempt_directory: &Path, worktree: &Path)
     }
 }
 
-/// Lists the unmerged paths inside a (possibly conflicted) worktree.
 fn unmerged_paths(worktree: &Path) -> Result<Vec<String>, GitFailure> {
     let mut command = git_command(worktree);
     command.args(["diff", "--name-only", "--diff-filter=U"]);
@@ -1355,8 +1138,6 @@ fn unmerged_paths(worktree: &Path) -> Result<Vec<String>, GitFailure> {
         .collect())
 }
 
-/// Counts the worktrees that currently hold `target_ref` checked out (the
-/// `branch` lines of `git worktree list --porcelain`).
 fn worktrees_holding(repository: &Path, target_ref: &str) -> Result<usize, GitFailure> {
     let listing = probe_git(repository, &["worktree", "list", "--porcelain"])?;
     let count = listing
@@ -1367,17 +1148,11 @@ fn worktrees_holding(repository: &Path, target_ref: &str) -> Result<usize, GitFa
     Ok(count)
 }
 
-/// Whether the working tree of `repository` violates the dirty policy: any
-/// `git status --porcelain` row (staged, unstaged, or untracked) is dirty —
-/// the same projection the Git inspector reports.
 fn working_tree_dirty(repository: &Path) -> Result<bool, GitFailure> {
     let status = probe_git(repository, &["status", "--porcelain"])?;
     Ok(!status.is_empty())
 }
 
-/// Runs one Git probe to a single answer line. Probe refusals are never the
-/// missing-ref answer: only the dedicated rev-parse reader classifies
-/// Git's exit-status-1 convention.
 fn probe_git(repository: &Path, arguments: &[&str]) -> Result<String, GitFailure> {
     let mut command = git_command(repository);
     command.args(arguments);
@@ -1392,7 +1167,6 @@ fn probe_git(repository: &Path, arguments: &[&str]) -> Result<String, GitFailure
     )))
 }
 
-/// A Git step failure with its local-only detail and its verdict facets.
 struct GitFailure {
     detail: String,
     permission: bool,
@@ -1415,7 +1189,6 @@ impl GitFailure {
         }
     }
 
-    /// Projects the failure onto the settled result vocabulary.
     fn settled(self, context: &str) -> SettledAttempt {
         let result = if self.permission {
             ApplyResult::PermissionDenied
@@ -1433,8 +1206,6 @@ impl GitFailure {
     }
 }
 
-/// Reads one ref through Git: the exit-status-1 answer is the explicit
-/// missing-ref answer, mirroring the registry's reading discipline.
 fn read_git_ref(repository: &Path, ref_name: &str) -> Result<Option<String>, GitFailure> {
     let mut command = git_command(repository);
     command.args([
@@ -1466,8 +1237,6 @@ fn read_git_ref(repository: &Path, ref_name: &str) -> Result<Option<String>, Git
     )))
 }
 
-/// The shared Git invocation discipline: fail closed, prompt-free, no
-/// system or global configuration surprises, no commit signing.
 fn git_command(repository: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(repository);
@@ -1478,9 +1247,6 @@ fn git_command(repository: &Path) -> Command {
     command
 }
 
-/// Projects an `std::io` failure onto the settled vocabulary: an operating
-/// system permission refusal is `permission_denied`, everything else
-/// `failed`.
 fn io_failure_settled(error: &std::io::Error, context: &str) -> SettledAttempt {
     let result = if error.kind() == std::io::ErrorKind::PermissionDenied {
         ApplyResult::PermissionDenied
@@ -1490,7 +1256,6 @@ fn io_failure_settled(error: &std::io::Error, context: &str) -> SettledAttempt {
     SettledAttempt::refused(result, format!("{context}: {error}"))
 }
 
-/// Projects a Git stderr refusal onto the settled vocabulary.
 fn git_failure_settled(stderr: &str, context: &str) -> SettledAttempt {
     let failure = GitFailure::refused(stderr);
     let result = if failure.permission {
@@ -1501,10 +1266,6 @@ fn git_failure_settled(stderr: &str, context: &str) -> SettledAttempt {
     SettledAttempt::refused(result, format!("{context}: {}", failure.detail))
 }
 
-/// Transitions the candidate registry row to `applied` or `failed` — the
-/// device-side mirror of the server ledger's result-to-state projection.
-/// Terminal rows can never be rewritten (the durable `CHECK` vocabulary plus
-/// this predicate).
 fn transition_candidate_state(
     store: &mut DeviceStore,
     candidate_id: &str,
@@ -1528,9 +1289,6 @@ fn transition_candidate_state(
     )))
 }
 
-/// Enqueues the durable `client.candidate.apply_result` frame: the receipt,
-/// stamped with the authorized occupancy lease and the mirror revision the
-/// command was authorized under.
 fn enqueue_apply_result(
     daemon: &mut DeviceDaemon,
     ticket: &FencingTicket,
@@ -1561,7 +1319,6 @@ fn enqueue_apply_result(
     Ok(sequence)
 }
 
-/// Validates one apply request before anything else runs.
 fn validate_request(request: &CandidateApplyRequest) -> Result<(), CandidateApplyError> {
     require_non_empty(
         &request.repository_binding_id,
@@ -1633,8 +1390,6 @@ fn candidate_integration_digest(
     format!("sha256:{:x}", digest.finalize())
 }
 
-/// Extracts the candidate id (the frozen commit) from the canonical
-/// candidate reference.
 fn candidate_id_from_ref(candidate_ref: &str) -> Result<String, CandidateApplyError> {
     let Some(candidate_id) = candidate_ref.strip_prefix(CANDIDATE_REF_PREFIX) else {
         return Err(CandidateApplyError::invalid(format!(
@@ -1645,9 +1400,6 @@ fn candidate_id_from_ref(candidate_ref: &str) -> Result<String, CandidateApplyEr
     Ok(candidate_id.to_owned())
 }
 
-/// Validates the target branch shape accepted by `git check-ref-format` for
-/// a branch under `refs/heads/`: canonical components, no climbs, no `@{`,
-/// no `.lock` suffix, never the detached label.
 fn validate_target_branch(branch: &str) -> Result<(), CandidateApplyError> {
     let shaped = !branch.is_empty()
         && branch.len() <= MAX_BRANCH_BYTES
@@ -1677,9 +1429,6 @@ fn validate_target_branch(branch: &str) -> Result<(), CandidateApplyError> {
     }
 }
 
-/// Validates the frozen Git commit shape: full SHA-1 or SHA-256, lowercase
-/// hex — the same shape the worker freeze, the registry, and the server
-/// ledger enforce.
 fn validate_commit_sha(value: &str, label: &str) -> Result<(), CandidateApplyError> {
     let valid = (value.len() == 40 || value.len() == 64)
         && value
@@ -1729,7 +1478,6 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
-    /// One labeled request mutation exercised by the validation tests.
     type RequestMutation = (&'static str, fn(&mut CandidateApplyRequest));
 
     fn base_request(strategy: ApplyStrategy) -> CandidateApplyRequest {

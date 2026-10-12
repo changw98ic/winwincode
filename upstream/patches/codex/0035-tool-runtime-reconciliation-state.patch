@@ -1,0 +1,197 @@
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -136,3 +136,6 @@
+ pub use tool_runtime::ToolRuntimeFact;
+ pub use tool_runtime::ToolWaitFact;
+ pub use tool_runtime::ToolWaitState;
++
++pub use tool_runtime::ToolReconciliationFact;
++pub use tool_runtime::ToolRecoveryEvidence;
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -55,6 +55,7 @@
+ mod thread_sections;
+ mod threads;
+ mod tool_execution;
++mod tool_reconciliation;
+ mod tool_runtime;
+ 
+ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
+diff --git a/codex-rs/state/src/runtime/tool_reconciliation.rs b/codex-rs/state/src/runtime/tool_reconciliation.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_reconciliation.rs
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::StateRuntime;
++use crate::ToolReconciliationFact;
++use crate::ToolRuntimeFact;
++use anyhow::ensure;
++
++impl StateRuntime {
++    /// Appends changed downstream evidence for an exact original receipt revision.
++    /// The caller must authorize and revalidate its read before committing this fact.
++    /// Execution, output disposition and ownership remain unchanged.
++    pub async fn record_tool_reconciliation(
++        &self,
++        fact: &ToolReconciliationFact,
++    ) -> anyhow::Result<()> {
++        let encoded = serde_json::to_string(&ToolRuntimeFact::Reconciliation(fact.clone()))?;
++        ensure!(
++            encoded.len() <= 16 * 1024,
++            "reconciliation metadata exceeds limit"
++        );
++        let mut tx = self.pool.begin().await?;
++        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_attempts a JOIN tool_requests r ON r.sequence = a.request_sequence WHERE r.thread_id = ? AND a.request_sequence = ? AND a.attempt_id = ? AND a.owner_id = ? AND a.operation_digest = ? AND a.revision = ?)")
++            .bind(&fact.thread_id).bind(fact.request_sequence).bind(&fact.attempt.attempt_id)
++            .bind(&fact.attempt.owner_id).bind(&fact.attempt.operation_digest).bind(fact.attempt.revision)
++            .fetch_one(&mut *tx).await?;
++        ensure!(current, "reconciliation receipt has changed");
++        let previous: Option<String> = sqlx::query_scalar("SELECT fact_json FROM tool_fact_events WHERE request_sequence = ? AND json_extract(fact_json, '$.kind') = 'reconciliation' ORDER BY sequence DESC LIMIT 1")
++            .bind(fact.request_sequence).fetch_optional(&mut *tx).await?;
++        if previous.as_deref() != Some(&encoded) {
++            sqlx::query("INSERT INTO tool_fact_events(request_sequence, thread_id, fact_json) VALUES (?, ?, ?)")
++                .bind(fact.request_sequence).bind(&fact.thread_id).bind(encoded).execute(&mut *tx).await?;
++        }
++        tx.commit().await?;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "tool_reconciliation_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/tool_reconciliation_tests.rs b/codex-rs/state/src/runtime/tool_reconciliation_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_reconciliation_tests.rs
+@@ -0,0 +1,87 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::*;
++use crate::SqliteConfig;
++use crate::ToolAttemptClaim;
++use crate::ToolExecutionStatus;
++use crate::ToolRecoveryEvidence;
++use crate::ToolRequestIdentity;
++use crate::ToolRequestObservation;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn reconciliation_deduplicates_evidence_and_preserves_original_execution() {
++    let home = unique_temp_dir();
++    let config = SqliteConfig::new_for_testing(home.as_path().abs());
++    let store = StateRuntime::init(config.clone(), "test".into())
++        .await
++        .unwrap();
++    let request = ToolRequestIdentity {
++        thread_id: "thread".into(),
++        logical_id: "logical".into(),
++        turn_id: "turn".into(),
++        scope_id: "scope".into(),
++        cell_id: None,
++        parent_call_id: None,
++        tool_name: "exec_command".into(),
++        source: "model".into(),
++        binding: "binding".into(),
++    };
++    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    else {
++        panic!("new");
++    };
++    let ToolAttemptClaim::Claimed(claimed) = store
++        .claim_tool_attempt(
++            observed.request_sequence,
++            "attempt",
++            "original-owner",
++            "digest",
++            "{}",
++        )
++        .await
++        .unwrap()
++    else {
++        panic!("claim");
++    };
++    let mut fact = ToolReconciliationFact {
++        schema_version: 1,
++        request_sequence: observed.request_sequence,
++        thread_id: "thread".into(),
++        observer_id: "new-owner".into(),
++        attempt: claimed.attempt.clone().unwrap(),
++        evidence: ToolRecoveryEvidence::Unconfirmed,
++    };
++    store.record_tool_reconciliation(&fact).await.unwrap();
++    store.record_tool_reconciliation(&fact).await.unwrap();
++    fact.evidence = ToolRecoveryEvidence::Running {
++        business_id: "process-original".into(),
++    };
++    store.record_tool_reconciliation(&fact).await.unwrap();
++    let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
++    assert_eq!(
++        reopened.observe_tool_request(&request).await.unwrap(),
++        ToolRequestObservation::Replay(claimed)
++    );
++    let events = reopened
++        .list_tool_runtime_events("thread", 0, 200)
++        .await
++        .unwrap();
++    assert_eq!(events.len(), 4);
++    assert_eq!(
++        events.last().unwrap().fact,
++        ToolRuntimeFact::Reconciliation(fact.clone())
++    );
++    store
++        .complete_tool_attempt(
++            fact.request_sequence,
++            "attempt",
++            "original-owner",
++            ToolExecutionStatus::Completed,
++            None,
++        )
++        .await
++        .unwrap();
++    assert!(store.record_tool_reconciliation(&fact).await.is_err());
++}
+diff --git a/codex-rs/state/src/tool_runtime.rs b/codex-rs/state/src/tool_runtime.rs
+--- a/codex-rs/state/src/tool_runtime.rs
++++ b/codex-rs/state/src/tool_runtime.rs
+@@ -49,6 +49,7 @@
+     Request(ToolExecutionFact),
+     Cell(ToolCellFact),
+     Wait(ToolWaitFact),
++    Reconciliation(ToolReconciliationFact),
+ }
+ 
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+@@ -56,3 +57,28 @@
+     pub sequence: i64,
+     pub fact: ToolRuntimeFact,
+ }
++
++/// Read-only downstream evidence never takes ownership of the original execution.
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(tag = "state", rename_all = "snake_case")]
++pub enum ToolRecoveryEvidence {
++    Unavailable,
++    Unconfirmed,
++    Running {
++        business_id: String,
++    },
++    Exited {
++        business_id: String,
++        exit_code: Option<i32>,
++    },
++}
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolReconciliationFact {
++    pub schema_version: u32,
++    pub request_sequence: i64,
++    pub thread_id: String,
++    pub observer_id: String,
++    pub attempt: crate::ToolAttemptReceipt,
++    pub evidence: ToolRecoveryEvidence,
++}

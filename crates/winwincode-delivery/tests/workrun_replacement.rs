@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::PathBuf;
@@ -167,9 +166,9 @@ fn prepare_admission_with_seed(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -212,9 +211,9 @@ fn prepare_admission_with_seed(
             job_id: job_id.clone(),
             request_id: RequestId(id("req", request_seed)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: at(4),
         })
         .unwrap();
@@ -556,9 +555,6 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
     );
     assert_eq!(bound_binding.attempt, 1);
 
-    // Cancellation is addressed by the durable WorkRun identity. The
-    // acknowledgement is intentionally non-terminal: Delivery remains
-    // byte-for-byte unchanged.
     let cancel_intent = request_cancel(&bound, bound.revision(), &identity().work_run_id)
         .expect("accepted WorkRun can be cancelled");
     let after_cancel_ack = acknowledge_cancel(

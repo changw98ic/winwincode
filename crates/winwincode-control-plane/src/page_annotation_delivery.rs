@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical Delivery journal projection for page annotations.
-//!
-//! The page annotation payload remains owned by the Collaboration Inbox. This
-//! module only appends the corresponding canonical Attention and Evidence
-//! facts to the same Delivery journal publication, so Delivery projections and
-//! rework can consume the existing types.
-
 use winwincode_delivery::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     DeliverySpecId, EvidenceRef, EvidenceRefType, SessionBindingId,
@@ -26,10 +19,6 @@ use crate::{
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key},
 };
 
-/// Stages the canonical Delivery append for one page annotation.
-///
-/// A page annotation is committed only when its owning Delivery journal is
-/// present and can receive the derived Attention/Evidence append.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn stage(
     storage: &dyn ProductStateStorage,
@@ -109,7 +98,8 @@ pub(crate) fn stage(
                 && evidence.delivery_spec_revision == annotation.candidate.delivery_spec_revision
                 && evidence.work_run_id == run.id
                 && evidence.session_binding_id == binding.id
-                && evidence.candidate_ref == annotation.candidate.candidate_ref
+                && evidence.candidate_id == annotation.candidate.candidate_id
+                && evidence.snapshot_id == annotation.candidate.snapshot_id
         })
         .ok_or_else(|| {
             StorageError::invalid_input("page annotation candidate Evidence is not current")
@@ -126,13 +116,15 @@ pub(crate) fn stage(
     let tree_source = format!("git_file:{}:", annotation.candidate.candidate_tree_id);
     let has_current_diff = current.snapshot().evidence.iter().any(|evidence| {
         evidence.work_run_id == run.id
-            && evidence.candidate_ref == annotation.candidate.candidate_ref
+            && evidence.candidate_id == annotation.candidate.candidate_id
+            && evidence.snapshot_id == annotation.candidate.snapshot_id
             && evidence.evidence_type == EvidenceRefType::Diff
             && evidence.source_ref == diff_source
     });
     let has_current_tree = current.snapshot().evidence.iter().any(|evidence| {
         evidence.work_run_id == run.id
-            && evidence.candidate_ref == annotation.candidate.candidate_ref
+            && evidence.candidate_id == annotation.candidate.candidate_id
+            && evidence.snapshot_id == annotation.candidate.snapshot_id
             && evidence.evidence_type == EvidenceRefType::File
             && evidence.source_ref.starts_with(&tree_source)
     });
@@ -185,7 +177,8 @@ pub(crate) fn stage(
         delivery_spec_revision: annotation.candidate.delivery_spec_revision,
         work_run_id: annotation.candidate.work_run_id.clone(),
         session_binding_id: SessionBindingId(annotation.candidate.session_binding_id.clone()),
-        candidate_ref: annotation.candidate.candidate_ref.clone(),
+        candidate_id: annotation.candidate.candidate_id.clone(),
+        snapshot_id: annotation.candidate.snapshot_id.clone(),
         evidence_type: EvidenceRefType::ReviewFinding,
         source_ref: format!("page-annotation:{}", annotation.id.0),
         created_at_millis: annotation.updated_at_millis,

@@ -136,6 +136,12 @@ async fn same_origin_redirects_preserve_timeout_and_response_body_limits() -> Re
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
         let adapter = OAuthHttpClientAdapter::new(
             Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
                 OutboundProxyPolicy::ReqwestDefault,
@@ -149,6 +155,18 @@ async fn same_origin_redirects_preserve_timeout_and_response_body_limits() -> Re
             )?,
             &resource_url,
         );
+        // Keep the redirect deadline independent of the platform's cold HTTP client setup.
+        adapter
+            .execute_request(
+                oauth2::http::Request::builder()
+                    .method("GET")
+                    .uri(server.uri())
+                    .body(Vec::new())?,
+                OAuthHttpRedirectPolicy::Follow,
+                None,
+            )
+            .await
+            .expect("warm the HTTP client before checking the redirect deadline");
         let error = adapter
             .execute_request(
                 oauth2::http::Request::builder()

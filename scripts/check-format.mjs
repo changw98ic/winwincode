@@ -11,6 +11,7 @@ const excludedDirectories = new Set([
   '.claude',
   '.codex',
   '.git',
+  '.playwright-cli',
   '.playwright-mcp',
   '.tmp-ui-review',
   'dist',
@@ -22,6 +23,8 @@ const excludedDirectories = new Set([
   'test-results',
   'third_party',
   'vendor',
+  'agent-benchmark-submissions',
+  'agent-benchmark-tasks',
 ])
 const checkedExtensions = new Set(['.json', '.md', '.mjs', '.toml', '.ts', '.yaml', '.yml'])
 const errors = []

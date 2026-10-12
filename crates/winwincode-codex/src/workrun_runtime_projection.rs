@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable `StrongFlow` stage-product projection over the canonical runtime stream.
-//!
-//! The projector accepts only trusted Codex lifecycle facts. It prepares the
-//! role-specific semantic product, assigns a deterministic event identity, and
-//! gives the complete generated frame to the existing runtime replay state
-//! machine before the caller may expose it or complete the turn.
-
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+    sync::Mutex,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_shell_command::bash::{
@@ -26,7 +23,9 @@ use winwincode_execution_port::{
         ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
         ExecutionJob, ExecutionLeaseStamp, RuntimeEventMessage, RuntimeEventMessageKind,
     },
-    replay::{ReplayAuthority, ReplayDecision, ReplaySnapshot, ReplayStore},
+    replay::{
+        ReplayAuthority, ReplayDecision, ReplayFrame, ReplayReadQuery, ReplaySnapshot, ReplayStore,
+    },
     runtime_replay::{RuntimeReplayError, RuntimeReplayIdentity, RuntimeReplayResponder},
 };
 
@@ -34,14 +33,14 @@ use crate::stage_product::{
     PreparedStageProduct, StageProductError, VerificationEvidenceKind, VerificationEvidenceStatus,
     prepare_planner_solution_activity, prepare_verification_command_evidence_with_artifact,
     prepare_verification_policy_attestation, prepare_verification_result_activity,
-    stage_product_job_digest,
+    prepare_verification_result_activity_for_fusion, stage_product_job_digest,
 };
 
 const MAX_SOURCE_ID_BYTES: usize = 4_096;
 const JSON_CONTENT_TYPE: &str = "application/json";
 const VERIFICATION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
+pub(crate) const VERIFICATION_POLICY_SOURCE: &str = "policy:session";
 
-/// Lease-bound identity and timestamps supplied by the production adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkRunRuntimeContext<'identity> {
     pub lease: &'identity ExecutionLeaseStamp,
@@ -51,7 +50,6 @@ pub struct WorkRunRuntimeContext<'identity> {
     pub sent_at: &'identity Instant,
 }
 
-/// Trusted fields from one completed Codex command.
 #[derive(Clone, Copy, Debug)]
 pub struct StageCommandEnd<'source> {
     pub command: &'source [String],
@@ -62,7 +60,6 @@ pub struct StageCommandEnd<'source> {
     pub artifact: Option<&'source ArtifactReference>,
 }
 
-/// Trusted fields from one completed Codex turn.
 #[derive(Clone, Copy, Debug)]
 pub struct StageTurnCompletion<'source> {
     pub turn_id: &'source str,
@@ -70,7 +67,6 @@ pub struct StageTurnCompletion<'source> {
     pub failed: bool,
 }
 
-/// Durable projection result for one trusted Codex source fact.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkRunRuntimeRetention {
     Ready {
@@ -86,13 +82,13 @@ pub enum WorkRunRuntimeRetention {
     },
 }
 
-/// Fail-closed stage runtime projection error.
 #[derive(Debug)]
 pub enum WorkRunRuntimeProjectionError<AuthorityError, StoreError> {
     Product(StageProductError),
     Store(StoreError),
     Replay(RuntimeReplayError<AuthorityError, StoreError>),
     InvalidSource,
+    InvalidModelResult,
     InvalidEvidence,
     CorruptOriginal,
 }
@@ -106,6 +102,7 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> fmt::Display
             Self::Store(_) => "stage runtime replay store failed",
             Self::Replay(_) => "stage runtime replay rejected the event",
             Self::InvalidSource => "Codex stage-product source identity is invalid",
+            Self::InvalidModelResult => "model result does not match the required JSON structure",
             Self::InvalidEvidence => "verification result does not cite retained direct evidence",
             Self::CorruptOriginal => "retained stage runtime frame is corrupt",
         })
@@ -117,10 +114,19 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> std::error::Error
 {
 }
 
-/// Stateless coordinator over the existing durable runtime replay authority.
 #[derive(Debug, Default)]
 pub struct WorkRunRuntimeProjector {
     responder: RuntimeReplayResponder,
+    policy_rows: Mutex<Option<HashMap<(String, String), CachedPolicyRow>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedPolicyRow {
+    event_id: String,
+    sequence: u64,
+    semantic_digest: String,
+    frame_digest: String,
+    observed_highest: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -135,17 +141,35 @@ impl WorkRunRuntimeProjector {
     pub const fn new() -> Self {
         Self {
             responder: RuntimeReplayResponder::new(),
+            policy_rows: Mutex::new(None),
         }
     }
 
-    /// Retains the verification read-only policy before direct evidence.
-    ///
-    /// Non-verification roles produce no stage product at turn start.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed source identity, stale stage input, replay conflicts,
-    /// or durable store failures.
+    pub(crate) fn verification_repair_prompt<S: ReplayStore>(
+        store: &mut S,
+        context: WorkRunRuntimeContext<'_>,
+        job: &ExecutionJob,
+    ) -> Result<String, WorkRunRuntimeProjectionError<(), S::Error>> {
+        let snapshot = load_snapshot(store, &replay_identity(context))?;
+        let catalog = evidence_catalog(&snapshot)?;
+        let mut sources = catalog.into_iter().map(|(source_id, binding)| {
+            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome), "command_digest":binding.command_digest})
+        }).collect::<Vec<_>>();
+        sources.sort_by(|left, right| left["source_id"].as_str().cmp(&right["source_id"].as_str()));
+        let input = serde_json::to_string(&job.work_input)
+            .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?;
+        let evidence_instruction = if sources.is_empty() {
+            "There are no retained verification command receipts. First run each assigned criterion's exact verificationMethod through exec_command in this read-only checkout and wait for completion. Only then return the verdict JSON. Tool names and command text are not source_id values."
+        } else {
+            "Run every assigned exact verificationMethod that is missing from the cited command receipts through exec_command in this read-only checkout. An inspection command does not replace the assigned method. Wait for completion and cite its actual source_id. If the assigned method reports missing or stale host test receipts, report fail with that command receipt; automatic rework must regenerate the host receipts. Do not claim pass from inspection or create a passing receipt yourself."
+        };
+        Ok(format!(
+            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. If further evidence is needed, run the exact assigned verification command in this same read-only candidate checkout. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions. {evidence_instruction}\nSealed workInput: {input}\nRetained direct receipts: {}",
+            serde_json::to_string(&sources)
+                .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?
+        ))
+    }
+
     pub fn retain_turn_started<S, A>(
         &self,
         store: &mut S,
@@ -174,18 +198,12 @@ impl WorkRunRuntimeProjector {
             authority,
             context,
             job,
-            &source_key("policy", turn_id, None),
+            VERIFICATION_POLICY_SOURCE,
             &product,
         )
         .map(Some)
     }
 
-    /// Retains one direct Command or Test outcome after the policy event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown source, missing policy predecessor, malformed direct
-    /// outcome, changed duplicate, replay conflict, or durable store failure.
     pub fn retain_exec_command_end<S, A>(
         &self,
         store: &mut S,
@@ -204,10 +222,8 @@ impl WorkRunRuntimeProjector {
         validate_source_id(command_end.turn_id)?;
         validate_source_id(command_end.call_id)?;
         let identity = replay_identity(context);
-        let snapshot = load_snapshot(store, &identity)?;
-        let policy_id = projected_event_id(job, &source_key("policy", command_end.turn_id, None))
-            .map_err(WorkRunRuntimeProjectionError::Product)?;
-        if !snapshot_has_policy(&snapshot, &policy_id) {
+        let mut snapshot = self.policy_snapshot(store, &identity, job)?;
+        if !snapshot_has_policy(&snapshot, job)? {
             return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
         }
         let product = prepare_verification_command_evidence_with_artifact(
@@ -221,13 +237,26 @@ impl WorkRunRuntimeProjector {
             command_end.artifact,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let source = source_key("evidence", command_end.turn_id, Some(command_end.call_id));
+        let event_id =
+            projected_event_id(job, &source).map_err(WorkRunRuntimeProjectionError::Product)?;
+        let exact = load_exact_snapshot(store, &identity, &event_id.0, 0)?;
+        snapshot.ack_sequence = exact.ack_sequence;
+        snapshot.highest_sequence = exact.highest_sequence;
+        if let Some(frame) = exact
+            .events
+            .into_iter()
+            .find(|frame| frame.event_id == event_id.0)
+        {
+            snapshot.events.push(frame);
+        }
         self.retain_product_with_snapshot(
             store,
             authority,
             context,
             Projection {
                 job,
-                source: &source_key("evidence", command_end.turn_id, Some(command_end.call_id)),
+                source: &source,
                 product: &product,
             },
             &snapshot,
@@ -235,18 +264,6 @@ impl WorkRunRuntimeProjector {
         .map(Some)
     }
 
-    /// Retains the strict Planner or verification final Activity before turn
-    /// completion is allowed to become terminal.
-    ///
-    /// A failed Codex turn produces no semantic result. Successful relevant
-    /// turns require a canonical final message; verification references are
-    /// resolved only against earlier direct evidence in this runtime stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing or malformed final JSON, stale stage facts, result
-    /// references without an earlier direct event, changed duplicates, replay
-    /// conflicts, or durable store failures.
     pub fn retain_turn_completed<S, A>(
         &self,
         store: &mut S,
@@ -259,13 +276,31 @@ impl WorkRunRuntimeProjector {
         S: ReplayStore,
         A: ReplayAuthority<Context = RuntimeReplayIdentity>,
     {
+        self.retain_turn_completed_with_fusion_claims(
+            store, authority, context, job, completion, None,
+        )
+    }
+
+    pub fn retain_turn_completed_with_fusion_claims<S, A>(
+        &self,
+        store: &mut S,
+        authority: &A,
+        context: WorkRunRuntimeContext<'_>,
+        job: &ExecutionJob,
+        completion: StageTurnCompletion<'_>,
+        expected_fusion_claim_keys: Option<&[String]>,
+    ) -> Result<Option<WorkRunRuntimeRetention>, WorkRunRuntimeProjectionError<A::Error, S::Error>>
+    where
+        S: ReplayStore,
+        A: ReplayAuthority<Context = RuntimeReplayIdentity>,
+    {
         if completion.failed {
             return Ok(None);
         }
         validate_source_id(completion.turn_id)?;
         let Some(final_message) = completion.final_message else {
             if job.execution_profile == "planner" || verification_role(&job.execution_profile) {
-                return Err(WorkRunRuntimeProjectionError::InvalidSource);
+                return Err(WorkRunRuntimeProjectionError::InvalidModelResult);
             }
             return Ok(None);
         };
@@ -275,15 +310,26 @@ impl WorkRunRuntimeProjector {
             "planner" => prepare_planner_solution_activity(job, final_message.as_bytes())
                 .map_err(WorkRunRuntimeProjectionError::Product)?,
             role if verification_role(role) => {
-                let policy_id =
-                    projected_event_id(job, &source_key("policy", completion.turn_id, None))
-                        .map_err(WorkRunRuntimeProjectionError::Product)?;
-                if !snapshot_has_policy(&snapshot, &policy_id) {
-                    return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+                if !snapshot_has_policy(&snapshot, job)? {
+                    return Err(WorkRunRuntimeProjectionError::InvalidSource);
                 }
-                let bound = bind_verification_evidence(final_message.as_bytes(), &snapshot)?;
-                prepare_verification_result_activity(job, &bound)
+                let bound = bind_verification_evidence(
+                    job,
+                    final_message,
+                    &snapshot,
+                    expected_fusion_claim_keys,
+                )?;
+                if expected_fusion_claim_keys.is_some() {
+                    prepare_verification_result_activity_for_fusion(
+                        job,
+                        &bound,
+                        expected_fusion_claim_keys,
+                    )
                     .map_err(WorkRunRuntimeProjectionError::Product)?
+                } else {
+                    prepare_verification_result_activity(job, &bound)
+                        .map_err(WorkRunRuntimeProjectionError::Product)?
+                }
             }
             _ => return Ok(None),
         };
@@ -314,7 +360,7 @@ impl WorkRunRuntimeProjector {
         S: ReplayStore,
         A: ReplayAuthority<Context = RuntimeReplayIdentity>,
     {
-        let snapshot = load_snapshot(store, &replay_identity(context))?;
+        let snapshot = self.policy_snapshot(store, &replay_identity(context), job)?;
         self.retain_product_with_snapshot(
             store,
             authority,
@@ -326,6 +372,109 @@ impl WorkRunRuntimeProjector {
             },
             &snapshot,
         )
+    }
+
+    fn policy_snapshot<S: ReplayStore, AuthorityError>(
+        &self,
+        store: &mut S,
+        identity: &RuntimeReplayIdentity,
+        job: &ExecutionJob,
+    ) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+        let key = (
+            identity.stream_key().as_str().to_owned(),
+            stage_product_job_digest(job)
+                .map_err(WorkRunRuntimeProjectionError::Product)?
+                .0,
+        );
+        let cached = self
+            .policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .as_ref()
+            .and_then(|rows| rows.get(&key))
+            .cloned();
+        if let Some(cached) = cached {
+            let snapshot = load_exact_snapshot(store, identity, &cached.event_id, cached.sequence)?;
+            let frame = snapshot
+                .events
+                .iter()
+                .find(|frame| frame.event_id == cached.event_id)
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if frame.sequence != cached.sequence
+                || frame.digest != cached.semantic_digest
+                || frame_digest(frame) != cached.frame_digest
+                || snapshot.highest_sequence < cached.observed_highest
+                || !snapshot_has_policy(&snapshot, job)?
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            if snapshot.highest_sequence > cached.observed_highest {
+                validate_policy_tail(
+                    store,
+                    identity,
+                    cached.observed_highest,
+                    snapshot.highest_sequence,
+                )?;
+            }
+            let mut rows = self
+                .policy_rows
+                .lock()
+                .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            let row = rows
+                .as_mut()
+                .and_then(|rows| rows.get_mut(&key))
+                .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+            if snapshot.highest_sequence < row.observed_highest {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            row.observed_highest = snapshot.highest_sequence;
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let canonical = projected_event_id(job, VERIFICATION_POLICY_SOURCE)
+            .map_err(WorkRunRuntimeProjectionError::Product)?;
+        let mut snapshot = load_exact_snapshot(store, identity, &canonical.0, 0)?;
+        if snapshot.highest_sequence > snapshot.events.len() as u64 {
+            snapshot = load_snapshot(store, identity)?;
+        }
+        let Some(policy) = retained_policy(&snapshot)? else {
+            if snapshot
+                .events
+                .iter()
+                .any(|frame| frame.event_id == canonical.0)
+            {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            return Ok(ReplaySnapshot {
+                events: Vec::new(),
+                ..snapshot
+            });
+        };
+        let frame = snapshot
+            .events
+            .iter()
+            .find(|frame| frame.event_id == policy.event.event_id.0)
+            .ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        validate_runtime_frame(frame, identity)?;
+        if !snapshot_has_policy(&snapshot, job)? {
+            return Ok(ReplaySnapshot {
+                events: vec![frame.clone()],
+                ..snapshot
+            });
+        }
+        let cached = cached_policy_row(frame, snapshot.highest_sequence);
+        self.policy_rows
+            .lock()
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?
+            .get_or_insert_with(HashMap::new)
+            .insert(key, cached);
+        Ok(ReplaySnapshot {
+            events: vec![frame.clone()],
+            ..snapshot
+        })
     }
 
     fn retain_product_with_snapshot<S, A>(
@@ -342,13 +491,20 @@ impl WorkRunRuntimeProjector {
     {
         let event_id = projected_event_id(projection.job, projection.source)
             .map_err(WorkRunRuntimeProjectionError::Product)?;
-        let existing = snapshot
-            .events
-            .iter()
-            .find(|frame| frame.event_id == event_id.0);
-        let message = if let Some(frame) = existing {
-            let original: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
-                .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let existing = if projection.source == VERIFICATION_POLICY_SOURCE {
+            retained_policy(snapshot)?
+        } else {
+            snapshot
+                .events
+                .iter()
+                .find(|frame| frame.event_id == event_id.0)
+                .map(|frame| {
+                    serde_json::from_slice::<RuntimeEventMessage>(&frame.frame)
+                        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)
+                })
+                .transpose()?
+        };
+        let message = if let Some(original) = existing {
             if !same_semantic_product(&original, projection.product) {
                 return Ok(WorkRunRuntimeRetention::Conflict {
                     highest_sequence: snapshot.highest_sequence,
@@ -452,6 +608,107 @@ fn replay_identity(context: WorkRunRuntimeContext<'_>) -> RuntimeReplayIdentity 
     }
 }
 
+fn cached_policy_row(frame: &ReplayFrame, observed_highest: u64) -> CachedPolicyRow {
+    CachedPolicyRow {
+        event_id: frame.event_id.clone(),
+        sequence: frame.sequence,
+        semantic_digest: frame.digest.clone(),
+        frame_digest: frame_digest(frame),
+        observed_highest,
+    }
+}
+
+fn frame_digest(frame: &ReplayFrame) -> String {
+    format!("sha256:{:x}", Sha256::digest(&frame.frame))
+}
+
+fn validate_runtime_frame<AuthorityError, StoreError>(
+    frame: &ReplayFrame,
+    identity: &RuntimeReplayIdentity,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
+    let message: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let canonical =
+        serde_json::to_vec(&message).map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    let event = serde_json::to_vec(&message.event)
+        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+    if canonical != frame.frame
+        || message.kind != RuntimeEventMessageKind::RuntimeEvent
+        || message.schema_version != SchemaVersion::WinwincodeV1
+        || message.event.event_id.0 != frame.event_id
+        || u64::try_from(message.event.sequence.0).ok() != Some(frame.sequence)
+        || format!("sha256:{:x}", Sha256::digest(event)) != frame.digest
+        || winwincode_execution_port::runtime_replay::runtime_event_stream_key(&message)
+            != identity.stream_key()
+    {
+        return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+    }
+    Ok(())
+}
+
+fn validate_policy_tail<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    mut after: u64,
+    through: u64,
+) -> Result<(), WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    while after < through {
+        let limit = usize::try_from((through - after).min(256))
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let mut snapshot = if let Some(snapshot) = store
+            .load_indexed(
+                &identity.stream_key(),
+                ReplayReadQuery::After {
+                    sequence: after,
+                    max_events: limit,
+                },
+            )
+            .map_err(WorkRunRuntimeProjectionError::Store)?
+        {
+            snapshot
+        } else {
+            let mut snapshot = load_snapshot(store, identity)?;
+            snapshot
+                .events
+                .retain(|frame| frame.sequence > after && frame.sequence <= through);
+            snapshot
+        };
+        snapshot.events.retain(|frame| frame.sequence <= through);
+        if snapshot.highest_sequence < through
+            || snapshot.events.is_empty()
+            || retained_policy(&snapshot)?.is_some()
+        {
+            return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+        }
+        for frame in &snapshot.events {
+            if frame.sequence != after + 1 {
+                return Err(WorkRunRuntimeProjectionError::CorruptOriginal);
+            }
+            validate_runtime_frame(frame, identity)?;
+            after = frame.sequence;
+        }
+    }
+    Ok(())
+}
+
+fn load_exact_snapshot<S: ReplayStore, AuthorityError>(
+    store: &mut S,
+    identity: &RuntimeReplayIdentity,
+    event_id: &str,
+    sequence: u64,
+) -> Result<ReplaySnapshot, WorkRunRuntimeProjectionError<AuthorityError, S::Error>> {
+    if let Some(snapshot) = store
+        .load_indexed(
+            &identity.stream_key(),
+            ReplayReadQuery::Conflict { event_id, sequence },
+        )
+        .map_err(WorkRunRuntimeProjectionError::Store)?
+    {
+        return Ok(snapshot);
+    }
+    load_snapshot(store, identity)
+}
+
 fn load_snapshot<S, AuthorityError>(
     store: &mut S,
     identity: &RuntimeReplayIdentity,
@@ -475,41 +732,101 @@ fn same_semantic_product(message: &RuntimeEventMessage, product: &PreparedStageP
         })
 }
 
-fn snapshot_has_policy(snapshot: &ReplaySnapshot, policy_id: &ExecutionEventId) -> bool {
-    snapshot.events.iter().any(|frame| {
-        if frame.event_id != policy_id.0 {
-            return false;
+fn retained_policy<AuthorityError, StoreError>(
+    snapshot: &ReplaySnapshot,
+) -> Result<Option<RuntimeEventMessage>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>
+{
+    let mut policy = None;
+    for frame in &snapshot.events {
+        let message: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        if message.event.category != ExecutionEventCategory::Lifecycle {
+            continue;
         }
-        let Ok(message) = serde_json::from_slice::<RuntimeEventMessage>(&frame.frame) else {
-            return false;
+        let Some(payload) = &message.event.payload else {
+            continue;
         };
-        message.event.category == ExecutionEventCategory::Lifecycle
-            && message.event.payload.as_ref().is_some_and(|payload| {
-                decode_payload(payload).is_some_and(|bytes| {
-                    serde_json::from_slice::<Value>(&bytes).is_ok_and(|value| {
-                        value.get("protocol").and_then(Value::as_str)
-                            == Some(VERIFICATION_POLICY_PROTOCOL)
-                    })
-                })
-            })
-    })
+        if payload.content_type != JSON_CONTENT_TYPE {
+            continue;
+        }
+        let bytes =
+            decode_payload(payload).ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        if value.get("protocol").and_then(Value::as_str) != Some(VERIFICATION_POLICY_PROTOCOL) {
+            continue;
+        }
+        if policy.replace(message).is_some() {
+            return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+        }
+    }
+    Ok(policy)
+}
+
+fn snapshot_has_policy<AuthorityError, StoreError>(
+    snapshot: &ReplaySnapshot,
+    job: &ExecutionJob,
+) -> Result<bool, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
+    let candidate_ref = job
+        .work_input
+        .as_ref()
+        .and_then(|input| input.candidate_ref.as_deref())
+        .unwrap_or_default();
+    let expected = prepare_verification_policy_attestation(job, candidate_ref)
+        .map_err(WorkRunRuntimeProjectionError::Product)?;
+    Ok(retained_policy(snapshot)?.is_some_and(|policy| same_semantic_product(&policy, &expected)))
 }
 
 fn bind_verification_evidence<AuthorityError, StoreError>(
-    final_message: &[u8],
+    job: &ExecutionJob,
+    final_message: &str,
     snapshot: &ReplaySnapshot,
+    expected_fusion_claim_keys: Option<&[String]>,
 ) -> Result<Vec<u8>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
-    let result: ModelVerificationResult = serde_json::from_slice(final_message)
-        .map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)?;
-    if serde_json::to_vec(&result).ok().as_deref() != Some(final_message) {
-        return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
-    }
+    let result: ModelVerificationResult = crate::structured_result::decode(final_message)
+        .map_err(|()| WorkRunRuntimeProjectionError::InvalidModelResult)?;
     let catalog = evidence_catalog(snapshot)?;
+    let fusion_investigations = bind_fusion_investigations(
+        expected_fusion_claim_keys,
+        result.fusion_investigations,
+        &catalog,
+    )?;
     let findings = result
         .findings
         .into_iter()
         .map(|finding| {
-            let mut cited_outcomes = Vec::with_capacity(finding.evidence_sources.len());
+            if finding.finding_id.trim() == "UNIQUE_FINDING_ID"
+                || finding.explanation.trim() == "OBSERVED_RESULT"
+            {
+                return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
+            if let Some(method) = finding.criterion_id.as_ref().and_then(|id| {
+                job.work_input
+                    .as_ref()?
+                    .work_contract
+                    .criteria
+                    .iter()
+                    .find(|criterion| criterion.id.0 == *id)?
+                    .verification_method
+                    .as_deref()
+            }) {
+                let approved = verification_method_digest(method)
+                    .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                let observed = finding
+                    .evidence_sources
+                    .iter()
+                    .filter_map(|source| catalog.get(&source.source_id))
+                    .filter(|evidence| evidence.command_digest.as_ref() == Some(&approved))
+                    .collect::<Vec<_>>();
+                if observed.is_empty()
+                    || finding.verdict == "pass"
+                        && !observed
+                            .iter()
+                            .any(|evidence| evidence.outcome == BoundEvidenceOutcome::Succeeded)
+                {
+                    return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+                }
+            }
             let evidence_sources = finding
                 .evidence_sources
                 .iter()
@@ -517,20 +834,17 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                     let evidence = catalog
                         .get(&source.source_id)
                         .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
-                    cited_outcomes.push(evidence.outcome);
                     Ok(BoundVerificationEvidenceSource {
                         evidence_type: evidence.kind,
                         event_id: evidence.event_id.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let (verdict, explanation) =
-                sealed_finding_verdict(finding.verdict, finding.explanation, &cited_outcomes);
             Ok(BoundVerificationFinding {
                 finding_id: finding.finding_id,
                 criterion_id: finding.criterion_id,
-                verdict,
-                explanation,
+                verdict: finding.verdict,
+                explanation: finding.explanation,
                 evidence_sources,
             })
         })
@@ -541,44 +855,75 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
         delivery_spec_revision: result.delivery_spec_revision,
         candidate_ref: result.candidate_ref,
         findings,
+        fusion_investigations,
     })
     .map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)
 }
 
-/// Reconciles one model finding with the sealed runtime outcomes it cites.
-///
-/// Product authority must not ship an agent conclusion that conflicts with
-/// direct command/test evidence for the same source identity. Successful
-/// sealed evidence supports `pass`; any sealed failure forces `fail`.
-/// Unobserved outcomes keep the agent claim so Delivery authority can still
-/// fail-closed on incomplete evidence.
-fn sealed_finding_verdict(
-    agent_verdict: String,
-    agent_explanation: String,
-    cited: &[BoundEvidenceOutcome],
-) -> (String, String) {
-    if cited.is_empty() {
-        return (agent_verdict, agent_explanation);
+fn bind_fusion_investigations<AuthorityError, StoreError>(
+    expected_claim_keys: Option<&[String]>,
+    investigations: Option<Vec<ModelFusionInvestigation>>,
+    catalog: &HashMap<String, EvidenceBinding>,
+) -> Result<
+    Option<Vec<BoundFusionInvestigation>>,
+    WorkRunRuntimeProjectionError<AuthorityError, StoreError>,
+> {
+    match (expected_claim_keys, investigations) {
+        (None | Some([]), None) => Ok(None),
+        (Some(expected), Some(investigations)) => {
+            let expected_keys: BTreeSet<_> = expected.iter().map(String::as_str).collect();
+            let actual_keys: BTreeSet<_> = investigations
+                .iter()
+                .map(|investigation| investigation.claim_key.as_str())
+                .collect();
+            if expected_keys.len() != expected.len()
+                || actual_keys.len() != investigations.len()
+                || actual_keys != expected_keys
+                || investigations.iter().any(|investigation| {
+                    investigation.claim_key.trim().is_empty()
+                        || !matches!(investigation.status.as_str(), "investigated" | "unresolved")
+                        || !matches!(
+                            (&investigation.evidence_sources, &investigation.source_id),
+                            (Some(sources), None) if !sources.is_empty()
+                        ) && !matches!(
+                            (&investigation.evidence_sources, &investigation.source_id),
+                            (None, Some(source_id)) if !source_id.trim().is_empty()
+                        )
+                })
+            {
+                return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
+            let bound = investigations
+                .into_iter()
+                .map(|investigation| {
+                    let sources = investigation.evidence_sources.unwrap_or_else(|| {
+                        vec![ModelVerificationEvidenceSource {
+                            source_id: investigation.source_id.expect("validated shorthand source"),
+                        }]
+                    });
+                    let evidence_sources = sources
+                        .iter()
+                        .map(|source| {
+                            let evidence = catalog
+                                .get(&source.source_id)
+                                .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                            Ok(BoundVerificationEvidenceSource {
+                                evidence_type: evidence.kind,
+                                event_id: evidence.event_id.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>>()?;
+                    Ok(BoundFusionInvestigation {
+                        claim_key: investigation.claim_key,
+                        status: investigation.status,
+                        evidence_sources,
+                    })
+                })
+                .collect::<Result<Vec<_>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>>()?;
+            Ok(Some(bound))
+        }
+        (Some(_), None) | (None, Some(_)) => Err(WorkRunRuntimeProjectionError::InvalidEvidence),
     }
-    if cited
-        .iter()
-        .any(|outcome| matches!(outcome, BoundEvidenceOutcome::Failed))
-    {
-        return (
-            "fail".to_owned(),
-            "Sealed runtime command or test evidence for this finding failed.".to_owned(),
-        );
-    }
-    if cited
-        .iter()
-        .all(|outcome| matches!(outcome, BoundEvidenceOutcome::Succeeded))
-    {
-        return (
-            "pass".to_owned(),
-            "Sealed runtime command or test evidence for this finding succeeded.".to_owned(),
-        );
-    }
-    (agent_verdict, agent_explanation)
 }
 
 fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
@@ -592,14 +937,20 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         .or_else(|| value.get("exitCode"))
         .and_then(Value::as_i64);
     match status.as_deref() {
-        Some("timed-out" | "timeout" | "cancelled" | "canceled" | "interrupted") => {
-            BoundEvidenceOutcome::Failed
-        }
-        Some("policy-denied" | "sandbox-denied" | "declined" | "denied") => {
-            BoundEvidenceOutcome::Failed
-        }
-        Some("infrastructure-error" | "infrastructure-failed") => BoundEvidenceOutcome::Failed,
-        Some("failed") => BoundEvidenceOutcome::Failed,
+        Some(
+            "timed-out"
+            | "timeout"
+            | "cancelled"
+            | "canceled"
+            | "interrupted"
+            | "policy-denied"
+            | "sandbox-denied"
+            | "declined"
+            | "denied"
+            | "infrastructure-error"
+            | "infrastructure-failed"
+            | "failed",
+        ) => BoundEvidenceOutcome::Failed,
         Some("completed" | "succeeded" | "exited") if exit_code.unwrap_or(0) == 0 => {
             BoundEvidenceOutcome::Succeeded
         }
@@ -607,6 +958,84 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         _ if exit_code.is_some_and(|code| code != 0) => BoundEvidenceOutcome::Failed,
         _ => BoundEvidenceOutcome::Unobserved,
     }
+}
+
+pub(crate) fn verification_result_json_schema() -> Value {
+    verification_result_schema(false)
+}
+
+pub(crate) fn fusion_verification_result_json_schema() -> Value {
+    verification_result_schema(true)
+}
+
+fn verification_result_schema(require_fusion: bool) -> Value {
+    let mut required = vec![
+        "protocol",
+        "delivery_spec_id",
+        "delivery_spec_revision",
+        "candidate_ref",
+        "findings",
+    ];
+    let mut properties = serde_json::json!({
+        "protocol": {"type": "string", "enum": [crate::stage_product::VERIFICATION_RESULT_PROTOCOL]},
+        "delivery_spec_id": {"type": "string"},
+        "delivery_spec_revision": {"type": "integer"},
+        "candidate_ref": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["finding_id", "criterion_id", "verdict", "explanation", "evidence_sources"],
+                "properties": {
+                    "finding_id": {"type": "string"},
+                    "criterion_id": {"type": "string"},
+                    "verdict": {"type": "string", "enum": ["pass", "fail"]},
+                    "explanation": {"type": "string"},
+                    "evidence_sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object", "additionalProperties": false,
+                            "required": ["source_id"],
+                            "properties": {"source_id": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        },
+        "fusion_investigations": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["claim_key", "status", "evidence_sources"],
+                "properties": {
+                    "claim_key": {"type": "string"},
+                    "status": {"type": "string", "enum": ["investigated", "unresolved"]},
+                    "evidence_sources": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object", "additionalProperties": false,
+                            "required": ["source_id"],
+                            "properties": {"source_id": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        }
+    });
+    if require_fusion {
+        required.push("fusion_investigations");
+    } else {
+        properties
+            .as_object_mut()
+            .expect("schema object")
+            .remove("fusion_investigations");
+    }
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -617,6 +1046,19 @@ struct ModelVerificationResult {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<ModelVerificationFinding>,
+    #[serde(default)]
+    fusion_investigations: Option<Vec<ModelFusionInvestigation>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelFusionInvestigation {
+    claim_key: String,
+    status: String,
+    #[serde(default)]
+    evidence_sources: Option<Vec<ModelVerificationEvidenceSource>>,
+    #[serde(default)]
+    source_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -642,6 +1084,15 @@ struct BoundVerificationResult {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<BoundVerificationFinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fusion_investigations: Option<Vec<BoundFusionInvestigation>>,
+}
+
+#[derive(Serialize)]
+struct BoundFusionInvestigation {
+    claim_key: String,
+    status: String,
+    evidence_sources: Vec<BoundVerificationEvidenceSource>,
 }
 
 #[derive(Serialize)]
@@ -679,6 +1130,7 @@ struct EvidenceBinding {
     kind: EvidenceKind,
     event_id: String,
     outcome: BoundEvidenceOutcome,
+    command_digest: Option<Sha256Digest>,
 }
 
 fn evidence_catalog<AuthorityError, StoreError>(
@@ -715,6 +1167,12 @@ fn evidence_catalog<AuthorityError, StoreError>(
                 kind,
                 event_id: message.event.event_id.0,
                 outcome: sealed_command_outcome(&value),
+                command_digest: value
+                    .get("command_digest")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?,
             },
         );
         if previous.is_some() {
@@ -730,8 +1188,6 @@ fn decode_payload(payload: &EncodedPayload) -> Option<Vec<u8>> {
     (digest == payload.payload_digest).then_some(bytes)
 }
 
-/// Bind a successful check after literal inspection commands to the approved
-/// method. The original Core invocation remains in the source call's rollout.
 fn verification_command_digest(
     job: &ExecutionJob,
     end: StageCommandEnd<'_>,
@@ -767,8 +1223,6 @@ fn inspection_tail_digest(command: &[String]) -> Option<Sha256Digest> {
     if inspections.is_empty() || !inspections.iter().all(|words| is_literal_inspection(words)) {
         return None;
     }
-    // ponytail: only literal inspection prefixes qualify. General shell flow
-    // needs per-process completion facts, not guesses from a shell exit code.
     let mut pending = vec![tree.root_node()];
     let mut last_command = None;
     let mut last_start = 0;
@@ -810,7 +1264,7 @@ fn classify_evidence(command: &[String]) -> VerificationEvidenceKind {
     }
 }
 
-fn verification_role(role: &str) -> bool {
+pub(crate) fn verification_role(role: &str) -> bool {
     matches!(role, "reviewer" | "verifier" | "adversarial-verifier")
 }
 
@@ -870,8 +1324,7 @@ mod tests {
 
     use super::*;
 
-    const CANDIDATE_REF: &str =
-        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CANDIDATE_REF: &str = "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const PLANNER_JSON: &str = concat!(
         "{\"schemaVersion\":1,",
         "\"protocol\":\"winwincode.planner-solution.v1\",",
@@ -938,7 +1391,7 @@ mod tests {
         "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
         "\"delivery_spec_id\":\"spec-fixture\",",
         "\"delivery_spec_revision\":2,",
-        "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+        "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-fixture\",",
         "\"criterion_id\":\"crt_00000000000000000000000001\",",
@@ -1055,7 +1508,7 @@ mod tests {
                 description: "The exact fixture behavior is verified.".to_owned(),
                 required: true,
                 required_evidence_class: "machine".into(),
-                verification_method: Some("Run the exact fixture check.".to_owned()),
+                verification_method: Some("cargo test".to_owned()),
             }],
             id: contract_id.clone(),
             objective: "Implement fixture".to_owned(),
@@ -1085,9 +1538,9 @@ mod tests {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-28T01:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2026-08-28T01:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -1102,11 +1555,13 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: (role != "planner").then(|| CANDIDATE_REF.to_owned()),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),
@@ -1249,6 +1704,43 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn inspection_receipt_cannot_finish_an_assigned_test_before_react_correction() {
+        for verdict in ["pass", "fail"] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let mut job = job("reviewer");
+            job.work_input.as_mut().unwrap().work_contract.criteria[0].verification_method =
+                Some("cargo test".to_owned());
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            let mut result: Value = serde_json::from_str(VERIFICATION_RESULT).unwrap();
+            result["findings"][0]["verdict"] = serde_json::json!(verdict);
+            result["findings"][0]["evidence_sources"] =
+                serde_json::json!([{"source_id":"call-command"}]);
+            let message = serde_json::to_string(&result).unwrap();
+            let before = store.0.clone();
+            assert!(
+                matches!(
+                    projector.retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    ),
+                    Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+                ),
+                "{verdict} with only an inspection must request correction"
+            );
+            assert_eq!(store.0, before);
+        }
     }
 
     #[test]
@@ -1397,6 +1889,305 @@ mod tests {
     }
 
     #[test]
+    fn verification_normalizes_unique_result_and_preserves_evidence_guards() {
+        for message in [
+            VERIFICATION_RESULT.to_owned(),
+            format!("Corrected result follows.\n\n```json\r\n{VERIFICATION_RESULT}\r\n```\nDone."),
+            format!("\u{feff}  Result follows:\n{VERIFICATION_RESULT}\nEnd."),
+        ] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let job = job("verifier");
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    )
+                    .is_ok(),
+                "unique result"
+            );
+        }
+        for message in [
+            format!("{VERIFICATION_RESULT}\n{VERIFICATION_RESULT}"),
+            format!("[{VERIFICATION_RESULT}]"),
+            VERIFICATION_RESULT.replacen(
+                "\"protocol\":",
+                "\"protocol\":\"duplicate\",\"protocol\":",
+                1,
+            ),
+            VERIFICATION_RESULT.replace("call-test", "invented-source"),
+            format!("```text\n{VERIFICATION_RESULT}\n```"),
+            format!("```json\n{VERIFICATION_RESULT}\n```\n```json\n{{}}\n```"),
+        ] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let job = job("verifier");
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            let before = store.0.clone();
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    )
+                    .is_err(),
+                "invalid result"
+            );
+            assert_eq!(store.0, before);
+        }
+    }
+
+    #[test]
+    fn repair_feedback_preserves_receipts_and_rejects_remaining_placeholders() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        retain_verification_sequence(&projector, &mut store, &fixture, &job);
+        let prompt = WorkRunRuntimeProjector::verification_repair_prompt(
+            &mut store,
+            fixture.context(),
+            &job,
+        )
+        .expect("retained evidence feedback");
+        assert!(prompt.contains("call-test"));
+        assert!(prompt.contains("call-command"));
+        assert!(!prompt.contains("FUNCTION_CALL_ID"));
+        let before = store.0.clone();
+        for invalid in [
+            VERIFICATION_RESULT.replace("finding-fixture", "UNIQUE_FINDING_ID"),
+            VERIFICATION_RESULT.replace(
+                "Direct command and test evidence passed.",
+                "OBSERVED_RESULT",
+            ),
+            VERIFICATION_RESULT.replace("call-test", "FUNCTION_CALL_ID"),
+        ] {
+            assert!(matches!(
+                projector.retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-verifier",
+                        final_message: Some(&invalid),
+                        failed: false
+                    }
+                ),
+                Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+            ));
+            assert_eq!(
+                store.0, before,
+                "rejected output cannot alter direct evidence"
+            );
+        }
+        projector
+            .retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-repair",
+            )
+            .expect("repair read-only policy");
+        assert_eq!(
+            store.0, before,
+            "format correction must reuse the sole policy event"
+        );
+        assert!(
+            projector
+                .retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-repair",
+                        final_message: Some(VERIFICATION_RESULT),
+                        failed: false
+                    }
+                )
+                .expect("bind corrected result to original actual receipts")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn verification_policy_is_reused_across_turns_and_rejects_a_changed_candidate() {
+        for role in ["reviewer", "verifier"] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let mut job = job(role);
+            let first = ready(
+                projector
+                    .retain_turn_started(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        "turn-first",
+                    )
+                    .expect("first policy"),
+            );
+            let before = store.0.clone();
+            let second = projector
+                .retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-repair",
+                )
+                .expect("reused policy");
+            assert!(matches!(
+                second,
+                Some(WorkRunRuntimeRetention::Ready {
+                    duplicate: true,
+                    ..
+                })
+            ));
+            assert_eq!(ready(second).event, first.event);
+            assert_eq!(store.0, before);
+            let command = projector
+                .retain_exec_command_end(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageCommandEnd {
+                        command: &["cargo".to_owned(), "test".to_owned()],
+                        turn_id: "turn-repair",
+                        call_id: "repair-command",
+                        status: VerificationEvidenceStatus::Completed,
+                        exit_code: 0,
+                        artifact: None,
+                    },
+                )
+                .expect("command in correction turn uses original policy");
+            assert_eq!(ready(command).event.sequence.0, 2);
+            let before = store.0.clone();
+            job.work_input.as_mut().unwrap().candidate_ref =
+                Some(format!("refs/winwincode/candidates/{}", "b".repeat(64)));
+            assert!(matches!(
+                projector.retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-stale",
+                ),
+                Ok(Some(WorkRunRuntimeRetention::Conflict { .. }))
+            ));
+            assert!(matches!(
+                projector.retain_exec_command_end(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageCommandEnd {
+                        command: &["cargo".to_owned(), "test".to_owned()],
+                        turn_id: "turn-stale",
+                        call_id: "stale-command",
+                        status: VerificationEvidenceStatus::Completed,
+                        exit_code: 0,
+                        artifact: None,
+                    },
+                ),
+                Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+            ));
+            assert_eq!(
+                store.0, before,
+                "stale candidate cannot add policy or evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_restart_reuses_original_policy_and_rejects_multiple_attestations() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        let product = prepare_verification_policy_attestation(&job, CANDIDATE_REF).unwrap();
+        let original = ready(Some(
+            projector
+                .retain_product(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    &source_key("policy", "turn-before-upgrade", None),
+                    &product,
+                )
+                .expect("policy retained by the previous adapter"),
+        ));
+        let before = store.0.clone();
+        let reopened = WorkRunRuntimeProjector::new();
+        let replay = reopened
+            .retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-after-restart",
+            )
+            .expect("replay existing policy");
+        assert!(matches!(
+            replay,
+            Some(WorkRunRuntimeRetention::Ready {
+                duplicate: true,
+                ..
+            })
+        ));
+        assert_eq!(ready(replay).event, original.event);
+        assert_eq!(store.0, before);
+        projector
+            .retain_product(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                &source_key("policy", "turn-duplicate-old-bug", None),
+                &product,
+            )
+            .expect("reproduce prior duplicate attestation");
+        let before = store.0.clone();
+        assert!(matches!(
+            reopened.retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-new",
+            ),
+            Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+        ));
+        assert_eq!(
+            store.0, before,
+            "multiple attestations are rejected, never silently discarded"
+        );
+    }
+
+    #[test]
     fn verification_policy_evidence_and_result_are_contiguous_and_exact() {
         let fixture = fixture();
         let mut store = MemoryStore::default();
@@ -1475,6 +2266,185 @@ mod tests {
             panic!("expected exact duplicate")
         };
         assert_eq!(message, result);
+    }
+
+    #[test]
+    fn fusion_claim_investigation_is_bound_to_a_direct_review_event() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("reviewer");
+        ready(
+            projector
+                .retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-reviewer",
+                )
+                .expect("retain reviewer policy"),
+        );
+        let mut test_event_id = None;
+        for (call_id, command) in [
+            ("call-test", vec!["cargo".to_owned(), "test".to_owned()]),
+            ("call-command", vec!["git".to_owned(), "status".to_owned()]),
+        ] {
+            let message = ready(
+                projector
+                    .retain_exec_command_end(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageCommandEnd {
+                            command: &command,
+                            turn_id: "turn-reviewer",
+                            call_id,
+                            status: VerificationEvidenceStatus::Completed,
+                            exit_code: 0,
+                            artifact: None,
+                        },
+                    )
+                    .expect("retain direct review evidence"),
+            );
+            if call_id == "call-test" {
+                test_event_id = Some(message.event.event_id.0.clone());
+            }
+        }
+        let mut result: Value = serde_json::from_str(VERIFICATION_RESULT).expect("result");
+        result["fusion_investigations"] = serde_json::json!([{
+            "claim_key":"claim:root-race",
+            "status":"investigated",
+            "source_id":"call-test"
+        }]);
+        let final_message = serde_json::to_string(&result).expect("Fusion review JSON");
+        let expected = vec!["claim:root-race".to_owned()];
+        let retained = projector
+            .retain_turn_completed_with_fusion_claims(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                StageTurnCompletion {
+                    turn_id: "turn-reviewer",
+                    final_message: Some(&final_message),
+                    failed: false,
+                },
+                Some(&expected),
+            )
+            .expect("bind Fusion review result");
+        let message = ready(Some(retained.expect("review Activity")));
+        let payload = message.event.payload.as_ref().expect("payload");
+        let bytes = STANDARD
+            .decode(&payload.data_base64)
+            .expect("payload bytes");
+        let bound: Value = serde_json::from_slice(&bytes).expect("bound result");
+        assert_eq!(
+            bound["fusion_investigations"][0]["claim_key"],
+            "claim:root-race"
+        );
+        assert_eq!(
+            bound["fusion_investigations"][0]["evidence_sources"][0]["event_id"],
+            test_event_id.expect("retained test event id")
+        );
+
+        let mismatch = projector.retain_turn_completed_with_fusion_claims(
+            &mut store,
+            &AllowAuthority,
+            fixture.context(),
+            &job,
+            StageTurnCompletion {
+                turn_id: "turn-reviewer",
+                final_message: Some(&final_message),
+                failed: false,
+            },
+            Some(&["claim:other".to_owned()]),
+        );
+        assert!(matches!(
+            mismatch,
+            Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+        ));
+    }
+
+    #[test]
+    fn empty_fusion_panel_binds_no_investigations() {
+        let expected: Vec<String> = Vec::new();
+        let catalog = HashMap::new();
+        let bound =
+            bind_fusion_investigations::<(), ()>(Some(&expected), Some(Vec::new()), &catalog)
+                .expect("empty panel");
+        assert!(bound.as_ref().is_some_and(Vec::is_empty));
+        assert!(
+            bind_fusion_investigations::<(), ()>(Some(&expected), None, &catalog)
+                .expect("omitted empty panel")
+                .is_none()
+        );
+        assert!(bind_fusion_investigations::<(), ()>(None, Some(Vec::new()), &catalog).is_err());
+    }
+
+    #[test]
+    fn verification_json_formatting_keeps_identical_evidence_and_replay_identity() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        let [_, _, _, original] =
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+        let value: Value = serde_json::from_str(VERIFICATION_RESULT).expect("result");
+        let formatted = serde_json::to_string_pretty(&value).expect("formatted result");
+        for representation in [
+            formatted.clone(),
+            format!("```json\n{formatted}\n```"),
+            format!(" \r\n```json\r\n{formatted}\r\n```\r\n"),
+            format!("Checks passed.\n{formatted}"),
+            format!("Checks passed.\n```json\n{formatted}\n```"),
+            format!("```json\n{formatted}\n```\nExplanation"),
+        ] {
+            let replay = projector
+                .retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-verifier",
+                        final_message: Some(&representation),
+                        failed: false,
+                    },
+                )
+                .expect("equivalent result");
+            assert!(
+                matches!(replay, Some(WorkRunRuntimeRetention::Ready { message, duplicate: true }) if message == original)
+            );
+        }
+        for invalid in [
+            format!("```json\n{formatted}\n```\n```json\n{formatted}\n```"),
+            format!(
+                "```json\n{}\n```",
+                VERIFICATION_RESULT.replace("call-test", "invented")
+            ),
+            format!("{formatted}\n{formatted}"),
+            VERIFICATION_RESULT
+                .replace("\"source_id\":\"call-test\"", "\"source_id\":\"invented\""),
+            VERIFICATION_RESULT.replacen("\"protocol\":", "\"extra\":true,\"protocol\":", 1),
+        ] {
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&invalid),
+                            failed: false
+                        },
+                    )
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1589,31 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_reconciles_agent_finding_with_sealed_runtime_outcome() {
-        let (pass, pass_explanation) = sealed_finding_verdict(
-            "fail".to_owned(),
-            "agent saw no exit code".to_owned(),
-            &[BoundEvidenceOutcome::Succeeded],
-        );
-        assert_eq!(pass, "pass");
-        assert!(pass_explanation.contains("succeeded"));
-
-        let (fail, fail_explanation) = sealed_finding_verdict(
-            "pass".to_owned(),
-            "agent claimed success".to_owned(),
-            &[BoundEvidenceOutcome::Failed],
-        );
-        assert_eq!(fail, "fail");
-        assert!(fail_explanation.contains("failed"));
-
-        let (kept, kept_explanation) = sealed_finding_verdict(
-            "fail".to_owned(),
-            "agent saw no exit code".to_owned(),
-            &[BoundEvidenceOutcome::Unobserved],
-        );
-        assert_eq!(kept, "fail");
-        assert_eq!(kept_explanation, "agent saw no exit code");
-
+    fn command_execution_outcomes_remain_separate_from_findings() {
         assert_eq!(
             sealed_command_outcome(
                 &serde_json::json!({"status":"completed","exit_code":0,"source_id":"call"})
@@ -1629,7 +2575,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_rewrites_conflicting_agent_verdict_before_stage_product() {
+    fn successful_inspection_preserves_business_failure_and_explanation() {
         let fixture = fixture();
         let mut store = MemoryStore::default();
         let projector = WorkRunRuntimeProjector::new();
@@ -1672,7 +2618,7 @@ mod tests {
             .replace("\"verdict\":\"pass\"", "\"verdict\":\"fail\"")
             .replace(
                 "\"explanation\":\"Direct command and test evidence passed.\"",
-                "\"explanation\":\"The observed command did not report exit code 0.\"",
+                "\"explanation\":\"The inspected configuration omits the required business rule.\"",
             );
         let retained = ready(
             projector
@@ -1689,21 +2635,15 @@ mod tests {
                 )
                 .expect("bound conflicting product"),
         );
-        let payload = retained
-            .event
-            .payload
-            .as_ref()
-            .expect("result payload");
-        let bytes = STANDARD
-            .decode(&payload.data_base64)
-            .expect("result bytes");
+        let payload = retained.event.payload.as_ref().expect("result payload");
+        let bytes = STANDARD.decode(&payload.data_base64).expect("result bytes");
         let json: Value = serde_json::from_slice(&bytes).expect("result JSON");
-        assert_eq!(json["findings"][0]["verdict"], "pass");
+        assert_eq!(json["findings"][0]["verdict"], "fail");
         assert!(
             json["findings"][0]["explanation"]
                 .as_str()
                 .expect("explanation")
-                .contains("succeeded")
+                .eq("The inspected configuration omits the required business rule.")
         );
         assert_eq!(json["findings"][0]["evidence_sources"][0]["type"], "test");
         assert_eq!(
@@ -1711,4 +2651,5 @@ mod tests {
             "command"
         );
     }
+    include!("storage_workrun_regression.rs");
 }

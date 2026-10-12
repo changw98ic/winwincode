@@ -1,21 +1,16 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* Settings (design pages 12-16): one page, a black-outlined 设置分类 button in
-   the top-right, frameless row-style forms per category. */
-
 .wwc-settings {
   display: grid;
   gap: var(--wwc-space-6);
   min-width: 0;
 }
 
-/* Design page 12: the display title stands alone at display size. */
 .wwc-settings-heading .wwc-page-header-title {
   font-size: var(--wwc-font-size-display);
   font-weight: var(--wwc-font-weight-display);
 }
 
-/* The status line stays the polite live region; it renders nowhere. */
 .wwc-settings-status {
   position: absolute;
   width: 1px;
@@ -54,7 +49,6 @@
   font-weight: var(--wwc-font-weight-medium);
 }
 
-/* Design page 12: the category switcher reads as one black-outlined button. */
 .wwc-settings-category-select {
   min-height: var(--wwc-control-min-height);
   padding: var(--wwc-space-2) var(--wwc-space-4);
@@ -66,7 +60,6 @@
   cursor: pointer;
 }
 
-/* Category bodies: one visible section, one row after another. */
 .wwc-settings-category {
   display: none;
 }
@@ -76,8 +69,6 @@
   gap: var(--wwc-space-2);
 }
 
-/* Row-style forms: bold label left, control right. 设计稿逐页差异:
-   12(通用与个人)无行分隔线;14(执行与强流程)行间有发丝线。 */
 .wwc-settings-row {
   display: grid;
   grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr);
@@ -120,8 +111,6 @@
   margin: var(--wwc-space-0);
 }
 
-/* Collapsed disclosure rows (其他偏好, 权限与高级选项, …): chevron leads the
-   row, no separator lines. */
 .wwc-settings-collapsed {
   margin-top: var(--wwc-space-2);
 }
@@ -169,7 +158,6 @@
   color: var(--wwc-color-text-muted);
 }
 
-/* Local-draft save rows: accent 保存设置 plus the honest local feedback. */
 .wwc-settings-local-save {
   display: flex;
   flex-wrap: wrap;
@@ -187,7 +175,6 @@
   min-height: 1em;
 }
 
-/* Route form and credential forms keep their bounded grids. */
 .wwc-settings-route-form,
 .wwc-settings-create-form,
 .wwc-settings-rotate-form {
@@ -242,7 +229,6 @@
   margin: var(--wwc-space-0);
 }
 
-/* Provider 列表 rows: name, status dot, 管理/配置 action. */
 .wwc-settings-provider-rows {
   display: grid;
   gap: var(--wwc-space-0);
@@ -379,21 +365,18 @@
   justify-self: start;
 }
 
-/* 设计稿 13:小节说明为下拉下方的灰字。 */
 .wwc-settings-section-note {
   margin: var(--wwc-space-0);
   color: var(--wwc-color-text-muted);
   font-size: var(--wwc-font-size-sm);
 }
 
-/* 设计稿 13/16:小节为素色平铺,无卡片描边;13 稿外的凭据编辑面折叠。 */
 .wwc-settings [data-wwc-component='panel'] {
   padding: var(--wwc-space-0);
   border: 0;
   background: transparent;
 }
 
-/* 设计稿 16:从备份恢复为素色文字动作;选择范围靠行尾。 */
 .wwc-settings-backup-restore[data-wwc-component='button'] {
   border: 0;
   background: transparent;
@@ -406,7 +389,6 @@
   align-items: center;
 }
 
-/* 数据与存储: honest disabled backup/restore/export actions. */
 .wwc-settings-storage-last-backup {
   margin: var(--wwc-space-0);
   color: var(--wwc-color-text-muted);
@@ -434,7 +416,6 @@
   font-weight: var(--wwc-font-weight-strong);
 }
 
-/* Static execution facts: value plus a muted or success annotation. */
 .wwc-settings-execution-review,
 .wwc-settings-execution-isolation {
   display: flex;
@@ -452,7 +433,6 @@
   color: var(--wwc-color-success-text);
 }
 
-/* 诊断与用量: run diagnostics summary plus title-level usage sections. */
 .wwc-settings [data-wwc-component='tabs'] [role='tab'][aria-selected='true'] {
   border-bottom-color: var(--wwc-color-accent-strong);
 }

@@ -5,11 +5,9 @@ import {
   type ControlPlaneRepositorySummary,
 } from './community-control-plane-client.js'
 
-/** Whether, and how, the repository list was last read. */
 export type RepositoriesLoadStatus = 'unloaded' | 'loading' | 'loaded' | 'unavailable'
 
 export interface RepositoriesViewModelState {
-  /** The selected Client device; the list stays empty until one is selected. */
   readonly clientId: string | null
   readonly repositories: readonly ControlPlaneRepositorySummary[]
   readonly status: RepositoriesLoadStatus
@@ -20,37 +18,25 @@ export type RepositoriesViewModelListener = (state: RepositoriesViewModelState) 
 export interface RepositoriesViewModel {
   readonly state: RepositoriesViewModelState
   subscribe(listener: RepositoriesViewModelListener): () => void
-  /** Select one Client device and read its repositories; null clears the area. */
   showDevice(clientId: string | null): Promise<void>
-  /** Re-read the list for the selected device; a failed read never discards shown cards. */
   refresh(): Promise<void>
   close(): void
 }
 
-/**
- * §16.5: the card shows the seven-character short HEAD hash; the wire keeps
- * the full Server-provided commit string and the presentation truncates.
- */
 export function repositoryHeadShortText(repository: ControlPlaneRepositorySummary): string {
   return `HEAD ${repository.headCommit.slice(0, 7)}`
 }
 
-/** §16.5 dirty badge copy; the badge text carries the meaning, not color. */
 export function repositoryDirtyText(repository: ControlPlaneRepositorySummary): string {
   return repository.dirtyState === 'dirty' ? '有改动' : '干净'
 }
 
-/** Non-color tone of the dirty badge. */
 export function repositoryDirtyTone(
   repository: ControlPlaneRepositorySummary,
 ): 'success' | 'warning' {
   return repository.dirtyState === 'dirty' ? 'warning' : 'success'
 }
 
-/**
- * §16.5: one of the seven availability states is shown as a reason badge only
- * when it is not `available`; `available` renders no badge at all.
- */
 export function repositoryAvailabilityText(
   repository: ControlPlaneRepositorySummary,
 ): string | null {
@@ -65,7 +51,6 @@ export function repositoryAvailabilityText(
   }
 }
 
-/** Non-color tone of the availability reason badge. */
 export function repositoryAvailabilityTone(
   repository: ControlPlaneRepositorySummary,
 ): 'warning' | 'danger' {
@@ -76,11 +61,6 @@ export function repositoryAvailabilityTone(
     : 'warning'
 }
 
-/**
- * Own the repository list reads for the selected Client device. The list is
- * Server snapshot state that the browser only displays; an unavailable read
- * marks the list and keeps the cards already shown for that device.
- */
 export function createRepositoriesViewModel(options: {
   readonly client: ControlPlaneClientDirectory
 }): RepositoriesViewModel {
@@ -108,9 +88,6 @@ export function createRepositoriesViewModel(options: {
       return
     }
     const sameDevice = current.clientId === clientId
-    // A selection already in flight is never repeated; a re-selection of the
-    // same device keeps its shown cards during the read, while a different
-    // device swaps to an empty loading list so cards never cross devices.
     if (sameDevice && current.status === 'loading') return
     const epoch = ++refreshEpoch
     if (!sameDevice || current.status === 'unloaded') {

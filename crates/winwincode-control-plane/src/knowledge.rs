@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable personal and repository knowledge with explicit confirmation.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
@@ -20,7 +18,6 @@ const CHANGE_TOPIC: &str = "knowledge.catalog.changed.v1";
 const MAX_ENTRIES: usize = 1_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable failure categories for knowledge commands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KnowledgeErrorKind {
     InvalidRequest,
@@ -33,7 +30,6 @@ pub enum KnowledgeErrorKind {
     Storage,
 }
 
-/// Secret-safe knowledge service failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeError {
     kind: KnowledgeErrorKind,
@@ -73,7 +69,6 @@ impl KnowledgeError {
         )
     }
 
-    /// Returns the stable machine-readable failure category.
     #[must_use]
     pub const fn kind(&self) -> KnowledgeErrorKind {
         self.kind
@@ -115,7 +110,6 @@ impl From<StorageError> for KnowledgeError {
     }
 }
 
-/// Community knowledge is either personal or bound to one repository.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", deny_unknown_fields)]
 pub enum KnowledgeScope {
@@ -123,7 +117,6 @@ pub enum KnowledgeScope {
     Repository { repository_id: RepositoryId },
 }
 
-/// How the candidate knowledge entered the catalog.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeOrigin {
@@ -132,7 +125,6 @@ pub enum KnowledgeOrigin {
     UserCorrection,
 }
 
-/// Explicit lifecycle state. Only `Confirmed` entries can enter model context.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeStatus {
@@ -144,7 +136,6 @@ pub enum KnowledgeStatus {
     SourceDeleted,
 }
 
-/// Exact location of the source material without storing another source copy.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", deny_unknown_fields)]
 pub enum KnowledgeSourceLocator {
@@ -160,7 +151,6 @@ pub enum KnowledgeSourceLocator {
     },
 }
 
-/// Source identity, current version, and an authorization-bearing repository.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnowledgeSource {
@@ -170,7 +160,6 @@ pub struct KnowledgeSource {
     pub locator: KnowledgeSourceLocator,
 }
 
-/// Editable knowledge content. Every create or edit starts unconfirmed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnowledgeDraft {
@@ -183,7 +172,6 @@ pub struct KnowledgeDraft {
     pub expires_at_millis: Option<u64>,
 }
 
-/// One durable catalog mutation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", deny_unknown_fields)]
 pub enum KnowledgeAction {
@@ -213,7 +201,6 @@ pub enum KnowledgeAction {
     },
 }
 
-/// Authenticated, idempotent mutation envelope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnowledgeCommand {
@@ -224,7 +211,6 @@ pub struct KnowledgeCommand {
     pub action: KnowledgeAction,
 }
 
-/// Durable result of a knowledge mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeMutationReceipt {
     pub request_id: RequestId,
@@ -232,14 +218,12 @@ pub struct KnowledgeMutationReceipt {
     pub idempotent_replay: bool,
 }
 
-/// Caller authorization used by every read before matching or counting.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeAccess {
     pub user_id: UserId,
     pub authorized_repository_ids: Vec<RepositoryId>,
 }
 
-/// Safe projection of an entry whose source remains visible to the caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeEntry {
     pub entry_id: String,
@@ -255,14 +239,12 @@ pub struct KnowledgeEntry {
     pub expires_at_millis: Option<u64>,
 }
 
-/// Generic unavailability reasons returned without source title or content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KnowledgeUnavailableReason {
     SourceAccessLost,
     SourceDeleted,
 }
 
-/// Exact entry lookup. Foreign users receive `NotFound` rather than a hint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KnowledgeLookup {
     Found(Box<KnowledgeEntry>),
@@ -270,7 +252,6 @@ pub enum KnowledgeLookup {
     NotFound,
 }
 
-/// Bounded authorized search result; its count is derived only from returned rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeSearchResult {
     pub catalog_revision: u64,
@@ -278,14 +259,12 @@ pub struct KnowledgeSearchResult {
     pub entries: Vec<KnowledgeEntry>,
 }
 
-/// Why an effective entry is inherited or directly scoped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KnowledgeInheritance {
     Direct,
     InheritedPersonal,
 }
 
-/// One confirmed entry selected for model context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectedKnowledge {
     pub entry: KnowledgeEntry,
@@ -293,7 +272,6 @@ pub struct SelectedKnowledge {
     pub overrides_entry_id: Option<String>,
 }
 
-/// Authorized, precedence-resolved model context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeSelectionResult {
     pub catalog_revision: u64,
@@ -327,7 +305,6 @@ struct KnowledgeCatalogState {
     source_tombstones: BTreeMap<String, u64>,
 }
 
-/// Durable Community knowledge service. Team sharing remains outside this catalog.
 pub struct KnowledgeCatalogService<'a> {
     storage: &'a mut dyn ProductStateStorage,
 }
@@ -338,11 +315,6 @@ impl<'a> KnowledgeCatalogService<'a> {
         Self { storage }
     }
 
-    /// Applies one create/edit/confirm/archive/revoke/source lifecycle command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid, stale, conflicting, missing, or illegal transitions.
     pub fn apply(
         &mut self,
         command: &KnowledgeCommand,
@@ -383,11 +355,6 @@ impl<'a> KnowledgeCatalogService<'a> {
         Ok(mutation_receipt(command, &receipt))
     }
 
-    /// Looks up one exact entry while withholding all metadata after source loss.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed access or entry identities and corrupted storage.
     pub fn lookup(
         &self,
         access: &KnowledgeAccess,
@@ -412,11 +379,6 @@ impl<'a> KnowledgeCatalogService<'a> {
         Ok(KnowledgeLookup::Found(Box::new(project(record)?)))
     }
 
-    /// Searches only rows visible to the caller; unauthorized rows affect no count.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed access/query input and corrupted storage.
     pub fn search(
         &self,
         access: &KnowledgeAccess,
@@ -448,12 +410,6 @@ impl<'a> KnowledgeCatalogService<'a> {
         })
     }
 
-    /// Selects confirmed, current knowledge with repository-over-personal precedence.
-    /// Current user instructions and the approved Spec win by supplying their rule keys.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed access/scope input and corrupted storage.
     pub fn select_context(
         &self,
         access: &KnowledgeAccess,
@@ -563,8 +519,6 @@ fn apply_action(
                 return Err(KnowledgeError::invalid_state());
             }
             if state.entries.len() >= MAX_ENTRIES {
-                // ponytail: one bounded catalog keeps persistence atomic; shard per user if this
-                // measured ceiling is reached in normal use.
                 return Err(KnowledgeError::new(
                     KnowledgeErrorKind::CatalogFull,
                     "knowledge catalog reached its entry limit",

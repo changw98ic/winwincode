@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-test-support = []
+test-support = ["winwincode-kernel/test-support"]
 
 [dependencies]
 base64.workspace = true
@@ -27,11 +27,15 @@ tokio = { workspace = true, features = ["macros"] }
 uuid.workspace = true
 winwincode-domain.workspace = true
 winwincode-provider.workspace = true
+winwincode-fusion.workspace = true
 winwincode-execution-port.workspace = true
 winwincode-kernel = { path = "../kernel" }
 
 [build-dependencies]
 sha2.workspace = true
+
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks"] }
 
 [lints]
 workspace = true

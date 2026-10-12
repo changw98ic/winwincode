@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Fleet rollout intent and disconnected-Worker fencing.
-//!
-//! This module deliberately does not own Worker identity, health, capacity,
-//! placement, or leases. Rollout records contain only operator intent and a
-//! fixed observation digest. Failure fencing updates the canonical
-//! [`crate::ExecutionRegistry`] lease rows in the same `SQLite` transaction and
-//! leaves the normal placement adapter to select the replacement Worker.
-
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
@@ -58,15 +50,10 @@ CREATE TABLE IF NOT EXISTS worker_fleet_failure_fences (
 );
 ";
 
-/// Monotonic deployment release used by one Fleet controller.
-///
-/// The release number is not a second Worker identity. A production Fleet
-/// adapter must derive it from its authenticated deployment observation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct WorkerFleetReleaseVersion(pub u64);
 
-/// Health fact from one fixed Fleet-controller observation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerFleetMemberHealth {
@@ -76,7 +63,6 @@ pub enum WorkerFleetMemberHealth {
     Offline,
 }
 
-/// One member in a fixed, authority-sealed Fleet observation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetMemberObservation {
@@ -87,7 +73,6 @@ pub struct WorkerFleetMemberObservation {
     pub active_leases: u64,
 }
 
-/// Exact Fleet cut consumed by the deterministic rollout reconciler.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetObservation {
@@ -98,12 +83,6 @@ pub struct WorkerFleetObservation {
 }
 
 impl WorkerFleetObservation {
-    /// Seals canonical observation bytes for a production adapter or fake
-    /// Registry used by the Fleet module.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed, duplicate, or unbounded member facts.
     pub fn seal(
         observed_at: Instant,
         current_capacity: u64,
@@ -120,7 +99,6 @@ impl WorkerFleetObservation {
     }
 }
 
-/// Operator policy supplied on every compare-and-swap rollout command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetRolloutPolicy {
@@ -132,7 +110,6 @@ pub struct WorkerFleetRolloutPolicy {
     pub desired_capacity: u64,
 }
 
-/// Current durable rollout phase.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerFleetRolloutPhase {
@@ -142,7 +119,6 @@ pub enum WorkerFleetRolloutPhase {
     RollingBack,
 }
 
-/// Worker process awaiting one exact drain-and-replace intent.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetPendingReplacement {
@@ -151,8 +127,6 @@ pub struct WorkerFleetPendingReplacement {
     pub target_version: WorkerFleetReleaseVersion,
 }
 
-/// Durable rollout state. Identity/capacity values remain observation data;
-/// this record owns only desired policy and outstanding idempotent intent.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetRolloutRecord {
@@ -168,7 +142,6 @@ pub struct WorkerFleetRolloutRecord {
     pub updated_at: Instant,
 }
 
-/// Exact compare-and-swap command for a Fleet rollout reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerFleetRolloutCommand {
@@ -180,7 +153,6 @@ pub struct WorkerFleetRolloutCommand {
     pub observation: WorkerFleetObservation,
 }
 
-/// Idempotent intent produced for the infrastructure Fleet controller.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum WorkerFleetAction {
@@ -196,7 +168,6 @@ pub enum WorkerFleetAction {
     },
 }
 
-/// Durable response for one rollout command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetRolloutReceipt {
@@ -205,7 +176,6 @@ pub struct WorkerFleetRolloutReceipt {
     pub replayed: bool,
 }
 
-/// Exact disconnected-process command that fences all of its current leases.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerFleetFailureCommand {
@@ -217,7 +187,6 @@ pub struct WorkerFleetFailureCommand {
     pub detected_at: Instant,
 }
 
-/// One canonical Registry lease shortened by a disconnected-Worker fence.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetFencedLease {
@@ -230,7 +199,6 @@ pub struct WorkerFleetFencedLease {
     pub fenced_at: Instant,
 }
 
-/// Durable fence proof consumed by the existing placement/claim adapter.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerFleetFailureReceipt {
@@ -240,17 +208,11 @@ pub struct WorkerFleetFailureReceipt {
     pub replayed: bool,
 }
 
-/// `SQLite` adapter for rollout intent and failure fencing over one Registry.
 pub struct WorkerFleetOperations<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens Fleet operations beside the canonical Registry tables.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when either schema cannot be prepared.
     pub fn worker_fleet_operations(&mut self) -> Result<WorkerFleetOperations<'_>, StorageError> {
         WorkerFleetOperations::new(self)
     }
@@ -268,16 +230,6 @@ impl<'storage> WorkerFleetOperations<'storage> {
         Ok(Self { storage })
     }
 
-    /// Reconciles one fixed observation into deterministic rollout intents.
-    ///
-    /// Exact retries return the stored action ids. Changed request reuse,
-    /// stale revisions, malformed observations, and corrupt durable bytes fail
-    /// closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input, request, revision, or adapter error as described
-    /// above.
     pub fn reconcile_rollout(
         &mut self,
         command: &WorkerFleetRolloutCommand,
@@ -329,11 +281,6 @@ impl<'storage> WorkerFleetOperations<'storage> {
         Ok(receipt)
     }
 
-    /// Loads one current rollout plan from an exact scope and pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities and corrupt stored bytes.
     pub fn load_rollout(
         &self,
         scope: &WorkerRegistryScope,
@@ -348,16 +295,6 @@ impl<'storage> WorkerFleetOperations<'storage> {
         )
     }
 
-    /// Fences every current lease of one exact disconnected Worker process.
-    ///
-    /// The canonical lease expiry is shortened in the same transaction as the
-    /// immutable fence receipt. This makes late renewal/results fail against
-    /// the Registry and allows the existing placement adapter to claim the
-    /// next attempt with the returned higher fencing token.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a live, stale, foreign, changed, or unbounded Worker/lease cut.
     pub fn fence_disconnected_worker(
         &mut self,
         command: &WorkerFleetFailureCommand,

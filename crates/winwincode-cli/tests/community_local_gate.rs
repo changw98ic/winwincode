@@ -262,6 +262,7 @@ fn build_test_asset_bindings(
     let test_source =
         fs::read(repository.join("tests/community.rs")).expect("read canonical TestAsset source");
     let manifest = TestAssetManifest {
+        candidate_id: candidate.candidate_id().clone(),
         schema_version: TEST_ASSET_MANIFEST_SCHEMA_VERSION,
         id: "community-local-tests".into(),
         revision: 1,
@@ -735,6 +736,7 @@ fn freeze_local_candidate(
         delivery,
         &winwincode_storage::delivery_candidate_source(&source),
         &outcome,
+        winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
     )
     .expect("freeze candidate from exact local source");
     artifacts.close().expect("Artifact close");

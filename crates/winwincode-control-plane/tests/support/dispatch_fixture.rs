@@ -92,9 +92,9 @@ pub fn prepare_delivery_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -139,9 +139,9 @@ pub fn prepare_delivery_admission(
             repository_access: ExecutionRepositoryAccess::IsolatedWrite {
                 worktree_key: job.job_id.0.clone(),
             },
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: attempt_time(clock, 1),
         })
         .expect("admission reserve");

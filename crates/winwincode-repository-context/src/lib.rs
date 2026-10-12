@@ -1,5 +1,3 @@
-//! Baseline-bound repository facts and explicit local code-index capabilities.
-
 mod command_index;
 mod git_snapshot;
 mod model;

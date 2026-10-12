@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Approval and Delivery Attention Inbox source adapter.
-
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -23,16 +21,10 @@ use crate::{
     session_binding_transaction::instant_millis,
 };
 
-/// Durable scope-wide Approval and Attention source backed by canonical state.
 pub struct DurableCollaborationInboxSource {
     storage: Box<dyn ProductSessionPersistence>,
 }
 
-/// Local production authority for the single Owner account.
-///
-/// The local Server has one repository and one durable Owner. Its Inbox
-/// authority is derived from the same canonical Approval/Delivery source cut,
-/// so page annotations cannot outlive the Delivery state they reference.
 pub struct LocalOwnerCollaborationInboxAuthority {
     source: DurableCollaborationInboxSource,
     owner: UserId,
@@ -234,16 +226,14 @@ fn attention_candidate(
         .iter()
         .rev()
         .find(|evidence| &evidence.work_run_id == work_run_id)?;
-    let candidate_digest = evidence
-        .candidate_ref
-        .strip_prefix("git-candidate:")?
-        .to_owned();
-    if !candidate_digest.starts_with("sha256:") {
+    let verdict = delivery.snapshot().verdict.as_ref()?;
+    if evidence.candidate_id != verdict.candidate_id || evidence.snapshot_id != verdict.snapshot_id
+    {
         return None;
     }
     Some(CollaborationCandidateIdentity {
-        candidate_ref: evidence.candidate_ref.clone(),
-        candidate_digest: Sha256Digest(candidate_digest),
+        candidate_ref: verdict.candidate_ref.clone(),
+        candidate_digest: verdict.candidate_digest.clone(),
         candidate_revision: delivery.revision(),
     })
 }

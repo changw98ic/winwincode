@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable model admission at the Provider invocation boundary.
-//!
-//! This module is the single production bridge from already-resolved
-//! Settings, Catalog, and Credential-reference facts to the durable model
-//! admission ledger. It owns no secret material and no organization billing
-//! ledger.
-
 use std::{
     fmt,
     path::Path,
@@ -31,10 +24,6 @@ use crate::{
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Conservative operational reservation configured by the deployment.
-///
-/// These are capacity estimates only. Final Provider usage and cost come from
-/// the trusted terminal charge and are owned by the separate Usage ledger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderAdmissionReservationConfig {
     estimated_tokens: u64,
@@ -42,11 +31,6 @@ pub struct ProviderAdmissionReservationConfig {
 }
 
 impl ProviderAdmissionReservationConfig {
-    /// Creates one bounded deployment reservation estimate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero/unsafe token estimates or unsafe cost estimates.
     pub fn try_new(
         estimated_tokens: u64,
         estimated_cost_micros: u64,
@@ -64,7 +48,6 @@ impl ProviderAdmissionReservationConfig {
     }
 }
 
-/// Exact secret-free facts resolved by the Gateway for one pre-open attempt.
 pub struct ProviderAdmissionOpenRequest<'request> {
     pub identity: &'request ProviderGatewayIdentity,
     pub settings: &'request ModelSettingsProjection,
@@ -91,15 +74,12 @@ impl fmt::Debug for ProviderAdmissionOpenRequest<'_> {
     }
 }
 
-/// Successful durable pre-open result. A denial is still a durable result and
-/// is represented by `reservation.denial`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderAdmissionOpenReceipt {
     pub route_authority: FrozenModelRouteAuthority,
     pub reservation: ModelReservationReceipt,
 }
 
-/// Stable Provider-admission bridge failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderAdmissionErrorKind {
     InvalidRequest,
@@ -110,7 +90,6 @@ pub enum ProviderAdmissionErrorKind {
     Storage,
 }
 
-/// Bounded error containing no Provider payload, secret, or authority text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderAdmissionError {
     kind: ProviderAdmissionErrorKind,
@@ -143,23 +122,12 @@ impl fmt::Display for ProviderAdmissionError {
 
 impl std::error::Error for ProviderAdmissionError {}
 
-/// Unique Gateway seam for durable reserve/release/complete operations.
 pub trait ProviderGatewayAdmissionPort: Send {
-    /// Freezes route/policy authority and durably reserves before Provider use.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed for unavailable authority, conflicts, or durable failures.
     fn reserve(
         &mut self,
         request: &ProviderAdmissionOpenRequest<'_>,
     ) -> Result<ProviderAdmissionOpenReceipt, ProviderAdmissionError>;
 
-    /// Releases a cancelled or failed reservation exactly once.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed authority/body replay or unavailable durable storage.
     fn release(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -168,11 +136,6 @@ pub trait ProviderGatewayAdmissionPort: Send {
         reason: ModelReservationReleaseReason,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError>;
 
-    /// Recovery-only conditional release. Absence means reserve never began.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/corrupt authority or unavailable durable storage.
     fn release_if_reserved(
         &mut self,
         authority: &FrozenModelRouteAuthority,
@@ -184,22 +147,16 @@ pub trait ProviderGatewayAdmissionPort: Send {
             .map(Some)
     }
 
-    /// Completes a successful reservation with trusted normalized usage/cost.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed authority/body replay or unavailable durable storage.
     fn complete(
         &mut self,
         authority: &FrozenModelRouteAuthority,
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError>;
 }
 
-/// Production UTC minute clock used by the durable admission ledger.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemModelAdmissionClock;
 
@@ -212,8 +169,6 @@ impl ModelAdmissionClock for SystemModelAdmissionClock {
     }
 }
 
-/// Production Provider-admission adapter over an independent connection to
-/// the canonical Control Plane database.
 pub struct DurableProviderGatewayAdmission<'authority, 'clock> {
     storage: SqliteStorage,
     clock: &'clock dyn ModelAdmissionClock,
@@ -222,7 +177,6 @@ pub struct DurableProviderGatewayAdmission<'authority, 'clock> {
 }
 
 impl<'authority, 'clock> DurableProviderGatewayAdmission<'authority, 'clock> {
-    /// Creates the unique production admission bridge.
     #[must_use]
     pub const fn new(
         storage: SqliteStorage,
@@ -238,17 +192,11 @@ impl<'authority, 'clock> DurableProviderGatewayAdmission<'authority, 'clock> {
         }
     }
 
-    /// Returns the canonical database path for composition-root equality checks.
     #[must_use]
     pub fn database_path(&self) -> &Path {
         self.storage.database_path()
     }
 
-    /// Deterministically checkpoints and closes the admission connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded storage failure.
     pub fn close(self) -> Result<(), ProviderAdmissionError> {
         Box::new(self.storage).close().map_err(|_| {
             ProviderAdmissionError::new(
@@ -359,7 +307,7 @@ impl ProviderGatewayAdmissionPort for DurableProviderGatewayAdmission<'_, '_> {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         let request = ModelReservationCompletion {
             request_id: terminal_request_id(

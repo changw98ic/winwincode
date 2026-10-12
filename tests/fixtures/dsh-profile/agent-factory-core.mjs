@@ -12,7 +12,6 @@ import { DshRuntimeProjection, RuntimeApprovalRouter, } from './runtime-projecti
 import { RuntimeSessionLedger, } from './session-ledger.mjs';
 import { reconcileDeliveryAfterRestart, } from './delivery-recovery.mjs';
 const DEFAULT_ROLE_ID = 'chat';
-/** Explicit startup or turn failure at the DSH-to-Codex execution boundary. */
 export class WinWinCodeAgentFactoryError extends Error {
     code;
     constructor(code, message, options) {
@@ -111,7 +110,6 @@ const PROJECTION_EVENT_TYPES = new Set([
 function projectionKey(append) {
     return `${append.type}\u0000${JSON.stringify(append.data)}`;
 }
-/** Typed writer that preserves DSH turn/step and surface invariants. */
 class DshSessionWriter {
     #session;
     #chunkSeqs = [];
@@ -220,7 +218,6 @@ function approvalDecision(outcome) {
             return Object.freeze({ kind: 'denied', rejection: 'No approval answerer was available.' });
     }
 }
-/** DSH Agent facade whose only execution authority is the embedded Codex kernel. */
 export class EmbeddedCodexAgent {
     id;
     options;
@@ -566,7 +563,6 @@ export class EmbeddedCodexAgent {
         });
     }
 }
-/** Canonical Cordis AgentFactory replacing the stock DSH execution loop. */
 export class WinWinCodeAgentFactoryCore extends Service {
     static inject = ['agents', 'sessions', 'systemPrompt', 'approval'];
     static Config = z.object({
@@ -613,15 +609,12 @@ export class WinWinCodeAgentFactoryCore extends Service {
         ctx.effect(() => () => this.disposeFactory(), 'winwincodeAgentFactory.runtime()');
         ctx.effect(() => ctx.agents.setFactory(this), 'winwincodeAgentFactory.setFactory()');
     }
-    /** Read the DSH-owned append-only facts used by StrongFlow projections. */
     async readRuntimeSessionEvents(dshSessionId) {
         return (await RuntimeSessionLedger.open(this.config.home, dshSessionId).then(ledger => ledger.read())).events;
     }
-    /** Read the exact persisted route and native-session owner for one DSH Session. */
     async readRuntimeSessionManifest(dshSessionId) {
         return RuntimeSessionLedger.open(this.config.home, dshSessionId).then(ledger => ledger.manifest);
     }
-    /** Rebuild one Delivery and select its one legal next action without executing it. */
     async reconcileDelivery(deliveryId, candidate = null) {
         return reconcileDeliveryAfterRestart({
             home: this.config.home,

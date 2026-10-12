@@ -34,6 +34,43 @@ impl EventPublisher for NoopPublisher {
 }
 
 #[test]
+fn unlimited_delivery_runtime_survives_durable_dispatch_and_reopen() {
+    let root = unique_root("delivery-unlimited");
+    let repository = root.join("repository");
+    let data = root.join("data");
+    let baseline = initialize_repository(&repository);
+    let scope = scope(1);
+    let delivery_id = DeliveryId(canonical_id("dlv", 1));
+    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&data),
+        Box::new(NoopPublisher),
+        LocalDeliveryAdapterConfig::new(&repository, scope.clone())
+            .with_execution_limits(None, 1_073_741_824),
+    )
+    .expect("unlimited host");
+    control_plane
+        .delivery_create(&create_command(
+            scope.clone(),
+            delivery_id.clone(),
+            baseline,
+            1,
+        ))
+        .expect("create");
+    control_plane
+        .work_items_create(&task_breakdown_command(&scope, &delivery_id, 3, &data))
+        .expect("work items");
+    control_plane
+        .workrun_start(&advance_command(scope, delivery_id, 2, 2))
+        .expect("dispatch");
+    control_plane.shutdown().expect("shutdown");
+    let job = queued_job(&data);
+    assert_eq!(job.limits.max_runtime_seconds, None);
+    assert_eq!(job.limits.deadline_at, None);
+    assert_eq!(queued_jobs(&data), 1);
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     let root = unique_root("delivery-production-replay");
     let repository = root.join("repository");

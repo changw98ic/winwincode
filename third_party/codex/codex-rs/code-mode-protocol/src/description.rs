@@ -36,6 +36,7 @@ const EXEC_DESCRIPTION_TEMPLATE: &str = r#"Run JavaScript code to orchestrate/co
 - `setTimeout(callback: () => void, delayMs?: number)`: schedules a callback to run later and returns a timeout id. Pending timeouts do not keep `exec` alive by themselves; await an explicit promise if you need to wait for one.
 - `clearTimeout(timeoutId?: number)`: cancels a timeout created by `setTimeout`.
 - `ALL_TOOLS`: metadata for the enabled nested tools as `{ name, description }` entries.
+- `toolDefinition(name: string)`: loads the input and output schemas and kind for an enabled nested tool. Use a name from `ALL_TOOLS`. Unknown or unauthorized names throw an error.
 - `yield_control()`: yields the accumulated output to the model immediately while the script keeps running."#;
 const WAIT_DESCRIPTION_TEMPLATE: &str = r#"- Use `wait` only after `exec` returns `Script running with cell ID ...`.
 - `cell_id` identifies the running `exec` cell to resume.
@@ -380,6 +381,8 @@ pub fn enabled_tool_metadata(definition: &ToolDefinition) -> EnabledToolMetadata
         global_name: normalize_code_mode_identifier(&definition.name),
         description: definition.description.clone(),
         kind: definition.kind,
+        input_schema: definition.input_schema.clone(),
+        output_schema: definition.output_schema.clone(),
     }
 }
 
@@ -389,6 +392,8 @@ pub struct EnabledToolMetadata {
     pub global_name: String,
     pub description: String,
     pub kind: CodeModeToolKind,
+    pub input_schema: Option<JsonValue>,
+    pub output_schema: Option<JsonValue>,
 }
 
 pub fn render_code_mode_sample(

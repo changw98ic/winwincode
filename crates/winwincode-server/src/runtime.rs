@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Supervised local execution runtime owned by the Server composition.
-//!
-//! The supervisor does not create a second Control Plane, `SQLite` connection,
-//! queue, or event hub. Callers inject the already-composed [`ExecutionPort`] core
-//! into [`LocalLauncher`], and this module only serializes launcher lifecycle,
-//! periodic liveness work, and ordered shutdown.
-
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -24,11 +17,12 @@ use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 use winwincode_control_plane::{
     DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
-    ProductSessionService, RepositoryExecutionScheduler,
+    DurableWorkerInteractionOutbound, ProductSessionService, RepositoryExecutionScheduler,
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
-    ExecutionJob, ExecutionPortMessage, ExecutionWorkspaceWriteMode, JobDispatchMessage,
+    ExecutionJob, ExecutionLeaseStamp, ExecutionPortMessage, ExecutionWorkspaceWriteMode,
+    JobDispatchMessage, LeaseRenewMessage, LeaseRenewMessageKind, WorkerHeartbeatAckMessageStatus,
 };
 use winwincode_execution_port::{
     execution_identity::canonical_dispatch_session_identity, transport::ExecutionPortCore,
@@ -38,13 +32,14 @@ use winwincode_local::{
     LocalExecutionPortHandle, LocalLauncher, LocalLauncherConfig, SharedControlPlaneHandle,
 };
 use winwincode_storage::{
-    ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionJobRecord, ExecutionJobState, ExecutionLeaseClaim,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    ExecutionReservationState, RepositorySchedulerClaimRequest, RepositorySchedulerScope,
-    WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
-    WorkerSlotResourceLimits, WorkerSlotResources,
+    ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionJobState,
+    ExecutionLeaseClaim, ExecutionRepositoryAccess, ExecutionReservationRequest,
+    ExecutionReservationStart, ExecutionReservationState, RepositorySchedulerClaimRequest,
+    RepositorySchedulerScope, WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority,
+    WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
+#[cfg(test)]
+use winwincode_storage::{ExecutionAdmissionLimits, ExecutionAdmissionPolicy};
 #[cfg(feature = "local-worker")]
 use winwincode_worker::{CodexCoreAdapter, WorkerConfig};
 
@@ -59,12 +54,13 @@ const FAULTED: u8 = 1;
 const STOPPED: u8 = 2;
 const DEFAULT_RUNTIME_USER_ID: &str = "usr_00000000000000000000000001";
 const DEFAULT_RUNTIME_WORKER_POOL_ID: &str = "wpl_00000000000000000000000001";
+#[cfg(test)]
 const LOCAL_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
     max_concurrent: 1,
     max_queued: 10_000,
-    token_budget: 1_000_000_000,
-    cost_budget_microunits: 1_000_000_000,
-    max_runtime_millis: 604_800_000,
+    token_budget: None,
+    cost_budget_microunits: None,
+    max_runtime_millis: Some(604_800_000),
 };
 const LOCAL_SLOT_RESOURCE_LIMITS: WorkerSlotResourceLimits = WorkerSlotResourceLimits {
     max_memory_bytes: 1_073_741_824,
@@ -76,13 +72,7 @@ const LOCAL_SLOT_RESOURCES: WorkerSlotResources = WorkerSlotResources {
     disk_bytes: 1,
     process_slots: 1,
 };
-const RUNTIME_INTERACTION_PAGE_SIZE: usize = 100;
 
-/// Admission denials that describe expected queue pressure rather than a
-/// broken runtime.  The driver must leave the Job queued and retry after the
-/// current Worker slot or budget is released; turning these into a health
-/// fault strands the entire local runtime behind one ordinary backpressure
-/// event.
 const fn deferred_admission_error(code: ExecutionAdmissionErrorCode) -> bool {
     matches!(
         code,
@@ -95,7 +85,6 @@ const fn deferred_admission_error(code: ExecutionAdmissionErrorCode) -> bool {
     )
 }
 
-/// Stable failure categories for the supervised local runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSupervisorErrorKind {
     InvalidConfiguration,
@@ -105,7 +94,6 @@ pub enum RuntimeSupervisorErrorKind {
     Shutdown,
 }
 
-/// Secret-free runtime supervisor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeSupervisorError {
     kind: RuntimeSupervisorErrorKind,
@@ -138,19 +126,11 @@ impl fmt::Display for RuntimeSupervisorError {
 
 impl std::error::Error for RuntimeSupervisorError {}
 
-/// Read-only health port installed on the public application.
 pub trait RuntimeHealthPort: Send + Sync {
-    /// Returns `true` while every supervised runtime task is healthy.
     #[must_use]
     fn is_healthy(&self) -> bool;
 }
 
-/// Health implementation used before a local runtime is attached.
-///
-/// The composition root replaces this value with [`RuntimeHealthHandle`] once
-/// the launcher has started. Keeping the default explicit means an application
-/// built for command/query-only tests remains available while production code
-/// can opt into fail-closed supervised health.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HealthyRuntimeHealth;
 
@@ -160,7 +140,6 @@ impl RuntimeHealthPort for HealthyRuntimeHealth {
     }
 }
 
-/// Stable error categories for the Server-owned execution-port core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerExecutionPortErrorKind {
     ApplicationUnavailable,
@@ -169,8 +148,6 @@ pub enum ServerExecutionPortErrorKind {
     Publication,
 }
 
-/// Secret-free error returned when the Server's shared application state cannot
-/// accept a Worker frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerExecutionPortError {
     kind: ServerExecutionPortErrorKind,
@@ -196,46 +173,20 @@ impl fmt::Display for ServerExecutionPortError {
 
 impl std::error::Error for ServerExecutionPortError {}
 
-/// Synchronous scheduler hook executed by the supervised local driver.
-///
-/// The hook only performs short durable work and enqueues typed messages on
-/// the supplied local port. It must not retain the port or start an async task;
-/// the supervisor remains the sole owner of the Worker lifecycle.
 #[cfg(feature = "local-worker")]
 pub trait LocalRuntimeScheduler: Send + 'static {
-    /// Claims/replays pending work and enqueues exact CP-to-Worker messages.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable driver failure when durable scheduling cannot make
-    /// progress.
     fn drive(
         &mut self,
         now: Instant,
         execution_port: &LocalExecutionPortHandle,
     ) -> Result<(), RuntimeSupervisorError>;
 
-    /// Acknowledges Control Plane-to-Worker interaction frames after the local
-    /// launcher has accepted the queued batch. Implementations may retain
-    /// claimed frames across a failed drive so restart replays the exact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable driver failure when an interaction acknowledgement
-    /// cannot be committed.
     fn complete(&mut self, _now: Instant) -> Result<(), RuntimeSupervisorError> {
         Ok(())
     }
 }
 
-/// Minimal Control Plane-to-Worker queue used by both the same-process
-/// launcher and the authenticated remote exchange.
 pub trait RuntimeControlOutbound {
-    /// Retains one canonical control message until its transport accepts it.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded runtime error when the transport queue is unavailable.
     fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError>;
 }
 
@@ -251,13 +202,6 @@ impl RuntimeControlOutbound for LocalExecutionPortHandle {
     }
 }
 
-/// Durable repository scheduler used by the production local driver.
-///
-/// The scheduler owns no queue or worker state. It borrows the one
-/// `ApplicationState` only for the duration of a synchronous drive, asks the
-/// canonical repository scheduler for exact receipts, and puts the returned
-/// `job.dispatch`/`job.cancel` messages on the launcher's typed CP-to-Worker
-/// queue. It never creates a Job or a terminal outcome itself.
 pub struct RepositoryRuntimeScheduler {
     state: Arc<StdMutex<Option<ApplicationState>>>,
     hub: Arc<crate::DurableEventHub>,
@@ -278,12 +222,6 @@ pub struct RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
-    /// Creates a scheduler over one already-composed application authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-repository scope, empty process identities, or a zero
-    /// lease duration before the driver starts.
     pub fn from_application(
         application: &StandaloneControlPlaneApplication,
         scope: RepositoryScope,
@@ -342,16 +280,6 @@ impl RepositoryRuntimeScheduler {
         })
     }
 
-    /// Adopts the durable active Owner as the local admission identity once
-    /// one exists.
-    ///
-    /// The composition root resolves the Owner once at process startup, so a
-    /// Server initialized after startup (browser bootstrap) would otherwise
-    /// keep the stable default subject for its whole lifetime and reserve
-    /// admission under an identity that can never pass the active-account
-    /// check. Adoption re-reads the account ledger on every drive until the
-    /// default is replaced; a lookup failure leaves the identity untouched so
-    /// admission simply defers.
     fn refresh_admission_identity(&mut self, storage: &mut winwincode_storage::SqliteStorage) {
         if self.user_id.0 != DEFAULT_RUNTIME_USER_ID {
             return;
@@ -366,16 +294,6 @@ impl RepositoryRuntimeScheduler {
         }
     }
 
-    /// Installs the authenticated local user and the one configured Worker
-    /// pool used by operational execution admission.  These identities are
-    /// carried into the durable reservation; Worker frames cannot replace
-    /// them. The user identity is the initializing Owner's durable userId
-    /// once the Server is initialized; an uninitialized Server keeps the
-    /// stable default until initialization assigns the Owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when either identity is outside the canonical format.
     pub fn with_admission_identity(
         mut self,
         user_id: Option<UserId>,
@@ -402,7 +320,6 @@ impl RepositoryRuntimeScheduler {
         Ok(self)
     }
 
-    /// Returns the scheduler's immutable repository scope.
     #[must_use]
     pub const fn scope(&self) -> &RepositorySchedulerScope {
         &self.scope
@@ -442,18 +359,16 @@ impl RepositoryRuntimeScheduler {
         now: &Instant,
     ) -> Result<bool, RuntimeSupervisorError> {
         let (job, runtime_seconds) = validate_admission_job(record)?;
-        let runtime_limit_millis = runtime_seconds.checked_mul(1_000).ok_or_else(|| {
-            RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler execution deadline overflowed",
-            )
-        })?;
-        // Never reserve under an identity that is not an active durable
-        // account: an uninitialized Server still carries the stable default
-        // subject, and a reservation created under it could never pass the
-        // active-account check below. Leave the Job queued (and the
-        // supervisor healthy) until the Owner exists and
-        // `refresh_admission_identity` adopts it.
+        let runtime_limit_millis = runtime_seconds
+            .map(|seconds| {
+                seconds.checked_mul(1_000).ok_or_else(|| {
+                    RuntimeSupervisorError::new(
+                        RuntimeSupervisorErrorKind::Driver,
+                        "repository runtime scheduler execution deadline overflowed",
+                    )
+                })
+            })
+            .transpose()?;
         if !admission_user_is_active(storage, &self.user_id)? {
             return Ok(false);
         }
@@ -467,15 +382,17 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("load execution admission reservation", &error);
                 scheduler_failure()
             })?;
+        if let Some(reservation) = &reservation {
+            self.ensure_reservation_identity(record, reservation)?;
+        }
+        self.configure_admission_policies(
+            &mut admission,
+            &record.scope,
+            runtime_limit_millis.is_some(),
+        )?;
         let reservation = if let Some(reservation) = reservation {
             reservation
         } else {
-            let policy_limits = ExecutionAdmissionLimits {
-                max_runtime_millis: runtime_limit_millis
-                    .max(LOCAL_ADMISSION_LIMITS.max_runtime_millis),
-                ..LOCAL_ADMISSION_LIMITS
-            };
-            self.configure_admission_policies(&mut admission, &record.scope, policy_limits)?;
             let Some(reservation) =
                 self.reserve_admission(&mut admission, record, &job, runtime_limit_millis)?
             else {
@@ -483,28 +400,13 @@ impl RepositoryRuntimeScheduler {
             };
             reservation
         };
-        if reservation.scope != record.scope || reservation.worker_pool_id != self.worker_pool_id {
-            return Err(RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler admission identity differs",
-            ));
-        }
-        // Admission admits reservations from any active user account instead
-        // of one fixed process subject: every browser session now carries its
-        // own durable userId, so the reservation subject may differ per user.
-        // The stable default subject is the embedded local runtime's own
-        // pre-initialization identity rather than an account: it can never
-        // resolve through the ledger, so reservations it created (a Server
-        // that queued work before its first Owner existed) stay admissible
-        // for the local pool instead of faulting the supervisor on every
-        // restart.
+        self.ensure_reservation_identity(record, &reservation)?;
         let reservation_user = reservation.user_id.clone();
         let reservation_state = reservation.state;
         let reservation_revision = reservation.revision;
         let reservation_updated_at = reservation.updated_at.clone();
         let reservation_scope = reservation.scope.clone();
         let reservation_pool = reservation.worker_pool_id.clone();
-        // The first admission borrow ends here; the reopen below shadows it.
         if reservation_user.0 != DEFAULT_RUNTIME_USER_ID
             && !admission_user_is_active(storage, &reservation_user)?
         {
@@ -519,12 +421,6 @@ impl RepositoryRuntimeScheduler {
         })?;
         match reservation_state {
             ExecutionReservationState::Queued => {
-                // A command may commit a new queued Job after this driver's
-                // tick captured its clock value.  Admission intentionally
-                // rejects an operation timestamp that precedes the durable
-                // reservation; leave the Job queued and retry on the next
-                // tick instead of faulting the supervisor or claiming a
-                // dispatch without a running reservation.
                 if now.0 < reservation_updated_at.0 {
                     return Ok(false);
                 }
@@ -558,12 +454,26 @@ impl RepositoryRuntimeScheduler {
         Ok(true)
     }
 
+    fn ensure_reservation_identity(
+        &self,
+        record: &ExecutionJobRecord,
+        reservation: &winwincode_storage::ExecutionReservationRecord,
+    ) -> Result<(), RuntimeSupervisorError> {
+        if reservation.scope != record.scope || reservation.worker_pool_id != self.worker_pool_id {
+            return Err(RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Driver,
+                "repository runtime scheduler admission identity differs",
+            ));
+        }
+        Ok(())
+    }
+
     fn reserve_admission(
         &self,
         admission: &mut winwincode_storage::ExecutionAdmission<'_>,
         record: &ExecutionJobRecord,
         job: &ExecutionJob,
-        runtime_limit_millis: u64,
+        runtime_limit_millis: Option<u64>,
     ) -> Result<Option<winwincode_storage::ExecutionReservationRecord>, RuntimeSupervisorError>
     {
         let repository_access = match job.workspace.write_mode {
@@ -579,8 +489,8 @@ impl RepositoryRuntimeScheduler {
             job_id: record.job_id.clone(),
             request_id: self.job_request_id(b"admission-reserve", &record.job_id),
             repository_access,
-            reserved_tokens: 1_000_000,
-            reserved_cost_microunits: 1_000_000,
+            reserved_tokens: None,
+            reserved_cost_microunits: None,
             runtime_limit_millis,
             submitted_at: record.submitted_at.clone(),
         };
@@ -601,14 +511,11 @@ impl RepositoryRuntimeScheduler {
         &self,
         admission: &mut winwincode_storage::ExecutionAdmission<'_>,
         scope: &winwincode_storage::ExecutionQueueScope,
-        policy_limits: ExecutionAdmissionLimits,
+        runtime_limited: bool,
     ) -> Result<(), RuntimeSupervisorError> {
         for boundary in admission_boundaries(scope, &self.worker_pool_id) {
             admission
-                .configure_policy(&ExecutionAdmissionPolicy {
-                    boundary,
-                    limits: policy_limits,
-                })
+                .configure_runtime_policy(boundary, runtime_limited)
                 .map_err(|error| {
                     debug_scheduler_error("configure execution admission policy", &error);
                     scheduler_failure()
@@ -694,14 +601,6 @@ impl RepositoryRuntimeScheduler {
         })
     }
 
-    /// Configures and reads the durable slot table before claiming work.
-    ///
-    /// Repository scheduling persists a lease before the Worker can accept a
-    /// dispatch.  Without this preflight a full local Worker would leave a
-    /// durable job in `Leased`, then `ensure_worker_slot` would turn ordinary
-    /// capacity pressure into a supervisor fault.  The slot table is the
-    /// authoritative source here because it is updated in the same durable
-    /// lifecycle as the dispatch and terminal outcome.
     fn ensure_worker_capacity(
         &self,
         storage: &mut winwincode_storage::SqliteStorage,
@@ -750,6 +649,12 @@ impl RepositoryRuntimeScheduler {
             .iter_mut()
             .find(|existing| existing.slot.job_id == authority.slot.job_id)
         {
+            if existing.slot == authority.slot
+                && existing.lease_issued_at == authority.lease_issued_at
+                && existing.lease_expires_at.0 > authority.lease_expires_at.0
+            {
+                return;
+            }
             *existing = authority;
         } else {
             self.active_worker_authorities.push(authority);
@@ -759,6 +664,7 @@ impl RepositoryRuntimeScheduler {
     fn prune_worker_authorities(
         &mut self,
         storage: &mut winwincode_storage::SqliteStorage,
+        now: &Instant,
     ) -> Result<(), RuntimeSupervisorError> {
         let active = storage
             .repository_scheduler()
@@ -777,7 +683,151 @@ impl RepositoryRuntimeScheduler {
                 .iter()
                 .any(|record| record.job_id == authority.slot.job_id)
         });
+        for record in active {
+            let registry = storage
+                .execution_registry()
+                .map_err(|_| scheduler_failure())?;
+            let Some(lease) = registry
+                .load_live_lease(&record.job_id, now)
+                .map_err(|_| scheduler_failure())?
+            else {
+                continue;
+            };
+            if lease.worker_id != self.worker_id
+                || lease.worker_instance_id != self.worker_instance_id
+            {
+                continue;
+            }
+            let Some(dispatch) = registry
+                .load_dispatch_authority(&record.job_id)
+                .map_err(|_| scheduler_failure())?
+            else {
+                continue;
+            };
+            if dispatch.lease() != &lease {
+                return Err(scheduler_failure());
+            }
+            let slot = storage
+                .worker_session_slots()
+                .map_err(|_| scheduler_failure())?
+                .load(dispatch.worker_session_id())
+                .map_err(|_| scheduler_failure())?
+                .ok_or_else(scheduler_failure)?;
+            let authority = &slot.authority;
+            if authority.worker_id != lease.worker_id
+                || authority.worker_instance_id != lease.worker_instance_id
+                || authority.job_id != lease.job_id
+                || authority.lease_id != lease.lease_id
+                || authority.attempt != lease.attempt
+                || authority.fencing_token != lease.fencing_token
+                || !matches!(
+                    slot.state,
+                    winwincode_storage::WorkerSlotState::Running
+                        | winwincode_storage::WorkerSlotState::Cancelling
+                )
+            {
+                return Err(scheduler_failure());
+            }
+            self.remember_worker_authority(WorkerOutboundAuthority {
+                slot: slot.authority,
+                lease_issued_at: lease.issued_at,
+                lease_expires_at: lease.expires_at,
+            });
+        }
         Ok(())
+    }
+
+    fn retire_terminal_pending(
+        &mut self,
+        storage: &mut winwincode_storage::SqliteStorage,
+        now: &Instant,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let mut retired = Vec::new();
+        for (authority, id) in &self.pending_interaction_acknowledgements {
+            let slot = storage
+                .worker_session_slots()
+                .map_err(|_| scheduler_failure())?
+                .load(&authority.slot.worker_session_id)
+                .map_err(|_| scheduler_failure())?
+                .ok_or_else(scheduler_failure)?;
+            if slot.authority == authority.slot
+                && !matches!(
+                    slot.state,
+                    winwincode_storage::WorkerSlotState::Running
+                        | winwincode_storage::WorkerSlotState::Cancelling
+                )
+            {
+                storage
+                    .worker_outbound_queue(winwincode_storage::WorkerOutboundQueueConfig::default())
+                    .map_err(|_| scheduler_failure())?
+                    .settle_terminal(authority, now)
+                    .map_err(|_| scheduler_failure())?;
+                retired.push(id.clone());
+            }
+        }
+        self.pending_interaction_acknowledgements
+            .retain(|(_, id)| !retired.contains(id));
+        Ok(())
+    }
+
+    fn refresh_worker_authorities(
+        &mut self,
+        storage: &mut winwincode_storage::SqliteStorage,
+    ) -> Result<(), RuntimeSupervisorError> {
+        for authority in self.active_worker_authorities.iter_mut().chain(
+            self.pending_interaction_acknowledgements
+                .iter_mut()
+                .map(|(authority, _)| authority),
+        ) {
+            let Some(dispatch) = storage
+                .execution_registry()
+                .map_err(|_| scheduler_failure())?
+                .load_dispatch_authority(&authority.slot.job_id)
+                .map_err(|_| scheduler_failure())?
+            else {
+                continue;
+            };
+            let lease = dispatch.lease();
+            let slot = storage
+                .worker_session_slots()
+                .map_err(|_| scheduler_failure())?
+                .load(dispatch.worker_session_id())
+                .map_err(|_| scheduler_failure())?
+                .ok_or_else(scheduler_failure)?;
+            if slot.authority != authority.slot
+                || lease.job_id != authority.slot.job_id
+                || lease.lease_id != authority.slot.lease_id
+                || lease.worker_id != authority.slot.worker_id
+                || lease.worker_instance_id != authority.slot.worker_instance_id
+                || lease.attempt != authority.slot.attempt
+                || lease.fencing_token != authority.slot.fencing_token
+                || lease.issued_at != authority.lease_issued_at
+                || lease.expires_at.0 < authority.lease_expires_at.0
+            {
+                return Err(scheduler_failure());
+            }
+            authority.lease_expires_at = lease.expires_at.clone();
+        }
+        Ok(())
+    }
+
+    fn interaction_delivery_targets(&self) -> Vec<WorkerOutboundAuthority> {
+        let is_current_worker = |authority: &WorkerOutboundAuthority| {
+            authority.slot.worker_id == self.worker_id
+                && authority.slot.worker_instance_id == self.worker_instance_id
+        };
+        if self
+            .pending_interaction_acknowledgements
+            .iter()
+            .any(|(authority, _)| is_current_worker(authority))
+        {
+            return Vec::new();
+        }
+        self.active_worker_authorities
+            .iter()
+            .filter(|authority| is_current_worker(authority))
+            .cloned()
+            .collect()
     }
 
     fn dispatch_interactions(
@@ -786,30 +836,15 @@ impl RepositoryRuntimeScheduler {
         now: &Instant,
         execution_port: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
-        if !self.pending_interaction_acknowledgements.is_empty() {
-            return Ok(());
-        }
-        for authority in self.active_worker_authorities.clone() {
-            let mut cursor = None;
-            loop {
-                let page = state
-                    .worker_outbound
-                    .claim_page(
-                        &authority,
-                        now,
-                        cursor.as_ref(),
-                        RUNTIME_INTERACTION_PAGE_SIZE,
-                    )
-                    .map_err(|_| scheduler_failure())?;
-                for claim in page.claims {
-                    execution_port.enqueue_control(claim.typed_frame().message().clone())?;
-                    self.pending_interaction_acknowledgements
-                        .push((authority.clone(), claim.message_id().clone()));
-                }
-                cursor = page.next_cursor;
-                if cursor.is_none() {
-                    break;
-                }
+        for authority in self.interaction_delivery_targets() {
+            let claims = state
+                .worker_outbound
+                .claim_pending(&authority, now)
+                .map_err(|_| scheduler_failure())?;
+            for claim in claims {
+                execution_port.enqueue_control(claim.typed_frame().message().clone())?;
+                self.pending_interaction_acknowledgements
+                    .push((authority.clone(), claim.message_id().clone()));
             }
         }
         Ok(())
@@ -821,6 +856,8 @@ impl RepositoryRuntimeScheduler {
         state: &mut ApplicationState,
         now: &Instant,
     ) -> Result<(), RuntimeSupervisorError> {
+        self.retire_terminal_pending(&mut state.storage, now)?;
+        self.refresh_worker_authorities(&mut state.storage)?;
         let pending = std::mem::take(&mut self.pending_interaction_acknowledgements);
         for (index, (authority, message_id)) in pending.iter().enumerate() {
             if state
@@ -853,8 +890,6 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("list queued jobs", &error);
                 scheduler_failure()
             })?;
-        // Local/fleet Workers skip device jobs. A Device Worker selects only
-        // the job whose sealed launch facts name this exact process.
         let mut matching_head = None;
         for record in &queued {
             let device_facts = {
@@ -907,34 +942,37 @@ impl RepositoryRuntimeScheduler {
         Ok(admission_ready)
     }
 
+    fn reconcile_cancel_routes_once(&mut self, state: &mut ApplicationState) {
+        if self.session_cancel_routes_reconciled {
+            return;
+        }
+        let public_scope = winwincode_storage::PublicEventScope::Repository {
+            organization_id: self.scope.organization_id.clone(),
+            workspace_id: self.scope.workspace_id.clone(),
+            project_id: self.scope.project_id.clone(),
+            repository_id: self.scope.repository_id.clone(),
+        };
+        let reconciled = {
+            let mut sessions = ProductSessionService::new(&mut state.storage);
+            sessions.reconcile_cancelled_session_routes(&public_scope)
+        };
+        match reconciled {
+            Ok(_) => {
+                self.session_cancel_routes_reconciled = true;
+            }
+            Err(error) => {
+                debug_scheduler_error("reconcile cancelled ProductSession routes", &error);
+            }
+        }
+    }
+
     fn dispatch_cancellations(
         &mut self,
         state: &mut ApplicationState,
         now: &Instant,
         execution_port: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
-        // y2es: on the first drive after process start, replay any durable
-        // ProductSession cancel routes whose queue cancel never committed.
-        if !self.session_cancel_routes_reconciled {
-            let public_scope = winwincode_storage::PublicEventScope::Repository {
-                organization_id: self.scope.organization_id.clone(),
-                workspace_id: self.scope.workspace_id.clone(),
-                project_id: self.scope.project_id.clone(),
-                repository_id: self.scope.repository_id.clone(),
-            };
-            let reconciled = {
-                let mut sessions = ProductSessionService::new(&mut state.storage);
-                sessions.reconcile_cancelled_session_routes(&public_scope)
-            };
-            match reconciled {
-                Ok(_) => {
-                    self.session_cancel_routes_reconciled = true;
-                }
-                Err(error) => {
-                    debug_scheduler_error("reconcile cancelled ProductSession routes", &error);
-                }
-            }
-        }
+        self.reconcile_cancel_routes_once(state);
         let cancellations = {
             let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
             scheduler
@@ -978,7 +1016,6 @@ impl RepositoryRuntimeScheduler {
             } else {
                 false
             };
-            // A released Device lease confirms its Workers stopped and also revokes remote ingress.
             if device_released
                 || lease
                     .as_ref()
@@ -1037,19 +1074,24 @@ impl RepositoryRuntimeScheduler {
         })?;
         let request_id = self.next_request_id(b"claim");
         self.dispatch_cancellations(state, now, execution_port)?;
-        // A queued Job may be waiting for an admission timestamp or for
-        // ordinary concurrency/budget capacity.  Cancellation and interaction
-        // traffic for already-running work must still flow while that queue
-        // head waits; otherwise a cancellation can never release the very
-        // slot needed to make admission progress.
+        for command in state
+            .control_plane
+            .pending_snapshot_commands(
+                &mut state.storage,
+                &self.worker_id,
+                &self.worker_instance_id,
+                now,
+            )
+            .map_err(|error| {
+                debug_scheduler_error("replay Snapshot command", &error);
+                scheduler_failure()
+            })?
+        {
+            execution_port.enqueue_control(command)?;
+        }
         if !admission_ready {
             return Ok(());
         }
-        // `claim_next` writes the Registry lease before the local Worker slot
-        // is opened.  Do not create that lease while the current Worker is at
-        // its durable slot/resource ceiling.  A normal restart has a fresh
-        // Worker instance, so old-instance slots are not counted and the
-        // scheduler can perform its replacement transaction.
         if !self.ensure_worker_capacity(&mut state.storage)? {
             return Ok(());
         }
@@ -1099,7 +1141,14 @@ impl RepositoryRuntimeScheduler {
             let authority = self
                 .ensure_worker_slot(&mut state.storage, &dispatch, now)
                 .inspect_err(|error| debug_scheduler_error("ensure Worker slot", error))?;
-            execution_port.enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch))?;
+            let command = state
+                .control_plane
+                .prepare_snapshot_freeze(&mut state.storage, &dispatch, now)
+                .map_err(|error| {
+                    debug_scheduler_error("prepare Snapshot freeze", &error);
+                    scheduler_failure()
+                })?;
+            execution_port.enqueue_control(command)?;
             self.remember_worker_authority(authority);
         }
         Ok(())
@@ -1107,12 +1156,6 @@ impl RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
-    /// Drives the canonical repository scheduler into a separated Worker
-    /// transport without changing its durable queue, lease, or slot owners.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same durable scheduling failures as the local driver.
     pub fn drive_remote(
         &mut self,
         now: &Instant,
@@ -1121,12 +1164,6 @@ impl RepositoryRuntimeScheduler {
         self.drive_outbound(now, outbound, true)
     }
 
-    /// Drives one authenticated remote process using its transport-bound
-    /// worker and pool identities.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same durable scheduling failures as the local driver.
     pub fn drive_remote_for(
         &mut self,
         now: &Instant,
@@ -1147,20 +1184,13 @@ impl RepositoryRuntimeScheduler {
         result
     }
 
-    /// Commits only interaction receipts explicitly confirmed by the remote
-    /// Worker. Unconfirmed messages remain claimed for exact replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a durable queue failure without dropping remaining receipts.
     pub fn acknowledge_remote(
         &mut self,
         now: &Instant,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
         confirmed: &[winwincode_domain::ExecutionMessageId],
     ) -> Result<(), RuntimeSupervisorError> {
-        if confirmed.is_empty() {
-            return Ok(());
-        }
         let state_handle = Arc::clone(&self.state);
         let mut guard = state_handle.lock().map_err(|_| {
             RuntimeSupervisorError::new(
@@ -1174,23 +1204,34 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
-        let mut remaining = Vec::new();
-        for (authority, message_id) in
-            std::mem::take(&mut self.pending_interaction_acknowledgements)
-        {
-            if confirmed.contains(&message_id) {
-                if state
-                    .worker_outbound
-                    .acknowledge(&authority, &message_id, now)
-                    .is_err()
-                {
-                    remaining.push((authority, message_id));
-                }
-            } else {
-                remaining.push((authority, message_id));
-            }
+        self.retire_terminal_pending(&mut state.storage, now)?;
+        self.refresh_worker_authorities(&mut state.storage)?;
+        for message_id in confirmed {
+            state
+                .worker_outbound
+                .confirm_remote(worker_id, worker_instance_id, message_id, now)
+                .map_err(|_| scheduler_failure())?;
         }
-        self.pending_interaction_acknowledgements = remaining;
+        self.retry_confirmed_interactions(state, worker_id, worker_instance_id)?;
+        Ok(())
+    }
+
+    fn retry_confirmed_interactions(
+        &mut self,
+        state: &mut ApplicationState,
+        worker_id: &WorkerId,
+        instance_id: &WorkerInstanceId,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let progress = state
+            .worker_outbound
+            .retry_confirmed(worker_id, instance_id)
+            .map_err(|_| scheduler_failure())?;
+        self.pending_interaction_acknowledgements.retain(|(_, id)| {
+            !progress
+                .acknowledgements
+                .iter()
+                .any(|receipt| &receipt.message_id == id)
+        });
         Ok(())
     }
 
@@ -1213,8 +1254,13 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        self.retry_confirmed_interactions(
+            state,
+            &self.worker_id.clone(),
+            &self.worker_instance_id.clone(),
+        )?;
         self.refresh_admission_identity(&mut state.storage);
-        self.prune_worker_authorities(&mut state.storage)?;
+        self.prune_worker_authorities(&mut state.storage, now)?;
         let admission_ready = self.ensure_queued_admission(state, now)?;
         self.dispatch_scheduler_messages(
             state,
@@ -1223,6 +1269,8 @@ impl RepositoryRuntimeScheduler {
             admission_ready,
             authenticated_remote,
         )?;
+        self.retire_terminal_pending(&mut state.storage, now)?;
+        self.refresh_worker_authorities(&mut state.storage)?;
         self.dispatch_interactions(state, now, execution_port)?;
         self.hub
             .publish_pending(&mut state.storage)
@@ -1234,7 +1282,6 @@ impl RepositoryRuntimeScheduler {
     }
 }
 
-/// Reports whether the reservation subject resolves to the durable Owner.
 fn admission_user_is_active(
     storage: &mut winwincode_storage::SqliteStorage,
     user_id: &UserId,
@@ -1251,7 +1298,7 @@ fn admission_user_is_active(
 
 fn validate_admission_job(
     record: &ExecutionJobRecord,
-) -> Result<(ExecutionJob, u64), RuntimeSupervisorError> {
+) -> Result<(ExecutionJob, Option<u64>), RuntimeSupervisorError> {
     let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload).map_err(|_| {
         RuntimeSupervisorError::new(
             RuntimeSupervisorErrorKind::Driver,
@@ -1268,15 +1315,19 @@ fn validate_admission_job(
             "repository runtime scheduler found mismatched ExecutionJob authority",
         ));
     }
-    let runtime_seconds = u64::try_from(job.limits.max_runtime_seconds)
-        .ok()
-        .filter(|seconds| *seconds > 0)
-        .ok_or_else(|| {
-            RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler found an invalid execution deadline",
-            )
-        })?;
+    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
+        return Err(scheduler_failure());
+    }
+    let runtime_seconds = job
+        .limits
+        .max_runtime_seconds
+        .map(|seconds| {
+            u64::try_from(seconds)
+                .ok()
+                .filter(|seconds| (1..=604_800).contains(seconds))
+                .ok_or_else(scheduler_failure)
+        })
+        .transpose()?;
     Ok((job, runtime_seconds))
 }
 
@@ -1344,36 +1395,34 @@ impl LocalRuntimeScheduler for RepositoryRuntimeScheduler {
     }
 }
 
-/// The one Worker-to-Control Plane core used by a local Server launcher.
-///
-/// It borrows no application state across an await: each synchronous typed
-/// frame obtains the shared `ApplicationState` lock, runs the canonical durable
-/// ingress, publishes pending public events through the same hub, and releases
-/// the lock before returning. A second Control Plane, storage, hub, or queue is
-/// never constructed here.
 pub struct ServerExecutionPortCore<Delegate> {
     state: Arc<StdMutex<Option<ApplicationState>>>,
     hub: Arc<crate::DurableEventHub>,
     repository_scope: RepositoryScope,
     clock: Arc<dyn StandaloneApplicationClock>,
+    lease_duration_millis: u64,
     delegate: Delegate,
 }
 
 impl<Delegate> ServerExecutionPortCore<Delegate> {
-    /// Creates a core over the exact state and hub owned by one application.
-    #[must_use]
     pub fn from_application(
         application: &StandaloneControlPlaneApplication,
         repository_scope: RepositoryScope,
         delegate: Delegate,
-    ) -> Self {
-        Self {
+        lease_duration: Duration,
+    ) -> Result<Self, ServerExecutionPortError> {
+        let lease_duration_millis = u64::try_from(lease_duration.as_millis())
+            .ok()
+            .filter(|millis| *millis > 0)
+            .ok_or_else(lease_renewal_failure)?;
+        Ok(Self {
             state: application.shared_runtime_state(),
             hub: application.runtime_hub(),
             repository_scope,
             clock: application.runtime_clock(),
+            lease_duration_millis,
             delegate,
-        }
+        })
     }
 
     #[must_use]
@@ -1416,7 +1465,7 @@ where
             &mut state.control_plane,
             &mut state.storage,
             &self.repository_scope,
-            server_time,
+            server_time.clone(),
             &mut self.delegate,
         )
         .map_err(|_error| {
@@ -1435,6 +1484,14 @@ where
             )
         })?;
         drop(ingress);
+        renew_heartbeat_leases(
+            &mut state.storage,
+            &mut state.worker_outbound,
+            message,
+            &responses,
+            &server_time,
+            self.lease_duration_millis,
+        )?;
         self.hub
             .publish_pending(&mut state.storage)
             .map_err(|_error| {
@@ -1445,6 +1502,114 @@ where
             })?;
         Ok(responses)
     }
+}
+
+fn lease_renewal_failure() -> ServerExecutionPortError {
+    ServerExecutionPortError::new(
+        ServerExecutionPortErrorKind::Ingress,
+        "Server Worker lease renewal is unavailable",
+    )
+}
+
+fn renew_heartbeat_leases(
+    storage: &mut winwincode_storage::SqliteStorage,
+    outbound: &mut DurableWorkerInteractionOutbound,
+    message: &ExecutionPortMessage,
+    responses: &[ExecutionPortMessage],
+    now: &Instant,
+    lease_duration_millis: u64,
+) -> Result<(), ServerExecutionPortError> {
+    let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message else {
+        return Ok(());
+    };
+    if !responses.iter().any(|response| {
+        matches!(response,
+            ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)
+            if ack.status == WorkerHeartbeatAckMessageStatus::Accepted
+                && ack.error.is_none()
+                && ack.worker_id == heartbeat.worker_id
+                && ack.worker_instance_id == heartbeat.worker_instance_id
+                && ack.heartbeat_sequence == heartbeat.heartbeat_sequence
+        )
+    }) {
+        return Ok(());
+    }
+    let renewal_lead_millis = (lease_duration_millis / 2).min(120_000);
+    let renew_before = add_millis(now, renewal_lead_millis).ok_or_else(lease_renewal_failure)?;
+    let expires_at = add_millis(now, lease_duration_millis).ok_or_else(lease_renewal_failure)?;
+    for summary in &heartbeat.active_leases {
+        let registry = storage
+            .execution_registry()
+            .map_err(|_| lease_renewal_failure())?;
+        let Some(lease) = registry
+            .load_live_lease(&summary.job_id, now)
+            .map_err(|_| lease_renewal_failure())?
+        else {
+            continue;
+        };
+        if lease.worker_id != heartbeat.worker_id
+            || lease.worker_instance_id != heartbeat.worker_instance_id
+            || lease.lease_id != summary.lease_id
+            || Some(lease.attempt) != u64::try_from(summary.attempt).ok()
+            || lease.fencing_token != summary.fencing_token
+            || lease.expires_at != summary.expires_at
+            || lease.expires_at.0 > renew_before.0
+            || lease.expires_at.0 >= expires_at.0
+        {
+            continue;
+        }
+        let Some(dispatch) = registry
+            .load_dispatch_authority(&summary.job_id)
+            .map_err(|_| lease_renewal_failure())?
+        else {
+            continue;
+        };
+        if dispatch.lease() != &lease {
+            return Err(lease_renewal_failure());
+        }
+        let slot = storage
+            .worker_session_slots()
+            .map_err(|_| lease_renewal_failure())?
+            .load(dispatch.worker_session_id())
+            .map_err(|_| lease_renewal_failure())?
+            .ok_or_else(lease_renewal_failure)?;
+        let mut digest = Sha256::new();
+        digest.update(b"winwincode.server-heartbeat-renewal.v1\0");
+        for identity in [
+            &heartbeat.worker_instance_id.0,
+            &heartbeat.message_id.0,
+            &summary.job_id.0,
+            &summary.lease_id.0,
+        ] {
+            digest.update(identity.as_bytes());
+            digest.update([0]);
+        }
+        let identity = crockford_26(&digest.finalize());
+        outbound
+            .renew_lease(
+                &slot.authority,
+                &LeaseRenewMessage {
+                    kind: LeaseRenewMessageKind::LeaseRenew,
+                    lease: ExecutionLeaseStamp {
+                        attempt: summary.attempt,
+                        expires_at: expires_at.clone(),
+                        fencing_token: lease.fencing_token,
+                        issued_at: lease.issued_at,
+                        job_id: lease.job_id,
+                        lease_id: lease.lease_id,
+                        worker_id: lease.worker_id,
+                        worker_instance_id: lease.worker_instance_id,
+                    },
+                    message_id: winwincode_domain::ExecutionMessageId(format!("xmsg_{identity}")),
+                    prior_expires_at: lease.expires_at,
+                    request_id: RequestId(format!("req_{identity}")),
+                    schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+                    sent_at: now.clone(),
+                },
+            )
+            .map_err(|_| lease_renewal_failure())?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1470,7 +1635,6 @@ impl RuntimeHealthState {
     }
 }
 
-/// Cloneable health handle for an application and its HTTP health endpoint.
 #[derive(Clone)]
 #[cfg(feature = "local-worker")]
 pub struct RuntimeHealthHandle {
@@ -1492,7 +1656,6 @@ impl RuntimeHealthPort for RuntimeHealthHandle {
     }
 }
 
-/// One running local Worker and its supervised liveness driver.
 #[cfg(feature = "local-worker")]
 pub struct LocalRuntimeSupervisor<Core, Codex>
 where
@@ -1513,15 +1676,6 @@ where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    /// Starts the local launcher and then its supervised heartbeat/poll driver.
-    ///
-    /// The injected `Core` must already contain the Server's canonical
-    /// Control Plane, `SQLite`, interaction outbox, repository scope, and event
-    /// hub. No runtime-owned replacement is created here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when launcher startup or runtime configuration fails.
     pub async fn start(
         config: LocalLauncherConfig,
         worker_config: WorkerConfig,
@@ -1542,11 +1696,6 @@ where
         .await
     }
 
-    /// Starts the launcher with one supervised scheduler hook.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the polling interval is invalid or launcher startup fails.
     pub async fn start_with_scheduler(
         config: LocalLauncherConfig,
         worker_config: WorkerConfig,
@@ -1612,23 +1761,16 @@ where
         })
     }
 
-    /// Returns the read-only health handle used by `StandaloneControlPlaneApplication`.
     #[must_use]
     pub fn health_handle(&self) -> RuntimeHealthHandle {
         self.health.clone()
     }
 
-    /// Returns the supervisor polling interval.
     #[must_use]
     pub const fn tick(&self) -> Duration {
         self.tick
     }
 
-    /// Runs one CP-to-Worker message through the sole local launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or the launcher rejects the frame.
     pub async fn accept_control(
         &self,
         message: ExecutionPortMessage,
@@ -1643,11 +1785,6 @@ where
             .map_err(|_| self.mark_faulted(RuntimeSupervisorErrorKind::Launcher))
     }
 
-    /// Runs one explicit launcher drive cycle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or the launcher drive fails.
     pub async fn drive(&self, now: Instant) -> Result<usize, RuntimeSupervisorError> {
         self.ensure_healthy()?;
         let mut launcher = self.launcher.lock().await;
@@ -1658,11 +1795,6 @@ where
             .map_err(|_| self.mark_faulted(RuntimeSupervisorErrorKind::Launcher))
     }
 
-    /// Returns the same CP-to-Worker queue handle used by the launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn execution_port(&self) -> Result<LocalExecutionPortHandle, RuntimeSupervisorError> {
         self.ensure_healthy()?;
         let launcher = self.launcher.lock().await;
@@ -1672,11 +1804,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Returns the same shared Control Plane endpoint used by the launcher.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn control_plane(
         &self,
     ) -> Result<SharedControlPlaneHandle<Core>, RuntimeSupervisorError> {
@@ -1688,11 +1815,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Reports the current Worker lifecycle state through a short lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supervisor is faulted or stopped.
     pub async fn worker_lifecycle(
         &self,
     ) -> Result<winwincode_worker::WorkerLifecycleState, RuntimeSupervisorError> {
@@ -1704,11 +1826,6 @@ where
             .ok_or_else(stopped_error)
     }
 
-    /// Stops the driver, drains the Worker/ACK queue, and releases the CP lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the driver or local launcher does not stop cleanly.
     pub async fn shutdown(mut self) -> Result<(), RuntimeSupervisorError> {
         let _ = self.stop.send(true);
         let driver_error = if let Some(driver) = self.driver.take() {
@@ -1722,9 +1839,6 @@ where
             None
         };
 
-        // Take the launcher before awaiting its shutdown so the async mutex is
-        // never held across Worker/Core cleanup. Cleanup still runs when the
-        // driver join failed, preserving the single owned resource boundary.
         let launcher = self.launcher.lock().await.take();
         let now = self.clock.now_instant();
         let now_millis = self.clock.now_millis();
@@ -1801,11 +1915,6 @@ async fn run_driver<Core, Codex>(
                     return;
                 }
                 let heartbeat_now = clock.now_instant();
-                // Publish the Worker capacity observation before processing
-                // any durable commands from the preceding tick.  Heartbeat
-                // is replay-safe, so it is the first durable operation on
-                // every tick and keeps liveness visible while the launcher
-                // drains its control queue.
                 if let Err(error) = launcher.heartbeat(heartbeat_now.clone()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                         eprintln!("runtime driver heartbeat failed: {error}");
@@ -1820,12 +1929,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Poll the Codex adapter before making the next durable
-                // scheduling decision.  `poll_codex` removes terminal jobs,
-                // closes their Worker slots, and synchronously commits the
-                // terminal outcome through the same Core.  This snapshot is
-                // therefore the point at which a just-finished job becomes
-                // eligible for the next claim.
                 let active_jobs_before_poll = launcher.active_job_count();
                 if let Err(error) = launcher.poll_codex(clock.now_instant()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
@@ -1834,10 +1937,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Keep the regular one-heartbeat-per-tick cadence when no
-                // capacity changed, but immediately publish a fresh Worker
-                // capacity observation after terminal polling.  The scheduler
-                // below must not wait another tick to see the slot released.
                 if launcher.active_job_count() != active_jobs_before_poll
                     && let Err(error) = launcher.heartbeat(clock.now_instant()).await
                 {
@@ -1857,9 +1956,6 @@ async fn run_driver<Core, Codex>(
                     health.mark_faulted();
                     return;
                 }
-                // Scheduler dispatches are queued on the same local port.  A
-                // second drive applies the exact durable command before the
-                // next tick's Codex poll, preserving command ordering.
                 if let Err(error) = launcher.drive(scheduler_now.clone()).await {
                     if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                         eprintln!("runtime driver post-scheduler control drive failed: {error}");
@@ -2098,6 +2194,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remote_interaction_delivery_is_scoped_to_the_polling_worker() {
+        let root = unique_directory("remote-interaction-routing");
+        std::fs::create_dir_all(&root).expect("temp directory");
+        let mut scheduler = scheduler_with_user(UserId(DEFAULT_RUNTIME_USER_ID.to_owned()), &root);
+        let authority = |suffix: char| WorkerOutboundAuthority {
+            slot: WorkerSlotAuthority {
+                worker_id: WorkerId(format!("wrk_{}", suffix.to_string().repeat(26))),
+                worker_instance_id: WorkerInstanceId(format!(
+                    "wki_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                worker_session_id: winwincode_domain::WorkerSessionId(format!(
+                    "wsn_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                codex_thread_id: winwincode_domain::CodexThreadId(format!(
+                    "cdx_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                job_id: ExecutionJobId(format!("job_{}", suffix.to_string().repeat(26))),
+                lease_id: winwincode_domain::LeaseId(format!(
+                    "lse_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                attempt: 1,
+                fencing_token: winwincode_domain::FencingToken("1".to_owned()),
+            },
+            lease_issued_at: fixed_instant("2026-09-29T00:00:00.000Z"),
+            lease_expires_at: fixed_instant("2026-09-29T01:00:00.000Z"),
+        };
+        let executor = authority('A');
+        let ordinary = authority('B');
+        scheduler.active_worker_authorities = vec![executor.clone(), ordinary.clone()];
+        scheduler.worker_id = ordinary.slot.worker_id.clone();
+        scheduler.worker_instance_id = ordinary.slot.worker_instance_id.clone();
+
+        assert_eq!(
+            scheduler.interaction_delivery_targets(),
+            vec![ordinary.clone()]
+        );
+        scheduler.pending_interaction_acknowledgements.push((
+            executor.clone(),
+            winwincode_domain::ExecutionMessageId(fixed_id("xmsg_")),
+        ));
+        assert_eq!(
+            scheduler.interaction_delivery_targets(),
+            vec![ordinary.clone()]
+        );
+        scheduler.pending_interaction_acknowledgements.push((
+            ordinary,
+            winwincode_domain::ExecutionMessageId(format!("xmsg_{}", "B".repeat(26))),
+        ));
+        assert!(scheduler.interaction_delivery_targets().is_empty());
+
+        drop(scheduler);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn queued_job_record(scope: &ExecutionQueueScope) -> (ExecutionJobRecord, ExecutionJob) {
         let job = ExecutionJob {
             attachments: None,
@@ -2107,9 +2262,9 @@ mod tests {
             goal: "admission regression fixture".to_owned(),
             job_id: ExecutionJobId(fixed_id("job_")),
             limits: ExecutionLimits {
-                deadline_at: fixed_instant("2026-09-07T00:00:00.000Z"),
+                deadline_at: Some(fixed_instant("2026-09-07T00:00:00.000Z")),
                 max_artifact_bytes: 1_024,
-                max_runtime_seconds: 3_600,
+                max_runtime_seconds: Some(3_600),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "A".repeat(64))),
             scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
@@ -2168,9 +2323,9 @@ mod tests {
                 job_id: job_id.clone(),
                 request_id: RequestId(format!("req_{}", "B".repeat(26))),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 1_000,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 3_600_000,
+                reserved_tokens: Some(1_000),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(3_600_000),
                 submitted_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             })
             .expect("stale reservation is created");
@@ -2192,6 +2347,605 @@ mod tests {
             .and_then(|mut ledger| ledger.create(&account))
             .expect("owner account is created");
         user_id
+    }
+
+    struct Publisher;
+    impl winwincode_control_plane::EventPublisher for Publisher {
+        fn publish(
+            &mut self,
+            _event: &winwincode_control_plane::OutboxEvent,
+        ) -> Result<(), winwincode_control_plane::EventPublishError> {
+            Ok(())
+        }
+    }
+    struct NoControls;
+    impl RuntimeControlOutbound for NoControls {
+        fn enqueue_control(
+            &self,
+            _message: ExecutionPortMessage,
+        ) -> Result<(), RuntimeSupervisorError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn default_lease_renews_at_thirteen_minutes_on_accepted_heartbeat() {
+        use winwincode_domain::{
+            CodexThreadId, ExecutionMessageId, FencingToken, LeaseId, WorkerSessionId,
+        };
+        use winwincode_execution_port::generated::{
+            ActiveLeaseSummary, WorkerCapacity, WorkerHeartbeatMessage, WorkerHeartbeatMessageKind,
+        };
+        use winwincode_storage::{
+            DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
+            ProductStateStorage, WorkerAuthenticationIdentity, WorkerPlatform,
+            WorkerRegistrationRequest,
+        };
+
+        let root = unique_directory("default-renewal-window");
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let start = fixed_instant("2027-01-15T08:00:00.000Z");
+        let at = |seconds: u64| add_millis(&start, seconds * 1_000).expect("timestamp");
+        let message_id = |number| ExecutionMessageId(format!("xmsg_{number:026}"));
+        let request_id = |number| RequestId(format!("req_{number:026}"));
+        let lease = ExecutionLeaseClaim {
+            worker_id: WorkerId(fixed_id("wrk_")),
+            worker_instance_id: WorkerInstanceId(fixed_id("wki_")),
+            job_id: ExecutionJobId(fixed_id("job_")),
+            lease_id: LeaseId(fixed_id("lse_")),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            attempt: 1,
+            fencing_token: FencingToken("7".to_owned()),
+            issued_at: start.clone(),
+            expires_at: at(900),
+            message_id: message_id(1),
+            request_id: request_id(1),
+        };
+        let slot = WorkerSlotAuthority {
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            worker_session_id: WorkerSessionId(fixed_id("wsn_")),
+            codex_thread_id: CodexThreadId(fixed_id("cdx_")),
+            job_id: lease.job_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            attempt: lease.attempt,
+            fencing_token: lease.fencing_token.clone(),
+        };
+        {
+            let mut registry = storage.execution_registry().expect("registry");
+            registry
+                .register_worker(&WorkerRegistrationRequest {
+                    authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                        control_plane_principal: "fixture-control-plane".into(),
+                    },
+                    protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+                    platform: WorkerPlatform::Aarch64AppleDarwin,
+                    capabilities: vec!["codex".into()],
+                    capability_digest: lease.payload_digest.clone(),
+                    security_zone: "local".into(),
+                    max_slots: 1,
+                    message_id: message_id(2),
+                    request_id: request_id(2),
+                    sent_at: start.clone(),
+                    started_at: start.clone(),
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                })
+                .expect("register");
+            registry.claim_execution_job(&lease).expect("claim");
+            registry
+                .record_dispatch_result(&DispatchResultRequest {
+                    checked_at: start.clone(),
+                    expires_at: lease.expires_at.clone(),
+                    fencing_token: lease.fencing_token.clone(),
+                    issued_at: lease.issued_at.clone(),
+                    job_id: lease.job_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    message_id: message_id(3),
+                    payload_digest: lease.payload_digest.clone(),
+                    request_id: request_id(3),
+                    sent_at: start.clone(),
+                    status: DispatchResultStatus::Accepted,
+                    attempt: lease.attempt,
+                    error: None,
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                    worker_session_id: Some(slot.worker_session_id.clone()),
+                })
+                .expect("dispatch");
+        }
+        poison_reservation_with_user(
+            &mut storage,
+            &test_scope(),
+            &lease.job_id,
+            &UserId(OWNER_USER_ID.to_owned()),
+        );
+        storage
+            .execution_admission()
+            .expect("admission")
+            .start(&ExecutionReservationStart {
+                scope: test_scope(),
+                worker_pool_id: WorkerPoolId(DEFAULT_RUNTIME_WORKER_POOL_ID.to_owned()),
+                job_id: lease.job_id.clone(),
+                request_id: request_id(5),
+                expected_revision: 1,
+                started_at: start.clone(),
+            })
+            .expect("running admission");
+        {
+            let mut slots = storage.worker_session_slots().expect("slots");
+            slots
+                .configure_resources(
+                    &lease.worker_id,
+                    &lease.worker_instance_id,
+                    LOCAL_SLOT_RESOURCE_LIMITS,
+                )
+                .expect("resources");
+            slots
+                .open(&WorkerSlotOpenRequest {
+                    authority: slot.clone(),
+                    resources: LOCAL_SLOT_RESOURCES,
+                    request_id: request_id(4),
+                    opened_at: start.clone(),
+                })
+                .expect("slot");
+        }
+        let mut outbound = DurableWorkerInteractionOutbound::new(
+            SqliteStorage::open(&root).expect("outbound connection"),
+            winwincode_storage::WorkerOutboundQueueConfig::default(),
+        )
+        .expect("outbound");
+        for second in (5..=1_560).step_by(5) {
+            let prior_expiry = if second <= 780 { 900 } else { 1_680 };
+            let expected_expiry = match second {
+                0..780 => 900,
+                780..1_560 => 1_680,
+                _ => 2_460,
+            };
+            let heartbeat = WorkerHeartbeatMessage {
+                active_leases: vec![ActiveLeaseSummary {
+                    attempt: 1,
+                    expires_at: at(prior_expiry),
+                    fencing_token: lease.fencing_token.clone(),
+                    job_id: lease.job_id.clone(),
+                    last_event_sequence: winwincode_domain::ExecutionAckSequence(0),
+                    lease_id: lease.lease_id.clone(),
+                }],
+                capacity: WorkerCapacity {
+                    available_slots: 0,
+                    running_jobs: 1,
+                },
+                heartbeat_sequence: winwincode_domain::ExecutionSequence(
+                    i64::try_from(second / 5).expect("heartbeat sequence"),
+                ),
+                kind: WorkerHeartbeatMessageKind::WorkerHeartbeat,
+                message_id: message_id(100 + second),
+                observed_at: at(second),
+                sent_at: at(second),
+                schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+            };
+            let ack = winwincode_control_plane::ExecutionPortService::new(&mut storage, at(second))
+                .record_heartbeat(&heartbeat)
+                .expect("durable heartbeat");
+            assert_eq!(ack.status, WorkerHeartbeatAckMessageStatus::Accepted);
+            renew_heartbeat_leases(
+                &mut storage,
+                &mut outbound,
+                &ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat),
+                &[ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)],
+                &at(second),
+                900_000,
+            )
+            .expect("renew due lease");
+            assert_eq!(
+                storage
+                    .execution_registry()
+                    .expect("registry")
+                    .load_dispatch_authority(&lease.job_id)
+                    .expect("dispatch")
+                    .expect("authority")
+                    .lease()
+                    .expires_at,
+                at(expected_expiry),
+                "renewal boundary at elapsed {second}s"
+            );
+        }
+        let authority = WorkerOutboundAuthority {
+            slot,
+            lease_issued_at: lease.issued_at,
+            lease_expires_at: at(2_460),
+        };
+        assert_eq!(
+            outbound
+                .claim_pending(&authority, &at(1_560))
+                .expect("renewals")
+                .len(),
+            2
+        );
+        outbound.close().expect("close outbound");
+        Box::new(storage).close().expect("close storage");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn scheduler_refreshes_renewed_dispatch_and_pending_ack_authorities() {
+        use winwincode_domain::{
+            CodexThreadId, ExecutionMessageId, FencingToken, LeaseId, WorkerSessionId,
+        };
+        use winwincode_storage::{
+            DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
+            ExecutionLeaseRenewal, LeaseWriteStatus, ProductStateStorage,
+            WorkerAuthenticationIdentity, WorkerPlatform, WorkerRegistrationRequest,
+        };
+
+        let root = unique_directory("renewed-authority");
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let mut scheduler = scheduler_with_user(UserId(OWNER_USER_ID.to_owned()), &root);
+        let at = |second| fixed_instant(&format!("2027-01-15T08:00:{second:02}.000Z"));
+        let message_id = |number| ExecutionMessageId(format!("xmsg_{number:026}"));
+        let request_id = |number| RequestId(format!("req_{number:026}"));
+        let lease = ExecutionLeaseClaim {
+            worker_id: scheduler.worker_id.clone(),
+            worker_instance_id: scheduler.worker_instance_id.clone(),
+            job_id: ExecutionJobId(fixed_id("job_")),
+            lease_id: LeaseId(fixed_id("lse_")),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            attempt: 1,
+            fencing_token: FencingToken("7".to_owned()),
+            issued_at: at(1),
+            expires_at: at(5),
+            message_id: message_id(1),
+            request_id: request_id(1),
+        };
+        let original = WorkerOutboundAuthority {
+            slot: WorkerSlotAuthority {
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+                worker_session_id: WorkerSessionId(fixed_id("wsn_")),
+                codex_thread_id: CodexThreadId(fixed_id("cdx_")),
+                job_id: lease.job_id.clone(),
+                lease_id: lease.lease_id.clone(),
+                attempt: lease.attempt,
+                fencing_token: lease.fencing_token.clone(),
+            },
+            lease_issued_at: lease.issued_at.clone(),
+            lease_expires_at: lease.expires_at.clone(),
+        };
+        {
+            let mut registry = storage.execution_registry().expect("registry");
+            registry
+                .register_worker(&WorkerRegistrationRequest {
+                    authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                        control_plane_principal: "fixture-control-plane".into(),
+                    },
+                    protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+                    platform: WorkerPlatform::Aarch64AppleDarwin,
+                    capabilities: vec!["codex".into()],
+                    capability_digest: lease.payload_digest.clone(),
+                    security_zone: "local".into(),
+                    max_slots: 1,
+                    message_id: message_id(2),
+                    request_id: request_id(2),
+                    sent_at: at(1),
+                    started_at: at(0),
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                })
+                .expect("register");
+            registry.claim_execution_job(&lease).expect("claim");
+            registry
+                .record_dispatch_result(&DispatchResultRequest {
+                    checked_at: at(2),
+                    expires_at: lease.expires_at.clone(),
+                    fencing_token: lease.fencing_token.clone(),
+                    issued_at: lease.issued_at.clone(),
+                    job_id: lease.job_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    message_id: message_id(3),
+                    payload_digest: lease.payload_digest.clone(),
+                    request_id: request_id(3),
+                    sent_at: lease.issued_at.clone(),
+                    status: DispatchResultStatus::Accepted,
+                    attempt: lease.attempt,
+                    error: None,
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                    worker_session_id: Some(original.slot.worker_session_id.clone()),
+                })
+                .expect("dispatch");
+            assert_eq!(
+                registry
+                    .renew_execution_lease(&ExecutionLeaseRenewal {
+                        expires_at: at(9),
+                        fencing_token: lease.fencing_token.clone(),
+                        job_id: lease.job_id.clone(),
+                        lease_id: lease.lease_id.clone(),
+                        message_id: message_id(4),
+                        prior_expires_at: lease.expires_at.clone(),
+                        request_id: request_id(4),
+                        sent_at: at(3),
+                        worker_id: lease.worker_id.clone(),
+                        worker_instance_id: lease.worker_instance_id.clone(),
+                        attempt: lease.attempt,
+                    })
+                    .expect("renew")
+                    .status,
+                LeaseWriteStatus::Accepted
+            );
+        }
+        poison_reservation_with_user(
+            &mut storage,
+            &test_scope(),
+            &lease.job_id,
+            &scheduler.user_id,
+        );
+        storage
+            .execution_admission()
+            .expect("admission")
+            .start(&ExecutionReservationStart {
+                scope: test_scope(),
+                worker_pool_id: scheduler.worker_pool_id.clone(),
+                job_id: lease.job_id.clone(),
+                request_id: request_id(7),
+                expected_revision: 1,
+                started_at: at(2),
+            })
+            .expect("running admission");
+        {
+            let mut slots = storage.worker_session_slots().expect("slots");
+            slots
+                .configure_resources(
+                    &lease.worker_id,
+                    &lease.worker_instance_id,
+                    LOCAL_SLOT_RESOURCE_LIMITS,
+                )
+                .expect("resources");
+            slots
+                .open(&WorkerSlotOpenRequest {
+                    authority: original.slot.clone(),
+                    resources: LOCAL_SLOT_RESOURCES,
+                    request_id: request_id(5),
+                    opened_at: at(3),
+                })
+                .expect("slot");
+        }
+        Box::new(storage).close().expect("close");
+        let mut storage = SqliteStorage::open(&root).expect("reopen");
+        scheduler.remember_worker_authority(original.clone());
+        scheduler
+            .pending_interaction_acknowledgements
+            .push((original.clone(), message_id(6)));
+        scheduler
+            .refresh_worker_authorities(&mut storage)
+            .expect("refresh");
+        let mut renewed = original.clone();
+        renewed.lease_expires_at = at(9);
+        assert_eq!(scheduler.active_worker_authorities, vec![renewed.clone()]);
+        assert_eq!(
+            scheduler.pending_interaction_acknowledgements,
+            vec![(renewed.clone(), message_id(6))]
+        );
+        scheduler.remember_worker_authority(original);
+        assert_eq!(scheduler.active_worker_authorities, vec![renewed.clone()]);
+        for invalid in 0..4 {
+            let mut forged = renewed.clone();
+            match invalid {
+                0 => {
+                    forged.slot.worker_session_id =
+                        WorkerSessionId(format!("wsn_{}", "B".repeat(26)));
+                }
+                1 => forged.slot.fencing_token = FencingToken("8".into()),
+                2 => forged.lease_issued_at = at(2),
+                _ => forged.lease_expires_at = at(10),
+            }
+            scheduler.active_worker_authorities = vec![forged.clone()];
+            assert!(scheduler.refresh_worker_authorities(&mut storage).is_err());
+            assert_eq!(scheduler.active_worker_authorities, vec![forged]);
+        }
+        scheduler.active_worker_authorities = vec![renewed.clone()];
+        let mut outbound = DurableWorkerInteractionOutbound::new(
+            SqliteStorage::open(&root).expect("outbound connection"),
+            winwincode_storage::WorkerOutboundQueueConfig::default(),
+        )
+        .expect("outbound");
+        let heartbeat = |sequence, second, expiry| {
+            use winwincode_execution_port::generated::{
+                ActiveLeaseSummary, WorkerCapacity, WorkerHeartbeatMessage,
+                WorkerHeartbeatMessageKind,
+            };
+            WorkerHeartbeatMessage {
+                active_leases: vec![ActiveLeaseSummary {
+                    attempt: 1,
+                    expires_at: at(expiry),
+                    fencing_token: lease.fencing_token.clone(),
+                    job_id: lease.job_id.clone(),
+                    last_event_sequence: winwincode_domain::ExecutionAckSequence(0),
+                    lease_id: lease.lease_id.clone(),
+                }],
+                capacity: WorkerCapacity {
+                    available_slots: 0,
+                    running_jobs: 1,
+                },
+                heartbeat_sequence: winwincode_domain::ExecutionSequence(sequence),
+                kind: WorkerHeartbeatMessageKind::WorkerHeartbeat,
+                message_id: message_id(100 + sequence),
+                observed_at: at(second),
+                sent_at: at(second),
+                schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+            }
+        };
+        let mut run_heartbeat = |message, now, expected_status, expected_expiry| {
+            let ack = winwincode_control_plane::ExecutionPortService::new(&mut storage, at(now))
+                .record_heartbeat(&message)
+                .expect("durable heartbeat");
+            assert_eq!(ack.status, expected_status);
+            renew_heartbeat_leases(
+                &mut storage,
+                &mut outbound,
+                &ExecutionPortMessage::WorkerHeartbeatMessage(message),
+                &[ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)],
+                &at(now),
+                4_000,
+            )
+            .expect("renew due lease");
+            assert_eq!(
+                storage
+                    .execution_registry()
+                    .expect("registry")
+                    .load_dispatch_authority(&lease.job_id)
+                    .expect("dispatch")
+                    .expect("proof")
+                    .lease()
+                    .expires_at,
+                at(expected_expiry)
+            );
+        };
+        run_heartbeat(
+            heartbeat(1, 6, 9),
+            6,
+            WorkerHeartbeatAckMessageStatus::Accepted,
+            9,
+        );
+        run_heartbeat(
+            heartbeat(1, 6, 9),
+            7,
+            WorkerHeartbeatAckMessageStatus::Duplicate,
+            9,
+        );
+        let mut foreign = heartbeat(2, 7, 9);
+        foreign.worker_instance_id = WorkerInstanceId(format!("wki_{}", "B".repeat(26)));
+        run_heartbeat(
+            foreign,
+            7,
+            WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance,
+            9,
+        );
+        run_heartbeat(
+            heartbeat(2, 7, 9),
+            7,
+            WorkerHeartbeatAckMessageStatus::Accepted,
+            11,
+        );
+        run_heartbeat(
+            heartbeat(3, 9, 9),
+            9,
+            WorkerHeartbeatAckMessageStatus::Accepted,
+            11,
+        );
+        run_heartbeat(
+            heartbeat(4, 9, 11),
+            9,
+            WorkerHeartbeatAckMessageStatus::Accepted,
+            13,
+        );
+        run_heartbeat(
+            heartbeat(5, 12, 13),
+            13,
+            WorkerHeartbeatAckMessageStatus::Accepted,
+            13,
+        );
+        outbound.close().expect("close outbound");
+        let mut outbound = DurableWorkerInteractionOutbound::new(
+            SqliteStorage::open(&root).expect("reopen outbound connection"),
+            winwincode_storage::WorkerOutboundQueueConfig::default(),
+        )
+        .expect("reopen outbound");
+        scheduler
+            .refresh_worker_authorities(&mut storage)
+            .expect("refresh heartbeat renewals");
+        let authority = &scheduler.active_worker_authorities[0];
+        assert_eq!(authority.lease_expires_at, at(13));
+        let claims = outbound
+            .claim_pending(authority, &at(12))
+            .expect("durable renewals");
+        assert_eq!(claims.len(), 2);
+        for (claim, (prior, expiry)) in claims.iter().zip([(9, 11), (11, 13)]) {
+            let ExecutionPortMessage::LeaseRenewMessage(message) = claim.typed_frame().message()
+            else {
+                panic!("canonical renewal frame");
+            };
+            assert_eq!(message.prior_expires_at, at(prior));
+            assert_eq!(message.lease.expires_at, at(expiry));
+            assert_eq!(message.lease.issued_at, at(1));
+            assert_eq!(message.lease.fencing_token, lease.fencing_token);
+        }
+        outbound.close().expect("close outbound");
+        let scope: RepositoryScope = serde_json::from_value(serde_json::json!({
+            "kind":"repository", "organizationId":test_scope().organization_id,
+            "workspaceId":test_scope().workspace_id, "projectId":test_scope().project_id,
+            "repositoryId":test_scope().repository_id
+        }))
+        .expect("scope");
+        let application = StandaloneControlPlaneApplication::new(
+            winwincode_control_plane::ControlPlane::start_local(
+                winwincode_control_plane::ControlPlaneConfig::local(&root),
+                Box::new(Publisher),
+            )
+            .expect("control plane"),
+            storage,
+            DurableWorkerInteractionOutbound::new(
+                SqliteStorage::open(&root).expect("outbound"),
+                winwincode_storage::WorkerOutboundQueueConfig::default(),
+            )
+            .expect("outbound"),
+            scheduler.hub.clone(),
+            winwincode_control_plane::ProductSessionExecutionConfig::try_new(
+                scope,
+                "fixture-revision",
+                "codex-chat",
+                Some(3600),
+                1_073_741_824,
+            )
+            .expect("execution config"),
+        )
+        .expect("application");
+        scheduler.state = application.shared_runtime_state();
+        scheduler.pending_interaction_acknowledgements = claims
+            .iter()
+            .map(|claim| (authority.clone(), claim.message_id().clone()))
+            .collect();
+        let confirmed: Vec<_> = claims
+            .iter()
+            .map(|claim| claim.message_id().clone())
+            .collect();
+        let fault = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("fault connection");
+        fault.execute_batch("CREATE TRIGGER fail_interaction_cleanup BEFORE INSERT ON internal_worker_outbound_settlements BEGIN SELECT RAISE(ABORT,'fixture cleanup failure'); END;").expect("inject cleanup fault");
+        scheduler
+            .acknowledge_remote(
+                &at(12),
+                &lease.worker_id,
+                &lease.worker_instance_id,
+                &confirmed,
+            )
+            .expect("durable receipt accepts cleanup retry");
+        assert_eq!(scheduler.pending_interaction_acknowledgements.len(), 2);
+        fault
+            .execute_batch("DROP TRIGGER fail_interaction_cleanup")
+            .expect("release fault");
+        let _ = scheduler.drive_remote(&at(12), &NoControls);
+        let retained: i64 = fault
+            .query_row(
+                "SELECT COUNT(*) FROM internal_worker_outbound_messages",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            retained, 0,
+            "driver retries confirmed cleanup without another transport ACK"
+        );
+        assert!(scheduler.pending_interaction_acknowledgements.is_empty());
+        drop(fault);
+        drop(application);
+        drop(scheduler);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -2234,8 +2988,6 @@ mod tests {
         let (record, _) = queued_job_record(&scope);
         let default_user = UserId(DEFAULT_RUNTIME_USER_ID.to_owned());
         poison_reservation_with_user(&mut storage, &scope, &record.job_id, &default_user);
-        // The restarted Server resolves a durable Owner at startup (the
-        // browser bootstrap ran before the previous shutdown).
         create_active_owner(&mut storage);
 
         let mut scheduler =
@@ -2262,6 +3014,40 @@ mod tests {
             .expect("the reservation still exists");
         assert_eq!(reservation.state, ExecutionReservationState::Running);
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn unlimited_local_job_reserves_without_runtime_ceiling() {
+        let directory = unique_directory("unlimited");
+        let mut storage = SqliteStorage::open(&directory).expect("storage");
+        let owner = create_active_owner(&mut storage);
+        let (mut record, mut job) = queued_job_record(&test_scope());
+        job.limits.deadline_at = None;
+        job.limits.max_runtime_seconds = None;
+        record.dispatch_payload = serde_json::to_vec(&job).expect("job");
+        let scheduler = scheduler_with_user(owner, &directory);
+        assert!(
+            scheduler
+                .ensure_admission(
+                    &mut storage,
+                    &record,
+                    &fixed_instant("2026-09-06T12:00:00.000Z")
+                )
+                .expect("admit unlimited")
+        );
+        drop(storage);
+        let mut storage = SqliteStorage::open(&directory).expect("reopen");
+        let reservation = storage
+            .execution_admission()
+            .expect("admission")
+            .load_reservation_by_job(&record.job_id)
+            .expect("lookup")
+            .expect("reservation");
+        assert_eq!(reservation.runtime_limit_millis, None);
+        assert_eq!(reservation.reserved_tokens, None);
+        assert_eq!(reservation.reserved_cost_microunits, None);
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]
@@ -2296,7 +3082,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_device_reservation_keeps_its_worker_pool_policy() {
+    fn existing_device_reservation_upgrades_defaults_without_a_new_job() {
         let directory = unique_directory("device-reservation");
         std::fs::create_dir_all(&directory).expect("temp directory");
         let mut storage = SqliteStorage::open(&directory).expect("storage opens");
@@ -2328,9 +3114,9 @@ mod tests {
                     job_id: record.job_id.clone(),
                     request_id: RequestId(format!("req_{}", "D".repeat(26))),
                     repository_access: ExecutionRepositoryAccess::ReadOnly,
-                    reserved_tokens: 1_000,
-                    reserved_cost_microunits: 1_000,
-                    runtime_limit_millis: 3_600_000,
+                    reserved_tokens: Some(1_000),
+                    reserved_cost_microunits: Some(1_000),
+                    runtime_limit_millis: Some(3_600_000),
                     submitted_at: record.submitted_at.clone(),
                 })
                 .expect("device reservation is created");
@@ -2347,6 +3133,17 @@ mod tests {
                 )
                 .expect("existing device reservation is admitted")
         );
+        let connection =
+            rusqlite::Connection::open(storage.database_path()).expect("policy database");
+        let remaining_former_limits: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM execution_admission_policies
+             WHERE boundary_json NOT LIKE '%product_session%' AND max_concurrent != ?1",
+                [i64::MAX],
+                |row| row.get(0),
+            )
+            .expect("default policies are readable");
+        assert_eq!(remaining_former_limits, 0);
         std::fs::remove_dir_all(&directory).ok();
     }
 

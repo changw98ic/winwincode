@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable execution-resource admission and budget reservations.
-
 use std::fmt;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -20,9 +18,13 @@ CREATE TABLE IF NOT EXISTS execution_admission_policies (
     boundary_json TEXT NOT NULL,
     max_concurrent INTEGER NOT NULL CHECK (max_concurrent >= 0),
     max_queued INTEGER NOT NULL CHECK (max_queued >= 0),
-    token_budget INTEGER NOT NULL CHECK (token_budget >= 0),
-    cost_budget_microunits INTEGER NOT NULL CHECK (cost_budget_microunits >= 0),
-    max_runtime_millis INTEGER NOT NULL CHECK (max_runtime_millis > 0)
+    token_budget INTEGER CHECK (token_budget >= 0),
+    cost_budget_microunits INTEGER CHECK (cost_budget_microunits >= 0),
+    max_runtime_millis INTEGER CHECK (max_runtime_millis > 0)
+);
+CREATE TABLE IF NOT EXISTS execution_attempt_accounting_pending (
+ job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_json TEXT NOT NULL,
+ observed_at TEXT NOT NULL,PRIMARY KEY(job_id,attempt)
 );
 CREATE TABLE IF NOT EXISTS execution_admission_reservations (
     job_id TEXT PRIMARY KEY NOT NULL,
@@ -40,9 +42,9 @@ CREATE TABLE IF NOT EXISTS execution_admission_reservations (
     ),
     worktree_key TEXT,
     state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'released', 'settled')),
-    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
-    reserved_cost_microunits INTEGER NOT NULL CHECK (reserved_cost_microunits >= 0),
-    runtime_limit_millis INTEGER NOT NULL CHECK (runtime_limit_millis > 0),
+    reserved_tokens INTEGER CHECK (reserved_tokens >= 0),
+    reserved_cost_microunits INTEGER CHECK (reserved_cost_microunits >= 0),
+    runtime_limit_millis INTEGER CHECK (runtime_limit_millis > 0),
     actual_tokens INTEGER,
     actual_cost_microunits INTEGER,
     actual_runtime_millis INTEGER,
@@ -58,7 +60,7 @@ CREATE TABLE IF NOT EXISTS execution_admission_reservations (
     ),
     CHECK (
         (state = 'settled' AND actual_tokens IS NOT NULL
-            AND actual_cost_microunits IS NOT NULL AND actual_runtime_millis IS NOT NULL
+            AND actual_runtime_millis IS NOT NULL
             AND terminal_at IS NOT NULL AND release_reason IS NULL)
         OR (state = 'released' AND actual_tokens IS NULL
             AND actual_cost_microunits IS NULL AND actual_runtime_millis IS NULL
@@ -93,6 +95,19 @@ CREATE TABLE IF NOT EXISTS execution_admission_settlement_sources (
     settlement_request_id TEXT NOT NULL,
     FOREIGN KEY (job_id) REFERENCES execution_admission_reservations(job_id) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS execution_admission_reconciliation (
+    job_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_admission_reservations(job_id),
+    terminal_request_id TEXT NOT NULL, terminal_usage_json TEXT NOT NULL,
+    accounting_status TEXT NOT NULL CHECK(accounting_status IN ('pending','settled')),
+    settlement_request_id TEXT, settlement_usage_json TEXT, observed_at TEXT,
+    CHECK((accounting_status='pending' AND settlement_request_id IS NULL AND settlement_usage_json IS NULL)
+      OR (accounting_status='settled' AND settlement_request_id IS NOT NULL AND settlement_usage_json IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS execution_admission_reconciliation_facts (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES execution_admission_reconciliation(job_id),
+    settlement_request_id TEXT UNIQUE NOT NULL, usage_json TEXT NOT NULL, observed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS execution_admission_boundary_usage
     ON execution_admission_reservation_boundaries (boundary_key, job_id);
 CREATE INDEX IF NOT EXISTS execution_admission_repository_writes
@@ -103,14 +118,107 @@ CREATE INDEX IF NOT EXISTS execution_admission_settlement_receipts
     ON execution_admission_settlement_sources (settlement_request_id, sequence);
 ";
 
+const RECONCILIATION_BACKFILL: &str = r"
+INSERT OR IGNORE INTO execution_admission_reconciliation (job_id,terminal_request_id,terminal_usage_json,accounting_status)
+SELECT r.job_id,s.settlement_request_id,json_object('runtimeMillis',r.actual_runtime_millis,'tokens',r.actual_tokens,'knownTokens',r.actual_tokens,'accountingStatus','known','costMicrounits',NULL),'pending'
+FROM execution_admission_reservations r JOIN execution_admission_settlement_sources s ON s.job_id=r.job_id
+WHERE r.state='settled' AND r.actual_cost_microunits IS NULL AND r.actual_tokens IS NOT NULL AND r.actual_runtime_millis IS NOT NULL;
+";
+
 const MAX_SETTLEMENT_SOURCE_PAGE_SIZE: u64 = 200;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Canonical worker-pool identity used by resource admission.
+fn prepare_admission_schema(connection: &mut Connection) -> Result<(), ExecutionAdmissionError> {
+    connection
+        .execute_batch(crate::execution_attempt_accounting::SCHEMA)
+        .map_err(sql_error)?;
+    let needs_migration: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('execution_admission_policies') WHERE name IN ('max_runtime_millis', 'token_budget', 'cost_budget_microunits') AND \"notnull\" = 1) OR EXISTS(SELECT 1 FROM pragma_table_info('execution_admission_reservations') WHERE name IN ('runtime_limit_millis', 'reserved_tokens', 'reserved_cost_microunits') AND \"notnull\" = 1)",
+        [], |row| row.get(0),
+    ).map_err(sql_error)?;
+    let requires_known_cost: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'execution_admission_reservations' AND instr(sql, 'actual_cost_microunits IS NOT NULL') > 0)",
+        [], |row| row.get(0),
+    ).map_err(sql_error)?;
+    if !needs_migration && !requires_known_cost {
+        return connection
+            .execute_batch(ADMISSION_SCHEMA)
+            .map_err(sql_error);
+    }
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .map_err(sql_error)?;
+    let result = (|| {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        for (table, columns) in [
+            (
+                "execution_admission_policies",
+                [
+                    "max_runtime_millis",
+                    "token_budget",
+                    "cost_budget_microunits",
+                ],
+            ),
+            (
+                "execution_admission_reservations",
+                [
+                    "runtime_limit_millis",
+                    "reserved_tokens",
+                    "reserved_cost_microunits",
+                ],
+            ),
+        ] {
+            let required: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name IN (?2, ?3, ?4) AND \"notnull\" = 1)",
+                params![table, columns[0], columns[1], columns[2]], |row| row.get(0),
+            ).map_err(sql_error)?;
+            if !(required || table == "execution_admission_reservations" && requires_known_cost) {
+                continue;
+            }
+            let prefix = format!("CREATE TABLE IF NOT EXISTS {table} (");
+            let start = ADMISSION_SCHEMA.find(&prefix).ok_or_else(|| {
+                ExecutionAdmissionError::adapter("missing admission table definition")
+            })?;
+            let definition = ADMISSION_SCHEMA[start..]
+                .split_once(';')
+                .ok_or_else(|| {
+                    ExecutionAdmissionError::adapter("invalid admission table definition")
+                })?
+                .0;
+            let replacement = format!("{table}_limits_migration");
+            transaction.execute_batch(&format!(
+                "{}; INSERT INTO {replacement} SELECT * FROM {table}; DROP TABLE {table}; ALTER TABLE {replacement} RENAME TO {table};",
+                definition.replacen(&prefix, &format!("CREATE TABLE {replacement} ("), 1),
+            )).map_err(sql_error)?;
+        }
+        transaction
+            .execute_batch(ADMISSION_SCHEMA)
+            .map_err(sql_error)?;
+        let invalid: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if invalid {
+            return Err(ExecutionAdmissionError::adapter(
+                "admission migration violates foreign keys",
+            ));
+        }
+        transaction.commit().map_err(sql_error)
+    })();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(sql_error)?;
+    result
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct WorkerPoolId(pub String);
 
-/// One independently limited scheduler boundary.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionAdmissionBoundary {
@@ -141,24 +249,24 @@ pub enum ExecutionAdmissionBoundary {
     },
 }
 
-/// Fixed limits for one scheduler boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionLimits {
     pub max_concurrent: u64,
     pub max_queued: u64,
-    pub token_budget: u64,
-    pub cost_budget_microunits: u64,
-    pub max_runtime_millis: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub token_budget: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub cost_budget_microunits: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub max_runtime_millis: Option<u64>,
 }
 
-/// Immutable configured policy for one scheduler boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionPolicy {
     pub boundary: ExecutionAdmissionBoundary,
     pub limits: ExecutionAdmissionLimits,
 }
 
-/// Repository access determines whether two writes may run together.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionRepositoryAccess {
@@ -167,7 +275,6 @@ pub enum ExecutionRepositoryAccess {
     IsolatedWrite { worktree_key: String },
 }
 
-/// Durable admission reservation lifecycle.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionReservationState {
@@ -200,7 +307,6 @@ impl ExecutionReservationState {
     }
 }
 
-/// Why a queued/running reservation stopped without a completed result.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionReservationReleaseReason {
@@ -227,7 +333,6 @@ impl ExecutionReservationReleaseReason {
     }
 }
 
-/// Queue admission and full budget reservation request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRequest {
     pub scope: ExecutionQueueScope,
@@ -236,13 +341,15 @@ pub struct ExecutionReservationRequest {
     pub job_id: ExecutionJobId,
     pub request_id: RequestId,
     pub repository_access: ExecutionRepositoryAccess,
-    pub reserved_tokens: u64,
-    pub reserved_cost_microunits: u64,
-    pub runtime_limit_millis: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reserved_tokens: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reserved_cost_microunits: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub runtime_limit_millis: Option<u64>,
     pub submitted_at: Instant,
 }
 
-/// Starts one queued reservation after concurrent-resource checks.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationStart {
     pub scope: ExecutionQueueScope,
@@ -253,7 +360,6 @@ pub struct ExecutionReservationStart {
     pub started_at: Instant,
 }
 
-/// Releases all queue, concurrency, and unspent budget reservations.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRelease {
     pub scope: ExecutionQueueScope,
@@ -265,7 +371,6 @@ pub struct ExecutionReservationRelease {
     pub released_at: Instant,
 }
 
-/// Settles a completed execution against actual usage.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationSettlement {
     pub scope: ExecutionQueueScope,
@@ -274,12 +379,12 @@ pub struct ExecutionReservationSettlement {
     pub request_id: RequestId,
     pub expected_revision: u64,
     pub actual_tokens: u64,
-    pub actual_cost_microunits: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub actual_cost_microunits: Option<u64>,
     pub actual_runtime_millis: u64,
     pub completed_at: Instant,
 }
 
-/// Complete durable reservation record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionReservationRecord {
     pub scope: ExecutionQueueScope,
@@ -288,9 +393,12 @@ pub struct ExecutionReservationRecord {
     pub job_id: ExecutionJobId,
     pub repository_access: ExecutionRepositoryAccess,
     pub state: ExecutionReservationState,
-    pub reserved_tokens: u64,
-    pub reserved_cost_microunits: u64,
-    pub runtime_limit_millis: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reserved_tokens: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reserved_cost_microunits: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub runtime_limit_millis: Option<u64>,
     pub actual_tokens: Option<u64>,
     pub actual_cost_microunits: Option<u64>,
     pub actual_runtime_millis: Option<u64>,
@@ -302,7 +410,6 @@ pub struct ExecutionReservationRecord {
     pub release_reason: Option<ExecutionReservationReleaseReason>,
 }
 
-/// Immutable worker usage fact committed with a successful settlement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkerSettlementSourceFact {
@@ -313,11 +420,11 @@ pub struct WorkerSettlementSourceFact {
     pub user_id: UserId,
     pub actual_runtime_millis: u64,
     pub actual_tokens: u64,
-    pub actual_cost_microunits: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub actual_cost_microunits: Option<u64>,
     pub completed_at: Instant,
 }
 
-/// One immutable worker-settlement source for usage reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourceEntry {
     pub sequence: u64,
@@ -325,7 +432,6 @@ pub struct WorkerSettlementSourceEntry {
     pub fact: WorkerSettlementSourceFact,
 }
 
-/// Stable cursor over one immutable worker-settlement source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourceCursor {
     snapshot_sequence: u64,
@@ -344,7 +450,6 @@ impl WorkerSettlementSourceCursor {
     }
 }
 
-/// One bounded page from a fixed worker-settlement source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourcePage {
     pub snapshot_sequence: u64,
@@ -352,25 +457,37 @@ pub struct WorkerSettlementSourcePage {
     pub next: Option<WorkerSettlementSourceCursor>,
 }
 
-/// Replay-safe response for reserve/start/release/settle.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutionAdmissionReceipt {
     pub reservation: ExecutionReservationRecord,
     pub replayed: bool,
 }
 
-/// Transactionally consistent usage for one configured boundary.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionAdmissionUsage {
     pub queued: u64,
     pub running: u64,
     pub reserved_tokens: u64,
     pub reserved_cost_microunits: u64,
     pub committed_tokens: u64,
-    pub committed_cost_microunits: u64,
+    pub accounting_pending: u64,
+    pub committed_cost_microunits: Option<u64>,
 }
 
-/// Stable machine-readable rejection and adapter failure categories.
+impl Default for ExecutionAdmissionUsage {
+    fn default() -> Self {
+        Self {
+            queued: 0,
+            running: 0,
+            reserved_tokens: 0,
+            reserved_cost_microunits: 0,
+            committed_tokens: 0,
+            accounting_pending: 0,
+            committed_cost_microunits: Some(0),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionAdmissionErrorCode {
     InvalidInput,
@@ -386,7 +503,6 @@ pub enum ExecutionAdmissionErrorCode {
     Adapter,
 }
 
-/// Admission error with a stable code and optional failing boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionAdmissionError {
     code: ExecutionAdmissionErrorCode,
@@ -442,17 +558,11 @@ impl fmt::Display for ExecutionAdmissionError {
 
 impl std::error::Error for ExecutionAdmissionError {}
 
-/// SQLite-backed execution admission service.
 pub struct ExecutionAdmission<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens durable execution admission over this storage connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the admission schema cannot be prepared.
     pub fn execution_admission(
         &mut self,
     ) -> Result<ExecutionAdmission<'_>, ExecutionAdmissionError> {
@@ -463,25 +573,68 @@ impl SqliteStorage {
 impl<'storage> ExecutionAdmission<'storage> {
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, ExecutionAdmissionError> {
         let admission = Self { storage };
+        prepare_admission_schema(admission.storage.connection_mut().map_err(storage_error)?)?;
         admission
             .storage
-            .connection()
+            .connection_mut()
             .map_err(storage_error)?
-            .execute_batch(ADMISSION_SCHEMA)
+            .execute_batch(RECONCILIATION_BACKFILL)
             .map_err(sql_error)?;
         Ok(admission)
     }
 
-    /// Installs one immutable boundary policy. Exact repeats are idempotent;
-    /// changing an installed policy is rejected so concurrent callers cannot
-    /// weaken an active limit.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed boundaries/limits, changed policies, and `SQLite` failures.
     pub fn configure_policy(
         &mut self,
         policy: &ExecutionAdmissionPolicy,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        self.configure_policy_inner(policy, None)
+    }
+
+    pub fn configure_runtime_policy(
+        &mut self,
+        boundary: ExecutionAdmissionBoundary,
+        runtime_limited: bool,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        let limits = ExecutionAdmissionLimits {
+            max_concurrent: if matches!(boundary, ExecutionAdmissionBoundary::ProductSession { .. })
+            {
+                1
+            } else {
+                i64::MAX as u64
+            },
+            max_queued: 10_000,
+            token_budget: None,
+            cost_budget_microunits: None,
+            max_runtime_millis: runtime_limited.then_some(604_800_000),
+        };
+        let old_max_concurrent = match &boundary {
+            ExecutionAdmissionBoundary::ProductSession { .. } => None,
+            ExecutionAdmissionBoundary::WorkerPool { worker_pool_id, .. } => {
+                match worker_pool_id.0.as_str() {
+                    "wpl_00000000000000000000000001" | "wpl_000000000000000000000000D3" => Some(1),
+                    "wpl_000000000000000000000000F7" => Some(4),
+                    _ => None,
+                }
+            }
+            _ => Some(1),
+        };
+        let former_default = old_max_concurrent.map(|max_concurrent| ExecutionAdmissionPolicy {
+            boundary: boundary.clone(),
+            limits: ExecutionAdmissionLimits {
+                max_concurrent,
+                ..limits
+            },
+        });
+        self.configure_policy_inner(
+            &ExecutionAdmissionPolicy { boundary, limits },
+            former_default.as_ref(),
+        )
+    }
+
+    fn configure_policy_inner(
+        &mut self,
+        policy: &ExecutionAdmissionPolicy,
+        former_default: Option<&ExecutionAdmissionPolicy>,
     ) -> Result<bool, ExecutionAdmissionError> {
         validate_policy(policy)?;
         let boundary_key = boundary_key(&policy.boundary)?;
@@ -505,9 +658,19 @@ impl<'storage> ExecutionAdmission<'storage> {
         if let Some(existing) = existing {
             let existing = complete_policy(&existing)?;
             if existing != *policy {
-                return Err(ExecutionAdmissionError::invalid(
-                    "execution admission policy is already configured differently",
-                ));
+                if former_default != Some(&existing) {
+                    return Err(ExecutionAdmissionError::invalid(
+                        "execution admission policy is already configured differently",
+                    ));
+                }
+                upgrade_runtime_policy(
+                    &transaction,
+                    &boundary_key,
+                    &existing.limits,
+                    policy.limits.max_concurrent,
+                )?;
+                transaction.commit().map_err(sql_error)?;
+                return Ok(true);
             }
             transaction.commit().map_err(sql_error)?;
             return Ok(false);
@@ -524,9 +687,21 @@ impl<'storage> ExecutionAdmission<'storage> {
                     boundary_json,
                     to_sql_integer(policy.limits.max_concurrent, "maxConcurrent")?,
                     to_sql_integer(policy.limits.max_queued, "maxQueued")?,
-                    to_sql_integer(policy.limits.token_budget, "tokenBudget")?,
-                    to_sql_integer(policy.limits.cost_budget_microunits, "costBudgetMicrounits")?,
-                    to_sql_integer(policy.limits.max_runtime_millis, "maxRuntimeMillis")?,
+                    policy
+                        .limits
+                        .token_budget
+                        .map(|value| to_sql_integer(value, "tokenBudget"))
+                        .transpose()?,
+                    policy
+                        .limits
+                        .cost_budget_microunits
+                        .map(|value| to_sql_integer(value, "costBudgetMicrounits"))
+                        .transpose()?,
+                    policy
+                        .limits
+                        .max_runtime_millis
+                        .map(|value| to_sql_integer(value, "maxRuntimeMillis"))
+                        .transpose()?,
                 ],
             )
             .map_err(sql_error)?;
@@ -534,13 +709,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(true)
     }
 
-    /// Atomically reserves queue capacity plus the requested token and cost
-    /// budgets across every boundary in the request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, missing/exhausted policies, conflicting replays,
-    /// duplicate jobs, and `SQLite` failures.
     pub fn reserve(
         &mut self,
         request: &ExecutionReservationRequest,
@@ -595,12 +763,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(receipt)
     }
 
-    /// Atomically consumes concurrency slots and starts one queued reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/invalid requests, exhausted concurrency, repository-write
-    /// conflicts, conflicting replays, and `SQLite` failures.
     pub fn start(
         &mut self,
         request: &ExecutionReservationStart,
@@ -686,18 +848,38 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Releases a queued or running reservation after cancellation/failure.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/terminal requests, conflicting replays, and `SQLite` failures.
     pub fn release(
         &mut self,
         request: &ExecutionReservationRelease,
     ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
+        self.release_with_accounting(request, None)
+    }
+
+    pub fn release_with_unknown_usage(
+        &mut self,
+        request: &ExecutionReservationRelease,
+        usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+    ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
+        if !winwincode_execution_port::usage::valid_usage(usage) || usage.tokens.is_some() {
+            return Err(ExecutionAdmissionError::invalid(
+                "unknown terminal usage is inconsistent",
+            ));
+        }
+        self.release_with_accounting(request, Some(usage))
+    }
+
+    fn release_with_accounting(
+        &mut self,
+        request: &ExecutionReservationRelease,
+        usage: Option<&winwincode_execution_port::generated::ExecutionOutcomeUsage>,
+    ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
         validate_release(request)?;
         let scope_key = reservation_scope_key(&request.scope, &request.worker_pool_id)?;
-        let request_digest = digest(request)?;
+        let request_digest = if let Some(usage) = usage {
+            digest(&(request, usage))?
+        } else {
+            digest(request)?
+        };
         let transaction = self
             .storage
             .connection_mut()
@@ -740,6 +922,13 @@ impl<'storage> ExecutionAdmission<'storage> {
             Some(&request.released_at),
             Some(request.reason),
         )?;
+        if let Some(usage) = usage {
+            let usage_json = serde_json::to_string(usage).map_err(|_| {
+                ExecutionAdmissionError::invalid("terminal accounting cannot be encoded")
+            })?;
+            transaction.execute("INSERT INTO execution_admission_reconciliation (job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES (?1,?2,?3,'pending')",
+                params![request.job_id.0,request.request_id.0,usage_json]).map_err(sql_error)?;
+        }
         finish_mutation(
             &transaction,
             &scope_key,
@@ -755,18 +944,120 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Settles a running reservation using actual usage and releases the
-    /// unused portion of its token/cost reservation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale/non-running requests, actual usage above the reservation,
-    /// conflicting replays, and `SQLite` failures.
+    pub fn settle_reconciliation(
+        &mut self,
+        job_id: &ExecutionJobId,
+        terminal_request_id: &RequestId,
+        settlement_request_id: &RequestId,
+        usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+        observed_at: &Instant,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        validate_id(&job_id.0, "job_", "jobId")?;
+        validate_id(&terminal_request_id.0, "req_", "terminalRequestId")?;
+        validate_id(&settlement_request_id.0, "req_", "settlementRequestId")?;
+        validate_instant(observed_at)?;
+        if !winwincode_execution_port::usage::valid_usage(usage) {
+            return Err(ExecutionAdmissionError::invalid(
+                "settlement usage is inconsistent",
+            ));
+        }
+        let unresolved: bool = self
+            .storage
+            .connection()
+            .map_err(storage_error)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)",
+                [&job_id.0],
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
+        let missing_tokens: bool = self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)",[&job_id.0],|row|row.get(0)).map_err(sql_error)?;
+        if (missing_tokens && usage.tokens.is_some())
+            || (unresolved && usage.cost_microunits.is_some())
+        {
+            return Err(ExecutionAdmissionError::invalid(
+                "predecessor attempt accounting remains unresolved",
+            ));
+        }
+        let value = serde_json::to_string(usage)
+            .map_err(|_| ExecutionAdmissionError::invalid("settlement encoding failed"))?;
+        let tx = self
+            .storage
+            .connection_mut()
+            .map_err(storage_error)?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let previous:Option<(String,String,String)>=tx.query_row("SELECT job_id,usage_json,observed_at FROM execution_admission_reconciliation_facts WHERE settlement_request_id=?1",[&settlement_request_id.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql_error)?;
+        if let Some(previous) = previous {
+            if previous != (job_id.0.clone(), value, observed_at.0.clone()) {
+                return Err(ExecutionAdmissionError::invalid(
+                    "settlement replay conflicts",
+                ));
+            }
+            let bound:String=tx.query_row("SELECT terminal_request_id FROM execution_admission_reconciliation WHERE job_id=?1",[&job_id.0],|r|r.get(0)).map_err(sql_error)?;
+            if bound != terminal_request_id.0 {
+                return Err(ExecutionAdmissionError::invalid(
+                    "foreign terminal identity",
+                ));
+            }
+            return Ok(false);
+        }
+        let row:(String,String)=tx.query_row(
+            "SELECT terminal_request_id,COALESCE((SELECT usage_json FROM execution_admission_reconciliation_facts f WHERE f.job_id=r.job_id ORDER BY sequence DESC LIMIT 1),terminal_usage_json) FROM execution_admission_reconciliation r WHERE job_id=?1",
+            [&job_id.0], |r| Ok((r.get(0)?,r.get(1)?))).map_err(sql_error)?;
+        let original: winwincode_execution_port::generated::ExecutionOutcomeUsage =
+            serde_json::from_str(&row.1)
+                .map_err(|_| ExecutionAdmissionError::invalid("corrupt terminal accounting"))?;
+        if row.0 != terminal_request_id.0
+            || usage.known_tokens < original.known_tokens
+            || usage.runtime_millis != original.runtime_millis
+            || original
+                .tokens
+                .is_some_and(|tokens| usage.tokens != Some(tokens))
+            || original
+                .cost_microunits
+                .is_some_and(|cost| usage.cost_microunits != Some(cost))
+        {
+            return Err(ExecutionAdmissionError::invalid(
+                "settlement changed known accounting or authority",
+            ));
+        }
+        let changed = *usage != original;
+        tx.execute("INSERT INTO execution_admission_reconciliation_facts(job_id,settlement_request_id,usage_json,observed_at) VALUES (?1,?2,?3,?4)",params![job_id.0,settlement_request_id.0,value,observed_at.0]).map_err(sql_error)?;
+        if usage.tokens.is_some() && usage.cost_microunits.is_some() {
+            tx.execute("UPDATE execution_admission_reconciliation SET accounting_status='settled',settlement_request_id=?2,settlement_usage_json=?3,observed_at=?4 WHERE job_id=?1 AND accounting_status='pending'",params![job_id.0,settlement_request_id.0,value,observed_at.0]).map_err(sql_error)?;
+        }
+        tx.commit().map_err(sql_error)?;
+        Ok(changed)
+    }
+
+    #[allow(clippy::too_many_lines)]
     pub fn settle(
         &mut self,
         request: &ExecutionReservationSettlement,
     ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
         validate_settlement(request)?;
+        let missing_tokens: bool = self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)",[&request.job_id.0],|row|row.get(0)).map_err(sql_error)?;
+        if missing_tokens {
+            return Err(ExecutionAdmissionError::invalid(
+                "predecessor token accounting remains unresolved",
+            ));
+        }
+        let unresolved: bool = self
+            .storage
+            .connection()
+            .map_err(storage_error)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)",
+                [&request.job_id.0],
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
+        if unresolved && request.actual_cost_microunits.is_some() {
+            return Err(ExecutionAdmissionError::invalid(
+                "predecessor attempt accounting remains unresolved",
+            ));
+        }
         let scope_key = reservation_scope_key(&request.scope, &request.worker_pool_id)?;
         let request_digest = digest(request)?;
         let transaction = self
@@ -797,9 +1088,17 @@ impl<'storage> ExecutionAdmission<'storage> {
             ExecutionReservationState::Running,
             &request.completed_at,
         )?;
-        if request.actual_tokens > current.reserved_tokens
-            || request.actual_cost_microunits > current.reserved_cost_microunits
-            || request.actual_runtime_millis > current.runtime_limit_millis
+        if current
+            .reserved_tokens
+            .is_some_and(|limit| request.actual_tokens > limit)
+            || current.reserved_cost_microunits.is_some_and(|limit| {
+                request
+                    .actual_cost_microunits
+                    .is_some_and(|cost| cost > limit)
+            })
+            || current
+                .runtime_limit_millis
+                .is_some_and(|limit| request.actual_runtime_millis > limit)
         {
             return Err(ExecutionAdmissionError::invalid(
                 "actual execution usage exceeds its reservation",
@@ -815,7 +1114,10 @@ impl<'storage> ExecutionAdmission<'storage> {
                 params![
                     request.completed_at.0,
                     to_sql_integer(request.actual_tokens, "actualTokens")?,
-                    to_sql_integer(request.actual_cost_microunits, "actualCostMicrounits")?,
+                    request
+                        .actual_cost_microunits
+                        .map(|cost| to_sql_integer(cost, "actualCostMicrounits"))
+                        .transpose()?,
                     to_sql_integer(request.actual_runtime_millis, "actualRuntimeMillis")?,
                     request.job_id.0,
                     to_sql_integer(request.expected_revision, "expectedRevision")?,
@@ -828,6 +1130,15 @@ impl<'storage> ExecutionAdmission<'storage> {
             ));
         }
         insert_settlement_source(&transaction, &current, request)?;
+        if request.actual_cost_microunits.is_none() {
+            let tokens = i64::try_from(request.actual_tokens)
+                .map_err(|_| ExecutionAdmissionError::invalid("token range"))?;
+            let usage=winwincode_execution_port::generated::ExecutionOutcomeUsage {
+                tokens:Some(tokens),known_tokens:tokens,accounting_status:winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+                runtime_millis:i64::try_from(request.actual_runtime_millis).map_err(|_| ExecutionAdmissionError::invalid("runtime range"))?,cost_microunits:None,
+            };
+            transaction.execute("INSERT INTO execution_admission_reconciliation(job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES (?1,?2,?3,'pending')",params![request.job_id.0,request.request_id.0,serde_json::to_string(&usage).map_err(|_| ExecutionAdmissionError::invalid("usage encoding"))?]).map_err(sql_error)?;
+        }
         finish_mutation(
             &transaction,
             &scope_key,
@@ -843,11 +1154,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Loads one reservation only for its exact scope and worker pool.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed input and `SQLite` failures.
     pub fn load_reservation(
         &self,
         scope: &ExecutionQueueScope,
@@ -865,16 +1171,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         )
     }
 
-    /// Loads the one durable reservation identified by its globally unique Job.
-    ///
-    /// This is the scheduler/Worker composition seam: tenant attribution and
-    /// pool placement are returned from the stored admission receipt rather
-    /// than being repeated by a caller that is about to claim the Job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, corrupt stored reservations, and
-    /// `SQLite` failures.
     pub fn load_reservation_by_job(
         &self,
         job_id: &ExecutionJobId,
@@ -900,11 +1196,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         stored.map(complete_reservation).transpose()
     }
 
-    /// Loads the immutable settlement source for one exact execution job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identity, corrupt source facts, and `SQLite` failures.
     pub fn load_settlement_source(
         &self,
         job_id: &ExecutionJobId,
@@ -918,11 +1209,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(source)
     }
 
-    /// Scans immutable settlement sources using a bounded fixed snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid cursors/limits, corrupt source facts, and `SQLite` failures.
     pub fn scan_settlement_sources(
         &self,
         cursor: Option<&WorkerSettlementSourceCursor>,
@@ -935,11 +1221,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         )
     }
 
-    /// Reads current queue, concurrency, reserved, and committed budget usage.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed/missing policies and `SQLite` failures.
     pub fn usage(
         &self,
         boundary: &ExecutionAdmissionBoundary,
@@ -958,7 +1239,11 @@ fn ensure_reservation_capacity(
 ) -> Result<(), ExecutionAdmissionError> {
     for boundary in boundaries {
         let (key, policy) = required_policy(connection, boundary)?;
-        if request.runtime_limit_millis > policy.limits.max_runtime_millis {
+        if policy.limits.max_runtime_millis.is_some_and(|limit| {
+            request
+                .runtime_limit_millis
+                .is_none_or(|requested| requested > limit)
+        }) {
             return Err(ExecutionAdmissionError::rejected(
                 ExecutionAdmissionErrorCode::RuntimeLimitExceeded,
                 boundary,
@@ -973,18 +1258,24 @@ fn ensure_reservation_capacity(
                 "execution queue capacity is exhausted",
             ));
         }
-        if total_tokens(&usage) + u128::from(request.reserved_tokens)
-            > u128::from(policy.limits.token_budget)
-        {
+        if policy.limits.token_budget.is_some_and(|limit| {
+            usage.accounting_pending > 0
+                || request.reserved_tokens.is_none_or(|requested| {
+                    total_tokens(&usage) + u128::from(requested) > u128::from(limit)
+                })
+        }) {
             return Err(ExecutionAdmissionError::rejected(
                 ExecutionAdmissionErrorCode::TokenBudgetExhausted,
                 boundary,
                 "execution token budget is exhausted",
             ));
         }
-        if total_cost(&usage) + u128::from(request.reserved_cost_microunits)
-            > u128::from(policy.limits.cost_budget_microunits)
-        {
+        if policy.limits.cost_budget_microunits.is_some_and(|limit| {
+            request.reserved_cost_microunits.is_none_or(|requested| {
+                total_cost(&usage)
+                    .is_none_or(|cost| cost + u128::from(requested) > u128::from(limit))
+            })
+        }) {
             return Err(ExecutionAdmissionError::rejected(
                 ExecutionAdmissionErrorCode::CostBudgetExhausted,
                 boundary,
@@ -1030,9 +1321,18 @@ fn insert_reservation(
                 request.worker_pool_id.0,
                 access_kind,
                 worktree_key,
-                to_sql_integer(request.reserved_tokens, "reservedTokens")?,
-                to_sql_integer(request.reserved_cost_microunits, "reservedCostMicrounits")?,
-                to_sql_integer(request.runtime_limit_millis, "runtimeLimitMillis")?,
+                request
+                    .reserved_tokens
+                    .map(|value| to_sql_integer(value, "reservedTokens"))
+                    .transpose()?,
+                request
+                    .reserved_cost_microunits
+                    .map(|value| to_sql_integer(value, "reservedCostMicrounits"))
+                    .transpose()?,
+                request
+                    .runtime_limit_millis
+                    .map(|value| to_sql_integer(value, "runtimeLimitMillis"))
+                    .transpose()?,
                 request.submitted_at.0,
             ],
         )
@@ -1131,9 +1431,9 @@ struct StoredPolicyRow {
     boundary_json: String,
     max_concurrent: i64,
     max_queued: i64,
-    token_budget: i64,
-    cost_budget_microunits: i64,
-    max_runtime_millis: i64,
+    token_budget: Option<i64>,
+    cost_budget_microunits: Option<i64>,
+    max_runtime_millis: Option<i64>,
 }
 
 fn stored_policy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPolicyRow> {
@@ -1155,12 +1455,18 @@ fn complete_policy(
         limits: ExecutionAdmissionLimits {
             max_concurrent: from_sql_integer(stored.max_concurrent, "maxConcurrent")?,
             max_queued: from_sql_integer(stored.max_queued, "maxQueued")?,
-            token_budget: from_sql_integer(stored.token_budget, "tokenBudget")?,
-            cost_budget_microunits: from_sql_integer(
-                stored.cost_budget_microunits,
-                "costBudgetMicrounits",
-            )?,
-            max_runtime_millis: from_sql_integer(stored.max_runtime_millis, "maxRuntimeMillis")?,
+            token_budget: stored
+                .token_budget
+                .map(|value| from_sql_integer(value, "tokenBudget"))
+                .transpose()?,
+            cost_budget_microunits: stored
+                .cost_budget_microunits
+                .map(|value| from_sql_integer(value, "costBudgetMicrounits"))
+                .transpose()?,
+            max_runtime_millis: stored
+                .max_runtime_millis
+                .map(|value| from_sql_integer(value, "maxRuntimeMillis"))
+                .transpose()?,
         },
     };
     validate_policy(&policy)
@@ -1168,6 +1474,7 @@ fn complete_policy(
     Ok(policy)
 }
 
+#[allow(clippy::too_many_lines)]
 fn load_usage(
     connection: &Connection,
     boundary_key: &str,
@@ -1175,7 +1482,8 @@ fn load_usage(
     let mut statement = connection
         .prepare(
             "SELECT r.state, r.reserved_tokens, r.reserved_cost_microunits,
-                    r.actual_tokens, r.actual_cost_microunits
+                    r.actual_tokens, r.actual_cost_microunits,
+                    (SELECT COALESCE((SELECT usage_json FROM execution_admission_reconciliation_facts f WHERE f.job_id=r.job_id ORDER BY sequence DESC LIMIT 1),a.terminal_usage_json) FROM execution_admission_reconciliation a WHERE a.job_id=r.job_id)
              FROM execution_admission_reservation_boundaries b
              JOIN execution_admission_reservations r ON r.job_id = b.job_id
              WHERE b.boundary_key = ?1",
@@ -1185,28 +1493,71 @@ fn load_usage(
         .query_map([boundary_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(sql_error)?;
     let mut usage = ExecutionAdmissionUsage::default();
     for row in rows {
-        let (state, reserved_tokens, reserved_cost, actual_tokens, actual_cost) =
+        let (state, reserved_tokens, reserved_cost, actual_tokens, actual_cost, reconciliation) =
             row.map_err(sql_error)?;
+        if let Some(fact) = reconciliation {
+            let accounting: winwincode_execution_port::generated::ExecutionOutcomeUsage =
+                serde_json::from_str(&fact).map_err(|_| {
+                    ExecutionAdmissionError::invalid("corrupt reconciliation usage")
+                })?;
+            if !winwincode_execution_port::usage::valid_usage(&accounting)
+                || !matches!(state.as_str(), "released" | "settled")
+            {
+                return Err(ExecutionAdmissionError::invalid(
+                    "inconsistent reconciliation authority",
+                ));
+            }
+            usage.committed_tokens = checked_add(
+                usage.committed_tokens,
+                u64::try_from(accounting.known_tokens)
+                    .map_err(|_| ExecutionAdmissionError::invalid("usage range"))?,
+                "reconciled tokens",
+            )?;
+            if accounting.tokens.is_none() {
+                usage.accounting_pending =
+                    checked_add(usage.accounting_pending, 1, "pending accounting")?;
+            }
+            usage.committed_cost_microunits = usage
+                .committed_cost_microunits
+                .zip(accounting.cost_microunits)
+                .map(|(a, b)| {
+                    checked_add(
+                        a,
+                        u64::try_from(b)
+                            .map_err(|_| ExecutionAdmissionError::invalid("cost range"))?,
+                        "reconciled cost",
+                    )
+                })
+                .transpose()?;
+            continue;
+        }
         match ExecutionReservationState::parse(&state)? {
             ExecutionReservationState::Queued => {
                 usage.queued = checked_add(usage.queued, 1, "queued usage")?;
                 usage.reserved_tokens = checked_add(
                     usage.reserved_tokens,
-                    from_sql_integer(reserved_tokens, "reservedTokens")?,
+                    reserved_tokens
+                        .map(|value| from_sql_integer(value, "reservedTokens"))
+                        .transpose()?
+                        .unwrap_or(0),
                     "reserved token usage",
                 )?;
                 usage.reserved_cost_microunits = checked_add(
                     usage.reserved_cost_microunits,
-                    from_sql_integer(reserved_cost, "reservedCostMicrounits")?,
+                    reserved_cost
+                        .map(|value| from_sql_integer(value, "reservedCostMicrounits"))
+                        .transpose()?
+                        .unwrap_or(0),
                     "reserved cost usage",
                 )?;
             }
@@ -1214,12 +1565,18 @@ fn load_usage(
                 usage.running = checked_add(usage.running, 1, "running usage")?;
                 usage.reserved_tokens = checked_add(
                     usage.reserved_tokens,
-                    from_sql_integer(reserved_tokens, "reservedTokens")?,
+                    reserved_tokens
+                        .map(|value| from_sql_integer(value, "reservedTokens"))
+                        .transpose()?
+                        .unwrap_or(0),
                     "reserved token usage",
                 )?;
                 usage.reserved_cost_microunits = checked_add(
                     usage.reserved_cost_microunits,
-                    from_sql_integer(reserved_cost, "reservedCostMicrounits")?,
+                    reserved_cost
+                        .map(|value| from_sql_integer(value, "reservedCostMicrounits"))
+                        .transpose()?
+                        .unwrap_or(0),
                     "reserved cost usage",
                 )?;
             }
@@ -1236,21 +1593,30 @@ fn load_usage(
                     )?,
                     "committed token usage",
                 )?;
-                usage.committed_cost_microunits = checked_add(
-                    usage.committed_cost_microunits,
-                    from_sql_integer(
-                        actual_cost.ok_or_else(|| {
-                            ExecutionAdmissionError::adapter(
-                                "settled reservation has no actual cost usage",
-                            )
-                        })?,
-                        "actualCostMicrounits",
-                    )?,
-                    "committed cost usage",
-                )?;
+                usage.committed_cost_microunits = usage
+                    .committed_cost_microunits
+                    .zip(actual_cost)
+                    .map(|(known, cost)| {
+                        checked_add(
+                            known,
+                            from_sql_integer(cost, "actualCostMicrounits")?,
+                            "committed cost usage",
+                        )
+                    })
+                    .transpose()?;
             }
             ExecutionReservationState::Released => {}
         }
+    }
+    let pending:i64=connection.query_row("SELECT COUNT(*) FROM execution_attempt_accounting_pending p JOIN execution_admission_reservation_boundaries b ON b.job_id=p.job_id JOIN execution_admission_reservations r ON r.job_id=p.job_id WHERE b.boundary_key=?1 AND NOT EXISTS(SELECT 1 FROM execution_attempt_accounting_totals t WHERE t.job_id=p.job_id AND t.attempt=p.attempt AND t.tokens IS NOT NULL AND t.cost IS NOT NULL) ",[boundary_key],|r|r.get(0)).map_err(sql_error)?;
+    if pending > 0 {
+        usage.accounting_pending = checked_add(
+            usage.accounting_pending,
+            u64::try_from(pending)
+                .map_err(|_| ExecutionAdmissionError::invalid("pending accounting range"))?,
+            "predecessor accounting",
+        )?;
+        usage.committed_cost_microunits = None;
     }
     Ok(usage)
 }
@@ -1259,8 +1625,10 @@ fn total_tokens(usage: &ExecutionAdmissionUsage) -> u128 {
     u128::from(usage.reserved_tokens) + u128::from(usage.committed_tokens)
 }
 
-fn total_cost(usage: &ExecutionAdmissionUsage) -> u128 {
-    u128::from(usage.reserved_cost_microunits) + u128::from(usage.committed_cost_microunits)
+fn total_cost(usage: &ExecutionAdmissionUsage) -> Option<u128> {
+    usage
+        .committed_cost_microunits
+        .map(|cost| u128::from(usage.reserved_cost_microunits) + u128::from(cost))
 }
 
 fn checked_add(left: u64, right: u64, field: &str) -> Result<u64, ExecutionAdmissionError> {
@@ -1504,7 +1872,7 @@ fn require_source_matches_reservation(
         && reservation.user_id == source.fact.user_id
         && reservation.actual_runtime_millis == Some(source.fact.actual_runtime_millis)
         && reservation.actual_tokens == Some(source.fact.actual_tokens)
-        && reservation.actual_cost_microunits == Some(source.fact.actual_cost_microunits)
+        && reservation.actual_cost_microunits == source.fact.actual_cost_microunits
         && reservation.terminal_at.as_ref() == Some(&source.fact.completed_at);
     if !matches {
         return Err(ExecutionAdmissionError::adapter(
@@ -1641,7 +2009,9 @@ fn validate_settlement_source_fact(
     validate_id(&fact.settlement_request_id.0, "req_", "settlementRequestId")?;
     validate_sql_range(fact.actual_runtime_millis, "actualRuntimeMillis")?;
     validate_sql_range(fact.actual_tokens, "actualTokens")?;
-    validate_sql_range(fact.actual_cost_microunits, "actualCostMicrounits")?;
+    if let Some(cost) = fact.actual_cost_microunits {
+        validate_sql_range(cost, "actualCostMicrounits")?;
+    }
     validate_instant(&fact.completed_at)
 }
 
@@ -1744,9 +2114,9 @@ struct StoredReservationRow {
     access_kind: String,
     worktree_key: Option<String>,
     state: String,
-    reserved_tokens: i64,
-    reserved_cost_microunits: i64,
-    runtime_limit_millis: i64,
+    reserved_tokens: Option<i64>,
+    reserved_cost_microunits: Option<i64>,
+    runtime_limit_millis: Option<i64>,
     actual_tokens: Option<i64>,
     actual_cost_microunits: Option<i64>,
     actual_runtime_millis: Option<i64>,
@@ -1851,12 +2221,18 @@ fn complete_reservation(
         job_id: ExecutionJobId(stored.job_id),
         repository_access,
         state: ExecutionReservationState::parse(&stored.state)?,
-        reserved_tokens: from_sql_integer(stored.reserved_tokens, "reservedTokens")?,
-        reserved_cost_microunits: from_sql_integer(
-            stored.reserved_cost_microunits,
-            "reservedCostMicrounits",
-        )?,
-        runtime_limit_millis: from_sql_integer(stored.runtime_limit_millis, "runtimeLimitMillis")?,
+        reserved_tokens: stored
+            .reserved_tokens
+            .map(|value| from_sql_integer(value, "reservedTokens"))
+            .transpose()?,
+        reserved_cost_microunits: stored
+            .reserved_cost_microunits
+            .map(|value| from_sql_integer(value, "reservedCostMicrounits"))
+            .transpose()?,
+        runtime_limit_millis: stored
+            .runtime_limit_millis
+            .map(|value| from_sql_integer(value, "runtimeLimitMillis"))
+            .transpose()?,
         actual_tokens: stored
             .actual_tokens
             .map(|value| from_sql_integer(value, "actualTokens"))
@@ -1909,7 +2285,7 @@ fn validate_stored_reservation(
             .map_err(|_| ExecutionAdmissionError::adapter("stored reservation time is invalid"))?;
     }
     if reservation.revision == 0
-        || reservation.runtime_limit_millis == 0
+        || reservation.runtime_limit_millis == Some(0)
         || reservation.updated_at.0 < reservation.submitted_at.0
         || reservation
             .started_at
@@ -1947,7 +2323,6 @@ fn validate_stored_reservation(
                 && reservation.terminal_at.is_some()
                 && reservation.release_reason.is_none()
                 && reservation.actual_tokens.is_some()
-                && reservation.actual_cost_microunits.is_some()
                 && reservation.actual_runtime_millis.is_some()
         }
     };
@@ -1969,14 +2344,24 @@ fn validate_reservation_request(
     validate_id(&request.user_id.0, "usr_", "userId")?;
     validate_access(&request.repository_access)?;
     validate_instant(&request.submitted_at)?;
-    validate_sql_range(request.reserved_tokens, "reservedTokens")?;
-    validate_sql_range(request.reserved_cost_microunits, "reservedCostMicrounits")?;
-    if request.runtime_limit_millis == 0 {
+    request
+        .reserved_tokens
+        .map(|value| validate_sql_range(value, "reservedTokens"))
+        .transpose()?;
+    request
+        .reserved_cost_microunits
+        .map(|value| validate_sql_range(value, "reservedCostMicrounits"))
+        .transpose()?;
+    if request.runtime_limit_millis == Some(0) {
         return Err(ExecutionAdmissionError::invalid(
             "runtimeLimitMillis must be positive",
         ));
     }
-    validate_sql_range(request.runtime_limit_millis, "runtimeLimitMillis")
+    request
+        .runtime_limit_millis
+        .map(|value| validate_sql_range(value, "runtimeLimitMillis"))
+        .transpose()?;
+    Ok(())
 }
 
 fn validate_start(request: &ExecutionReservationStart) -> Result<(), ExecutionAdmissionError> {
@@ -2013,7 +2398,9 @@ fn validate_settlement(
         &request.completed_at,
     )?;
     validate_sql_range(request.actual_tokens, "actualTokens")?;
-    validate_sql_range(request.actual_cost_microunits, "actualCostMicrounits")?;
+    if let Some(cost) = request.actual_cost_microunits {
+        validate_sql_range(cost, "actualCostMicrounits")?;
+    }
     validate_sql_range(request.actual_runtime_millis, "actualRuntimeMillis")
 }
 
@@ -2079,19 +2466,25 @@ fn validate_revision_time(
 fn validate_policy(policy: &ExecutionAdmissionPolicy) -> Result<(), ExecutionAdmissionError> {
     validate_boundary(&policy.boundary)?;
     for (value, field) in [
-        (policy.limits.max_concurrent, "maxConcurrent"),
-        (policy.limits.max_queued, "maxQueued"),
+        (Some(policy.limits.max_concurrent), "maxConcurrent"),
+        (Some(policy.limits.max_queued), "maxQueued"),
         (policy.limits.token_budget, "tokenBudget"),
         (policy.limits.cost_budget_microunits, "costBudgetMicrounits"),
-        (policy.limits.max_runtime_millis, "maxRuntimeMillis"),
     ] {
-        validate_sql_range(value, field)?;
+        value
+            .map(|value| validate_sql_range(value, field))
+            .transpose()?;
     }
-    if policy.limits.max_runtime_millis == 0 {
+    if policy.limits.max_runtime_millis == Some(0) {
         return Err(ExecutionAdmissionError::invalid(
             "maxRuntimeMillis must be positive",
         ));
     }
+    policy
+        .limits
+        .max_runtime_millis
+        .map(|value| validate_sql_range(value, "maxRuntimeMillis"))
+        .transpose()?;
     Ok(())
 }
 
@@ -2272,6 +2665,46 @@ fn to_sql_integer(value: u64, field: &str) -> Result<i64, ExecutionAdmissionErro
     })
 }
 
+fn upgrade_runtime_policy(
+    connection: &Connection,
+    boundary_key: &str,
+    previous: &ExecutionAdmissionLimits,
+    max_concurrent: u64,
+) -> Result<(), ExecutionAdmissionError> {
+    let updated = connection
+        .execute(
+            "UPDATE execution_admission_policies SET max_concurrent = ?2
+             WHERE boundary_key = ?1 AND max_concurrent = ?3
+               AND max_queued = ?4 AND token_budget IS ?5
+               AND cost_budget_microunits IS ?6 AND max_runtime_millis IS ?7",
+            params![
+                boundary_key,
+                to_sql_integer(max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_concurrent, "maxConcurrent")?,
+                to_sql_integer(previous.max_queued, "maxQueued")?,
+                previous
+                    .token_budget
+                    .map(|value| to_sql_integer(value, "tokenBudget"))
+                    .transpose()?,
+                previous
+                    .cost_budget_microunits
+                    .map(|value| to_sql_integer(value, "costBudgetMicrounits"))
+                    .transpose()?,
+                previous
+                    .max_runtime_millis
+                    .map(|value| to_sql_integer(value, "maxRuntimeMillis"))
+                    .transpose()?,
+            ],
+        )
+        .map_err(sql_error)?;
+    if updated != 1 {
+        return Err(ExecutionAdmissionError::invalid(
+            "execution admission defaults changed during upgrade",
+        ));
+    }
+    Ok(())
+}
+
 fn from_sql_integer(value: i64, field: &str) -> Result<u64, ExecutionAdmissionError> {
     u64::try_from(value).map_err(|_| {
         ExecutionAdmissionError::adapter(format!("stored {field} is outside the supported range"))
@@ -2286,4 +2719,150 @@ fn sql_error(error: rusqlite::Error) -> ExecutionAdmissionError {
 #[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: StorageError) -> ExecutionAdmissionError {
     ExecutionAdmissionError::adapter(format!("execution admission storage failure: {error}"))
+}
+
+#[cfg(test)]
+mod limits_schema_tests {
+    use super::*;
+
+    #[test]
+    fn limits_migration_preserves_rows_foreign_keys_and_rolls_back_corruption() {
+        for (runtime_required, limits_required) in [(false, false), (false, true), (true, true)] {
+            assert_limits_migration(runtime_required, limits_required);
+        }
+    }
+
+    fn assert_limits_migration(runtime_required: bool, limits_required: bool) {
+        let mut connection = Connection::open_in_memory().expect("database");
+        let old_schema = legacy_admission_schema(runtime_required, limits_required);
+        connection.execute_batch(&old_schema).expect("old schema");
+        connection.execute_batch("INSERT INTO execution_admission_policies VALUES ('boundary', '{}', 1, 1, 1, 1, 1000);
+            INSERT INTO execution_admission_reservations (job_id, scope_key, organization_id, workspace_id, project_id, repository_id, product_session_id, user_id, worker_pool_id, access_kind, state, reserved_tokens, reserved_cost_microunits, runtime_limit_millis, revision, submitted_at, updated_at) VALUES ('job', 'scope', 'org', 'workspace', 'project', 'repository', 'session', 'user', 'pool', 'read_only', 'queued', 1, 1, 1000, 1, 'time', 'time');
+            INSERT INTO execution_admission_reservation_boundaries VALUES ('job', 'boundary', 0);
+            CREATE TABLE migration_external_job (job TEXT REFERENCES execution_admission_reservations(job_id));
+            INSERT INTO migration_external_job VALUES ('job');
+            CREATE TABLE migration_external_child (boundary TEXT REFERENCES execution_admission_policies(boundary_key));
+            INSERT INTO migration_external_child VALUES ('boundary');
+            INSERT INTO execution_admission_receipts VALUES ('scope', 'request', 'digest', '{}');").expect("existing rows");
+        prepare_admission_schema(&mut connection).expect("migrate");
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'execution_admission_reservations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema");
+        assert!(!schema.contains("actual_cost_microunits IS NOT NULL"));
+        prepare_admission_schema(&mut connection).expect("reopen");
+        let limit: i64 = connection
+            .query_row(
+                "SELECT max_runtime_millis FROM execution_admission_policies",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved limit");
+        assert_eq!(limit, 1000);
+        for table in [
+            "migration_external_child",
+            "migration_external_job",
+            "execution_admission_reservations",
+            "execution_admission_reservation_boundaries",
+            "execution_admission_receipts",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("preserved row");
+            assert_eq!(count, 1);
+        }
+        connection
+            .execute(
+                "UPDATE execution_admission_policies SET max_runtime_millis = NULL, token_budget = NULL, cost_budget_microunits = NULL",
+                [],
+            )
+            .expect("explicit unlimited");
+        connection.execute("UPDATE execution_admission_reservations SET reserved_tokens = NULL, reserved_cost_microunits = NULL", []).expect("unlimited reservation");
+        assert!(
+            connection
+                .execute("DELETE FROM execution_admission_policies", [])
+                .is_err()
+        );
+
+        assert_corrupt_schema_migration_rolls_back(&old_schema, limits_required);
+    }
+
+    fn legacy_admission_schema(runtime_required: bool, limits_required: bool) -> String {
+        let schema = ADMISSION_SCHEMA
+            .replace(
+                "token_budget INTEGER CHECK",
+                "token_budget INTEGER NOT NULL CHECK",
+            )
+            .replace(
+                "cost_budget_microunits INTEGER CHECK",
+                "cost_budget_microunits INTEGER NOT NULL CHECK",
+            )
+            .replace(
+                "reserved_tokens INTEGER CHECK",
+                "reserved_tokens INTEGER NOT NULL CHECK",
+            )
+            .replace(
+                "reserved_cost_microunits INTEGER CHECK",
+                "reserved_cost_microunits INTEGER NOT NULL CHECK",
+            )
+            .replace(
+                "max_runtime_millis INTEGER CHECK",
+                "max_runtime_millis INTEGER NOT NULL CHECK",
+            )
+            .replace(
+                "runtime_limit_millis INTEGER CHECK",
+                "runtime_limit_millis INTEGER NOT NULL CHECK",
+            );
+        let schema = if runtime_required {
+            schema
+        } else {
+            schema
+                .replace(
+                    "max_runtime_millis INTEGER NOT NULL CHECK",
+                    "max_runtime_millis INTEGER CHECK",
+                )
+                .replace(
+                    "runtime_limit_millis INTEGER NOT NULL CHECK",
+                    "runtime_limit_millis INTEGER CHECK",
+                )
+        };
+        let schema = if limits_required {
+            schema
+        } else {
+            ADMISSION_SCHEMA.to_owned()
+        };
+        schema.replace(
+            "AND actual_runtime_millis IS NOT NULL\n            AND terminal_at",
+            "AND actual_cost_microunits IS NOT NULL AND actual_runtime_millis IS NOT NULL\n            AND terminal_at",
+        )
+    }
+
+    fn assert_corrupt_schema_migration_rolls_back(old_schema: &str, limits_required: bool) {
+        let mut broken = Connection::open_in_memory().expect("broken database");
+        broken
+            .pragma_update(None, "foreign_keys", false)
+            .expect("seed corruption");
+        broken.execute_batch(old_schema).expect("old schema");
+        broken.execute_batch("INSERT INTO execution_admission_reservation_boundaries VALUES ('missing-job', 'missing-policy', 0);").expect("preexisting corruption");
+        assert!(prepare_admission_schema(&mut broken).is_err());
+        let required: i64 = broken.query_row("SELECT \"notnull\" FROM pragma_table_info('execution_admission_policies') WHERE name = 'token_budget'", [], |row| row.get(0)).expect("rolled back schema");
+        assert_eq!(required, i64::from(limits_required));
+        let restored: String = broken
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'execution_admission_reservations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rolled back cost constraint");
+        assert!(restored.contains("actual_cost_microunits IS NOT NULL"));
+        let foreign_keys: bool = broken
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign keys");
+        assert!(foreign_keys);
+    }
 }

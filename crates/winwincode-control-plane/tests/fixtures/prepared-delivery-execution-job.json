@@ -62,7 +62,23 @@
       "title": "Invitation API",
       "workContractId": "wct_00000000000000000000000006",
       "workContractRevision": 1
-    }
+    },
+    "workPlan": [
+      {
+        "criterionIds": [
+          "crt_01J00000000000000000000000"
+        ],
+        "dependsOn": [],
+        "goal": "Deliver the independently verifiable invitation endpoint.",
+        "id": "wit_00000000000000000000000006",
+        "revision": 1,
+        "schemaVersion": "winwincode/v1",
+        "state": "ready",
+        "title": "Invitation API",
+        "workContractId": "wct_00000000000000000000000006",
+        "workContractRevision": 1
+      }
+    ]
   },
   "workspace": {
     "checkoutRevision": "0123456789abcdef",

@@ -247,9 +247,9 @@ fn execution_job(seed: u64, repository_seed: u64) -> ExecutionJob {
         goal: "execute the frozen Delivery task".to_owned(),
         job_id: ExecutionJobId(id("job", seed)),
         limits: ExecutionLimits {
-            deadline_at: Instant("2030-01-01T00:04:00.000Z".to_owned()),
+            deadline_at: Some(Instant("2030-01-01T00:04:00.000Z".to_owned())),
             max_artifact_bytes: 1_000_000,
-            max_runtime_seconds: 240,
+            max_runtime_seconds: Some(240),
         },
         payload_digest: Sha256Digest(format!("sha256:{seed:064x}")),
         scope: ExecutionScope::WorkRunExecutionScope(

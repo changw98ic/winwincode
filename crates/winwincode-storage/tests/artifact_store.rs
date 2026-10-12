@@ -57,6 +57,137 @@ fn provenance_for_job(execution_job_id: ExecutionJobId) -> ArtifactProvenance {
     .expect("execution artifact provenance")
 }
 
+fn replacement_open(seed: u64, bytes: &[u8], predecessor: Option<ArtifactId>) -> ArtifactOpen {
+    ArtifactOpen::new(
+        scope("repository:upload-upgrade"),
+        message(seed),
+        request(seed),
+        ArtifactId(format!("art_{seed:026}")),
+        "candidate",
+        "application/octet-stream",
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))),
+        bytes.len() as u64,
+        None,
+        provenance(),
+        metering_attribution(),
+        ArtifactRetention::Indefinite,
+        1000,
+    )
+    .with_replaced_artifact(predecessor)
+}
+
+#[test]
+fn upload_replacement_migrates_v2_catalog_and_retires_only_the_incomplete_stream() {
+    for complete in [false, true] {
+        let root = temporary_directory("upload-replacement");
+        let objects = FakeArtifactObjectStore::new();
+        let bytes = b"hello";
+        let old = replacement_open(700, bytes, None);
+        let mut store = ArtifactStore::open(&root, Box::new(objects.clone())).unwrap();
+        store.open_artifact(old.clone()).unwrap();
+        store
+            .append_chunk(&artifact_chunk(
+                scope("repository:upload-upgrade"),
+                message(710),
+                old.artifact_id().clone(),
+                1,
+                Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(if complete { bytes.as_slice() } else { b"he" })
+                )),
+                if complete {
+                    bytes.to_vec()
+                } else {
+                    b"he".to_vec()
+                },
+                complete,
+            ))
+            .unwrap();
+        store.close().unwrap();
+        let catalog = rusqlite::Connection::open(root.join("artifact-catalog.sqlite3")).unwrap();
+        catalog
+            .execute_batch("DROP TABLE artifact_upload_replacements; PRAGMA user_version=2;")
+            .unwrap();
+        drop(catalog);
+        let mut store = ArtifactStore::open(&root, Box::new(objects.clone())).unwrap();
+        let new = replacement_open(701, bytes, Some(old.artifact_id().clone()));
+        let receipt = store.open_artifact(new.clone()).unwrap();
+        assert_eq!(
+            receipt.record().artifact_id(),
+            if complete {
+                old.artifact_id()
+            } else {
+                new.artifact_id()
+            }
+        );
+        if complete {
+            assert!(receipt.record().is_complete());
+        } else {
+            assert_eq!(
+                store
+                    .acknowledged_sequence(&scope("repository:upload-upgrade"), old.artifact_id())
+                    .unwrap_err()
+                    .kind(),
+                ArtifactErrorKind::NotFound
+            );
+            assert_eq!(
+                store
+                    .unfinished_quota_opens_for_job(provenance().execution_job_id())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            store
+                .append_chunk(&artifact_chunk(
+                    scope("repository:upload-upgrade"),
+                    message(711),
+                    new.artifact_id().clone(),
+                    1,
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))),
+                    bytes.to_vec(),
+                    true,
+                ))
+                .unwrap();
+        }
+        store.close().unwrap();
+        let mut store = ArtifactStore::open(&root, Box::new(objects)).unwrap();
+        assert!(store.open_artifact(new.clone()).unwrap().is_duplicate());
+        let changed = replacement_open(701, b"world", Some(old.artifact_id().clone()));
+        assert_eq!(
+            store.open_artifact(changed).unwrap_err().kind(),
+            ArtifactErrorKind::Conflict
+        );
+        store.close().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn failed_upload_replacement_rolls_back_old_retirement_and_the_replacement_receipt() {
+    let root = temporary_directory("replacement-rollback");
+    let mut store = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new())).unwrap();
+    let old = replacement_open(720, b"hello", None);
+    store.open_artifact(old.clone()).unwrap();
+    let catalog = rusqlite::Connection::open(root.join("artifact-catalog.sqlite3")).unwrap();
+    catalog.execute_batch("CREATE TRIGGER fail_replacement BEFORE INSERT ON artifacts WHEN NEW.artifact_id='art_00000000000000000000000721' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    let new = replacement_open(721, b"hello", Some(old.artifact_id().clone()));
+    assert!(store.open_artifact(new.clone()).is_err());
+    assert_eq!(
+        store
+            .acknowledged_sequence(&scope("repository:upload-upgrade"), old.artifact_id())
+            .unwrap(),
+        0
+    );
+    assert!(store.replay_open(&new).unwrap().is_none());
+    catalog
+        .execute_batch("DROP TRIGGER fail_replacement")
+        .unwrap();
+    drop(catalog);
+    store.open_artifact(new).unwrap();
+    store.close().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn unfinished_quota_authority_is_bounded_to_one_exact_job_and_excludes_completed_artifacts() {
     let root = temporary_directory("unfinished-quota-authority");
@@ -1456,7 +1587,7 @@ fn create_legacy_catalog(root: &std::path::Path, populated: bool) {
 }
 
 #[test]
-fn empty_v1_catalog_migrates_to_the_exact_fresh_v2_shape() {
+fn empty_v1_catalog_migrates_to_the_exact_fresh_v3_shape() {
     let migrated_root = temporary_directory("empty-v1-migration");
     create_legacy_catalog(&migrated_root, false);
     ArtifactStore::open(&migrated_root, Box::new(FakeArtifactObjectStore::new()))
@@ -1480,7 +1611,7 @@ fn empty_v1_catalog_migrates_to_the_exact_fresh_v2_shape() {
         migrated
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("migrated version"),
-        2
+        3
     );
     drop((migrated, fresh));
     fs::remove_dir_all(migrated_root).expect("migrated cleanup");
@@ -1558,7 +1689,7 @@ fn malformed_metering_table_with_matching_names_fails_closed() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("preserved version"),
-        2
+        3
     );
     drop(connection);
     fs::remove_dir_all(root).expect("schema cleanup");

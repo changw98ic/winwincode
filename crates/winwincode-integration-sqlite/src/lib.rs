@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Community `SQLite` integration authority, receipts, queues, and rate limits.
-
 mod slack_rate_limit;
 
 pub use slack_rate_limit::SlackRateLimitGate;
@@ -30,6 +28,11 @@ use winwincode_integration_core::{
 
 const SCHEMA: &str = r"
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS integration_network_failures (
+ integration_id TEXT NOT NULL, operation_key TEXT NOT NULL, attempt INTEGER NOT NULL,
+ failure_json TEXT, reconciliation_required INTEGER NOT NULL CHECK(reconciliation_required IN (0,1)),
+ PRIMARY KEY(integration_id, operation_key, attempt)
+);
 CREATE TABLE IF NOT EXISTS integration_connectors (
     integration_id TEXT PRIMARY KEY NOT NULL,
     scope_json BLOB NOT NULL,
@@ -125,19 +128,12 @@ CREATE TABLE IF NOT EXISTS integration_audit_outbox (
 );
 ";
 
-/// SQLite-backed connector authority, receipts, command outbox, retry queue,
-/// and secret-safe audit outbox.
 pub struct IntegrationStorage {
     database_path: PathBuf,
     connection: Connection,
 }
 
 impl IntegrationStorage {
-    /// Opens or creates the integration database under one data directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable storage error for directory, database, or schema failure.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         let data_directory = data_directory.as_ref();
         fs::create_dir_all(data_directory).map_err(|_| storage_error())?;
@@ -160,11 +156,6 @@ impl IntegrationStorage {
         &self.database_path
     }
 
-    /// Registers one connector or exactly replays the same authority facts.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed connector reuse, scope conflict, or storage failure.
     pub fn register(
         &mut self,
         registration: &ConnectorRegistration,
@@ -219,11 +210,6 @@ impl IntegrationStorage {
         Ok(ConnectorRegistrationReceipt::new(authority, false))
     }
 
-    /// Loads the exact scoped connector authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing, foreign scope, or corrupt authority.
     pub fn authority(
         &self,
         scope: &IntegrationScope,
@@ -237,11 +223,6 @@ impl IntegrationStorage {
         Ok(authority)
     }
 
-    /// Atomically revokes one connector credential authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, stale revision, invalid time, or storage failure.
     pub fn revoke_credential(
         &mut self,
         scope: &IntegrationScope,
@@ -301,13 +282,6 @@ impl IntegrationStorage {
         Ok(authority)
     }
 
-    /// Persists one authenticated normalized event and, only when current,
-    /// one formal-command dispatch in the same transaction.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, changed event reuse, scope mismatch, revoked
-    /// credentials, or storage failure.
     pub fn accept_inbound(
         &mut self,
         expected_authority: &ConnectorAuthority,
@@ -412,11 +386,6 @@ impl IntegrationStorage {
         Ok(receipt)
     }
 
-    /// Scans a bounded page of accepted command dispatches.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, invalid cursor/limit, corrupt data, or storage failure.
     pub fn inbound_dispatches(
         &self,
         scope: &IntegrationScope,
@@ -476,12 +445,6 @@ impl IntegrationStorage {
         .collect()
     }
 
-    /// Enqueues or exactly replays one outbound operation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked credentials, changed operation-key reuse, stale scope,
-    /// or storage failure.
     pub fn enqueue_outbound(
         &mut self,
         request: &OutboundRequest,
@@ -544,12 +507,6 @@ impl IntegrationStorage {
         Ok(OutboundEnqueueReceipt::new(operation, false))
     }
 
-    /// Claims the next due request for one active connector. Expired leases
-    /// retain the same operation key and payload on the next attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revoked/foreign connector, invalid lease, corrupt state, or storage failure.
     pub fn claim_due(
         &mut self,
         scope: &IntegrationScope,
@@ -574,11 +531,20 @@ impl IntegrationStorage {
             transaction.commit().map_err(|_| storage_error())?;
             return Ok(None);
         };
-        if stored.attempt >= stored.retry_policy.max_attempts() {
+        let (ordinary_attempts, _) = network_attempt_counts(
+            &transaction,
+            integration_id,
+            &stored.operation_key,
+            stored.attempt,
+        )?;
+        if ordinary_attempts >= stored.retry_policy.max_attempts() {
             dead_letter_expired_claim(&transaction, &authority, &stored, now_millis)?;
             transaction.commit().map_err(|_| storage_error())?;
             return Ok(None);
         }
+        let reconciliation_required: bool = transaction.query_row(
+            "SELECT (state='leased') OR EXISTS(SELECT 1 FROM integration_network_failures n WHERE n.integration_id=o.integration_id AND n.operation_key=o.operation_key AND n.reconciliation_required=1) FROM integration_outbound_operations o WHERE integration_id=?1 AND operation_key=?2",
+            params![integration_id.0, stored.operation_key.digest().0], |row| row.get(0)).map_err(|_| storage_error())?;
         let attempt = stored.attempt.checked_add(1).ok_or_else(corrupt)?;
         transaction
             .execute(
@@ -602,16 +568,12 @@ impl IntegrationStorage {
             stored.payload,
             attempt,
             lease_id,
-        );
+        )
+        .requiring_reconciliation(reconciliation_required);
         transaction.commit().map_err(|_| storage_error())?;
         Ok(Some(claim))
     }
 
-    /// Records exact successful delivery or replays the same attempt receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed outcome reuse, stale claims, scope mismatch, or storage failure.
     pub fn record_success(
         &mut self,
         scope: &IntegrationScope,
@@ -680,11 +642,6 @@ impl IntegrationStorage {
         Ok(receipt)
     }
 
-    /// Records an exact retry/permanent/revoked failure or replays that attempt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed failure reuse, stale claims, scope mismatch, or storage failure.
     pub fn record_failure(
         &mut self,
         scope: &IntegrationScope,
@@ -701,14 +658,12 @@ impl IntegrationStorage {
             if stored_code != failure.code() || stored_kind != failure.kind() {
                 return Err(conflict_error());
             }
+            verify_network_failure_replay(&transaction, claim, failure)?;
             if let OutboundAttemptResult::RetryScheduled(operation) = &result {
                 let policy = load_retry_policy(&transaction, claim)?;
-                let expected = retry_at_with_provider_floor(
-                    policy,
-                    claim.attempt(),
-                    stored_failed_at,
-                    failure.retry_after_millis(),
-                )?;
+                let expected =
+                    outbound_retry_at(&transaction, claim, policy, failure, stored_failed_at)?
+                        .ok_or_else(conflict_error)?;
                 if operation.eligible_at_millis() != expected {
                     return Err(conflict_error());
                 }
@@ -717,9 +672,16 @@ impl IntegrationStorage {
             return Ok(mark_attempt_replay(result));
         }
         let operation = require_leased_operation(&transaction, claim)?;
+        let network_json = failure
+            .network_failure()
+            .map(|failure| serde_json::to_string(&failure).map_err(|_| storage_error()))
+            .transpose()?;
+        transaction.execute("INSERT INTO integration_network_failures(integration_id, operation_key, attempt, failure_json, reconciliation_required) VALUES(?1,?2,?3,?4,?5)",
+            params![claim.authority().integration_id().0, claim.operation_key().digest().0, i64::from(claim.attempt()), network_json, failure.requires_reconciliation() || claim.requires_reconciliation()]).map_err(|_| storage_error())?;
+
         let policy = load_retry_policy(&transaction, claim)?;
-        let dead_letter = failure.kind() != ConnectorCallErrorKind::Retryable
-            || claim.attempt() >= policy.max_attempts();
+        let retry_at = outbound_retry_at(&transaction, claim, policy, failure, failed_at_millis)?;
+        let dead_letter = retry_at.is_none();
         if dead_letter {
             transaction
                 .execute(
@@ -756,12 +718,7 @@ impl IntegrationStorage {
                 failed_at_millis,
             )?;
         } else {
-            let retry_at = retry_at_with_provider_floor(
-                policy,
-                claim.attempt(),
-                failed_at_millis,
-                failure.retry_after_millis(),
-            )?;
+            let retry_at = retry_at.ok_or_else(corrupt)?;
             transaction
                 .execute(
                     "UPDATE integration_outbound_operations
@@ -794,11 +751,6 @@ impl IntegrationStorage {
         Ok(result)
     }
 
-    /// Reads current outbound state within one scope.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, missing operation, corrupt state, or storage failure.
     pub fn outbound_operation(
         &self,
         scope: &IntegrationScope,
@@ -810,11 +762,6 @@ impl IntegrationStorage {
             .ok_or_else(not_found_error)
     }
 
-    /// Scans a bounded secret-safe audit-outbox page for one scoped connector.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign scope, invalid cursor/limit, corrupt facts, or storage failure.
     pub fn audit_facts(
         &self,
         scope: &IntegrationScope,
@@ -1358,6 +1305,116 @@ fn load_attempt_failure(
         parse_connector_failure_kind(&kind)?,
         from_sql(failed_at)?,
     ))
+}
+
+fn verify_network_failure_replay(
+    transaction: &Transaction<'_>,
+    claim: &OutboundClaim,
+    failure: &ConnectorCallError,
+) -> Result<(), IntegrationError> {
+    let (stored_network, stored_required): (Option<String>, bool) = transaction.query_row(
+        "SELECT failure_json,reconciliation_required FROM integration_network_failures WHERE integration_id=?1 AND operation_key=?2 AND attempt=?3",
+        params![claim.authority().integration_id().0, claim.operation_key().digest().0, i64::from(claim.attempt())], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| storage_error())?;
+    let expected_network = failure
+        .network_failure()
+        .map(|value| serde_json::to_string(&value).map_err(|_| storage_error()))
+        .transpose()?;
+    if stored_network != expected_network
+        || stored_required != (failure.requires_reconciliation() || claim.requires_reconciliation())
+    {
+        return Err(conflict_error());
+    }
+    Ok(())
+}
+
+fn network_attempt_counts(
+    transaction: &Transaction<'_>,
+    integration: &IntegrationId,
+    operation: &IntegrationOperationKey,
+    attempts: u32,
+) -> Result<(u32, u32), IntegrationError> {
+    let mut statement = transaction.prepare("SELECT failure_json FROM integration_network_failures WHERE integration_id=?1 AND operation_key=?2 ORDER BY attempt").map_err(|_| storage_error())?;
+    let failures = statement
+        .query_map(params![integration.0, operation.digest().0], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .map_err(|_| storage_error())?;
+    let mut offline = 0u32;
+    let mut connections = 0u32;
+    for failure in failures {
+        let failure = failure
+            .map_err(|_| storage_error())?
+            .map(|json| {
+                serde_json::from_str::<winwincode_network::NetworkFailure>(&json)
+                    .map_err(|_| corrupt())
+            })
+            .transpose()?;
+        if failure.is_some_and(|f| {
+            f.acceptance == winwincode_network::Acceptance::NotSent
+                && matches!(
+                    f.kind,
+                    winwincode_network::ErrorKind::ConnectionUnavailable
+                        | winwincode_network::ErrorKind::Timeout
+                )
+        }) {
+            offline = offline.saturating_add(1);
+            connections = connections.saturating_add(1);
+        } else {
+            connections = 0;
+        }
+    }
+    Ok((
+        attempts.checked_sub(offline).ok_or_else(corrupt)?,
+        connections,
+    ))
+}
+
+fn outbound_retry_at(
+    transaction: &Transaction<'_>,
+    claim: &OutboundClaim,
+    policy: RetryPolicy,
+    failure: &ConnectorCallError,
+    failed_at: u64,
+) -> Result<Option<u64>, IntegrationError> {
+    if failure.kind() != ConnectorCallErrorKind::Retryable {
+        return Ok(None);
+    }
+    let (attempt, connections) = network_attempt_counts(
+        transaction,
+        claim.authority().integration_id(),
+        claim.operation_key(),
+        claim.attempt(),
+    )?;
+    let delay = if let Some(facts) = failure.network_failure() {
+        match winwincode_network::decide(
+            facts,
+            winwincode_network::Replay::ReplayExact,
+            attempt.max(1),
+            connections,
+            policy.max_attempts(),
+            0,
+        ) {
+            winwincode_network::RetryDecision::RetryAfter(delay)
+            | winwincode_network::RetryDecision::DeferredUntil(delay) => {
+                winwincode_network::duration_millis(delay)
+            }
+            _ => return Ok(None),
+        }
+    } else {
+        if attempt >= policy.max_attempts() {
+            return Ok(None);
+        }
+        return retry_at_with_provider_floor(
+            policy,
+            attempt.max(1),
+            failed_at,
+            failure.retry_after_millis(),
+        )
+        .map(Some);
+    };
+    let eligible = failed_at.checked_add(delay).ok_or_else(invalid)?;
+    validate_time(eligible)?;
+    Ok(Some(eligible))
 }
 
 fn retry_at_with_provider_floor(

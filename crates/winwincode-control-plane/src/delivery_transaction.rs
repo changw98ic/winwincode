@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! One authoritative Delivery command transaction over product storage.
-
 use std::sync::Mutex;
 
 use serde_json::Value;
@@ -401,9 +399,6 @@ fn committed_delivery_receipt(
             "durable execution job is not a Delivery stage job",
         ));
     };
-    // The WorkRun and SessionBinding are intentionally absent at this point.
-    // They are appended only after the scheduler accepts this immutable job
-    // and the ExecutionPort verifies its dispatch authority.
     if delivery
         .snapshot()
         .session_bindings
@@ -455,9 +450,6 @@ pub(crate) fn strict_execution_job(
     Ok(job)
 }
 
-/// Loads and validates the one immutable dispatch intent owned by a generated
-/// `ExecutionPort` message. Session binding and terminal outcome transactions
-/// share this authority join rather than interpreting Worker-supplied scope.
 pub(crate) fn load_durable_execution_job(
     storage: &dyn ProductStateStorage,
     job_id: &ExecutionJobId,
@@ -516,9 +508,6 @@ pub(crate) fn load_durable_execution_job(
     Ok((durable, current))
 }
 
-/// Loads only the immutable `ExecutionJob` intent event. This read is kept
-/// separate from [`load_durable_execution_job`] so a complete phase-receipt
-/// replay can resolve before consulting mutable queue/replacement state.
 pub(crate) fn load_durable_execution_intent(
     storage: &dyn ProductStateStorage,
     job_id: &ExecutionJobId,

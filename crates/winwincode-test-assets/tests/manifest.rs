@@ -33,6 +33,7 @@ fn canonical_asset() -> TestAsset {
 
 fn manifest() -> TestAssetManifest {
     TestAssetManifest {
+        candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
         schema_version: TEST_ASSET_MANIFEST_SCHEMA_VERSION,
         id: "test-manifest-main".into(),
         revision: 1,
@@ -51,7 +52,8 @@ fn evidence(evidence_type: EvidenceRefType) -> EvidenceRef {
         delivery_spec_revision: 1,
         work_run_id: WorkRunId("wrn_01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
         session_binding_id: winwincode_delivery::domain::SessionBindingId("binding-1".into()),
-        candidate_ref: CANDIDATE_REF.into(),
+        candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         evidence_type,
         source_ref: "runtime-event-42".into(),
         created_at_millis: 10,
@@ -60,6 +62,9 @@ fn evidence(evidence_type: EvidenceRefType) -> EvidenceRef {
 
 fn verdict() -> DeliveryVerdict {
     DeliveryVerdict {
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
+        candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+        candidate_digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         schema_version: 3,
         id: DeliveryVerdictId("verdict-1".into()),
         delivery_id: DeliveryId("dlv_01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),

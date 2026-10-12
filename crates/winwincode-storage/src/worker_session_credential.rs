@@ -1,40 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable Server-side `WorkerSessionCredential` ledger and its audit trail.
-//!
-//! Short-lived Worker session credentials replace the shared static Worker
-//! bearer (plan 17.2): exactly one credential backs one `WorkerSession` and
-//! one `WorkerInstance`, and it authorizes exactly the one
-//! `WorkerLaunchGrant` it was issued beside. A credential is created
-//! `active`, and the frozen `active | rotated | revoked | expired` state
-//! machine is the whole lifetime:
-//!
-//! - `rotate` retires the session's `active` credential and inserts its
-//!   replacement inside one immediate transaction, so a worker session never
-//!   holds two live credentials and there is no acceptance window where the
-//!   old material still authenticates;
-//! - `revoke_for_session` terminates the `active` credential immediately —
-//!   a running worker loses its proof on its very next exchange;
-//! - `expire` is the sweep that retires every `active` credential whose
-//!   deadline passed; verification itself already refuses an expired
-//!   credential, so the sweep is durable hygiene over the same rule.
-//!
-//! Uniqueness: at most one `active` credential may exist per
-//! `worker_session_id` — the partial unique index is the durable backstop.
-//!
-//! Credentials: only the `sha256:` digest of the 32-byte material is stored.
-//! The raw material never enters this ledger; it crosses the launch response
-//! and the device chain once and is dropped (plan 17.2).
-//!
-//! Audit: every issuance, rotation, revocation, and expiry is appended to
-//! `worker_session_credentials_audit` inside the same transaction as the
-//! state change. Audit identities derive deterministically from the
-//! credential suffix and the action, so each of the at-most-once transitions
-//! records exactly one row without the storage layer drawing entropy.
-
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use winwincode_domain::Instant;
 
 use crate::{SqliteStorage, StorageError};
@@ -77,18 +46,26 @@ CREATE TABLE IF NOT EXISTS worker_session_credentials_audit (
 );
 CREATE INDEX IF NOT EXISTS worker_session_credentials_audit_by_credential
     ON worker_session_credentials_audit (worker_session_credential_id, occurred_at);
+CREATE TABLE IF NOT EXISTS worker_session_credential_renewals (
+    audit_id TEXT PRIMARY KEY NOT NULL,
+    worker_session_credential_id TEXT NOT NULL,
+    worker_session_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 1),
+    heartbeat_sequence INTEGER NOT NULL CHECK (heartbeat_sequence > 0),
+    job_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    previous_expires_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    UNIQUE (worker_session_credential_id, revision)
+);
 ";
 
-/// Lifecycle state of one `WorkerSessionCredential` (plan 17.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSessionCredentialState {
-    /// The material authenticates the bound worker session and instance.
     Active,
-    /// Terminal: a rotation replaced this credential; its material is dead.
     Rotated,
-    /// Terminal: revoked; the material is dead immediately.
     Revoked,
-    /// Terminal: the expiry deadline passed.
     Expired,
 }
 
@@ -123,17 +100,13 @@ impl fmt::Display for WorkerSessionCredentialState {
     }
 }
 
-/// Credential decision recorded in the credential audit trail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialAuditAction {
-    /// The credential was issued (initial issuance or rotation replacement).
     Issued,
-    /// A rotation retired this credential in favor of its replacement.
     Rotated,
-    /// The credential was revoked.
     Revoked,
-    /// The expiry sweep terminated the credential.
     Expired,
+    Renewed,
 }
 
 impl CredentialAuditAction {
@@ -144,44 +117,34 @@ impl CredentialAuditAction {
             Self::Rotated => "rotated",
             Self::Revoked => "revoked",
             Self::Expired => "expired",
+            Self::Renewed => "renewed",
         }
     }
 
-    /// Two-character audit identity discriminator. Crockford Base32 digits
-    /// only, so the derived audit id stays canonical.
     const fn code(self) -> &'static str {
         match self {
             Self::Issued => "01",
             Self::Rotated => "02",
             Self::Revoked => "03",
             Self::Expired => "04",
+            Self::Renewed => "05",
         }
     }
 }
 
-/// Validated atomic issue command (plan 17.2).
-///
-/// The `_id` postfix on every field is the plan's own domain vocabulary, so
-/// the lint against repeated field suffixes is intentionally allowed here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialIssuance {
-    worker_session_credential_id: String,
-    worker_session_id: String,
-    worker_id: String,
-    worker_instance_id: String,
-    worker_launch_grant_id: String,
-    credential_digest: String,
-    expires_at: Instant,
+    pub(crate) worker_session_credential_id: String,
+    pub(crate) worker_session_id: String,
+    pub(crate) worker_id: String,
+    pub(crate) worker_instance_id: String,
+    pub(crate) worker_launch_grant_id: String,
+    pub(crate) credential_digest: String,
+    pub(crate) expires_at: Instant,
 }
 
 impl CredentialIssuance {
-    /// Builds one validated issue command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-`sha256:` credential digest,
-    /// or a non-canonical expiry before any durable write.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         worker_session_credential_id: impl Into<String>,
@@ -222,11 +185,6 @@ impl CredentialIssuance {
     }
 }
 
-/// Validated rotation command (plan 17.2): the session's `active` credential
-/// is retired and replaced by the named replacement inside one transaction.
-/// The worker identities and the bound launch grant are inherited from the
-/// retired credential, so a rotation can never re-bind a credential to
-/// another worker session, worker instance, or launch grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialRotation {
     worker_session_id: String,
@@ -237,12 +195,6 @@ pub struct CredentialRotation {
 }
 
 impl CredentialRotation {
-    /// Builds one validated rotation command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-canonical identities, a non-`sha256:` replacement digest,
-    /// a non-canonical expiry, or an out-of-bounds reason.
     pub fn try_new(
         worker_session_id: impl Into<String>,
         replacement_credential_id: impl Into<String>,
@@ -273,63 +225,38 @@ impl CredentialRotation {
     }
 }
 
-/// Outcome of one rotation: the retired credential and its replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialRotationOutcome {
-    /// The previously `active` credential, now terminal `rotated`.
     pub retired: WorkerSessionCredentialRecord,
-    /// The replacement, `active` from the rotation instant on.
     pub issued: WorkerSessionCredentialRecord,
 }
 
-/// Durable `WorkerSessionCredential` row (plan 17.2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSessionCredentialRecord {
-    /// Stable credential identifier.
     pub worker_session_credential_id: String,
-    /// Worker session the credential authorizes.
     pub worker_session_id: String,
-    /// Worker identity the credential authorizes.
     pub worker_id: String,
-    /// Worker instance the credential authorizes.
     pub worker_instance_id: String,
-    /// The one launch grant this credential authorizes.
     pub worker_launch_grant_id: String,
-    /// `sha256:` digest of the credential material; never the material.
     pub credential_digest: String,
-    /// Lifecycle state.
     pub state: WorkerSessionCredentialState,
-    /// Deadline after which the credential no longer authenticates.
     pub expires_at: Instant,
-    /// Instant the credential was issued.
     pub issued_at: Instant,
-    /// Terminal instant; set on `rotated`, `revoked`, and `expired`.
     pub ended_at: Option<Instant>,
-    /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
 
-/// Stable credential ledger failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerSessionCredentialStoreErrorKind {
-    /// A command input violated the frozen schema bounds.
     InvalidInput,
-    /// No credential matches the requested identity.
     UnknownCredential,
-    /// The worker session already carries an `active` credential.
     CredentialConflict,
-    /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
-    /// A compare-and-swap guard lost a race that should be impossible inside
-    /// one immediate transaction.
     RevisionConflict,
-    /// A stored row violated the frozen schema invariants.
     CorruptState,
-    /// The underlying storage operation failed.
     Storage,
 }
 
-/// Secret-free credential ledger error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSessionCredentialStoreError {
     kind: WorkerSessionCredentialStoreErrorKind,
@@ -351,19 +278,11 @@ impl fmt::Display for WorkerSessionCredentialStoreError {
 
 impl std::error::Error for WorkerSessionCredentialStoreError {}
 
-/// Worker session credential ledger borrowing the sole product-state `SQLite`
-/// authority.
 pub struct WorkerSessionCredentialLedger<'storage> {
     storage: &'storage mut SqliteStorage,
 }
 
 impl SqliteStorage {
-    /// Opens the durable worker session credential ledger on this same
-    /// product-state database.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable connection or an incompatible existing schema.
     pub fn worker_session_credential_ledger(
         &mut self,
     ) -> Result<WorkerSessionCredentialLedger<'_>, WorkerSessionCredentialStoreError> {
@@ -385,71 +304,116 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(Self { storage })
     }
 
-    /// Atomically issues one worker session credential (plan 17.2). The
-    /// `active` row and its `issued` audit entry commit together. The worker
-    /// session must not already carry an `active` credential.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an `active` credential already present for the session, a
-    /// reused credential id, or storage failure.
+    pub fn renew_after_accepted_heartbeat(
+        &mut self,
+        expected: &WorkerSessionCredentialRecord,
+        heartbeat: &winwincode_execution_port::generated::WorkerHeartbeatMessage,
+        lease: &winwincode_execution_port::generated::ActiveLeaseSummary,
+        expires_at: &Instant,
+        now: &Instant,
+    ) -> Result<Option<WorkerSessionCredentialRecord>, WorkerSessionCredentialStoreError> {
+        validate_instant(now, "renewal time")?;
+        validate_instant(expires_at, "renewal expiry")?;
+        validate_crockford_id(&heartbeat.message_id.0, "xmsg_", "heartbeat message id")?;
+        if heartbeat.worker_id.0 != expected.worker_id
+            || heartbeat.worker_instance_id.0 != expected.worker_instance_id
+            || heartbeat.heartbeat_sequence.0 <= 0
+            || lease.attempt <= 0
+            || expires_at.0 <= expected.expires_at.0
+            || now.0 >= expected.expires_at.0
+        {
+            return Ok(None);
+        }
+        let transaction = self.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE worker_session_credentials AS c
+             SET expires_at=?2, revision=revision+1
+             WHERE c.worker_session_credential_id=?1 AND c.state='active'
+               AND c.credential_digest=?3 AND c.revision=?4 AND c.expires_at>?5
+               AND c.worker_id=?6 AND c.worker_instance_id=?7
+               AND EXISTS (
+                 SELECT 1 FROM worker_launch_grants g
+                 JOIN device_execution_bindings b
+                   ON b.worker_launch_grant_id=g.worker_launch_grant_id
+                 JOIN client_occupancy_leases o ON o.occupancy_lease_id=g.occupancy_lease_id
+                 JOIN client_nodes n ON n.client_node_id=g.client_node_id
+                 WHERE g.worker_launch_grant_id=c.worker_launch_grant_id
+                   AND g.worker_session_id=c.worker_session_id
+                   AND g.worker_id=c.worker_id AND g.worker_instance_id=c.worker_instance_id
+                   AND NOT EXISTS (SELECT 1 FROM worker_launch_grant_exits e WHERE e.worker_launch_grant_id=g.worker_launch_grant_id)
+                   AND g.state='consumed'
+                   AND b.state='bound' AND b.worker_session_id=c.worker_session_id
+                   AND b.client_node_id=g.client_node_id
+                   AND b.client_instance_id=g.client_instance_id
+                   AND n.current_instance_id=g.client_instance_id
+                   AND b.holder_user_id=g.holder_user_id AND o.holder_user_id=g.holder_user_id
+                   AND b.repository_binding_id=g.repository_binding_id
+                   AND b.occupancy_lease_id=o.occupancy_lease_id
+                   AND b.occupancy_fencing_token=o.fencing_token
+                   AND g.occupancy_fencing_token=o.fencing_token
+                   AND o.client_node_id=g.client_node_id AND o.state IN ('occupied','draining','recovery_pending')
+               )
+               AND EXISTS (
+                 SELECT 1 FROM execution_leases l
+                 JOIN device_execution_current_facts f ON f.job_id=l.job_id
+                 JOIN execution_dispatch_authorities d ON d.job_id=l.job_id AND d.lease_id=l.lease_id
+                 JOIN execution_workers w ON w.worker_id=l.worker_id
+                 JOIN execution_heartbeats h ON h.worker_id=w.worker_id
+                   AND h.worker_instance_id=w.worker_instance_id
+                 WHERE l.job_id=?8 AND l.lease_id=?9 AND l.attempt=?10
+                   AND l.fencing_token=?11 AND l.worker_id=c.worker_id
+                   AND l.worker_instance_id=c.worker_instance_id AND l.expires_at>?5
+                   AND f.worker_launch_grant_id=c.worker_launch_grant_id
+                   AND f.worker_session_id=c.worker_session_id
+                   AND f.worker_id=c.worker_id AND f.worker_instance_id=c.worker_instance_id
+                   AND d.worker_id=l.worker_id AND d.worker_instance_id=l.worker_instance_id
+                   AND d.attempt=l.attempt AND d.fencing_token=l.fencing_token
+                   AND w.worker_instance_id=c.worker_instance_id
+                   AND w.heartbeat_sequence=?12 AND h.heartbeat_sequence=?12
+                   AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t
+                     WHERE t.lease_id=l.lease_id)
+               )",
+            params![expected.worker_session_credential_id, expires_at.0,
+                expected.credential_digest, i64::try_from(expected.revision)
+                    .map_err(|_| invalid_id("credential revision"))?, now.0, expected.worker_id,
+                expected.worker_instance_id, lease.job_id.0, lease.lease_id.0,
+                lease.attempt, lease.fencing_token.0, heartbeat.heartbeat_sequence.0],
+        ).map_err(|sql| sql_error(&sql))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        let record = load_credential(&transaction, &expected.worker_session_credential_id)?
+            .ok_or_else(credential_missing_after_write)?;
+        let audit_digest = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "{}:{}",
+                record.worker_session_credential_id, record.revision
+            ))
+        );
+        let audit_id = format!("wca_{}", audit_digest[..26].to_ascii_uppercase());
+        transaction.execute(
+            "INSERT INTO worker_session_credential_renewals VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![audit_id, record.worker_session_credential_id, record.worker_session_id,
+                i64::try_from(record.revision).map_err(|_| invalid_id("credential revision"))?,
+                heartbeat.heartbeat_sequence.0, lease.job_id.0, lease.lease_id.0,
+                expected.expires_at.0, expires_at.0, now.0],
+        ).map_err(|sql| sql_error(&sql))?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(Some(record))
+    }
+
     pub fn issue(
         &mut self,
         issuance: &CredentialIssuance,
         now: &Instant,
     ) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialStoreError> {
-        validate_instant(now, "issue time")?;
         let transaction = self.transaction()?;
-        let inserted = transaction
-            .execute(
-                "INSERT INTO worker_session_credentials
-                 (worker_session_credential_id, worker_session_id, worker_id,
-                  worker_instance_id, worker_launch_grant_id, credential_digest,
-                  state, expires_at, issued_at, ended_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, NULL, 1)",
-                params![
-                    issuance.worker_session_credential_id,
-                    issuance.worker_session_id,
-                    issuance.worker_id,
-                    issuance.worker_instance_id,
-                    issuance.worker_launch_grant_id,
-                    issuance.credential_digest,
-                    issuance.expires_at.0,
-                    now.0,
-                ],
-            )
-            .map_err(|sql| map_credential_insert_sql(&sql))?;
-        if inserted != 1 {
-            return Err(error(
-                WorkerSessionCredentialStoreErrorKind::Storage,
-                "worker session credential insert did not store exactly one row",
-            ));
-        }
-        insert_audit(
-            &transaction,
-            CredentialAuditAction::Issued,
-            &issuance.worker_session_credential_id,
-            &issuance.worker_session_id,
-            &issuance.worker_session_id,
-            None,
-            now,
-        )?;
-        let record = load_credential(&transaction, &issuance.worker_session_credential_id)?
-            .ok_or_else(credential_missing_after_write)?;
+        let stored = issue_credential_in_transaction(&transaction, issuance, now)?;
         transaction.commit().map_err(|sql| sql_error(&sql))?;
-        Ok(record)
+        Ok(stored)
     }
 
-    /// Atomically rotates one worker session's credential (plan 17.2): the
-    /// `active` credential becomes terminal `rotated` and its replacement
-    /// becomes `active` inside one immediate transaction, so the old
-    /// material stops authenticating at the same instant the new material
-    /// starts. The replacement inherits the retired credential's worker
-    /// identities and launch grant.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a session without an `active` credential or storage failure.
     pub fn rotate(
         &mut self,
         rotation: &CredentialRotation,
@@ -533,14 +497,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         })
     }
 
-    /// Revokes the session's `active` credential immediately (plan 17.2): the
-    /// material stops authenticating at once, whether the worker session is
-    /// still launching or already running.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a session without an `active` credential, an over-long
-    /// reason, or storage failure.
     pub fn revoke_for_session(
         &mut self,
         worker_session_id: &str,
@@ -587,15 +543,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(revoked)
     }
 
-    /// Expires every `active` credential whose expiry deadline is at or
-    /// before `cutoff` (plan 17.2). Returns the expired credential ids.
-    ///
-    /// Verification already refuses an expired credential, so this sweep is
-    /// the durable state transition over the same rule.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid cutoff or storage failure.
     pub fn expire(
         &mut self,
         cutoff: &Instant,
@@ -644,12 +591,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(expired)
     }
 
-    /// Returns one durable credential projection.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical credential identity, corrupt stored rows, or
-    /// storage failure.
     pub fn snapshot(
         &self,
         worker_session_credential_id: &str,
@@ -658,14 +599,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         load_credential(self.connection()?, worker_session_credential_id)
     }
 
-    /// Returns the one `active` credential of a worker session, if any.
-    ///
-    /// More than one `active` row is a corrupt database and fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical worker session identity, a corrupt active
-    /// set, or storage failure.
     pub fn active_for_session(
         &self,
         worker_session_id: &str,
@@ -694,17 +627,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         }
     }
 
-    /// Looks one credential up by its stored `sha256:` digest — the durable
-    /// half of digest verification. State and expiry are judged by the
-    /// caller so every authentication failure stays one uniform category.
-    ///
-    /// More than one row for one digest is a corrupt database and fails
-    /// closed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-`sha256:` digest shape, a corrupt digest match, or
-    /// storage failure.
     pub fn find_by_digest(
         &self,
         credential_digest: &str,
@@ -733,12 +655,6 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         }
     }
 
-    /// Returns every durable credential audit entry of one credential,
-    /// oldest first.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical credential identity or storage failure.
     pub fn audit_trail(
         &self,
         worker_session_credential_id: &str,
@@ -751,6 +667,10 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
                         worker_session_id, actor_user_id, reason, occurred_at
                  FROM worker_session_credentials_audit
                  WHERE worker_session_credential_id = ?1
+                 UNION ALL
+                 SELECT audit_id,'renewed',worker_session_credential_id,worker_session_id,
+                        worker_session_id,NULL,occurred_at
+                 FROM worker_session_credential_renewals WHERE worker_session_credential_id=?1
                  ORDER BY occurred_at, audit_id",
             )
             .map_err(|sql| sql_error(&sql))?;
@@ -790,22 +710,14 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
     }
 }
 
-/// One credential audit row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialAuditEntry {
-    /// Stable audit identity.
     pub audit_id: String,
-    /// Recorded action.
     pub action: CredentialAuditAction,
-    /// Credential the entry refers to.
     pub worker_session_credential_id: String,
-    /// Worker session the credential authorizes.
     pub worker_session_id: String,
-    /// User that drove the transition; self-audits carry the session id.
     pub actor_user_id: String,
-    /// Machine-readable reason, when one exists.
     pub reason: Option<String>,
-    /// Instant the entry was recorded.
     pub occurred_at: Instant,
 }
 
@@ -836,6 +748,7 @@ impl CredentialAuditEntry {
             "rotated" => CredentialAuditAction::Rotated,
             "revoked" => CredentialAuditAction::Revoked,
             "expired" => CredentialAuditAction::Expired,
+            "renewed" => CredentialAuditAction::Renewed,
             _ => {
                 return Err(error(
                     WorkerSessionCredentialStoreErrorKind::CorruptState,
@@ -855,8 +768,6 @@ impl CredentialAuditEntry {
     }
 }
 
-/// Loads the session's one `active` credential or fails with the unknown
-/// category; the partial unique index keeps the active set a singleton.
 fn require_active_credential(
     connection: &rusqlite::Connection,
     worker_session_id: &str,
@@ -886,9 +797,6 @@ fn require_active_credential(
     }
 }
 
-/// Appends one credential audit row inside the caller's transaction. Audit
-/// identities derive from the credential suffix and the action code, so each
-/// of the at-most-once transitions records exactly one row.
 #[allow(clippy::too_many_arguments)]
 fn insert_audit(
     transaction: &Transaction<'_>,
@@ -926,9 +834,6 @@ fn insert_audit(
     Ok(())
 }
 
-/// Deterministic audit identity: the action discriminator followed by the
-/// first 24 characters of the credential suffix. Every action happens at
-/// most once per credential, so identities never collide.
 fn audit_identity(
     action: CredentialAuditAction,
     worker_session_credential_id: &str,
@@ -1145,7 +1050,6 @@ fn validate_user_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError
     validate_crockford_id(value, "usr_", "user id")
 }
 
-/// Validates the canonical `sha256:` + 64 lowercase hex digest shape.
 fn validate_credential_digest(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {
     let Some(digest) = value.strip_prefix("sha256:") else {
         return Err(error(
@@ -1167,7 +1071,6 @@ fn validate_credential_digest(value: &str) -> Result<(), WorkerSessionCredential
     }
 }
 
-/// Validates the canonical `domain.Instant` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`).
 fn validate_instant(value: &Instant, label: &str) -> Result<(), WorkerSessionCredentialStoreError> {
     let bytes = value.0.as_bytes();
     let punctuation = [
@@ -1209,9 +1112,6 @@ fn map_credential_insert_sql(sql: &rusqlite::Error) -> WorkerSessionCredentialSt
         && failure.code == rusqlite::ErrorCode::ConstraintViolation
     {
         return match failure.extended_code {
-            // The realistic unique violation is the one-active-per-session
-            // partial index; a credential id reuse shares the extended code
-            // family and fails closed as a conflict too.
             rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => error(
                 WorkerSessionCredentialStoreErrorKind::CredentialConflict,
                 "the worker session already carries an active credential",
@@ -1281,4 +1181,49 @@ fn error(
         kind,
         message: message.into(),
     }
+}
+
+pub(crate) fn issue_credential_in_transaction(
+    connection: &Transaction<'_>,
+    issuance: &CredentialIssuance,
+    now: &Instant,
+) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialStoreError> {
+    validate_instant(now, "issue time")?;
+    let inserted = connection
+        .execute(
+            "INSERT INTO worker_session_credentials
+                 (worker_session_credential_id, worker_session_id, worker_id,
+                  worker_instance_id, worker_launch_grant_id, credential_digest,
+                  state, expires_at, issued_at, ended_at, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, NULL, 1)",
+            params![
+                issuance.worker_session_credential_id,
+                issuance.worker_session_id,
+                issuance.worker_id,
+                issuance.worker_instance_id,
+                issuance.worker_launch_grant_id,
+                issuance.credential_digest,
+                issuance.expires_at.0,
+                now.0,
+            ],
+        )
+        .map_err(|sql| map_credential_insert_sql(&sql))?;
+    if inserted != 1 {
+        return Err(error(
+            WorkerSessionCredentialStoreErrorKind::Storage,
+            "worker session credential insert did not store exactly one row",
+        ));
+    }
+    insert_audit(
+        connection,
+        CredentialAuditAction::Issued,
+        &issuance.worker_session_credential_id,
+        &issuance.worker_session_id,
+        &issuance.worker_session_id,
+        None,
+        now,
+    )?;
+    let record = load_credential(connection, &issuance.worker_session_credential_id)?
+        .ok_or_else(credential_missing_after_write)?;
+    Ok(record)
 }

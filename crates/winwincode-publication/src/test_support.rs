@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Deterministic sealed publication fixtures for Rust integration tests.
-
 use crate::coordinator::{
     Publication, PublicationCancelCommand, PublicationCommandContext, PublicationCoordinator,
     PublicationError, PublicationLedger, PublicationPublishCommand,
@@ -59,11 +57,6 @@ impl CurrentPublicationFixture {
 }
 
 #[must_use]
-/// Builds one deterministic, fully sealed current-publication fixture.
-///
-/// # Panics
-///
-/// Panics only if a repository-owned canonical fixture literal becomes invalid.
 pub fn current_publication_fixture() -> CurrentPublicationFixture {
     let target = PublicationTarget::try_github(
         "example/widget",
@@ -79,7 +72,8 @@ pub fn current_publication_fixture() -> CurrentPublicationFixture {
         21,
         "spec_00000000000000000000000001",
         1,
-        format!("git-candidate:sha256:{}", "a".repeat(64)),
+        format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+        Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         "c".repeat(64),
         "verdict:fixture:pass",
         AttentionItemId("att_00000000000000000000000001".to_owned()),
@@ -127,7 +121,6 @@ pub fn current_publication_fixture() -> CurrentPublicationFixture {
     }
 }
 
-/// Returns the exact ordered provider operations for the current publication fixture.
 #[must_use]
 pub fn current_publication_operations() -> Vec<PublicationOperation> {
     let fixture = current_publication_fixture();
@@ -145,17 +138,11 @@ impl PublicationPolicyAudit for AcceptingPolicyAudit {
     }
 }
 
-/// Policy-guarded coordinator used only by direct Publication integration tests.
 pub struct CurrentPublicationCoordinator<'storage, 'port> {
     coordinator: PublicationCoordinator<'storage, 'port, 'static>,
 }
 
 impl CurrentPublicationCoordinator<'_, '_> {
-    /// Applies the fixed repository policy before persisting the fixture intent.
-    ///
-    /// # Errors
-    ///
-    /// Returns the production coordinator error unchanged.
     pub fn publish(
         &mut self,
         context: &PublicationCommandContext,
@@ -172,11 +159,6 @@ impl CurrentPublicationCoordinator<'_, '_> {
             .publish(context, command, authorization, &policy_context, &policy)
     }
 
-    /// Applies the fixed repository policy before the next provider operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the production coordinator error unchanged.
     pub fn resume(
         &mut self,
         publication_id: &PublicationId,
@@ -193,20 +175,10 @@ impl CurrentPublicationCoordinator<'_, '_> {
             .resume(publication_id, occurred_at_millis, &policy_context, &policy)
     }
 
-    /// Reads the exact durable Publication fixture.
-    ///
-    /// # Errors
-    ///
-    /// Returns the production coordinator error unchanged.
     pub fn get(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
         self.coordinator.get(publication_id)
     }
 
-    /// Cancels the exact durable Publication fixture.
-    ///
-    /// # Errors
-    ///
-    /// Returns the production coordinator error unchanged.
     pub fn cancel(
         &mut self,
         context: &PublicationCommandContext,
@@ -216,8 +188,6 @@ impl CurrentPublicationCoordinator<'_, '_> {
     }
 }
 
-/// Constructs the only direct-test coordinator. Production callers use the
-/// Control Plane application seam and its immutable `AuditStore` adapter.
 pub fn current_policy_coordinator<'storage, 'port>(
     storage: impl PublicationStorage + 'storage,
     port: &'port mut dyn PublicationPort,
@@ -282,15 +252,6 @@ fn current_policy_scope() -> RepositoryPolicyScope {
     .expect("canonical fixture policy scope")
 }
 
-/// Builds exact provider operations for an explicitly configured GitHub test repository.
-///
-/// The remaining Delivery, candidate, Artifact, verdict, approval, and scope facts are fixed
-/// repository-owned test identities. This helper is feature-gated and cannot construct production
-/// publication authority.
-///
-/// # Errors
-///
-/// Rejects an invalid target, source issue, commit identity, or derived sealed authorization.
 pub fn github_publication_operations_fixture(
     target: PublicationTarget,
     source: PublicationSourceIssue,
@@ -301,7 +262,8 @@ pub fn github_publication_operations_fixture(
         21,
         "spec_00000000000000000000000001",
         1,
-        format!("git-candidate:sha256:{}", "a".repeat(64)),
+        format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+        Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         "c".repeat(64),
         "verdict:fixture:pass",
         AttentionItemId("att_00000000000000000000000001".to_owned()),

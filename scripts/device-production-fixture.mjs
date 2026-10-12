@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Device-only production acceptance prerequisites.
- *
- * Production Server execution is fixed to Device Worker. These helpers keep
- * the acceptance runners on that path: model secrets belong on the Device,
- * session model routes must match Device-local Provider credentials, and the
- * Server must never receive centralized model environment variables.
- */
-
 import assert from 'node:assert/strict'
+import { withResponseFailure } from '../packages/network-request/src/index.mjs'
 import {
   createCipheriv,
   createECDH,
@@ -18,13 +10,74 @@ import {
   randomBytes,
   X509Certificate,
 } from 'node:crypto'
-import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { deviceAgentEnvironment } from './device-agent-environment.mjs'
+import { assertResolvedDeviceProviderCredentials } from './device-provider-credentials.mjs'
 
-/** Server environment keys that encode the removed Server-local model path. */
+export function runtimeChildEnvironment(environment = process.env) {
+  const keys = [
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
+    'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
+  ]
+  return Object.fromEntries(keys
+    .filter(key => environment[key] !== undefined)
+    .map(key => [key, environment[key]]))
+}
+
+export function deviceTaskLaunchResult({ response, directory, deliveryId, workRunId,
+  publicClientId, holderUserId, repositoryBindingId }) {
+  if (response.status === 201) return response.json
+  if (response.status === 400 && response.json?.error?.code === 'INVALID_REQUEST'
+    && [directory, deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId]
+      .every(value => typeof value === 'string' && value.length > 0)) {
+    const db = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
+    try {
+      const rows = db.prepare(`SELECT j.job_id, j.payload_digest, j.dispatch_payload,
+        f.product_session_id, f.worker_session_id, f.worker_id, f.worker_instance_id
+        FROM scheduler_execution_jobs j
+        JOIN device_execution_current_facts f ON f.job_id = j.job_id
+          AND f.work_run_id = j.work_run_id AND f.product_session_id = j.product_session_id
+        JOIN client_nodes c ON c.client_node_id = f.client_node_id
+        JOIN worker_launch_grants g ON g.worker_launch_grant_id = f.worker_launch_grant_id
+          AND g.client_node_id = f.client_node_id AND g.client_instance_id = f.client_instance_id
+          AND g.holder_user_id = f.holder_user_id AND g.repository_binding_id = f.repository_binding_id
+          AND g.occupancy_lease_id = f.occupancy_lease_id
+          AND g.occupancy_fencing_token = f.occupancy_fencing_token
+          AND g.worker_session_id = f.worker_session_id AND g.worker_id = f.worker_id
+          AND g.worker_instance_id = f.worker_instance_id
+          AND g.product_session_id = j.product_session_id AND g.work_run_id = j.work_run_id
+          AND g.state = 'consumed' AND g.consumed_at IS NOT NULL
+        JOIN execution_leases l ON l.job_id = j.job_id AND l.payload_digest = j.payload_digest
+          AND l.worker_id = f.worker_id AND l.worker_instance_id = f.worker_instance_id
+          AND l.attempt = j.attempt
+        JOIN execution_lease_terminals t ON t.lease_id = l.lease_id AND t.job_id = l.job_id
+          AND t.worker_id = l.worker_id AND t.worker_instance_id = l.worker_instance_id
+          AND t.attempt = l.attempt AND t.fencing_token = l.fencing_token AND t.outcome = 'completed'
+        WHERE j.delivery_id = ? AND j.work_run_id = ? AND j.state = 'completed'
+          AND c.public_client_id = ? AND f.holder_user_id = ? AND f.repository_binding_id = ?`)
+        .all(deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId)
+      if (rows.length === 1) {
+        const row = rows[0], payload = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
+        if (payload.jobId === row.job_id && payload.payloadDigest === row.payload_digest
+          && payload.scope?.kind === 'work-run' && payload.scope.workRunId === workRunId
+          && payload.scope.productSessionId === row.product_session_id) {
+          return { workRunId, productSessionId: row.product_session_id,
+            workerSessionId: row.worker_session_id, workerId: row.worker_id,
+            workerInstanceId: row.worker_instance_id, recoveredCompleted: true }
+        }
+      }
+    } finally { db.close() }
+  }
+  throw Object.assign(new Error(`Worker launch failed: ${response.text}`), {
+    code: 'DEVICE_LAUNCH_FAILED',
+  })
+}
+
 export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
   'WWC_SERVER_MODEL_PROVIDER_ID',
   'WWC_SERVER_MODEL_ID',
@@ -33,11 +86,6 @@ export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
   'WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID',
 ])
 
-/**
- * Ordered Device-only prerequisites that a production vertical must establish
- * before chat/StrongFlow/cancel/restart. Kept as data so unit tests can assert
- * the migration did not invent a parallel Server-local path.
- */
 export const DEVICE_ONLY_PREREQUISITES = Object.freeze([
   'temporary-real-git-repository',
   'device-enroll-pair',
@@ -50,11 +98,6 @@ export const DEVICE_ONLY_PREREQUISITES = Object.freeze([
   'chat-strongflow-cancel-restart',
 ])
 
-/**
- * Device Provider credential reference id used by the Server session route
- * gate. Mirrors `device_providers::route_reference` in
- * crates/winwincode-server/src/device_providers.rs.
- */
 export function deviceCredentialReferenceId({ clientNodeId, providerId }) {
   assert.equal(typeof clientNodeId, 'string')
   assert.equal(typeof providerId, 'string')
@@ -67,10 +110,6 @@ export function deviceCredentialReferenceId({ clientNodeId, providerId }) {
   return `crd_0${digest.slice(0, 25)}`
 }
 
-/**
- * Session model route for Device-local execution. The credential reference
- * must be the Device-bound route id, not a Server-side credential.
- */
 export function configuredDeviceModelRoute({
   clientNodeId,
   providerId,
@@ -83,10 +122,10 @@ export function configuredDeviceModelRoute({
   }
 }
 
-/** Deterministic Device-local test Provider used by acceptance runners. */
 export function deterministicDeviceProvider({
   providerId = 'winwincode-device-deterministic',
   modelId = 'device-deterministic-model',
+  repeatToolMarker = null,
 } = {}) {
   return Object.freeze({
     providerId,
@@ -94,6 +133,7 @@ export function deterministicDeviceProvider({
     displayName: 'WinWinCode Device deterministic Provider',
     endpointHint: 'https://127.0.0.1:<device-mock-model-port>/v1/messages',
     protocol: 'anthropic_messages',
+    ...(repeatToolMarker === null ? {} : { repeatToolMarker }),
   })
 }
 
@@ -107,15 +147,13 @@ export const DETERMINISTIC_PLANNER_PROTOCOL = 'winwincode.planner-solution.v1'
 export const DETERMINISTIC_VERIFICATION_PROTOCOL = 'winwincode.independent-verification-result.v1'
 export const DETERMINISTIC_VERIFICATION_CALL_ID = 'loopback-verification-command'
 export const DETERMINISTIC_VERIFICATION_POLL_CALL_ID = 'loopback-verification-command-poll'
-/** Long enough for contract verification methods (e.g. git rev-parse) to finish. */
 export const DETERMINISTIC_VERIFICATION_YIELD_MS = 30_000
 
-/**
- * Encrypts one Device Provider mutation with the Device public key.
- * The ciphertext is the production Web → Device apply payload; the API key
- * never appears in Server environment maps or public receipts.
- */
 export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
+  return encryptDeviceConfigurationEnvelope(DEVICE_PROVIDER_ENCRYPTION_CONTEXT, snapshot, requestId, mutation)
+}
+
+function encryptDeviceConfigurationEnvelope(context, snapshot, requestId, mutation) {
   assert.equal(typeof snapshot?.clientNodeId, 'string')
   assert.equal(typeof snapshot?.encryptionPublicKey, 'string')
   assert.equal(typeof requestId, 'string')
@@ -123,11 +161,11 @@ export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
   const ephemeral = createECDH('prime256v1')
   ephemeral.generateKeys()
   const shared = ephemeral.computeSecret(Buffer.from(snapshot.encryptionPublicKey, 'base64'))
-  const aad = `${DEVICE_PROVIDER_ENCRYPTION_CONTEXT}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
+  const aad = `${context}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
   const key = Buffer.from(hkdfSync(
     'sha256',
     shared,
-    Buffer.from(DEVICE_PROVIDER_ENCRYPTION_CONTEXT),
+    Buffer.from(context),
     Buffer.from(aad),
     32,
   ))
@@ -160,13 +198,6 @@ async function freeLoopbackPort() {
   await new Promise(resolvePromise => server.close(resolvePromise))
   assert.ok(port > 0, 'Device model fixture port must be positive')
   return port
-}
-
-function containsValueWithType(value, expected) {
-  if (Array.isArray(value)) return value.some(item => containsValueWithType(item, expected))
-  if (value === null || typeof value !== 'object') return false
-  if (value.type === expected) return true
-  return Object.values(value).some(item => containsValueWithType(item, expected))
 }
 
 function findTextValue(value, needle) {
@@ -238,18 +269,11 @@ export function parseProcessExitCode(text) {
   return null
 }
 
-/**
- * Extracts StrongFlow workInput fields the Device deterministic Provider must
- * honor for reviewer/verifier roles: contract criterion ids and the approved
- * verification method. Top-level `criterionIds` / `verificationCommand` remain
- * accepted for older runners; WorkRun dispatch uses nested WorkContract shape.
- */
 export function workInputFromRequest(request) {
   const text = findTextValue(request, 'StrongFlow workInput (canonical JSON):')
   if (text === null) return null
   const start = text.indexOf('{')
   if (start < 0) return null
-  // WorkInput is embedded after the marker; take the first balanced JSON object.
   let depth = 0
   let end = -1
   for (let index = start; index < text.length; index += 1) {
@@ -327,24 +351,37 @@ export function workInputFromRequest(request) {
   }
 }
 
-export function resolveVerificationObservation(providerRequest) {
-  const primary = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_CALL_ID)
-  const poll = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
-  const primaryExit = primary === null ? null : parseProcessExitCode(toolOutputText(primary))
-  const pollExit = poll === null ? null : parseProcessExitCode(toolOutputText(poll))
-  if (pollExit !== null) {
-    return { exitCode: pollExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_POLL_CALL_ID, hasToolOutput: true }
+export function observeToolProcess(providerRequest, callId) {
+  const originalOutput = findToolOutput(providerRequest, callId)
+  let output = originalOutput
+  let evidenceSourceId = codeModeCommandSource(originalOutput)
+  let pollIndex = 1
+  let nextCallId = `${callId}-poll`
+  for (;;) {
+    const poll = findToolOutput(providerRequest, nextCallId)
+    if (poll === null) break
+    output = poll
+    evidenceSourceId ??= codeModeCommandSource(poll)
+    pollIndex += 1
+    nextCallId = `${callId}-poll-${pollIndex}`
   }
-  if (primaryExit !== null) {
-    return { exitCode: primaryExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_CALL_ID, hasToolOutput: true }
-  }
+  const text = toolOutputText(output)
+  const exitCode = parseProcessExitCode(text)
+  const session = text?.match(/^Process running with session ID (\d+)\s*$/mu)
+  const sessionId = session ? Number(session[1]) : null
+  const cell = text?.match(/^Script running with cell ID (\S+)\s*$/mu)
   return {
-    exitCode: null,
-    evidenceSourceId: primary !== null || poll !== null
-      ? (poll !== null ? DETERMINISTIC_VERIFICATION_POLL_CALL_ID : DETERMINISTIC_VERIFICATION_CALL_ID)
-      : null,
-    hasToolOutput: primary !== null || poll !== null,
+    exitCode,
+    cellId: cell?.[1] ?? null,
+    sessionId: Number.isSafeInteger(sessionId) ? sessionId : null,
+    nextCallId,
+    evidenceSourceId: output === null ? null : evidenceSourceId ?? callId,
+    hasToolOutput: output !== null,
   }
+}
+
+export function resolveVerificationObservation(providerRequest) {
+  return observeToolProcess(providerRequest, DETERMINISTIC_VERIFICATION_CALL_ID)
 }
 
 function deterministicPlannerProduct(criterionIds) {
@@ -437,15 +474,19 @@ export function deterministicVerificationProduct({
   })
 }
 
-/**
- * Starts a Device-local deterministic anthropic-messages HTTPS Provider.
- * Trust is the explicit fixture certificate DER only (never system CAs).
- */
 export function startDeterministicDeviceModelServer({
   certificatePath,
   privateKeyPath,
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
+  repeatToolMarker = null,
+  nativeCellScripts = {},
 }) {
+  assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
+  for (const [marker, source] of Object.entries(nativeCellScripts)) {
+    assert.match(marker, /^native-cell-[AB]$/u)
+    assert.equal(typeof source, 'string')
+    assert.ok(source.length <= 6000)
+  }
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -463,25 +504,25 @@ export function startDeterministicDeviceModelServer({
         const bodyText = Buffer.concat(chunks).toString('utf8')
         assert.ok(size <= 512 * 1024, 'Device Provider request exceeds fixture bound')
         const providerRequest = JSON.parse(bodyText)
+        const repeatTool = repeatToolMarker !== null && bodyText.includes(repeatToolMarker)
+        const nativeCell = Object.keys(nativeCellScripts).find(marker => bodyText.includes(marker)) ?? null
         requests.push({
           path: request.url ?? '',
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
           executor: bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER),
           planner: bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL),
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
+          repeatTool,
         })
-        const shellTool = providerRequest.tools?.find(tool => (
-          /(?:^|__)shell_command$|(?:^|__)exec_command$/u.test(tool.name)
-        )) ?? null
+        const executionTool = providerRequest.tools?.find(tool => /(?:^|__)exec$/u.test(tool.name)) ?? null
+        const waitTool = providerRequest.tools?.find(tool => /(?:^|__)wait$/u.test(tool.name)) ?? null
         const workInput = workInputFromRequest(providerRequest)
         const isExecutor = bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER)
         const isVerification = bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER)
         const isPlanner = bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL)
           && workInput?.criterionIds?.length
-        const executorOutput = containsValueWithType(providerRequest, 'function_call_output')
-          || containsValueWithType(providerRequest, 'custom_tool_call_output')
-          || (bodyText.includes('loopback-executor-change')
-            && /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText))
+        const executorObservation = observeToolProcess(providerRequest, 'loopback-executor-change')
+        const executorOutput = executorObservation.hasToolOutput
         const verificationObservation = resolveVerificationObservation(providerRequest)
         const verificationExit = verificationObservation.exitCode
         const verificationEvidenceSourceId = verificationObservation.evidenceSourceId
@@ -495,33 +536,54 @@ export function startDeterministicDeviceModelServer({
         let toolCommand = 'true'
         let stopReason = 'end_turn'
         let toolYieldMs = 1000
+        let toolInput = null
+        let toolSource = null
+        let selectedTool = executionTool
+        let waitInput = null
 
-        if (isExecutor && !executorOutput) {
+        const observation = isExecutor ? executorObservation : verificationObservation
+        if (nativeCell !== null) {
+          assert.deepEqual(providerRequest.tools.map(tool => tool.name).sort(), ['exec', 'wait'])
+          const native = observeToolProcess(providerRequest, nativeCell)
+          toolCallId = native.hasToolOutput ? native.nextCallId : nativeCell
+          if (native.cellId !== null) {
+            selectedTool = waitTool
+            waitInput = { cell_id: native.cellId, yield_time_ms: 1000 }
+          } else if (!native.hasToolOutput) {
+            toolSource = nativeCellScripts[nativeCell]
+          }
+          useTool = native.cellId !== null || !native.hasToolOutput
+          stopReason = useTool ? 'tool_use' : 'end_turn'
+          text = useTool ? '' : `${nativeCell} completed`
+        } else if ((isExecutor || isVerification) && observation.cellId !== null) {
+          assert.ok(waitTool, 'running cell requires the Code Mode wait tool')
+          selectedTool = waitTool
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = observation.nextCallId
+          waitInput = { cell_id: observation.cellId, yield_time_ms: 1000 }
+          text = ''
+        } else if ((isExecutor || isVerification) && observation.sessionId !== null) {
+          assert.ok(executionTool, 'running command requires the Code Mode exec tool')
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = observation.nextCallId
+          toolInput = { session_id: observation.sessionId, chars: '', yield_time_ms: 1000 }
+          text = ''
+        } else if (isExecutor && !executorOutput) {
           useTool = true
           stopReason = 'tool_use'
           toolCallId = 'loopback-executor-change'
-          toolCommand = shellTool?.input_schema?.properties?.cmd
-            ? "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
-            : "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
+          toolCommand = "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
           text = ''
         } else if (isExecutor) {
-          text = 'The requested stage action completed.'
-        } else if (isVerification && !verificationObservation.hasToolOutput && shellTool) {
+          text = executorObservation.exitCode === 0
+            ? 'The requested stage action completed.'
+            : 'The stage command did not complete successfully.'
+        } else if (isVerification && !verificationObservation.hasToolOutput && executionTool) {
           useTool = true
           stopReason = 'tool_use'
           toolCallId = DETERMINISTIC_VERIFICATION_CALL_ID
-          toolCommand = verificationCommand
-          toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
-          text = ''
-        } else if (isVerification && verificationExit === null && shellTool
-          && verificationEvidenceSourceId === DETERMINISTIC_VERIFICATION_CALL_ID) {
-          // Tool output arrived without a sealed exit code (process still
-          // running). Do not invent a fail verdict — poll once under a
-          // distinct evidence source so Core can finish and seal command
-          // evidence before the verification product is emitted.
-          useTool = true
-          stopReason = 'tool_use'
-          toolCallId = DETERMINISTIC_VERIFICATION_POLL_CALL_ID
           toolCommand = verificationCommand
           toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
           text = ''
@@ -532,12 +594,15 @@ export function startDeterministicDeviceModelServer({
             evidenceSourceId: verificationEvidenceSourceId,
           })
         } else if (isVerification) {
-          // Still no sealed exit after the poll. Do not invent pass or fail:
-          // Worker bind_verification_evidence requires a sealed command
-          // outcome for the cited source and must fail closed without one.
           text = 'Verification command did not yield a sealed exit code; no independent result emitted.'
         } else if (isPlanner) {
           text = deterministicPlannerProduct(workInput.criterionIds)
+        } else if (repeatTool) {
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = `loopback-repeat-${requests.length}`
+          toolCommand = 'git rev-parse --verify HEAD'
+          text = ''
         }
 
         const events = [
@@ -554,20 +619,20 @@ export function startDeterministicDeviceModelServer({
           }],
         ]
         if (useTool) {
-          assert.ok(shellTool !== null, 'Device Provider fixture requires an exposed shell tool')
+          assert.ok(selectedTool !== null, 'Device Provider fixture requires a Code Mode tool')
           events.push(['content_block_start', {
             type: 'content_block_start',
             index: 0,
             content_block: {
               type: 'tool_use',
               id: toolCallId,
-              name: shellTool.name,
+              name: selectedTool.name,
               input: {},
             },
           }])
-          const input = shellTool.input_schema?.properties?.cmd
-            ? { cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs }
-            : { command: toolCommand, workdir: '.' }
+          const input = waitInput ?? { input: toolSource ?? deviceFixtureCodeModeCommand(toolInput ?? {
+            cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs,
+          }) }
           events.push(['content_block_delta', {
             type: 'content_block_delta',
             index: 0,
@@ -630,11 +695,140 @@ export function startDeterministicDeviceModelServer({
   }
 }
 
-/**
- * Seeds one Device-local Provider through the production encrypted Web → Device
- * HTTP apply path. Secrets are sealed to the Device store; Server only relays
- * ciphertext and public receipts.
- */
+const deviceExtensionMutations = new WeakMap()
+
+function deviceConfigurationApplyError(response, requestId) {
+  const receivedCode = response.json?.error?.code
+  const code = typeof receivedCode === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(receivedCode)
+    ? receivedCode : 'DEVICE_CONFIGURATION_HTTP_ERROR'
+  return withResponseFailure(Object.assign(new Error('Device configuration apply was rejected'), {
+    code, status: response.status, phase: 'device_configuration_apply', requestId,
+  }), response)
+}
+
+async function mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis) {
+  let clients = deviceExtensionMutations.get(api)
+  if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
+  const previous = clients.get(publicClientId) ?? Promise.resolve()
+  const result = previous.catch(() => {}).then(async () => {
+    const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
+    const current = await api.request(base)
+    assert.equal(current.status, 200)
+    assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
+    const requestId = `extension_${randomBytes(16).toString('hex')}`
+    const envelope = encryptDeviceConfigurationEnvelope(
+      'winwincode.device-extensions.v1', current.json.snapshot, requestId, mutation,
+    )
+    const applied = await api.request(base, { method: 'POST', body: envelope })
+    if (applied.status !== 202) throw deviceConfigurationApplyError(applied, requestId)
+    const completed = await waitFor(async () => {
+      const response = await api.request(`${base}/receipts/${requestId}`)
+      if (!response.json?.receipt) return false
+      assert.equal(response.status, 200)
+      assert.equal(response.json.receipt.outcome, expected, 'Device public smoke configuration failed')
+      return response.json
+    }, `Device public smoke ${expected}`, timeoutMillis)
+    return completed
+  })
+  clients.set(publicClientId, result)
+  return result
+}
+
+export async function installDevicePublicSmoke({ api, publicClientId, configuration,
+  id = 'benchmark_public_smoke', timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u)
+  const receipts = []
+  for (const mutation of [
+    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
+    { operation: 'test_mcp', id },
+  ]) {
+    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
+    const completed = await mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis)
+    receipts.push(completed.receipt)
+    if (expected === 'tested') {
+      const server = completed.snapshot?.mcpServers?.find(server => server.id === id)
+      assert.equal(server?.enabled, true)
+      assert.equal(server?.connectionStatus, 'ready')
+      assert.deepEqual(server?.toolNames, ['public_smoke'])
+    }
+  }
+  return { id, toolNames: ['public_smoke'], receipts }
+}
+
+export async function removeDevicePublicSmoke({ api, publicClientId, id, timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke_psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  return (await mutateDeviceExtension(api, publicClientId,
+    { operation: 'delete', kind: 'mcp', id }, 'deleted', timeoutMillis)).receipt
+}
+
+export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
+  automaticTaskActions = false, approvalOwner = 'core', corePendingApprovalIds = [],
+  onPending = () => {}, onDecision }) {
+  assert.equal(typeof automaticTaskActions, 'boolean')
+  assert.ok(Array.isArray(corePendingApprovalIds))
+  const corePending = new Set(corePendingApprovalIds)
+  const currentRun = approval => runs.find(run => {
+    const binding = approval.binding
+    const identity = binding?.sessionIdentity
+    return ['leased', 'running'].includes(run.state)
+      && run.productSessionId && run.codexThreadId
+      && identity?.workRunId === run.id
+      && identity.codexThreadId === run.codexThreadId
+      && identity.productSessionId === run.productSessionId
+      && identity.workerSessionId === run.workerSessionId
+      && binding.productSessionId === run.productSessionId
+      && binding.workerSessionId === run.workerSessionId
+      && binding.executionJobId === run.executionJobId
+  })
+  const pending = await api.query('approval.list', { states: ['pending', 'expired'] })
+  assert.equal(pending.page?.hasMore, false, 'Device task approval list must be complete')
+  assert.ok(Array.isArray(pending.result?.items), 'Device task approval list is invalid')
+  await onPending(pending.result.items.filter(item => currentRun(item)
+    && (item.state === 'pending' || corePending.has(item.id))))
+  if (approvalOwner === 'execution_port') return
+  assert.equal(approvalOwner, 'core')
+  for (const item of pending.result.items) {
+    if (item.state !== 'pending' || !currentRun(item)) continue
+    const approval = (await api.query('approval.get', { approvalId: item.id })).result
+    if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
+    const detail = approval.sanitizedDetail
+    const publicSmoke = typeof publicSmokeId === 'string'
+      && /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u.test(publicSmokeId)
+      && approval.category === 'mcp' && approval.effectiveDecisionScope === 'once'
+      && detail?.kind === 'available' && detail.operation === 'execute'
+      && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
+      && detail.targetSummaries?.length === 1
+      && detail.targetSummaries[0] === `server:${publicSmokeId}`
+    const taskAction = automaticTaskActions && approval.effectiveDecisionScope === 'once'
+      && detail?.kind === 'available' && detail.targetCount > 0
+      && Array.isArray(detail.targetSummaries) && detail.targetSummaries.length > 0
+      && ((approval.category === 'shell' && detail.operation === 'execute'
+        && ['sandbox_escalation', 'network_access'].includes(detail.reasonCode)
+        && detail.workingDirectory === 'workspace')
+      || (approval.category === 'network' && detail.operation === 'execute'
+        && detail.reasonCode === 'network_access' && detail.workingDirectory === 'workspace')
+      || (approval.category === 'filesystem_write' && detail.operation === 'modify'
+        && detail.reasonCode === 'filesystem_write'))
+    const allow = publicSmoke || taskAction
+    const decision = allow ? 'approve' : 'reject'
+    let result
+    try {
+      result = await api.command('approval.decide', approval.revision, {
+        approvalId: approval.id, binding: approval.binding, decision,
+        reason: taskAction
+          ? 'The operator authorized automatic task actions for this exact active Session and WorkRun.'
+          : allow ? 'Run the configured public_smoke in the frozen offline sandbox.'
+          : 'Continue within the configured workspace and public_smoke tool; escalation is not authorized.',
+      })
+    } catch (error) {
+      if (['REVISION_CONFLICT', 'WRONG_STATE'].includes(error?.code)) continue
+      throw error
+    }
+    assert.equal(result.outcome, 'completed', 'Device approval decision did not complete')
+    await onDecision({ approval, decision, result })
+  }
+}
+
 export async function seedDeviceLocalProvider({
   api,
   publicClientId,
@@ -642,11 +836,13 @@ export async function seedDeviceLocalProvider({
   modelId,
   endpoint,
   apiKey,
+  protocol = 'anthropic_messages',
+  customHeaders,
+  responsesStructuredOutput,
   displayName = 'WinWinCode Device deterministic Provider',
   timeoutMillis = 60_000,
 }) {
-  assert.equal(typeof apiKey, 'string')
-  assert.ok(apiKey.length > 0)
+  assertResolvedDeviceProviderCredentials({ apiKey, customHeaders })
   assert.ok(typeof publicClientId === 'string' && publicClientId.length > 0,
     'Device public client id is required to seed Provider')
   const providerPath = `/api/v1/clients/${encodeURIComponent(publicClientId)}/providers`
@@ -666,14 +862,16 @@ export async function seedDeviceLocalProvider({
       providerId,
       displayName,
       endpoint,
-      protocol: 'anthropic_messages',
+      protocol,
+      ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }),
       modelIds: [modelId],
       enabled: true,
     },
     apiKey,
+    ...(customHeaders === undefined ? {} : { customHeaders }),
   })
   const applied = await api.request(providerPath, { method: 'POST', body: encrypted })
-  assert.equal(applied.status, 202, `Device Provider apply failed: ${applied.text}`)
+  if (applied.status !== 202) throw deviceConfigurationApplyError(applied, requestId)
   const saved = await waitFor(async () => {
     const response = await api.request(`${providerPath}/receipts/${encodeURIComponent(requestId)}`)
     if (response.json?.receipt && response.json.receipt.outcome !== 'saved') {
@@ -700,10 +898,6 @@ export async function seedDeviceLocalProvider({
   }
 }
 
-/**
- * Rejects Server environments that still encode the removed Server-local
- * model execution path, including real GLM secrets.
- */
 export function assertServerEnvironmentIsDeviceOnly(serverEnvironment = {}) {
   for (const key of FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS) {
     assert.equal(
@@ -714,10 +908,6 @@ export function assertServerEnvironmentIsDeviceOnly(serverEnvironment = {}) {
   }
 }
 
-/**
- * Asserts known model secrets never appear in Server-facing environment maps.
- * Real GLM/modeled secrets belong only on the Device config path.
- */
 export function assertDeviceSecretsNeverOnServer(serverEnvironment = {}, secrets = []) {
   for (const [key, value] of Object.entries(serverEnvironment)) {
     if (value === undefined || value === null) continue
@@ -743,6 +933,21 @@ export function checkedWwc(wwc, args, environment = process.env) {
   return result.stdout.trim().length === 0 ? null : JSON.parse(result.stdout)
 }
 
+export function deviceConnectCodePublished(database, connectCodeId) {
+  return database.prepare(`
+    SELECT 1 FROM client_outbox
+    WHERE kind = 'client.connect_code.published' AND published = 1
+      AND json_extract(CAST(payload AS TEXT), '$.payload.connectCodeId') = ?
+  `).get(connectCodeId) !== undefined
+}
+
+export function deviceHelloAcknowledged(database, previousInstanceId) {
+  return database.prepare(`SELECT 1 FROM client_outbox
+    WHERE kind = 'client.hello' AND published = 1 AND client_instance_id =
+      (SELECT current_instance_id FROM device_identity LIMIT 1)
+      AND (? IS NULL OR client_instance_id <> ?)`).get(previousInstanceId, previousInstanceId) !== undefined
+}
+
 export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis = 200) {
   const deadline = Date.now() + timeoutMillis
   for (;;) {
@@ -753,35 +958,177 @@ export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis =
   }
 }
 
-export function stopProcessGroup(child) {
-  if (child === null || child.exitCode !== null || child.signalCode !== null) return
+function processSnapshot() {
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], {
+    encoding: 'utf8', timeout: 1000, maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, LC_ALL: 'C' },
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error('cannot inspect fixture process ownership')
+  const rows = new Map()
+  for (const line of result.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line)
+    if (!match) continue
+    const row = {
+      pid: Number(match[1]), parent: Number(match[2]), group: Number(match[3]),
+      state: match[4], start: match[5].replace(/\s+/gu, ' '),
+    }
+    if (process.platform === 'linux') {
+      try {
+        const stat = readFileSync(`/proc/${row.pid}/stat`, 'utf8')
+        row.start = `linux-${stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19]}`
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ESRCH') continue
+        throw error
+      }
+    }
+    rows.set(row.pid, row)
+  }
+  return rows
+}
+
+function ownedProcessAlive(witness, current) {
+  const row = current.get(witness.pid)
+  return row !== undefined && row.start === witness.start && row.group === witness.group
+    && !row.state.startsWith('Z')
+}
+
+function registeredFixtureWorkers(deviceData, snapshot) {
+  if (!deviceData) return []
+  const path = join(deviceData, 'device-client.sqlite3')
+  if (!existsSync(path)) return []
+  const database = new DatabaseSync(path, { readOnly: true })
   try {
-    process.kill(-child.pid, 'SIGTERM')
-  } catch {
-    child.kill('SIGTERM')
+    database.exec('PRAGMA busy_timeout = 1000')
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_process_registry'").get()) return []
+    return database.prepare(`SELECT pid, process_start_identity FROM worker_process_registry
+      WHERE state = 'running'`).all().flatMap(record => {
+      const row = snapshot.get(record.pid)
+      if (!row || row.state.startsWith('Z')) return []
+      const identity = process.platform === 'linux' ? row.start : `darwin-ps-${row.start}`
+      return record.process_start_identity === identity ? [row] : []
+    })
+  } finally { database.close() }
+}
+
+export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, launched, productSessionId }) {
+  const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
+  try {
+    server.exec('PRAGMA busy_timeout = 5000')
+    assert.equal(server.prepare('SELECT count(*) AS n FROM scheduler_execution_jobs WHERE product_session_id = ?')
+      .get(productSessionId).n, 0, 'source anchor must have no execution jobs')
+    assert.equal(server.prepare(`SELECT count(*) AS n FROM execution_leases l
+      WHERE worker_id = ? AND worker_instance_id = ?
+      AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id = l.lease_id)`)
+      .get(launched.workerId, launched.workerInstanceId).n, 0, 'source anchor must have no active lease')
+  } finally { server.close() }
+  const worker = await getDeviceWorker(api, launched.workerId)
+  assert.ok(worker, 'source anchor must be registered before it can drain')
+  if (worker.state === 'enabled') {
+    const drained = await api.command('worker.drain', worker.revision, {
+      workerId: worker.id, reason: 'Source authority anchor has no job; Delivery roles own execution.',
+    })
+    assert.equal(drained.outcome, 'completed')
+  }
+  const device = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+  try {
+    const record = device.prepare('SELECT * FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId)
+    assert.equal(record.worker_id, launched.workerId)
+    assert.equal(record.worker_instance_id, launched.workerInstanceId)
+    const observed = processSnapshot().get(record.pid)
+    const bootIdentity = observed && (process.platform === 'linux' ? observed.start : `darwin-ps-${observed.start}`)
+    const row = bootIdentity === record.process_start_identity && !observed.state.startsWith('Z') ? observed : null
+    if (row) {
+      try { process.kill(row.pid, 'SIGINT') } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+      await waitFor(() => !ownedProcessAlive(row, processSnapshot()), 'unused task anchor graceful exit', 30_000)
+    }
+    await waitFor(() => device.prepare('SELECT state FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId).state !== 'running', 'Device observed unused task anchor exit', 30_000)
+    return { workerSessionId: launched.workerSessionId, workerId: launched.workerId, state: 'drained' }
+  } finally { device.close() }
+}
+
+export async function getDeviceWorker(api, workerId) {
+  try {
+    const response = await api.query('worker.get', { workerId }, { cursor: null, limit: 1 })
+    assert.equal(response.result.id, workerId, 'Worker lookup must return the requested identity')
+    return response.result
+  } catch (error) {
+    if (error.code === 'RESOURCE_NOT_FOUND') return null
+    throw error
   }
 }
 
-/**
- * Writes the Device TLS trust root derived from the fixture certificate.
- * Explicit test trust root: Device-side Provider HTTPS uses this file only.
- */
+export function registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment }) {
+  const bindings = checkedWwc(wwc, ['repo', 'list', '--data-dir', deviceData, '--json'], deviceEnvironment)
+  const existing = bindings.repositories.find(binding => binding.canonicalPath === realpathSync(repository))
+  if (existing) {
+    const head = execFileSync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    assert.equal(existing.headCommit, head, 'retained Device repository HEAD differs from its binding')
+    assert.equal(existing.dirtyState, 'clean', 'retained Device repository binding is dirty')
+    return existing
+  }
+  return checkedWwc(wwc, ['repo', 'add', repository, '--data-dir', deviceData, '--json'], deviceEnvironment).repository
+}
+
+export async function stopProcessGroup(child, { graceMillis = 1000, deviceData } = {}) {
+  const parentExited = () => child === null || child.exitCode !== null || child.signalCode !== null
+  if (parentExited() && !deviceData) return
+  const snapshot = processSnapshot()
+  const root = parentExited() ? undefined : snapshot.get(child.pid)
+  const owned = new Map(registeredFixtureWorkers(deviceData, snapshot).map(row => [row.pid, row]))
+  if (root?.parent === process.pid) owned.set(root.pid, root)
+  if (owned.size === 0) {
+    assert.equal(parentExited(), true, 'cannot confirm ownership of a live fixture parent')
+    return
+  }
+  for (;;) {
+    const before = owned.size
+    for (const row of snapshot.values()) {
+      if (owned.has(row.parent)) owned.set(row.pid, row)
+    }
+    if (before === owned.size) break
+  }
+  const targets = new Map()
+  for (const row of [...owned.values()].reverse()) {
+    const target = owned.has(row.group) ? -row.group : row.pid
+    const witnesses = targets.get(target) ?? []
+    witnesses.push(row)
+    targets.set(target, witnesses)
+  }
+  const signalOwned = signal => {
+    for (const [target, witnesses] of targets) {
+      if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
+      try { process.kill(target, signal) } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+  }
+  const stopped = () => {
+    const current = processSnapshot()
+    return [...owned.values()].every(row => !ownedProcessAlive(row, current))
+      && parentExited()
+  }
+  signalOwned('SIGTERM')
+  const deadline = Date.now() + graceMillis
+  while (!stopped() && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
+  }
+  if (!stopped()) {
+    signalOwned('SIGKILL')
+    await waitFor(stopped, 'fixture process tree shutdown', 1000, 25)
+  }
+}
+
 export function writeDeviceTrustRoot({ certificatePath, destination }) {
   const der = new X509Certificate(readFileSync(certificatePath)).raw
   writeFileSync(destination, der)
   return destination
 }
 
-/**
- * Establishes Device-only production prerequisites against a running Server.
- *
- * Steps: enroll/pair Device Client → connect → occupy → bind repository →
- * optional encrypted/local Device Provider → launch anchor via `/api/v1/sessions`.
- *
- * This function never restores Server-local model execution. When
- * `deviceProvider` secrets are provided they are returned for Device-local
- * configuration only and must not be copied into Server environment.
- */
 export async function establishDeviceOnlyExecutionPath({
   api,
   wwc,
@@ -800,6 +1147,7 @@ export async function establishDeviceOnlyExecutionPath({
   seedDeviceProvider = true,
   repositoryScope = null,
   logName = 'device-process.log',
+  agentEnvironment = process.env,
 }) {
   assert.equal(typeof wwc, 'string')
   assert.equal(typeof api?.request, 'function')
@@ -810,9 +1158,12 @@ export async function establishDeviceOnlyExecutionPath({
     destination: join(directory, 'device-provider-trust-root.der'),
   })
   const deviceEnvironment = {
-    ...process.env,
+    ...runtimeChildEnvironment(),
+    ...deviceAgentEnvironment(agentEnvironment),
     WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
-    WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: tlsRoot,
+    WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
+      ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
+      : tlsRoot,
     WWC_WORKER_TLS_ROOT_DER_FILE: tlsRoot,
     ...(helperReleaseManifest === undefined ? {} : {
       WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
@@ -835,11 +1186,18 @@ export async function establishDeviceOnlyExecutionPath({
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId
     deviceEnvironment.WWC_WORKER_MODEL_ID = modelRouteSource.modelId
   }
-  if (deviceSecret !== null && deviceSecret !== undefined) {
-    // Secret stays on the Device process environment only.
-    deviceEnvironment.WWC_DEVICE_PROVIDER_API_KEY = deviceSecret
+  const priorStatus = existsSync(join(deviceData, 'device-client.sqlite3'))
+    ? checkedWwc(wwc, ['device', 'status', '--data-dir', deviceData, '--json'], deviceEnvironment)
+    : null
+  const directoryView = priorStatus?.device?.enrolled ? await api.request('/api/v1/clients') : null
+  if (directoryView) assert.equal(directoryView.status, 200, 'retained connection authorization must be readable')
+  const retainedGrant = directoryView?.json.clients.some(client => client.clientId === priorStatus.device.publicClientId)
+  let previousInstanceId = null
+  if (priorStatus) {
+    const previous = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+    try { previousInstanceId = previous.prepare('SELECT current_instance_id FROM device_identity LIMIT 1').get().current_instance_id }
+    finally { previous.close() }
   }
-
   const deviceLog = openSync(join(directory, logName), 'a', 0o600)
   const device = spawn(wwc, [
     'device', 'serve',
@@ -869,32 +1227,47 @@ export async function establishDeviceOnlyExecutionPath({
     report.publicClientId = status.publicClientId
     steps.push('device.enroll-pair')
 
-    const refreshed = checkedWwc(wwc, [
-      'device', 'refresh-code', '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 250))
-    const connected = await api.request('/api/v1/clients/connections', {
-      method: 'POST',
-      body: {
-        schemaVersion,
-        clientId: status.publicClientId,
-        connectionCode: refreshed.connectCode,
-      },
-    })
-    assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+    const deviceDatabase = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+    try {
+      await waitFor(() => {
+        if (device.exitCode !== null) throw new Error(`Device Client exited before hello acknowledgement (${device.exitCode})`)
+        return deviceHelloAcknowledged(deviceDatabase, previousInstanceId)
+      }, 'Device hello acknowledgement', Math.min(timeoutMillis, 60_000))
+      if (!retainedGrant) {
+        const refreshed = checkedWwc(wwc, [
+          'device', 'refresh-code', '--data-dir', deviceData, '--json',
+        ], deviceEnvironment)
+        await waitFor(() => {
+          if (device.exitCode !== null) throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
+          return deviceConnectCodePublished(deviceDatabase, refreshed.code.connectCodeId)
+        }, 'Device connect code publication acknowledgement', Math.min(timeoutMillis, 60_000))
+        const connected = await api.request('/api/v1/clients/connections', {
+          method: 'POST', body: { schemaVersion, clientId: status.publicClientId, connectionCode: refreshed.connectCode },
+        })
+        assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+      }
+    } finally { deviceDatabase.close() }
     steps.push('client-connect')
 
-    const occupied = await api.request('/api/v1/clients/occupancy', {
-      method: 'POST',
-      body: { schemaVersion, clientId: status.publicClientId },
-    })
-    assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    const occupancy = await waitFor(async () => {
+      const value = await api.request(`/api/v1/clients/${status.publicClientId}/occupancy`)
+      assert.equal(value.status, 200, `Client occupancy lookup failed: ${value.text}`)
+      return value.json.occupancy === 'recovery_pending' ? false : value
+    }, 'Device occupancy recovery', Math.min(timeoutMillis, 60_000))
+    assert.equal(occupancy.status, 200, `Client occupancy lookup failed: ${occupancy.text}`)
+    if (occupancy.json.occupancy === 'available') {
+      const occupied = await api.request('/api/v1/clients/occupancy', {
+        method: 'POST', body: { schemaVersion, clientId: status.publicClientId },
+      })
+      assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    } else {
+      assert.equal(occupancy.json.occupancy, 'occupied', 'retained Device occupancy is not usable')
+      assert.equal(occupancy.json.holderUserId, api.actor.id, 'retained Device occupancy belongs to another user')
+    }
     steps.push('client-occupancy')
 
-    const registered = checkedWwc(wwc, [
-      'repo', 'add', repository, '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
-    const repositoryBindingId = registered.repository.repositoryBindingId
+    const registered = registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment })
+    const repositoryBindingId = registered.repositoryBindingId
     await waitFor(async () => {
       const response = await api.request(`/api/v1/repositories?clientId=${status.publicClientId}`)
       return response.status === 200
@@ -907,19 +1280,27 @@ export async function establishDeviceOnlyExecutionPath({
     let providerApiKey = deviceSecret
     let seededProvider = null
     if (deviceProvider !== null && seedDeviceProvider) {
-      // Production path: Device-local HTTPS Provider + encrypted Web→Device apply.
-      modelServer = await startDeterministicDeviceModelServer({
-        certificatePath,
-        privateKeyPath,
-      }).listen()
+      if (deviceProvider.endpoint) {
+        assert.ok(deviceSecret, 'External Provider requires a Device-local credential')
+      } else {
+        modelServer = await startDeterministicDeviceModelServer({
+          certificatePath,
+          privateKeyPath,
+          repeatToolMarker: deviceProvider.repeatToolMarker,
+          nativeCellScripts: deviceProvider.nativeCellScripts,
+        }).listen()
+      }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`
       seededProvider = await seedDeviceLocalProvider({
         api,
         publicClientId: status.publicClientId,
         providerId: deviceProvider.providerId,
         modelId: deviceProvider.modelId,
-        endpoint: modelServer.endpoint,
+        endpoint: deviceProvider.endpoint ?? modelServer.endpoint,
         apiKey: providerApiKey,
+        protocol: deviceProvider.protocol,
+        customHeaders: deviceProvider.customHeaders,
+        responsesStructuredOutput: deviceProvider.responsesStructuredOutput,
         displayName: deviceProvider.displayName
           ?? 'WinWinCode Device deterministic Provider',
         timeoutMillis,
@@ -933,15 +1314,12 @@ export async function establishDeviceOnlyExecutionPath({
         configured: 'encrypted-web-to-device-apply',
         secretPlacement: 'device-local-only',
       }
-      steps.push('device-local-model-server')
+      if (modelServer !== null) steps.push('device-local-model-server')
       steps.push('device-local-provider-seeded')
     } else if (deviceProvider !== null) {
       report.deviceProvider = {
         providerId: deviceProvider.providerId,
         modelId: deviceProvider.modelId,
-        // Encrypted Web→Device apply is the production path. Acceptance runners
-        // may provision Device-local store state when a live encrypted apply
-        // endpoint is unavailable; secrets never leave Device config.
         configured: 'device-local-unseeded',
       }
       steps.push('device-local-provider')
@@ -950,9 +1328,6 @@ export async function establishDeviceOnlyExecutionPath({
     const modelRoute = modelRouteSource && seededProvider === null
       ? modelRouteSource
       : configuredDeviceModelRoute({
-        // Server route_reference binds the Device Provider credential to the
-        // Device node id from the public Provider snapshot, not the public
-        // client id used by occupancy HTTP paths.
         clientNodeId: seededProvider?.clientNodeId
           ?? status.publicClientId,
         providerId: deviceProvider?.providerId ?? seededProvider?.providerId
@@ -961,6 +1336,55 @@ export async function establishDeviceOnlyExecutionPath({
           ?? 'device-deterministic-model',
       })
     report.modelRoute = modelRoute
+    const launchAnchor = async ({ workRunId = null, productSessionId = null, deliveryId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
+      if (owner !== null) {
+        assert.ok(productSessionId === null || productSessionId === owner,
+          'launch anchor must belong to its ProductSession')
+        productSessionId = owner
+      }
+      const body = {
+        schemaVersion,
+        clientId: status.publicClientId,
+        repositoryBindingId: selectedBindingId,
+        ...(workRunId === null ? {} : { workRunId }),
+      }
+      if (workRunId === null && productSessionId !== null) {
+        assert.ok(repositoryScope !== null,
+          'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
+        body.productSession = {
+          id: productSessionId,
+          scope: {
+            kind: 'repository',
+            organizationId: repositoryScope.organizationId,
+            workspaceId: repositoryScope.workspaceId,
+            projectId: repositoryScope.projectId,
+            repositoryId: repositoryScope.repositoryId,
+          },
+        }
+      }
+      const launched = await waitFor(async () => {
+        const response = await api.request('/api/v1/sessions', {
+          method: 'POST', timeoutMillis: 30_000, body,
+        })
+        return response.json?.error?.code === 'CAPACITY_EXHAUSTED' ? false : response
+      }, 'available Device WorkerSession slot', timeoutMillis)
+      const anchor = deviceTaskLaunchResult({ response: launched, directory,
+        workRunId, deliveryId, publicClientId: status.publicClientId,
+        holderUserId: api.actor.id, repositoryBindingId: selectedBindingId })
+      if (owner !== null) {
+        if (workRunId === null) assert.equal(anchor.productSessionId, owner,
+          'Server launch authority must match the task ProductSession')
+        else assert.equal(anchor.workRunId, workRunId,
+          'Server launch authority must match the Controller WorkRun')
+      }
+      steps.push(anchor.recoveredCompleted === true ? 'recover-completed-anchor'
+        : workRunId !== null || productSessionId === null
+          ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
+      report.workerSessionId = anchor.workerSessionId
+      report.workerId = anchor.workerId
+      report.workerInstanceId = anchor.workerInstanceId
+      return anchor
+    }
 
     return {
       ...report,
@@ -976,77 +1400,36 @@ export async function establishDeviceOnlyExecutionPath({
       repositoryBindingId,
       schemaVersion,
       wwc,
-      /**
-       * Launches one Device WorkerSession as the durable launch anchor.
-       * Chat/cancel need `productSessionId` so Server creates a
-       * WorkerLaunchGrant bound to that ProductSession; StrongFlow passes
-       * `workRunId` for the Controller-dispatched execution job.
-       */
-      async launchAnchor({ workRunId = null, productSessionId = null } = {}) {
-        const body = {
-          schemaVersion,
-          clientId: status.publicClientId,
-          repositoryBindingId,
-          ...(workRunId === null ? {} : { workRunId }),
-        }
-        if (productSessionId !== null) {
-          assert.ok(repositoryScope !== null,
-            'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
-          body.productSession = {
-            id: productSessionId,
-            scope: {
-              kind: 'repository',
-              organizationId: repositoryScope.organizationId,
-              workspaceId: repositoryScope.workspaceId,
-              projectId: repositoryScope.projectId,
-              repositoryId: repositoryScope.repositoryId,
-            },
-          }
-        }
-        const launched = await api.request('/api/v1/sessions', {
-          method: 'POST',
-          timeoutMillis: 30_000,
-          body,
+      launchAnchor,
+      forProductSession(productSessionId, selectedBindingId = repositoryBindingId) {
+        assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+        return Object.freeze({
+          launchAnchor: options => launchAnchor({ ...options, repositoryBindingId: selectedBindingId }, productSessionId),
         })
-        assert.equal(launched.status, 201, `Worker launch failed: ${launched.text}`)
-        steps.push(productSessionId === null
-          ? 'launch-anchor'
-          : `launch-anchor:${productSessionId}`)
-        report.workerSessionId = launched.json.workerSessionId
-        report.workerId = launched.json.workerId
-        report.workerInstanceId = launched.json.workerInstanceId
-        return launched.json
       },
-      stop() {
+      async stop() {
         if (modelServer !== null) {
           try {
             modelServer.close()
           } catch {
-            // Model fixture shutdown is best-effort.
           }
         }
-        stopProcessGroup(device)
+        await stopProcessGroup(device, { deviceData })
       },
     }
   } catch (error) {
-    stopProcessGroup(device)
+    try { await stopProcessGroup(device, { deviceData }) } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Device setup and cleanup failed')
+    }
     throw error
   }
 }
 
-/**
- * Builds a Device-only Server environment for production acceptance.
- * Centralized model startup assumptions are removed on purpose.
- */
 export function deviceOnlyServerEnvironment(overrides = {}) {
   assertServerEnvironmentIsDeviceOnly(overrides)
   return { ...overrides }
 }
 
-/**
- * Captures Device-side Provider secret material for Device configuration only.
- * The returned object is never spread into Server environment maps.
- */
 export function deviceProviderSecretBundle({
   providerId,
   modelId,
@@ -1064,4 +1447,22 @@ export function deviceProviderSecretBundle({
 export function chmodDeviceCredential(path) {
   chmodSync(path, 0o600)
   return path
+}
+
+export function deviceFixtureCodeModeCommand(input) {
+  const name = input.session_id === undefined ? 'exec_command' : 'write_stdin'
+  return `const tool = ALL_TOOLS.find(item => item.name.endsWith(${JSON.stringify(name)}));
+if (!tool) throw new Error('Required command tool is unavailable');
+const result = await tools[tool.name](${JSON.stringify(input)});
+text(result.output);
+if (Number.isInteger(result.session_id)) text('Process running with session ID ' + result.session_id);
+if (Number.isInteger(result.exit_code)) text('Exit code: ' + result.exit_code);`
+}
+
+function codeModeCommandSource(output) {
+  const text = toolOutputText(output)
+  const packet = text?.match(/<core_tool_receipts>(.*?)<\/core_tool_receipts>/su)?.[1]
+  if (packet === undefined) return null
+  const receipts = JSON.parse(packet).receipts
+  return receipts.find(receipt => receipt.tool.endsWith('exec_command'))?.source_id ?? null
 }

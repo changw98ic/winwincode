@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::large_futures)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -166,6 +165,8 @@ struct RealKernelAdapter {
     sessions: HashMap<String, String>,
     runs: HashMap<winwincode_worker::CodexRunKey, CodexThreadId>,
     interrupted: HashSet<String>,
+    deliveries: Vec<DurableExecutionDelivery>,
+    pending_deliveries: HashSet<String>,
     stats: AdapterStats,
 }
 
@@ -176,6 +177,8 @@ impl RealKernelAdapter {
             sessions: HashMap::new(),
             runs: HashMap::new(),
             interrupted: HashSet::new(),
+            deliveries: Vec::new(),
+            pending_deliveries: HashSet::new(),
             stats: AdapterStats::default(),
         }
     }
@@ -198,8 +201,11 @@ impl RealKernelAdapter {
 fn measured_fixture_usage() -> ExecutionOutcomeUsage {
     ExecutionOutcomeUsage {
         runtime_millis: 50,
-        tokens: 2,
-        cost_microunits: 3,
+        tokens: Some(2),
+        known_tokens: 2,
+        accounting_status:
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        cost_microunits: Some(3),
     }
 }
 
@@ -228,6 +234,9 @@ impl CodexCoreAdapter for RealKernelAdapter {
             &capabilities,
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-coder".to_owned(),
                 reasoning: "provider_default".to_owned(),
@@ -300,7 +309,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                 summary: secret_safe_runtime_summary("embedded Codex fixture interrupted")
                     .map_err(|error| error.to_string())?,
                 artifacts: Vec::new(),
-                usage: measured_fixture_usage(),
+                usage: Some(measured_fixture_usage()),
             }));
         }
         let session_id = self.session_id(thread_id)?.to_owned();
@@ -315,7 +324,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                     summary: secret_safe_runtime_summary("embedded Codex fixture completed")
                         .map_err(|error| error.to_string())?,
                     artifacts: Vec::new(),
-                    usage: measured_fixture_usage(),
+                    usage: Some(measured_fixture_usage()),
                 }))
             }
             EventPoll::Event(event) if event.kind == "error" => Ok(CodexPoll::Failed(
@@ -363,16 +372,35 @@ impl CodexCoreAdapter for RealKernelAdapter {
         &mut self,
         message: &ExecutionPortMessage,
     ) -> Result<DurableExecutionDelivery, Self::Error> {
-        Ok(fixture_delivery(message))
+        let delivery = fixture_delivery(message);
+        if let Some(existing) = self
+            .deliveries
+            .iter()
+            .find(|existing| existing.delivery_id == delivery.delivery_id)
+        {
+            if existing.message != delivery.message {
+                return Err("changed retained fixture frame".into());
+            }
+        } else {
+            self.deliveries.push(delivery.clone());
+        }
+        self.pending_deliveries.insert(delivery.delivery_id.clone());
+        Ok(delivery)
     }
 
     fn pending_execution_deliveries(
         &mut self,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
-        Ok(Vec::new())
+        Ok(self
+            .deliveries
+            .iter()
+            .filter(|delivery| self.pending_deliveries.contains(&delivery.delivery_id))
+            .cloned()
+            .collect())
     }
 
-    fn record_execution_delivery_sent(&mut self, _delivery_id: &str) -> Result<(), Self::Error> {
+    fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error> {
+        self.pending_deliveries.remove(delivery_id);
         Ok(())
     }
 
@@ -439,7 +467,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
         Ok(Vec::new())
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &winwincode_execution_port::generated::JobOutcomeMessage,
@@ -575,9 +603,9 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
             goal: goal.to_owned(),
             job_id: lease.job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T08:04:30.000Z".to_owned()),
+                deadline_at: Some(Instant("2027-01-15T08:04:30.000Z".to_owned())),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
+                max_runtime_seconds: Some(240),
             },
             payload_digest: Sha256Digest(format!(
                 "sha256:{}",
@@ -600,6 +628,7 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
         replacement_authority: None,
         request_id: RequestId(id("req", suffix)),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: now(),
     }
 }
@@ -725,6 +754,10 @@ async fn run_real_local_codex_fixture() {
         )
         .await
         .expect("classify exact replay");
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("drive retained duplicate dispatch result");
 
     let cancelling = dispatch('B', "Wait for deterministic cancellation.");
     worker

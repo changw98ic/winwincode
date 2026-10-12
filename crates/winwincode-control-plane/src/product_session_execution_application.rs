@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production bridge from canonical Worker/model facts to `ProductSession` Chat.
-
 use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -33,7 +31,6 @@ use winwincode_storage::{
 
 use crate::delivery_transaction::load_durable_execution_job;
 use crate::durable_execution_port::product_session_outcome_output;
-use crate::execution_port_service::lease_stamp;
 use crate::{
     AppendAssistantMessageCommand, ChatInteractionService, ChatInteractionServiceError,
     ContinueProductSessionCommand, DurableExecutionPortContext, DurableExecutionPortDelegate,
@@ -51,6 +48,7 @@ const SYSTEM_ACTOR_ID: &str = "sys_00000000000000000000000001";
 const BINDING_STREAM_NAMESPACE: &[u8] = b"winwincode.product-session-worker-binding.v1";
 const BINDING_RECEIPT_NAMESPACE: &[u8] = b"binding-receipt";
 const MODEL_BINDING_RECEIPT_NAMESPACE: &[u8] = b"model-binding-receipt";
+const MODEL_FRAME_AUTHORITY_RECEIPT_NAMESPACE: &[u8] = b"chat-model-frame-authority";
 const MODEL_FRAME_RECEIPT_NAMESPACE: &[u8] = b"model-frame-receipt";
 const MODEL_FRAME_SOURCE_RECEIPT_NAMESPACE: &[u8] = b"model-frame-source-receipt";
 const MODEL_FRAME_PROJECTED_RECEIPT_NAMESPACE: &[u8] = b"model-frame-projected-receipt";
@@ -65,7 +63,6 @@ const SLOT_CANCEL_RECEIPT_NAMESPACE: &[u8] = b"slot-cancel-receipt";
 const SLOT_CLOSE_RECEIPT_NAMESPACE: &[u8] = b"slot-close-receipt";
 const EXECUTION_TERMINAL_RECEIPT_NAMESPACE: &[u8] = b"execution-terminal-receipt";
 
-/// Secret-free `ProductSession` execution bridge failure.
 #[derive(Debug)]
 pub enum ProductSessionExecutionApplicationError {
     ProductSession(ProductSessionServiceError),
@@ -81,8 +78,6 @@ impl fmt::Display for ProductSessionExecutionApplicationError {
 
 impl std::error::Error for ProductSessionExecutionApplicationError {}
 
-/// Decorates the one model/interaction delegate with `ProductSession` binding,
-/// public-text, and terminal ownership.
 pub struct ProductSessionExecutionApplication<Downstream> {
     downstream: Downstream,
     action_issuer: Option<ActionEnforcementIssuer>,
@@ -97,10 +92,6 @@ impl<Downstream> ProductSessionExecutionApplication<Downstream> {
         }
     }
 
-    /// Installs the Control Plane-owned signer used for Worker action
-    /// enforcement receipts. The signer is kept beside the existing
-    /// downstream model delegate, so action requests and model exchanges use
-    /// the same durable ingress and application state.
     #[must_use]
     pub const fn new_with_action_issuer(
         downstream: Downstream,
@@ -726,8 +717,6 @@ where
                         acknowledgement,
                     )]);
                 }
-                // The common ingress already checks the exact dispatch identity.
-                // Cancellation ACK confirms delivery; JobOutcome owns terminal settlement.
                 if matches!(message, ExecutionPortMessage::JobCancelAckMessage(_)) {
                     return Ok(Vec::new());
                 }
@@ -743,18 +732,18 @@ where
                     if chunk.session_identity.work_run_id.is_some() || chunk.error.is_some() {
                         return Err(DurableExecutionPortError::UnsupportedMessage);
                     }
-                    // Validate the public-only payload before it can bind or mutate a session.
                     let canonical = winwincode_provider::public_model_chunk(chunk)
                         .map_err(|_| storage_ingress("invalid public model frame"))?;
                     if canonical.payload != chunk.payload {
                         return Err(storage_ingress("non-public model payload"));
                     }
-                    attach_model_exchange(&mut context, dispatch, chunk)?;
-                    project_verified_product_session_chunks(
-                        context.storage(),
-                        std::slice::from_ref(chunk),
-                    )
-                    .map_err(application_ingress)?;
+                    if prepare_public_model_frame(&mut context, dispatch, chunk)? {
+                        project_verified_product_session_chunks(
+                            context.storage(),
+                            std::slice::from_ref(chunk),
+                        )
+                        .map_err(application_ingress)?;
+                    }
                     return Ok(vec![ExecutionPortMessage::ModelAckMessage(
                         ModelAckMessage {
                             ack_sequence: winwincode_domain::ExecutionAckSequence(chunk.sequence.0),
@@ -813,14 +802,9 @@ fn accept_approval_request(
     dispatch: &ExecutionDispatchAuthority,
     request: &ApprovalRequestMessage,
 ) -> Result<(), DurableExecutionPortError> {
-    let authority = product_interaction_authority(
-        context,
-        dispatch,
-        &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
-    )?;
     let trusted_now = context.server_time().clone();
     let public_scope = public_repository_scope(context.repository_scope());
-    register_core_approval(context, dispatch, request, authority)?;
+    register_core_approval(context, dispatch, request)?;
     ChatInteractionService::new(context.storage())
         .record_approval_at(
             &RecordApprovalInteractionCommand {
@@ -833,26 +817,99 @@ fn accept_approval_request(
         .map_err(interaction_ingress)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Chat and WorkRun approvals converge on one sealed Gate registration"
+)]
 fn register_core_approval(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     request: &ApprovalRequestMessage,
-    authority: WorkerInteractionAuthority,
 ) -> Result<(), DurableExecutionPortError> {
     use crate::{
         GateDecisionFact, GateInteractionActor, GateInteractionAuthority,
         GateInteractionCommandContext, GateInteractionService, GateInteractionSubject,
         RegisterGateInteractionCommand,
     };
-    let (durable, _) = load_durable_execution_job(context.storage(), &request.lease.job_id)
+    let (durable, job) = load_durable_execution_job(context.storage(), &request.lease.job_id)
         .map_err(DurableExecutionPortError::Storage)?;
-    let actor =
+    let mut actor =
         winwincode_storage::public_actor_from_receipt_key(durable.receipt_identity().actor_key())
             .map_err(DurableExecutionPortError::Storage)?;
+    let (
+        execution_scope,
+        worker_pool_id,
+        product_session_revision,
+        job_revision,
+        worker_slot_revision,
+        work_scope,
+    ) = match &job.scope {
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            let authority = product_interaction_authority(
+                context,
+                dispatch,
+                &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
+            )?;
+            (
+                authority.execution_scope,
+                authority.worker_pool_id,
+                Some(authority.product_session_revision),
+                authority.job_revision,
+                authority.worker_slot_revision,
+                None,
+            )
+        }
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            let now = context.server_time().clone();
+            let current = crate::execution_port_service::load_running_runtime_authority(
+                context.storage(),
+                &job,
+                &now,
+            )
+            .map_err(|_| storage_ingress("WorkRun approval binding is invalid"))?;
+            crate::durable_execution_port::require_exact_dispatch_message(
+                &request.lease,
+                &request.worker_session_id,
+                &request.session_identity.worker_session_id,
+                dispatch,
+                context.storage(),
+            )?;
+            if current.session_identity != request.session_identity
+                || current.worker_session_id != request.worker_session_id
+                || request.worker_session_id != *dispatch.worker_session_id()
+                || now.0 < request.lease.issued_at.0
+            {
+                return Err(storage_ingress("WorkRun approval identity differs"));
+            }
+            let reservation = context
+                .storage()
+                .execution_admission()
+                .map_err(|_| storage_ingress("WorkRun admission is unavailable"))?
+                .load_reservation_by_job(&job.job_id)
+                .map_err(|_| storage_ingress("WorkRun admission is invalid"))?
+                .ok_or_else(|| storage_ingress("WorkRun admission is missing"))?;
+            let slot = context
+                .storage()
+                .worker_session_slots()
+                .map_err(worker_slot_storage)?
+                .load(&request.worker_session_id)
+                .map_err(worker_slot_storage)?
+                .ok_or_else(|| storage_ingress("WorkRun Worker slot is missing"))?;
+            actor = PublicEventActor::User {
+                id: reservation.user_id.clone(),
+            };
+            (
+                reservation.scope,
+                reservation.worker_pool_id,
+                None,
+                reservation.revision,
+                slot.revision,
+                Some(scope),
+            )
+        }
+    };
     let PublicEventActor::User { id } = &actor else {
-        return Err(storage_ingress(
-            "Core approval has no authenticated Chat owner",
-        ));
+        return Err(storage_ingress("Core approval has no authenticated owner"));
     };
     let public_scope = public_repository_scope(context.repository_scope());
     let receipt_identity =
@@ -878,16 +935,17 @@ fn register_core_approval(
             },
             subject: GateInteractionSubject::Approval(request.approval_id.clone()),
             authority: GateInteractionAuthority {
-                execution_scope: authority.execution_scope,
-                worker_pool_id: authority.worker_pool_id,
-                product_session_revision: authority.product_session_revision,
-                work_contract_id: None,
-                work_contract_revision: None,
-                work_item_id: None,
-                work_item_revision: None,
-                work_run_id: None,
-                job_revision: authority.job_revision,
-                worker_slot_revision: authority.worker_slot_revision,
+                execution_scope,
+                worker_pool_id,
+                product_session_revision,
+                work_contract_id: work_scope.map(|scope| scope.work_contract_id.clone()),
+                work_contract_revision: work_scope
+                    .map(|scope| scope.work_contract_revision.clone()),
+                work_item_id: work_scope.map(|scope| scope.work_item_id.clone()),
+                work_item_revision: work_scope.map(|scope| scope.work_item_revision.clone()),
+                work_run_id: work_scope.map(|scope| scope.work_run_id.clone()),
+                job_revision,
+                worker_slot_revision,
                 runtime,
                 lease_expires_at: request.lease.expires_at.clone(),
                 gate,
@@ -925,13 +983,20 @@ fn product_interaction_authority(
             "Worker interaction belongs to another Job scope",
         ));
     };
+    let now = context.server_time().clone();
+    crate::durable_execution_port::require_exact_dispatch_message(
+        lease,
+        worker_session_id,
+        &session_identity.worker_session_id,
+        dispatch,
+        context.storage(),
+    )?;
     if session_identity.work_run_id.is_some()
         || session_identity.product_session_id != job_scope.product_session_id
         || worker_session_id != dispatch.worker_session_id()
         || session_identity.worker_session_id != *worker_session_id
-        || lease != &lease_stamp(dispatch.lease())
-        || context.server_time().0 < lease.issued_at.0
-        || context.server_time().0 >= lease.expires_at.0
+        || now.0 < lease.issued_at.0
+        || now.0 >= dispatch.lease().expires_at.0
     {
         return Err(storage_ingress(
             "Worker interaction identity differs from its accepted dispatch",
@@ -1132,7 +1197,7 @@ fn accept_worker_binding(
         }
         return Ok(());
     }
-    context.validate_first_seen_dispatch(dispatch)?;
+    context.validate_dispatch_observation(dispatch)?;
     let staged = staged_binding(context, job, dispatch, message)?;
     let current = context
         .storage()
@@ -1166,11 +1231,12 @@ fn accept_worker_binding(
     Ok(())
 }
 
-fn attach_model_exchange(
+#[allow(clippy::too_many_lines)]
+fn prepare_public_model_frame(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     message: &ModelChunkMessage,
-) -> Result<(), DurableExecutionPortError> {
+) -> Result<bool, DurableExecutionPortError> {
     let repository_scope = context.repository_scope().clone();
     let scope_key =
         repository_scope_key(&repository_scope).map_err(DurableExecutionPortError::Storage)?;
@@ -1178,6 +1244,8 @@ fn attach_model_exchange(
     let staged = load_staged_binding(context.storage(), &stream_id)?;
     if staged.runtime_authority.job_id != message.lease.job_id
         || staged.runtime_authority.worker_session_id != message.worker_session_id
+        || staged.runtime_authority.worker_session_id != message.session_identity.worker_session_id
+        || staged.runtime_authority.codex_thread_id != message.session_identity.codex_thread_id
         || staged.product_session_id != message.session_identity.product_session_id
         || message.session_identity.work_run_id.is_some()
     {
@@ -1185,6 +1253,8 @@ fn attach_model_exchange(
             "public model frame differs from staged Chat binding",
         ));
     }
+    public_text_delta(message).map_err(application_ingress)?;
+    retain_chat_model_frame_authority(context, dispatch, message)?;
     let record = ProductSessionService::new(context.storage())
         .get(&scope_key, &staged.product_session_id)
         .map_err(|error| product_session_ingress(&error))?
@@ -1209,6 +1279,25 @@ fn attach_model_exchange(
         staged.execution_job_id.clone(),
     )
     .map_err(|_| storage_ingress("staged Chat binding identity is invalid"))?;
+    let successor_binding = record.bindings().iter().find(|binding| {
+        binding.binding().identity() == &binding_identity
+            && binding.slot().authority == staged.runtime_authority
+            && binding.execution_scope() == &staged.execution_scope
+            && binding.worker_pool_id() == &staged.worker_pool_id
+    });
+    if record.session().state() == winwincode_session::ProductSessionState::Cancelled {
+        if successor_binding.is_none() {
+            return Err(storage_ingress(
+                "cancelled Chat model frame differs from the bound execution",
+            ));
+        }
+        return Ok(false);
+    }
+    if successor_binding
+        .is_some_and(|binding| binding.includes_model_exchange(&message.model_exchange_id))
+    {
+        return Ok(true);
+    }
     let replacement = context
         .storage()
         .load_execution_scope_replacement_authority(&message.lease.job_id)
@@ -1216,7 +1305,13 @@ fn attach_model_exchange(
         .filter(|authority| {
             i64::try_from(authority.replacement_attempt()).ok() == Some(message.lease.attempt)
         })
-        .filter(|authority| authority.predecessor_slot().is_some());
+        .filter(|authority| {
+            successor_binding.is_none()
+                && record.bindings().iter().any(|binding| {
+                    binding.binding().identity() == &binding_identity
+                        && authority.predecessor_slot() == Some(&binding.slot().authority)
+                })
+        });
     if let Some(replacement) = replacement {
         let command = ReplaceProductSessionExecutionBindingCommand {
             context: command_context,
@@ -1232,7 +1327,6 @@ fn attach_model_exchange(
             .replay_replace_execution_binding(&command)
             .map_err(|error| product_session_ingress(&error))?;
         if replay.is_none() {
-            context.validate_first_seen_dispatch(dispatch)?;
             ProductSessionService::new(context.storage())
                 .replace_execution_binding(&command)
                 .map_err(|error| product_session_ingress(&error))?;
@@ -1251,7 +1345,6 @@ fn attach_model_exchange(
             .replay_continue_session(&command)
             .map_err(|error| product_session_ingress(&error))?;
         if replay.is_none() {
-            context.validate_first_seen_dispatch(dispatch)?;
             let already_bound = record
                 .bindings()
                 .iter()
@@ -1265,7 +1358,90 @@ fn attach_model_exchange(
             .map_err(|error| product_session_ingress(&error))?;
         }
     }
+    Ok(true)
+}
+
+fn retain_chat_model_frame_authority(
+    context: &mut DurableExecutionPortContext<'_>,
+    dispatch: &ExecutionDispatchAuthority,
+    message: &ModelChunkMessage,
+) -> Result<(), DurableExecutionPortError> {
+    let request_id = chat_model_frame_request_id(message)?;
+    let identity = internal_receipt_identity(context.repository_scope(), &request_id)?;
+    let digest = json_digest(&("winwincode.chat-model-frame-authority.v1", message))?;
+    let stream_id = format!("chat-model-frame-authority:{}", request_id.0);
+    let scope = context.repository_scope().clone();
+    if retained_chat_model_frame(context.storage(), &scope, message)? {
+        return Ok(());
+    }
+    let accepted = context
+        .storage()
+        .execution_registry()
+        .and_then(|registry| registry.load_accepted_lease_for_period(dispatch.lease()))
+        .map_err(DurableExecutionPortError::Storage)?;
+    if accepted.is_none() {
+        return Err(storage_ingress(
+            "Chat model frame requires an accepted dispatch identity",
+        ));
+    }
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "protocol":"winwincode.chat-model-frame-authority.v1",
+        "messageId":message.message_id,"modelExchangeId":message.model_exchange_id,
+        "lease":message.lease,"sequence":message.sequence,"frameDigest":digest,
+        "frame":message,
+    }))
+    .map_err(|_| storage_ingress("Chat model frame cannot encode"))?;
+    context
+        .storage()
+        .commit(&StateCommit::new(
+            identity,
+            digest,
+            stream_id,
+            0,
+            bytes,
+            vec![internal_execution_event(&request_id)],
+        ))
+        .map_err(DurableExecutionPortError::Storage)?;
     Ok(())
+}
+
+fn chat_model_frame_request_id(
+    message: &ModelChunkMessage,
+) -> Result<RequestId, DurableExecutionPortError> {
+    let key = serde_json::to_vec(&(
+        &message.lease.job_id,
+        message.lease.attempt,
+        &message.model_exchange_id,
+        message.sequence.0,
+    ))
+    .map_err(|_| storage_ingress("Chat model frame identity cannot encode"))?;
+    Ok(derived_request_id(
+        MODEL_FRAME_AUTHORITY_RECEIPT_NAMESPACE,
+        &key,
+    ))
+}
+
+pub(crate) fn retained_chat_model_frame(
+    storage: &SqliteStorage,
+    scope: &RepositoryScope,
+    message: &ModelChunkMessage,
+) -> Result<bool, DurableExecutionPortError> {
+    let request_id = chat_model_frame_request_id(message)?;
+    let identity = internal_receipt_identity(scope, &request_id)?;
+    let digest = json_digest(&("winwincode.chat-model-frame-authority.v1", message))?;
+    let stream_id = format!("chat-model-frame-authority:{}", request_id.0);
+    if let Some(receipt) = storage
+        .load_receipt(&identity, &digest)
+        .map_err(DurableExecutionPortError::Storage)?
+    {
+        if receipt.stream_id != stream_id {
+            return Err(storage_ingress(
+                "Chat model frame authority receipt differs",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1370,7 +1546,7 @@ fn accept_terminal(
         .map_err(|error| product_session_ingress(&error))?;
     let replayed = replay.is_some();
     if !replayed {
-        context.validate_first_seen_dispatch(dispatch)?;
+        context.validate_dispatch_observation(dispatch)?;
         reconcile_product_session_model_exchange(
             context.storage(),
             &job.job_id,
@@ -1425,7 +1601,7 @@ fn accept_unstarted_terminal(
         ));
     }
     if !already_terminal {
-        context.validate_first_seen_dispatch(dispatch)?;
+        context.validate_dispatch_observation(dispatch)?;
     }
     let command_context = internal_context(
         context.repository_scope(),
@@ -1492,6 +1668,7 @@ pub(crate) fn finish_execution_resources(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn finish_local_admission(
     storage: &mut SqliteStorage,
     message: &JobOutcomeMessage,
@@ -1504,70 +1681,111 @@ fn finish_local_admission(
         .load_reservation_by_job(&message.lease.job_id)
         .map_err(|_| storage_ingress("local execution admission cannot be read"))?
         .ok_or_else(|| storage_ingress("local execution admission is missing"))?;
-    match message.outcome.status {
-        ExecutionOutcomeStatus::Succeeded => {
-            if current.state == ExecutionReservationState::Settled {
-                return Ok(());
-            }
-            let usage = message
-                .outcome
-                .usage
-                .as_ref()
-                .ok_or_else(|| storage_ingress("successful local outcome has no Usage"))?;
-            storage
-                .execution_admission()
-                .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
-                .settle(&ExecutionReservationSettlement {
-                    scope: execution_scope.clone(),
-                    worker_pool_id: worker_pool_id.clone(),
-                    job_id: message.lease.job_id.clone(),
-                    request_id: derived_request_id(
-                        b"local-admission-settle",
-                        message.message_id.0.as_bytes(),
-                    ),
-                    expected_revision: current.revision,
-                    actual_tokens: u64::try_from(usage.tokens)
-                        .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
-                    actual_cost_microunits: u64::try_from(usage.cost_microunits)
-                        .map_err(|_| storage_ingress("local Usage cost is invalid"))?,
-                    actual_runtime_millis: u64::try_from(usage.runtime_millis)
-                        .map_err(|_| storage_ingress("local Usage runtime is invalid"))?,
-                    completed_at: message.outcome.finished_at.clone(),
-                })
-                .map_err(|_| storage_ingress("local execution admission cannot settle"))?;
+    if message.outcome.usage.is_some()
+        || message.outcome.status == ExecutionOutcomeStatus::Succeeded
+    {
+        if current.state == ExecutionReservationState::Settled {
+            return Ok(());
         }
-        ExecutionOutcomeStatus::Cancelled
-        | ExecutionOutcomeStatus::Failed
-        | ExecutionOutcomeStatus::InfrastructureError => {
-            if current.state == ExecutionReservationState::Released {
-                return Ok(());
-            }
+        let usage = message
+            .outcome
+            .usage
+            .as_ref()
+            .ok_or_else(|| storage_ingress("successful local outcome has no Usage"))?;
+        if usage.tokens.is_none() {
             storage
                 .execution_admission()
-                .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
-                .release(&ExecutionReservationRelease {
+                .map_err(|_| storage_ingress("local admission unavailable"))?
+                .release_with_unknown_usage(
+                    &ExecutionReservationRelease {
+                        scope: execution_scope.clone(),
+                        worker_pool_id: worker_pool_id.clone(),
+                        job_id: message.lease.job_id.clone(),
+                        request_id: derived_request_id(
+                            b"local-admission-unknown",
+                            message.message_id.0.as_bytes(),
+                        ),
+                        expected_revision: if current.state == ExecutionReservationState::Released {
+                            current
+                                .revision
+                                .checked_sub(1)
+                                .ok_or_else(|| storage_ingress("invalid terminal revision"))?
+                        } else {
+                            current.revision
+                        },
+                        reason: ExecutionReservationReleaseReason::Failed,
+                        released_at: message.outcome.finished_at.clone(),
+                    },
+                    usage,
+                )
+                .map_err(|_| storage_ingress("local unknown accounting failed"))?;
+            return Ok(());
+        }
+        storage
+            .execution_admission()
+            .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
+            .settle(&ExecutionReservationSettlement {
+                scope: execution_scope.clone(),
+                worker_pool_id: worker_pool_id.clone(),
+                job_id: message.lease.job_id.clone(),
+                request_id: derived_request_id(
+                    b"local-admission-settle",
+                    message.message_id.0.as_bytes(),
+                ),
+                expected_revision: current.revision,
+                actual_tokens: u64::try_from(
+                    usage
+                        .tokens
+                        .ok_or_else(|| storage_ingress("missing token total"))?,
+                )
+                .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
+                actual_cost_microunits: usage
+                    .cost_microunits
+                    .map(u64::try_from)
+                    .transpose()
+                    .map_err(|_| storage_ingress("local Usage cost is invalid"))?,
+                actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                    .map_err(|_| storage_ingress("local Usage runtime is invalid"))?,
+                completed_at: message.outcome.finished_at.clone(),
+            })
+            .map_err(|_| storage_ingress("local execution admission cannot settle"))?;
+    } else {
+        let runtime = crate::worker_execution_lifecycle::trusted_execution_runtime_millis(
+            &current,
+            &message.outcome.finished_at,
+        )
+        .map_err(|_| storage_ingress("local runtime authority unavailable"))?;
+        let expected_revision = if current.state == ExecutionReservationState::Released {
+            current
+                .revision
+                .checked_sub(1)
+                .ok_or_else(|| storage_ingress("invalid terminal revision"))?
+        } else {
+            current.revision
+        };
+        storage
+            .execution_admission()
+            .map_err(|_| storage_ingress("local admission unavailable"))?
+            .release_with_unknown_usage(
+                &ExecutionReservationRelease {
                     scope: execution_scope.clone(),
                     worker_pool_id: worker_pool_id.clone(),
                     job_id: message.lease.job_id.clone(),
                     request_id: derived_request_id(
-                        b"local-admission-release",
+                        b"local-admission-unknown",
                         message.message_id.0.as_bytes(),
                     ),
-                    expected_revision: current.revision,
-                    reason: match message.outcome.status {
-                        ExecutionOutcomeStatus::Cancelled => {
-                            ExecutionReservationReleaseReason::Cancelled
-                        }
-                        ExecutionOutcomeStatus::Failed
-                        | ExecutionOutcomeStatus::InfrastructureError => {
-                            ExecutionReservationReleaseReason::Failed
-                        }
-                        ExecutionOutcomeStatus::Succeeded => unreachable!(),
+                    expected_revision,
+                    reason: if message.outcome.status == ExecutionOutcomeStatus::Cancelled {
+                        ExecutionReservationReleaseReason::Cancelled
+                    } else {
+                        ExecutionReservationReleaseReason::Failed
                     },
                     released_at: message.outcome.finished_at.clone(),
-                })
-                .map_err(|_| storage_ingress("local execution admission cannot release"))?;
-        }
+                },
+                &winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(runtime, 0),
+            )
+            .map_err(|_| storage_ingress("local accounting cannot release"))?;
     }
     Ok(())
 }
@@ -2214,7 +2432,6 @@ fn json_digest<T: Serialize>(value: &T) -> Result<Sha256Digest, DurableExecution
         .map_err(|_| storage_ingress("binding digest encode failed"))
 }
 
-// Worker message sequences are local to one process; durable receipts include the execution lease.
 fn execution_message_request_id(
     namespace: &[u8],
     lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,

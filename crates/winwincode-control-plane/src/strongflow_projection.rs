@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed, bounded `StrongFlow` application reads.
-//!
-//! The transport-facing seam accepts only generated query envelopes. All
-//! source selection and projection composition remains inside the Control
-//! Plane.
-
 mod application;
 mod candidate_history;
 mod candidate_review;
+mod core_tool_facts;
+mod core_tool_relations;
 mod evidence_detail;
 mod mapping;
 mod production_sources;
@@ -46,7 +42,6 @@ pub use sources::{
     TrustedRuntimeProjectionReadCutReader,
 };
 
-/// Stable failure classes for typed `StrongFlow` reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StrongFlowProjectionError {
     InvalidRequest(String),
@@ -65,7 +60,6 @@ impl StrongFlowProjectionError {
         Self::InvalidRequest(message.into())
     }
 
-    /// Returns the generated public error code without exposing source details.
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
         match self {
@@ -81,7 +75,6 @@ impl StrongFlowProjectionError {
         }
     }
 
-    /// Returns a redacted, stable explanation suitable for an API error.
     #[must_use]
     pub fn message(&self) -> &str {
         match self {
@@ -114,112 +107,52 @@ impl From<winwincode_delivery::projection::ProjectionError> for StrongFlowProjec
     }
 }
 
-/// Generated-query application port used by future HTTP and WebSocket adapters.
 pub trait StrongFlowProjectionQueryPort {
-    /// Returns one current bounded `StrongFlow` detail read.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when scope, revision, cursor, or trusted sources are not exact.
     fn delivery_get(
         &self,
         query: &DeliveryGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one runtime projection at the exact bounded cut named by the query.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on a foreign, stale, gapped, or unavailable source cut.
     fn runtime_projection_get(
         &self,
         query: &RuntimeProjectionGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns the exact `WorkRun` aggregate at one delivery read cut.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on a foreign, stale, gapped, or unavailable source cut.
     fn workrun_get(
         &self,
         query: &WorkRunGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one stable page of exact current-Candidate changed files.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on foreign scope/cursor/Candidate bindings or unavailable
-    /// trusted Git facts.
     fn candidate_files_list(
         &self,
         query: &CandidateFilesListQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one bounded byte range from one trusted current-Candidate file
-    /// diff.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on path traversal, over-limit ranges, foreign bindings, or
-    /// unavailable trusted Git facts.
     fn candidate_diff_get(
         &self,
         query: &CandidateDiffGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one bounded byte range from the exact current-Candidate file.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on path traversal, over-limit ranges, foreign/stale
-    /// Candidate bindings, deleted/non-blob paths, or unavailable Git facts.
     fn candidate_file_content_get(
         &self,
         query: &CandidateFileContentGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns a stable page of Candidates observed through one exact delivery
-    /// journal cut, with availability derived from durable Git retention.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on a foreign cursor, a broken journal, or moved/tampered
-    /// retention authority.
     fn candidate_history_list(
         &self,
         query: &CandidateHistoryListQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns original Candidate-bound Verdict/Evidence facts for display.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on a foreign/stale Candidate identity or unavailable
-    /// append-only history and retention facts.
     fn candidate_historical_review_get(
         &self,
         query: &CandidateHistoricalReviewGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one exact Evidence detail rebuilt from its accepted source.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on foreign or stale delivery, Candidate, `WorkRun`,
-    /// `SessionBinding`, Evidence, or source facts.
     fn evidence_get(
         &self,
         query: &EvidenceGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns one bounded Evidence Artifact range, when an exact producer link exists.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on unsupported ranges and foreign, stale, or tampered
-    /// Evidence/Artifact authority.
     fn evidence_artifact_content_get(
         &self,
         query: &EvidenceArtifactContentGetQuery,
@@ -476,7 +409,7 @@ fn workrun_device_bindings(
     runs.iter()
         .filter_map(|run| {
             storage
-                .load_work_run_device_binding_facts(&run.execution_job_id)
+                .load_device_binding_facts_for_work_run(&run.execution_job_id, &run.id)
                 .map(|facts| facts.map(|facts| (run, facts)))
                 .transpose()
         })

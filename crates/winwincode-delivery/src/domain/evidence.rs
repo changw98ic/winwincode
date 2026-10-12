@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact Evidence source resolution for the current frozen candidate.
-//!
-//! The accepted runtime-ledger source remains internal until its Phase 4
-//! authoritative adapter exists.
-//!
-//! ```compile_fail
-//! use winwincode_delivery::domain::evidence::AcceptedRuntimeSourceFact;
-//! ```
-
 use std::{error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
@@ -23,8 +14,8 @@ use super::verification::AcceptedVerificationJobOutcomeFact;
 use super::{
     CandidatePathState, Delivery, DeliverySpecId, DeliveryValidationError, FrozenDeliveryCandidate,
     MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, RepositoryRef, SessionBinding, SessionBindingId,
-    ValidatedGitSnapshotFact, assert_frozen_candidate_current, bounded_text, portable_identifier,
-    positive, safe_non_negative, schema_version,
+    assert_frozen_candidate_current, bounded_text, portable_identifier, positive,
+    safe_non_negative, schema_version,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,18 +48,14 @@ pub struct EvidenceRef {
     pub delivery_spec_revision: u64,
     pub work_run_id: WorkRunId,
     pub session_binding_id: SessionBindingId,
-    pub candidate_ref: String,
+    pub snapshot_id: winwincode_domain::SnapshotId,
+    pub candidate_id: winwincode_domain::CandidateId,
     #[serde(rename = "type")]
     pub evidence_type: EvidenceRefType,
     pub source_ref: String,
     pub created_at_millis: u64,
 }
 
-/// Outcome classified from one already persisted source fact.
-///
-/// This value is sealed inside [`ResolvedDeliveryEvidence`]. API callers do not
-/// submit it to verdict computation. Read-only projections may expose this
-/// closed classification after rebuilding the same accepted source authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedEvidenceOutcome {
     Observed,
@@ -80,12 +67,9 @@ pub enum VerifiedEvidenceOutcome {
     Cancelled,
 }
 
-/// Sealed checkout attestation rebuilt by the Worker/Artifact adapter.
-///
-/// Fields are private and this type has no public constructor or deserializer.
-/// Until its owning adapter lands, only this module's tests can construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedCheckoutAttestationFact {
+    snapshot_id: winwincode_domain::SnapshotId,
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
     work_run_id: WorkRunId,
@@ -102,12 +86,9 @@ pub(crate) struct ValidatedCheckoutAttestationFact {
     checkout_tree_id: String,
 }
 
-/// One source rebuilt from the accepted append-only runtime ledger.
-///
-/// This sealed fact stores identity, ordering, and direct outcome only. It never
-/// copies a log body, command output, model response, or complete `RuntimeEvent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AcceptedRuntimeSourceFact {
+    snapshot_id: winwincode_domain::SnapshotId,
     source_event_id: ExecutionEventId,
     evidence_type: EvidenceRefType,
     product_session_id: ProductSessionId,
@@ -130,9 +111,11 @@ pub(crate) struct AcceptedRuntimeSourceFact {
 
 pub(crate) fn checkout_attestation_from_snapshot(
     terminal: &AcceptedVerificationJobOutcomeFact,
-    snapshot: &ValidatedGitSnapshotFact,
+    snapshot: &winwincode_domain::CanonicalSnapshot,
+    repository: &RepositoryRef,
 ) -> ValidatedCheckoutAttestationFact {
     ValidatedCheckoutAttestationFact {
+        snapshot_id: snapshot.snapshot_id().clone(),
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
         work_run_id: terminal.work_run_id().clone(),
@@ -144,9 +127,9 @@ pub(crate) fn checkout_attestation_from_snapshot(
         worker_instance_id: terminal.worker_instance_id().clone(),
         worker_session_id: terminal.worker_session_id().clone(),
         codex_thread_id: terminal.codex_thread_id().clone(),
-        repository: snapshot.repository().clone(),
-        checkout_commit_id: snapshot.candidate_commit_id().into(),
-        checkout_tree_id: snapshot.candidate_tree_id().into(),
+        repository: repository.clone(),
+        checkout_commit_id: snapshot.as_contract().candidate_commit_id.0.clone(),
+        checkout_tree_id: snapshot.as_contract().candidate_tree_id.0.clone(),
     }
 }
 
@@ -162,6 +145,7 @@ pub(crate) fn accepted_runtime_source(
     command_digest: Sha256Digest,
 ) -> AcceptedRuntimeSourceFact {
     AcceptedRuntimeSourceFact {
+        snapshot_id: terminal.snapshot_id().clone(),
         source_event_id,
         evidence_type,
         product_session_id: terminal.product_session_id().clone(),
@@ -183,11 +167,9 @@ pub(crate) fn accepted_runtime_source(
     }
 }
 
-/// Fenced execution identity shared by the terminal outcome, source ledger,
-/// and checkout attestation. Comparing this value in one place prevents one
-/// boundary from accidentally omitting an identity component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct FencedExecutionIdentity {
+    snapshot_id: winwincode_domain::SnapshotId,
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
     work_run_id: WorkRunId,
@@ -201,8 +183,6 @@ struct FencedExecutionIdentity {
     codex_thread_id: CodexThreadId,
 }
 
-/// Selects one bounded source. Runtime identity and Git references are derived
-/// by the resolver rather than supplied as canonical Evidence fields.
 #[cfg_attr(
     not(test),
     expect(
@@ -228,6 +208,7 @@ pub(crate) enum EvidenceSource<'facts> {
 
 #[derive(Debug)]
 pub(crate) struct ResolveDeliveryEvidenceInput<'facts> {
+    pub snapshot: winwincode_domain::CanonicalSnapshot,
     pub work_run_id: WorkRunId,
     pub session_binding_id: SessionBindingId,
     pub source: EvidenceSource<'facts>,
@@ -242,7 +223,6 @@ struct ResolvedEvidenceSource {
     identity: VerifiedEvidenceSourceIdentity,
 }
 
-/// Exact identity that was checked before an `EvidenceRef` became canonical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum VerifiedEvidenceSourceIdentity {
     Runtime(Box<VerifiedRuntimeEvidenceSourceIdentity>),
@@ -262,7 +242,6 @@ pub(crate) enum VerifiedEvidenceSourceIdentity {
     },
 }
 
-/// Read-only runtime provenance retained beside canonical bounded Evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     execution: FencedExecutionIdentity,
@@ -274,11 +253,6 @@ pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     command_digest: Sha256Digest,
 }
 
-/// Canonical Evidence plus source facts that were checked by this module.
-///
-/// Fields stay private and this type has no deserializer or public constructor.
-/// Verdict code must consume this value instead of caller-provided Evidence or
-/// caller-provided outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDeliveryEvidence {
     evidence: EvidenceRef,
@@ -292,7 +266,8 @@ struct EvidenceIdentity<'identity> {
     delivery_id: &'identity DeliveryId,
     delivery_spec_id: &'identity DeliverySpecId,
     delivery_spec_revision: u64,
-    candidate_ref: &'identity str,
+    snapshot_id: &'identity winwincode_domain::SnapshotId,
+    candidate_id: &'identity winwincode_domain::CandidateId,
     work_run_id: &'identity WorkRunId,
     session_binding_id: &'identity SessionBindingId,
     evidence_type: EvidenceRefType,
@@ -306,14 +281,11 @@ impl ResolvedDeliveryEvidence {
         &self.evidence
     }
 
-    /// Returns the closed outcome rebuilt from the accepted source authority.
     #[must_use]
     pub const fn outcome(&self) -> VerifiedEvidenceOutcome {
         self.outcome
     }
 
-    /// Confirms that this Evidence is the exact accepted runtime position a
-    /// structured verification finding cited, under the same terminal lease.
     pub(crate) fn matches_finding_source(
         &self,
         terminal: &AcceptedVerificationJobOutcomeFact,
@@ -331,8 +303,6 @@ impl ResolvedDeliveryEvidence {
         }
     }
 
-    /// Confirms that direct runtime evidence came from the exact approved
-    /// verification command rather than another successful process.
     pub(crate) fn matches_verification_method(&self, method: &str) -> bool {
         let Some(expected) = verification_method_digest(method) else {
             return false;
@@ -403,13 +373,6 @@ fn resolution_error(
     }
 }
 
-/// Resolves one current `EvidenceRef` without starting runtime work.
-///
-/// # Errors
-///
-/// Rejects a stale candidate, foreign `WorkRun` or `SessionBinding`, missing or
-/// ambiguous source facts, identity/type/candidate drift, and sources that do
-/// not strictly precede the resulting Evidence.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the sealed resolver command is single-use application input"
@@ -425,6 +388,22 @@ pub(crate) fn resolve_delivery_evidence(
             format!("frozen candidate is not current: {error}"),
         )
     })?;
+    if !winwincode_domain::verify_snapshot_seal(&input.snapshot)
+        || !super::verification::snapshot_matches_candidate(&input.snapshot, candidate)
+    {
+        return Err(resolution_error(
+            EvidenceResolutionErrorCode::CandidateMismatch,
+            "Evidence requires the canonical Snapshot of its exact Candidate",
+        ));
+    }
+    if let EvidenceSource::Runtime { terminal, .. } = &input.source
+        && terminal.snapshot_id() != input.snapshot.snapshot_id()
+    {
+        return Err(resolution_error(
+            EvidenceResolutionErrorCode::CandidateMismatch,
+            "runtime Evidence has a foreign Snapshot binding",
+        ));
+    }
     let (work_run, binding, producer) = evidence_work_run_and_binding(delivery, candidate, &input)?;
 
     let source = match &input.source {
@@ -459,7 +438,8 @@ pub(crate) fn resolve_delivery_evidence(
         delivery_id: delivery.id(),
         delivery_spec_id: &delivery.snapshot().spec.id,
         delivery_spec_revision: delivery.snapshot().spec.revision,
-        candidate_ref: candidate.candidate_ref(),
+        snapshot_id: input.snapshot.snapshot_id(),
+        candidate_id: candidate.candidate_id(),
         work_run_id: &work_run.id,
         session_binding_id: &binding.id,
         evidence_type: source.evidence_type,
@@ -474,7 +454,8 @@ pub(crate) fn resolve_delivery_evidence(
         delivery_spec_revision: delivery.snapshot().spec.revision,
         work_run_id: work_run.id.clone(),
         session_binding_id: binding.id.clone(),
-        candidate_ref: candidate.candidate_ref().into(),
+        snapshot_id: input.snapshot.snapshot_id().clone(),
+        candidate_id: candidate.candidate_id().clone(),
         evidence_type: source.evidence_type,
         source_ref: source.source_ref,
         created_at_millis: input.created_at_millis,
@@ -507,11 +488,6 @@ fn deterministic_evidence_id(
     )))
 }
 
-/// Encodes one sealed Evidence identity digest as the canonical public
-/// Evidence id: `evd_` plus 26 Crockford Base32 characters.
-///
-/// The generated public contract only accepts this exact shape, so resolved
-/// Evidence never transports its internal digest spelling.
 fn canonical_evidence_id(digest: [u8; 32]) -> String {
     const CROCKFORD_BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut value = u128::from_be_bytes([
@@ -717,9 +693,6 @@ fn evidence_work_run_and_binding<'delivery>(
                 "candidate producer WorkRun is missing",
             )
         })?;
-    // Independent reader WorkItems consume a candidate through the sealed
-    // runtime terminal and checkout facts validated below, not by sharing the
-    // producer's mutable WorkItem identity. Direct evidence remains producer-scoped.
     let independent_reader = matches!(&input.source, EvidenceSource::Runtime { .. })
         && matches!(
             binding.execution_profile.as_deref(),
@@ -881,6 +854,7 @@ fn validate_runtime_terminal(
         ));
     }
     Ok(FencedExecutionIdentity {
+        snapshot_id: terminal.snapshot_id().clone(),
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
         work_run_id: terminal.work_run_id().clone(),
@@ -920,6 +894,7 @@ fn validate_checkout_attestation(
 
 fn runtime_source_identity(fact: &AcceptedRuntimeSourceFact) -> FencedExecutionIdentity {
     FencedExecutionIdentity {
+        snapshot_id: fact.snapshot_id.clone(),
         product_session_id: fact.product_session_id.clone(),
         execution_job_id: fact.execution_job_id.clone(),
         work_run_id: fact.work_run_id.clone(),
@@ -936,6 +911,7 @@ fn runtime_source_identity(fact: &AcceptedRuntimeSourceFact) -> FencedExecutionI
 
 fn terminal_identity(terminal: &AcceptedVerificationJobOutcomeFact) -> FencedExecutionIdentity {
     FencedExecutionIdentity {
+        snapshot_id: terminal.snapshot_id().clone(),
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
         work_run_id: terminal.work_run_id().clone(),
@@ -952,6 +928,7 @@ fn terminal_identity(terminal: &AcceptedVerificationJobOutcomeFact) -> FencedExe
 
 fn checkout_identity(fact: &ValidatedCheckoutAttestationFact) -> FencedExecutionIdentity {
     FencedExecutionIdentity {
+        snapshot_id: fact.snapshot_id.clone(),
         product_session_id: fact.product_session_id.clone(),
         execution_job_id: fact.execution_job_id.clone(),
         work_run_id: fact.work_run_id.clone(),
@@ -1011,11 +988,18 @@ pub(crate) fn validate(evidence: &EvidenceRef, path: &str) -> Result<(), Deliver
         &evidence.session_binding_id.0,
         &format!("{path}.sessionBindingId"),
     )?;
-    bounded_text(
-        &evidence.candidate_ref,
-        &format!("{path}.candidateRef"),
-        MAX_REFERENCE_LENGTH,
-    )?;
+    for (value, prefix, field) in [
+        (&evidence.snapshot_id.0, "snap_", "snapshotId"),
+        (&evidence.candidate_id.0, "cnd_", "candidateId"),
+    ] {
+        if !winwincode_domain::is_canonical_prefixed_id(value, prefix) {
+            return Err(super::validation_error(
+                super::DeliveryValidationErrorCode::InvalidIdentifier,
+                format!("{path}.{field}"),
+                "Evidence requires canonical product identities",
+            ));
+        }
+    }
     bounded_text(
         &evidence.source_ref,
         &format!("{path}.sourceRef"),
@@ -1037,9 +1021,6 @@ pub(crate) mod test_support {
         test_support::{VerificationFixtureState, independent_verification},
     };
 
-    /// Resolves one current role-scoped runtime Evidence through the production
-    /// resolver. Cross-module tests never construct [`ResolvedDeliveryEvidence`]
-    /// or any accepted source fact directly.
     pub(crate) fn resolved_role_evidence(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1059,9 +1040,6 @@ pub(crate) mod test_support {
         )
     }
 
-    /// Builds a sealed runtime source at a selected accepted-ledger position.
-    /// This narrow fixture lets verdict tests prove that a source reference
-    /// alone cannot substitute for the finding's exact source position.
     pub(crate) fn resolved_role_evidence_at_sequence(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1095,8 +1073,6 @@ pub(crate) mod test_support {
         )
     }
 
-    /// Builds a role Evidence fixture for a command other than the approved
-    /// criterion method so verdict tests can exercise fail-closed binding.
     pub(crate) fn resolved_role_evidence_for_method(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -1194,6 +1170,7 @@ pub(crate) mod test_support {
         let finished_at_millis = terminal.finished_at_millis();
         let source_event_id = ExecutionEventId(format!("event-evidence-{}", evidence_id.0));
         let source = AcceptedRuntimeSourceFact {
+            snapshot_id: terminal.snapshot_id().clone(),
             source_event_id: source_event_id.clone(),
             evidence_type,
             product_session_id: terminal.product_session_id().clone(),
@@ -1214,6 +1191,7 @@ pub(crate) mod test_support {
             command_digest,
         };
         let checkout = ValidatedCheckoutAttestationFact {
+            snapshot_id: terminal.snapshot_id().clone(),
             product_session_id: terminal.product_session_id().clone(),
             execution_job_id: terminal.execution_job_id().clone(),
             work_run_id: terminal.work_run_id().clone(),
@@ -1236,6 +1214,9 @@ pub(crate) mod test_support {
             delivery,
             candidate,
             ResolveDeliveryEvidenceInput {
+                snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(
+                    candidate,
+                ),
                 work_run_id: terminal.work_run_id().clone(),
                 session_binding_id: binding.id.clone(),
                 source: EvidenceSource::Runtime {
@@ -1262,7 +1243,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         Delivery, DeliveryStatus, SessionBinding, SessionBindingId,
-        candidate::test_support::{freeze_facts, frozen_candidate, validated_git_snapshot},
+        candidate::test_support::{candidate_source_fixture, freeze_facts, frozen_candidate},
         freeze_delivery_candidate, test_fixture,
         verification::test_support::{VerificationFixtureState, independent_verification},
     };
@@ -1364,7 +1345,7 @@ mod tests {
         candidate_tree_id: &str,
     ) -> FrozenDeliveryCandidate {
         let current = candidate(delivery);
-        let snapshot = validated_git_snapshot(
+        let snapshot = candidate_source_fixture(
             delivery,
             1_800_000_000_020,
             current.producer_session_binding_id(),
@@ -1382,6 +1363,7 @@ mod tests {
         terminal: &AcceptedVerificationJobOutcomeFact,
     ) -> AcceptedRuntimeSourceFact {
         AcceptedRuntimeSourceFact {
+            snapshot_id: terminal.snapshot_id().clone(),
             source_event_id: ExecutionEventId("event-verifier-test-7".into()),
             evidence_type: EvidenceRefType::Test,
             product_session_id: terminal.product_session_id().clone(),
@@ -1413,6 +1395,7 @@ mod tests {
         terminal: &AcceptedVerificationJobOutcomeFact,
     ) -> ValidatedCheckoutAttestationFact {
         ValidatedCheckoutAttestationFact {
+            snapshot_id: terminal.snapshot_id().clone(),
             product_session_id: terminal.product_session_id().clone(),
             execution_job_id: terminal.execution_job_id().clone(),
             work_run_id: terminal.work_run_id().clone(),
@@ -1458,11 +1441,13 @@ mod tests {
     }
 
     fn runtime_input<'facts>(
+        candidate: &FrozenDeliveryCandidate,
         accepted_sources: &'facts [AcceptedRuntimeSourceFact],
         terminal: &'facts AcceptedVerificationJobOutcomeFact,
         checkout: &'facts ValidatedCheckoutAttestationFact,
     ) -> ResolveDeliveryEvidenceInput<'facts> {
         ResolveDeliveryEvidenceInput {
+            snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(candidate),
             work_run_id: terminal.work_run_id().clone(),
             session_binding_id: SessionBindingId("binding-verifier-1".into()),
             source: EvidenceSource::Runtime {
@@ -1477,6 +1462,7 @@ mod tests {
     }
 
     fn direct_input(
+        candidate: &FrozenDeliveryCandidate,
         delivery: &Delivery,
         source: EvidenceSource<'static>,
     ) -> ResolveDeliveryEvidenceInput<'static> {
@@ -1487,6 +1473,7 @@ mod tests {
             .find(|binding| binding.id.0 == "binding-executor-1")
             .expect("candidate producer binding");
         ResolveDeliveryEvidenceInput {
+            snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(candidate),
             work_run_id: binding.work_run_id.clone(),
             session_binding_id: SessionBindingId("binding-executor-1".into()),
             source,
@@ -1513,7 +1500,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &revised,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateCommit),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit),
         )
         .expect_err("stale candidate");
 
@@ -1527,7 +1514,7 @@ mod tests {
         let terminal = terminal(&delivery, &candidate);
         let accepted_sources = [accepted_runtime_fact(&candidate, &terminal)];
         let checkout = checkout_attestation(&candidate, &terminal);
-        let mut input = runtime_input(&accepted_sources, &terminal, &checkout);
+        let mut input = runtime_input(&candidate, &accepted_sources, &terminal, &checkout);
         input.work_run_id = WorkRunId("stage-foreign".into());
 
         let error =
@@ -1543,7 +1530,7 @@ mod tests {
         let terminal = terminal(&delivery, &candidate);
         let accepted_sources = [accepted_runtime_fact(&candidate, &terminal)];
         let checkout = checkout_attestation(&candidate, &terminal);
-        let mut input = runtime_input(&accepted_sources, &terminal, &checkout);
+        let mut input = runtime_input(&candidate, &accepted_sources, &terminal, &checkout);
         input.session_binding_id = SessionBindingId("binding-foreign".into());
 
         let error = resolve_delivery_evidence(&delivery, &candidate, input)
@@ -1576,8 +1563,8 @@ mod tests {
     #[test]
     fn criterion_evidence_matches_current_candidate() {
         let mut fixture = test_fixture();
-        fixture.evidence[0].candidate_ref =
-            "git-tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        fixture.evidence[0].candidate_id =
+            winwincode_domain::CandidateId("cnd_01J00000000000000000000002".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
     }
 
@@ -1592,7 +1579,7 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&accepted_sources, &terminal, &checkout),
+            runtime_input(&candidate, &accepted_sources, &terminal, &checkout),
         )
         .expect("exact runtime source");
         let evidence = resolved.evidence();
@@ -1605,12 +1592,10 @@ mod tests {
         );
         assert_eq!(evidence.work_run_id, *terminal.work_run_id());
         assert_eq!(evidence.session_binding_id.0, "binding-verifier-1");
-        assert_eq!(evidence.candidate_ref, candidate.candidate_ref());
+        assert_eq!(&evidence.candidate_id, candidate.candidate_id());
         assert_eq!(evidence.evidence_type, EvidenceRefType::Test);
         assert_eq!(evidence.source_ref, "runtime_event:event-verifier-test-7");
         assert_eq!(resolved.outcome(), VerifiedEvidenceOutcome::Succeeded);
-        // The generated public contract only accepts `evd_` followed by 26
-        // Crockford Base32 characters as a public Evidence identity.
         let id = &evidence.id.0;
         assert!(
             id.len() == 30
@@ -1631,19 +1616,40 @@ mod tests {
     }
 
     #[test]
+    fn runtime_evidence_rejects_a_foreign_canonical_snapshot() {
+        let delivery = evidence_delivery();
+        let candidate = candidate(&delivery);
+        let terminal = terminal(&delivery, &candidate);
+        let accepted = [accepted_runtime_fact(&candidate, &terminal)];
+        let checkout = checkout_attestation(&candidate, &terminal);
+        let mut input = runtime_input(&candidate, &accepted, &terminal, &checkout);
+        let mut foreign = input.snapshot.into_contract();
+        foreign.snapshot_id =
+            winwincode_domain::SnapshotId("snap_01J00000000000000000000002".into());
+        foreign.validation_seal = winwincode_domain::seal_snapshot(&foreign);
+        input.snapshot = foreign.try_into().expect("valid foreign Snapshot");
+        assert_eq!(
+            resolve_delivery_evidence(&delivery, &candidate, input)
+                .expect_err("same code cannot substitute another runtime Snapshot")
+                .code(),
+            EvidenceResolutionErrorCode::CandidateMismatch
+        );
+    }
+
+    #[test]
     fn same_sealed_source_reuses_deterministic_evidence_identity() {
         let delivery = evidence_delivery();
         let candidate = candidate(&delivery);
         let first = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateCommit),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit),
         )
         .expect("first candidate commit evidence");
         let replay = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateCommit),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit),
         )
         .expect("replayed candidate commit evidence");
 
@@ -1657,13 +1663,13 @@ mod tests {
         let commit = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateCommit),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit),
         )
         .expect("candidate commit evidence");
         let diff = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateDiff),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateDiff),
         )
         .expect("candidate diff evidence");
 
@@ -1680,7 +1686,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&[], &terminal, &checkout),
+            runtime_input(&candidate, &[], &terminal, &checkout),
         )
         .expect_err("unpersisted source position");
 
@@ -1706,7 +1712,7 @@ mod tests {
             let error = resolve_delivery_evidence(
                 &delivery,
                 &candidate,
-                runtime_input(&sources, &terminal, attestation),
+                runtime_input(&candidate, &sources, &terminal, attestation),
             )
             .expect_err("foreign checkout attestation");
             assert_eq!(error.code(), EvidenceResolutionErrorCode::CandidateMismatch);
@@ -1717,7 +1723,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&sources, &terminal, &foreign_job),
+            runtime_input(&candidate, &sources, &terminal, &foreign_job),
         )
         .expect_err("foreign checkout job attestation");
         assert_eq!(error.code(), EvidenceResolutionErrorCode::SessionMismatch);
@@ -1749,7 +1755,7 @@ mod tests {
             let error = resolve_delivery_evidence(
                 &delivery,
                 &candidate,
-                runtime_input(&[source], &terminal, &checkout),
+                runtime_input(&candidate, &[source], &terminal, &checkout),
             )
             .expect_err("source outside accepted time or sequence range");
             assert_eq!(
@@ -1812,7 +1818,7 @@ mod tests {
             let error = resolve_delivery_evidence(
                 &delivery,
                 &candidate,
-                runtime_input(&[source], &terminal, &checkout),
+                runtime_input(&candidate, &[source], &terminal, &checkout),
             )
             .expect_err("foreign accepted source identity");
             assert_eq!(error.code(), expected, "{}", error.message());
@@ -1831,7 +1837,7 @@ mod tests {
         let duplicate_error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&duplicate, &terminal, &checkout),
+            runtime_input(&candidate, &duplicate, &terminal, &checkout),
         )
         .expect_err("duplicate accepted source");
         assert_eq!(
@@ -1844,13 +1850,14 @@ mod tests {
         let type_error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&[wrong_type], &terminal, &checkout),
+            runtime_input(&candidate, &[wrong_type], &terminal, &checkout),
         )
         .expect_err("wrong source type");
         assert_eq!(type_error.code(), EvidenceResolutionErrorCode::TypeMismatch);
 
         let wrong_position_sources = [valid];
-        let mut wrong_position_input = runtime_input(&wrong_position_sources, &terminal, &checkout);
+        let mut wrong_position_input =
+            runtime_input(&candidate, &wrong_position_sources, &terminal, &checkout);
         if let EvidenceSource::Runtime {
             source_event_id, ..
         } = &mut wrong_position_input.source
@@ -1909,7 +1916,7 @@ mod tests {
             let error = resolve_delivery_evidence(
                 &delivery,
                 &candidate,
-                runtime_input(&sources, &terminal, checkout),
+                runtime_input(&candidate, &sources, &terminal, checkout),
             )
             .expect_err("foreign checkout execution identity");
             assert_eq!(error.code(), EvidenceResolutionErrorCode::SessionMismatch);
@@ -1928,7 +1935,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&sources, &foreign_identity, &checkout),
+            runtime_input(&candidate, &sources, &foreign_identity, &checkout),
         )
         .expect_err("foreign accepted terminal identity");
         assert_eq!(error.code(), EvidenceResolutionErrorCode::SessionMismatch);
@@ -1939,7 +1946,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            runtime_input(&sources, &foreign_tree, &checkout),
+            runtime_input(&candidate, &sources, &foreign_tree, &checkout),
         )
         .expect_err("foreign accepted terminal candidate tree");
         assert_eq!(error.code(), EvidenceResolutionErrorCode::CandidateMismatch);
@@ -1965,13 +1972,16 @@ mod tests {
             let resolved = resolve_delivery_evidence(
                 &delivery,
                 &candidate,
-                runtime_input(&[source], &terminal, &checkout),
+                runtime_input(&candidate, &[source], &terminal, &checkout),
             )
             .expect("sealed source outcome");
             assert_eq!(resolved.outcome(), outcome);
             let evidence = serde_json::to_value(resolved.evidence()).expect("Evidence JSON");
             let object = evidence.as_object().expect("Evidence object");
-            assert_eq!(object.len(), 11);
+            assert_eq!(object.len(), 12);
+            assert_eq!(object["snapshotId"], terminal.snapshot_id().0);
+            assert_eq!(object["candidateId"], candidate.candidate_id().0);
+            assert!(!object.contains_key("candidateRef"));
             assert!(!object.contains_key("log"));
             assert!(!object.contains_key("output"));
             assert!(!object.contains_key("runtimeEvent"));
@@ -1986,7 +1996,7 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateCommit),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit),
         )
         .expect("candidate commit evidence");
 
@@ -2013,7 +2023,7 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(&delivery, EvidenceSource::CandidateDiff),
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateDiff),
         )
         .expect("candidate diff evidence");
 
@@ -2040,6 +2050,7 @@ mod tests {
             &delivery,
             &candidate,
             direct_input(
+                &candidate,
                 &delivery,
                 EvidenceSource::CandidateFile {
                     path: "src/invitation.rs".into(),
@@ -2076,6 +2087,7 @@ mod tests {
             &delivery,
             &candidate,
             direct_input(
+                &candidate,
                 &delivery,
                 EvidenceSource::CandidateFile {
                     path: "src/missing.rs".into(),
@@ -2085,7 +2097,8 @@ mod tests {
         .expect_err("missing candidate path");
         assert_eq!(missing.code(), EvidenceResolutionErrorCode::SourceMissing);
 
-        let mut foreign_stage = direct_input(&delivery, EvidenceSource::CandidateCommit);
+        let mut foreign_stage =
+            direct_input(&candidate, &delivery, EvidenceSource::CandidateCommit);
         foreign_stage.work_run_id = WorkRunId("stage-verifier-1".into());
         foreign_stage.session_binding_id = SessionBindingId("binding-verifier-1".into());
         foreign_stage.created_at_millis = 1_800_000_000_060;
@@ -2093,7 +2106,7 @@ mod tests {
             .expect_err("foreign direct Git producer");
         assert_eq!(foreign.code(), EvidenceResolutionErrorCode::SessionMismatch);
 
-        let mut early = direct_input(&delivery, EvidenceSource::CandidateDiff);
+        let mut early = direct_input(&candidate, &delivery, EvidenceSource::CandidateDiff);
         early.created_at_millis = 1_800_000_000_019;
         let early = resolve_delivery_evidence(&delivery, &candidate, early)
             .expect_err("early direct Git evidence");

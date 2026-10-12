@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Production Publication projection reads over canonical durable facts.
-
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::domain::{Delivery, FrozenDeliveryCandidate};
@@ -25,9 +23,6 @@ const PUBLICATION_STREAM_PREFIX: &str = "publication:";
 const MAX_PUBLICATION_STREAMS: usize = 100_000;
 const MAX_PUBLICATION_DIRECTORY_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-/// Production adapter that validates the bounded Publication directory and
-/// reconstructs the current candidate from durable terminal and Artifact
-/// authority on every read.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteTrustedPublicationProjectionAdapter;
 
@@ -523,6 +518,7 @@ mod tests {
             fixture.candidate.delivery_spec_id().0.clone(),
             fixture.candidate.delivery_spec_revision(),
             fixture.candidate.candidate_ref(),
+            fixture.candidate.candidate_digest().clone(),
             "f".repeat(64),
             "verdict:fixture:pass",
             AttentionItemId("att_01J00000000000000000000000".to_owned()),

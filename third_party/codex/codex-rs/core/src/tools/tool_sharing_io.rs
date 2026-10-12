@@ -1,0 +1,317 @@
+// SPDX-License-Identifier: Apache-2.0
+use super::*;
+
+pub(super) fn input_context(
+    invocation: &ToolInvocation,
+    tool: &dyn CoreToolRuntime,
+    sequence: i64,
+    operation: String,
+) -> ToolInputContext {
+    let payload = match &invocation.payload {
+        ToolPayload::Function { arguments } => ToolCallGatePayload::Function {
+            arguments: arguments.clone(),
+        },
+        ToolPayload::Custom { input } => ToolCallGatePayload::Custom {
+            input: input.clone(),
+        },
+        ToolPayload::ToolSearch { arguments } => ToolCallGatePayload::ToolSearch {
+            arguments_json: serde_json::to_string(arguments).unwrap_or_default(),
+        },
+    };
+    ToolInputContext {
+        request: ToolCallGateRequest {
+            thread_id: invocation.session.thread_id.to_string(),
+            turn_id: invocation.turn.sub_id.clone(),
+            call_id: invocation.call_id.clone(),
+            namespace: invocation.tool_name.namespace.clone(),
+            tool_name: invocation.tool_name.name.clone(),
+            payload,
+        },
+        request_sequence: sequence,
+        operation_digest: operation,
+        mcp_server: tool.mcp_server_name().map(str::to_owned),
+    }
+}
+pub(super) async fn bind(
+    facts: &ToolFactRecord,
+    context: &ToolInputContext,
+    snapshot: &ToolDependencySnapshot,
+) -> Result<(), FunctionCallError> {
+    facts
+        .store
+        .bind_tool_input(&ToolInputBindingFact {
+            schema_version: 1,
+            thread_id: context.request.thread_id.clone(),
+            request_sequence: facts.sequence,
+            operation_digest: context.operation_digest.clone(),
+            snapshot: snapshot.clone(),
+        })
+        .await
+        .map_err(storage_error)
+}
+pub(super) async fn source_fact(
+    store: &codex_state::StateRuntime,
+    sequence: i64,
+    invocation: &ToolInvocation,
+) -> Result<codex_state::ToolExecutionFact, FunctionCallError> {
+    let events = store
+        .tool_execution_fact(sequence)
+        .await
+        .map_err(storage_error)?;
+    if events.request.thread_id != invocation.session.thread_id.to_string() {
+        return Err(sharing_error("foreign_shared_source"));
+    }
+    Ok(events)
+}
+pub(super) async fn link(
+    facts: &ToolFactRecord,
+    source: &codex_state::ToolExecutionFact,
+    input: &ToolDependencySnapshot,
+    kind: ToolSharingKind,
+) -> Result<(), FunctionCallError> {
+    let attempt = source
+        .attempt
+        .as_ref()
+        .ok_or_else(|| sharing_error("shared_attempt_missing"))?;
+    facts
+        .link_shared(ToolSharingFact {
+            schema_version: 1,
+            thread_id: source.request.thread_id.clone(),
+            request_sequence: facts.sequence,
+            source_request_sequence: source.request_sequence,
+            source_attempt_id: attempt.attempt_id.clone(),
+            operation_digest: attempt.operation_digest.clone(),
+            snapshot: input.clone(),
+            kind,
+            disposition: ToolOutputDisposition::Pending,
+            delivery: ToolOutputDelivery::Pending,
+            cancelled: false,
+        })
+        .await
+}
+pub(super) async fn read_shared(
+    gate: &Arc<dyn ToolCallGate>,
+    context: &ToolInputContext,
+    input: &ToolDependencySnapshot,
+    source: &codex_state::ToolExecutionFact,
+    store: &codex_state::StateRuntime,
+) -> Result<String, FunctionCallError> {
+    if gate.freeze_tool_input(context.clone()).await.as_ref() != Some(input) {
+        return Err(sharing_error("shared_input_expired"));
+    }
+    for _ in 0..3 {
+        let current = store
+            .tool_execution_fact(source.request_sequence)
+            .await
+            .map_err(storage_error)?;
+        let attempt = current
+            .attempt
+            .as_ref()
+            .ok_or_else(|| sharing_error("shared_attempt_missing"))?;
+        let read = ToolResultReadRequest {
+            thread_id: context.request.thread_id.clone(),
+            turn_id: context.request.turn_id.clone(),
+            call_id: context.request.call_id.clone(),
+            request_sequence: current.request_sequence,
+            logical_id: current.request.logical_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            operation_digest: attempt.operation_digest.clone(),
+            revision: attempt.revision,
+        };
+        let permission = gate
+            .authorize_result_read(read.clone())
+            .await
+            .map_err(|_| sharing_error("shared_result_read_denied"))?;
+        let raw = store
+            .read_verified_tool_execution(
+                current.request_sequence,
+                &attempt.attempt_id,
+                attempt.revision,
+                input,
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(raw) = raw else {
+            let refreshed = store
+                .tool_execution_fact(current.request_sequence)
+                .await
+                .map_err(storage_error)?;
+            if refreshed.attempt.as_ref().map(|a| a.revision) != Some(attempt.revision) {
+                continue;
+            }
+            return Err(sharing_error("shared_result_unverified"));
+        };
+        gate.revalidate_result_read(read, permission)
+            .await
+            .map_err(|_| sharing_error("shared_result_read_denied"))?;
+        if gate.freeze_tool_input(context.clone()).await.as_ref() != Some(input) {
+            return Err(sharing_error("shared_input_expired"));
+        }
+        return Ok(raw);
+    }
+    Err(sharing_error("shared_receipt_changed"))
+}
+/// Output hooks can wait for external input. Recheck the shared source and its
+/// authority after those hooks and immediately before accepting delivery.
+pub(in crate::tools) async fn revalidate_delivery(
+    invocation: &ToolInvocation,
+    tool: &dyn CoreToolRuntime,
+    facts: &ToolFactRecord,
+) -> Result<(), FunctionCallError> {
+    let Some(shared) = facts
+        .store
+        .tool_sharing_fact(facts.sequence)
+        .await
+        .map_err(storage_error)?
+    else {
+        return Ok(());
+    };
+    let gate = invocation
+        .session
+        .services
+        .thread_extension_data
+        .get::<ToolCallGateAttachment>()
+        .ok_or_else(|| sharing_error("shared_authority_unavailable"))?
+        .gate();
+    let context = input_context(invocation, tool, facts.sequence, shared.operation_digest);
+    let source = facts
+        .store
+        .tool_execution_fact(shared.source_request_sequence)
+        .await
+        .map_err(storage_error)?;
+    read_shared(&gate, &context, &shared.snapshot, &source, &facts.store).await?;
+    Ok(())
+}
+
+/// Exact transport replay restores an already decided logical output. The
+/// effective input comes from its original receipt; hooks never execute again.
+pub(in crate::tools) async fn recover_shared(
+    replay: crate::tools::execution_facts::ToolFactReplay,
+    invocation: &ToolInvocation,
+    tool: Arc<dyn CoreToolRuntime>,
+    shared: ToolSharingFact,
+) -> Result<AnyToolResult, FunctionCallError> {
+    if shared.cancelled || shared.disposition != ToolOutputDisposition::Accepted {
+        return Err(sharing_error("shared_waiter_not_deliverable"));
+    }
+    recover_value(replay, invocation, tool, Some(shared)).await
+}
+pub(in crate::tools) async fn recover_actual(
+    replay: crate::tools::execution_facts::ToolFactReplay,
+    invocation: &ToolInvocation,
+    tool: Arc<dyn CoreToolRuntime>,
+) -> Result<AnyToolResult, FunctionCallError> {
+    recover_value(replay, invocation, tool, None).await
+}
+async fn recover_value(
+    replay: crate::tools::execution_facts::ToolFactReplay,
+    invocation: &ToolInvocation,
+    tool: Arc<dyn CoreToolRuntime>,
+    shared: Option<ToolSharingFact>,
+) -> Result<AnyToolResult, FunctionCallError> {
+    if replay
+        .store
+        .tool_waiter_cancelled(replay.fact.request_sequence)
+        .await
+        .map_err(storage_error)?
+    {
+        return Err(sharing_error("logical_waiter_cancelled"));
+    }
+    let gate = invocation
+        .session
+        .services
+        .thread_extension_data
+        .get::<ToolCallGateAttachment>()
+        .ok_or_else(|| sharing_error("shared_authority_unavailable"))?
+        .gate();
+    let source = match &shared {
+        Some(shared) => replay
+            .store
+            .tool_execution_fact(shared.source_request_sequence)
+            .await
+            .map_err(storage_error)?,
+        None => (*replay.fact).clone(),
+    };
+    let attempt = source
+        .attempt
+        .as_ref()
+        .ok_or_else(|| sharing_error("shared_attempt_missing"))?;
+    let read = ToolResultReadRequest {
+        thread_id: invocation.session.thread_id.to_string(),
+        turn_id: invocation.turn.sub_id.clone(),
+        call_id: invocation.call_id.clone(),
+        request_sequence: source.request_sequence,
+        logical_id: source.request.logical_id.clone(),
+        attempt_id: attempt.attempt_id.clone(),
+        operation_digest: attempt.operation_digest.clone(),
+        revision: attempt.revision,
+    };
+    let authorization = gate
+        .authorize_result_read(read.clone())
+        .await
+        .map_err(|_| sharing_error("shared_result_read_denied"))?;
+    let encoded = match &shared {
+        Some(shared) => replay
+            .store
+            .read_shared_tool_output(shared.request_sequence)
+            .await
+            .map_err(storage_error)?,
+        None => replay
+            .store
+            .read_accepted_tool_output(
+                source.request_sequence,
+                &attempt.attempt_id,
+                attempt.revision,
+            )
+            .await
+            .map_err(storage_error)?
+            .and_then(|results| results.accepted),
+    }
+    .ok_or_else(|| sharing_error("shared_output_unavailable"))?;
+    let stored: serde_json::Value = serde_json::from_str(&encoded).map_err(storage_error)?;
+    let mut frozen = invocation.clone();
+    frozen.payload = crate::tools::result_recovery::decode_payload(&stored["effective_input"])?;
+    let context = input_context(
+        &frozen,
+        tool.as_ref(),
+        replay.fact.request_sequence,
+        operation_digest(&frozen, tool.as_ref()),
+    );
+    if context.operation_digest != attempt.operation_digest {
+        return Err(sharing_error("shared_definition_or_input_changed"));
+    }
+    let input = gate
+        .freeze_tool_input(context.clone())
+        .await
+        .ok_or_else(|| sharing_error("shared_policy_unavailable"))?;
+    if shared
+        .as_ref()
+        .is_some_and(|shared| shared.snapshot != input)
+    {
+        return Err(sharing_error("shared_input_expired"));
+    }
+    read_shared(&gate, &context, &input, &source, &replay.store).await?;
+    gate.revalidate_result_read(read, authorization)
+        .await
+        .map_err(|_| sharing_error("shared_result_read_denied"))?;
+    let mut output =
+        crate::tools::result_recovery::shared_output(&encoded, &frozen, tool.as_ref())?;
+    output.post_tool_use_payload = None;
+    match shared {
+        Some(shared) => replay
+            .store
+            .offer_shared_tool_output(shared.request_sequence)
+            .await
+            .map_err(storage_error)?,
+        None => replay
+            .store
+            .offer_tool_output(
+                source.request_sequence,
+                &attempt.attempt_id,
+                &attempt.owner_id,
+            )
+            .await
+            .map_err(storage_error)?,
+    }
+    Ok(output)
+}

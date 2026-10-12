@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact active-Job ownership for detached Worker workspaces.
-//!
-//! This deep module is the only mutable map from an authenticated active Job
-//! to its private checkout. It resumes the original worktree after a process
-//! crash, freezes writer changes through the canonical candidate builder, and
-//! consumes the checkout at every terminal cleanup boundary.
-//!
-//! Delegated `ChangeBatch` work is routed through one injected deterministic
-//! executor port: this module never mutates checkout bytes itself. Every
-//! proposal, progress fact, receipt, validation decision, and Observer
-//! exchange is durable in the Worker-owned [`ChangeBatchStore`] before it
-//! becomes observable, and the accepted revision only advances through the
-//! exact revision gate.
-
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
@@ -22,7 +8,7 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     pin::Pin,
-    process::Stdio,
+    sync::{Arc, Mutex},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -33,8 +19,6 @@ use codex_exec_server::LOCAL_FS;
 use codex_utils_path_uri::PathUri;
 use futures::future::join_all;
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt as _;
-use tokio::process::Command;
 
 use winwincode_codex::RoleExecutionMode;
 use winwincode_domain::{
@@ -75,9 +59,10 @@ use winwincode_execution_port::validation_config::{
 use crate::{
     ActiveJob, ActiveJobLifecycle,
     change_batch_store::{
-        BatchState, ChangeBatchStore, ChangeBatchStoreError, ObservationChunkRetention,
-        ObservationGateResult, ObservationModelFrame, ObservationModelRecord, StoreRetention,
-        ValidationDiagnosticEvaluation, canonical_applied_file_summaries, derive_delta_digest,
+        BatchState, ChangeBatchStore, ChangeBatchStoreError, CheckpointAcceptanceDeadline,
+        ObservationChunkRetention, ObservationGateResult, ObservationModelFrame,
+        ObservationModelRecord, StoreRetention, ValidationDiagnosticEvaluation,
+        canonical_applied_file_summaries, derive_delta_digest,
     },
     context_safety::{contains_sensitive_material, observation_secret_scan_version},
     stage_product::{
@@ -85,6 +70,10 @@ use crate::{
         prepare_verification_artifact,
     },
     validation_diagnostics::{ValidationDiagnosticDisposition, decide_validation_diagnostics},
+    verification_isolation::{
+        ProtectedInputScope, ProtectionCapability, VerificationCancellation, VerificationIsolation,
+        VerificationScratch,
+    },
     workspace::{
         WorkerWorkspace, WorkspaceCleanupReport, WorkspaceCloseReason, WorkspaceError,
         WorkspaceManager, WorkspaceProvenance, controlled_path,
@@ -96,16 +85,15 @@ use crate::workspace::WorkspaceCreationRollbackFailure;
 #[cfg(feature = "test-support")]
 use crate::workspace::{WorkspaceCleanupInterruption, WorkspaceCreationInterruption};
 
-/// Stable active-workspace failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobWorkspaceErrorCode {
     AuthorityMismatch,
     Workspace,
     Candidate,
+    UnchangedCandidate,
     ChangeBatch,
 }
 
-/// Independent Provider route used only for bounded one-shot observations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationModelConfiguration {
     pub provider: String,
@@ -113,7 +101,6 @@ pub struct ObservationModelConfiguration {
     pub route: ModelGatewayRoute,
 }
 
-/// One authority-checked Observer chunk application.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationChunkApplication {
     pub retention: ObservationChunkRetention,
@@ -123,8 +110,6 @@ pub struct ObservationChunkApplication {
     pub terminal_accounting: Option<ObserverTerminalAccounting>,
 }
 
-/// Internal terminal Observer accounting retained independently from the
-/// public receipt, including billed Provider failures.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObserverTerminalAccounting {
     pub batch_id: ChangeBatchId,
@@ -132,11 +117,6 @@ pub struct ObserverTerminalAccounting {
 }
 
 impl ObservationModelConfiguration {
-    /// Creates a bounded route that is independent from the Composer model.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, control-bearing, or credential-shaped values.
     pub fn try_new(
         provider: impl Into<String>,
         model: impl Into<String>,
@@ -168,22 +148,37 @@ impl ObservationModelConfiguration {
     }
 }
 
-/// Secret-safe active-workspace failure.
 #[derive(Debug)]
 pub struct JobWorkspaceError {
     code: JobWorkspaceErrorCode,
     message: &'static str,
+    stage: &'static str,
+    cause_code: &'static str,
 }
 
 impl JobWorkspaceError {
     fn new(code: JobWorkspaceErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            stage: "job_workspace",
+            cause_code: "JOB_WORKSPACE",
+        }
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> JobWorkspaceErrorCode {
         self.code
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> &'static str {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn cause_code(&self) -> &'static str {
+        self.cause_code
     }
 }
 
@@ -196,40 +191,50 @@ impl fmt::Display for JobWorkspaceError {
 impl std::error::Error for JobWorkspaceError {}
 
 impl From<WorkspaceError> for JobWorkspaceError {
-    fn from(_: WorkspaceError) -> Self {
-        Self::new(
+    fn from(error: WorkspaceError) -> Self {
+        let mut failure = Self::new(
             JobWorkspaceErrorCode::Workspace,
             "detached Job workspace operation failed",
-        )
+        );
+        failure.stage = "workspace";
+        failure.cause_code = error.code().as_str();
+        failure
     }
 }
 
 impl From<CandidateProductError> for JobWorkspaceError {
-    fn from(_: CandidateProductError) -> Self {
-        Self::new(
-            JobWorkspaceErrorCode::Candidate,
+    fn from(error: CandidateProductError) -> Self {
+        let mut failure = Self::new(
+            if error.code() == crate::stage_product::CandidateProductErrorCode::UnchangedCandidate {
+                JobWorkspaceErrorCode::UnchangedCandidate
+            } else {
+                JobWorkspaceErrorCode::Candidate
+            },
             "detached Job candidate preparation failed",
-        )
+        );
+        failure.stage = "candidate_prepare";
+        failure.cause_code = error.cause_code();
+        failure
     }
 }
 
 impl From<ChangeBatchStoreError> for JobWorkspaceError {
     fn from(error: ChangeBatchStoreError) -> Self {
-        Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message())
+        let mut failure = Self::new(JobWorkspaceErrorCode::ChangeBatch, error.message());
+        failure.stage = "change_batch_store";
+        failure.cause_code = "CHANGE_BATCH_STORE";
+        failure
     }
 }
 
-/// Exact immutable input passed to the injected deterministic executor.
 #[derive(Clone, Copy)]
 pub struct ChangeBatchExecutionRequest<'request> {
     pub active: &'request ActiveJob,
     pub base_revision: &'request WorkspaceRevision,
     pub checkout: &'request Path,
-    /// Exact patch bytes whose canonical digest is bound to the batch identity.
     pub patch: &'request str,
 }
 
-/// Bounded result returned by an injected deterministic executor.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeBatchExecutionResult {
     Applied {
@@ -249,7 +254,6 @@ pub enum ChangeBatchExecutionResult {
     },
 }
 
-/// Secret-free deterministic executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeBatchExecutorError;
 
@@ -261,14 +265,12 @@ impl fmt::Display for ChangeBatchExecutorError {
 
 impl std::error::Error for ChangeBatchExecutorError {}
 
-/// Exact validation output stream persisted before its bounded command receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationArtifactStream {
     Stdout,
     Stderr,
 }
 
-/// Replay-stable identity and bytes submitted to the private validation Artifact store.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidationArtifactRequest<'request> {
     pub identity: &'request ChangeBatchIdentity,
@@ -279,7 +281,6 @@ pub struct ValidationArtifactRequest<'request> {
     pub bytes: &'request [u8],
 }
 
-/// Secret-free failure from the authority-bound validation Artifact store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidationArtifactError;
 
@@ -291,13 +292,7 @@ impl fmt::Display for ValidationArtifactError {
 
 impl std::error::Error for ValidationArtifactError {}
 
-/// Authority-bound, replay-idempotent raw validation output store.
 pub trait ValidationArtifactPort: fmt::Debug + Send {
-    /// Persists exact bytes and returns the canonical Artifact identity and digest.
-    ///
-    /// # Errors
-    ///
-    /// Exact-key changed bytes and storage failures are rejected.
     fn persist(
         &mut self,
         request: ValidationArtifactRequest<'_>,
@@ -316,7 +311,6 @@ impl ValidationArtifactPort for UnavailableValidationArtifactPort {
     }
 }
 
-/// One non-blocking deterministic executor operation.
 pub type ChangeBatchExecutorFuture<'operation> = Pin<
     Box<
         dyn Future<Output = Result<ChangeBatchExecutionResult, ChangeBatchExecutorError>>
@@ -325,33 +319,17 @@ pub type ChangeBatchExecutorFuture<'operation> = Pin<
     >,
 >;
 
-/// Explicit mutation port for deterministic checkout changes.
 pub trait ChangeBatchExecutor: fmt::Debug + Send {
-    /// Starts one new deterministic execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when the executor cannot prove an exact result.
     fn execute<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation>;
 
-    /// Reconciles an execution whose durable stream reached `apply_started`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when recovery cannot prove an exact result.
     fn recover<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation>;
 
-    /// Rolls back or proves the state of a cancelling execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded failure when cancellation cannot prove an exact result.
     fn cancel<'operation>(
         &'operation mut self,
         request: ChangeBatchExecutionRequest<'operation>,
@@ -398,6 +376,44 @@ impl ChangeBatchExecutor for DeterministicChangeBatchExecutor {
                 },
             )
         })
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct DelayedDeterministicChangeBatchExecutor {
+    inner: DeterministicChangeBatchExecutor,
+    return_delay: Option<std::time::Duration>,
+}
+
+#[cfg(feature = "test-support")]
+impl ChangeBatchExecutor for DelayedDeterministicChangeBatchExecutor {
+    fn execute<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        let delay = self.return_delay.take();
+        Box::pin(async move {
+            let result = self.inner.execute(request).await;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            result
+        })
+    }
+
+    fn recover<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.inner.recover(request)
+    }
+
+    fn cancel<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.inner.cancel(request)
     }
 }
 
@@ -786,7 +802,6 @@ fn applied_summary(
     })
 }
 
-/// Terminal evidence of one executed or replayed delegated proposal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutedChangeBatch {
     pub progress: Vec<ChangeBatchProgressEvent>,
@@ -795,9 +810,6 @@ pub struct ExecutedChangeBatch {
     pub replayed: bool,
 }
 
-/// Revalidated terminal facts used to rebuild a bounded delegated loop after
-/// a Worker restart. The durable store remains the sole source of proposal and
-/// receipt history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DelegatedBatchHistory {
     pub proposal: ChangeBatchProposalEvent,
@@ -806,26 +818,38 @@ pub struct DelegatedBatchHistory {
     pub terminal_at: Instant,
 }
 
-/// Process-owned manager for all live detached Job workspaces.
 #[derive(Debug)]
 pub struct JobWorkspaceRuntime {
     manager: WorkspaceManager,
+    partition: Option<(PathBuf, PathBuf)>,
     active: HashMap<String, WorkerWorkspace>,
     change_batch_executor: Box<dyn ChangeBatchExecutor>,
-    validation_artifacts: Box<dyn ValidationArtifactPort>,
+    validation_artifacts: Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
+    pending_validations: HashMap<String, PendingBatchValidation>,
+    unconfirmed_validation_cleanup: HashSet<String>,
+    #[cfg(feature = "test-support")]
+    force_next_validation_cleanup_failure: bool,
+    #[cfg(feature = "test-support")]
+    validation_cleanup_pending_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(feature = "test-support")]
+    validation_cleanup_clear_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(feature = "test-support")]
+    validation_completion_writer_barrier:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     change_batch_store: ChangeBatchStore,
 }
 
+impl Drop for JobWorkspaceRuntime {
+    fn drop(&mut self) {
+        for pending in self.pending_validations.values() {
+            pending.task.abort();
+        }
+    }
+}
+
 impl JobWorkspaceRuntime {
-    /// Opens the controlled workspace and source roots.
-    ///
-    /// Existing directories are left untouched until an exact active Job asks
-    /// to resume them; foreign orphan cleanup remains an explicit startup
-    /// policy rather than deleting a resumable writer checkout.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical workspace-root validation failure.
     pub fn open(
         root: impl Into<PathBuf>,
         source_root: impl Into<PathBuf>,
@@ -835,14 +859,61 @@ impl JobWorkspaceRuntime {
         let change_batch_store = ChangeBatchStore::open(change_batch_store_root(&root)?)?;
         Ok(Self {
             manager: WorkspaceManager::open(root, source_root)?,
+            partition: None,
             active: HashMap::new(),
             change_batch_executor: Box::new(DeterministicChangeBatchExecutor),
-            validation_artifacts: Box::new(UnavailableValidationArtifactPort),
+            validation_artifacts: Arc::new(Mutex::new(Box::new(UnavailableValidationArtifactPort))),
+            pending_validations: HashMap::new(),
+            unconfirmed_validation_cleanup: HashSet::new(),
+            #[cfg(feature = "test-support")]
+            force_next_validation_cleanup_failure: false,
+            #[cfg(feature = "test-support")]
+            validation_cleanup_pending_barrier: None,
+            #[cfg(feature = "test-support")]
+            validation_cleanup_clear_barrier: None,
+            #[cfg(feature = "test-support")]
+            validation_completion_writer_barrier: None,
             change_batch_store,
         })
     }
 
-    /// Installs the sole deterministic mutation executor.
+    pub fn open_partitioned(
+        root: impl Into<PathBuf>,
+        source_root: impl Into<PathBuf>,
+    ) -> Result<Self, JobWorkspaceError> {
+        let source = fs::canonicalize(source_root.into()).map_err(|_| authority_error())?;
+        let identity = Sha256::digest(source.as_os_str().as_encoded_bytes());
+        let root = root.into().join(format!("{identity:x}"));
+        let mut runtime = Self::open(root.join("control"), source.clone())?;
+        runtime.partition = Some((root.join("jobs"), source));
+        Ok(runtime)
+    }
+
+    fn partition_manager(
+        &self,
+        active: &ActiveJob,
+    ) -> Result<Option<WorkspaceManager>, JobWorkspaceError> {
+        self.partition
+            .as_ref()
+            .map(|(root, source)| {
+                if !winwincode_domain::is_canonical_prefixed_id(&active.job.job_id.0, "job_")
+                    || !winwincode_domain::is_canonical_prefixed_id(
+                        &active.job.workspace.repository_id.0,
+                        "rep_",
+                    )
+                {
+                    return Err(authority_error());
+                }
+                WorkspaceManager::open(
+                    root.join(&active.job.workspace.repository_id.0)
+                        .join(&active.job.job_id.0),
+                    source,
+                )
+                .map_err(Into::into)
+            })
+            .transpose()
+    }
+
     #[must_use]
     pub fn with_change_batch_executor(
         mut self,
@@ -852,65 +923,60 @@ impl JobWorkspaceRuntime {
         self
     }
 
-    /// Installs the authority-bound raw validation Artifact store.
     #[must_use]
     pub fn with_validation_artifact_port(
         mut self,
         port: impl ValidationArtifactPort + 'static,
     ) -> Self {
-        self.validation_artifacts = Box::new(port);
+        self.validation_artifacts = Arc::new(Mutex::new(Box::new(port)));
         self
     }
 
-    /// Creates or resumes the one exact checkout for an active Job.
-    ///
-    /// Repeated calls for the same authority return the original path. A Job ID
-    /// whose active lease/session/thread changed is rejected without opening a
-    /// second checkout in this process.
-    ///
-    /// # Errors
-    ///
-    /// Rejects changed authority or any create/recovery failure.
     pub fn open_for_job(
         &mut self,
         active: &ActiveJob,
         replacement: Option<&ExecutionJobReplacementAuthority>,
     ) -> Result<PathBuf, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         if let Some(workspace) = self.active.get(&active.job.job_id.0) {
             if !same_authority(workspace.provenance(), active) {
                 return Err(authority_error());
             }
             return Ok(workspace.layout().checkout().to_path_buf());
         }
-        let workspace = self.manager.create_or_recover(active, replacement)?;
+        let manager = self.partition_manager(active)?;
+        let workspace = manager
+            .as_ref()
+            .unwrap_or(&self.manager)
+            .create_or_recover(active, replacement)?;
         let checkout = workspace.layout().checkout().to_path_buf();
         self.active.insert(active.job.job_id.0.clone(), workspace);
         Ok(checkout)
     }
 
-    /// Opens a checkout only after every durable interrupted batch is
-    /// reconciled to a proven terminal state.
-    ///
-    /// A batch whose evidence is still unresolved, quarantined, or foreign
-    /// keeps the checkout closed: this module never exposes a checkout whose
-    /// exact state cannot be proven.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, quarantined receipts, and unresolved durable
-    /// batch state.
     pub fn open_for_job_recovering(
         &mut self,
         active: &ActiveJob,
         replacement: Option<&ExecutionJobReplacementAuthority>,
         _now: &Instant,
     ) -> Result<PathBuf, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let records = self
             .change_batch_store
             .records_for_job(&active.job.job_id)?;
         for record in &records {
             if !same_change_batch_lease_authority(&record.event, active) {
                 return Err(authority_error());
+            }
+            if self
+                .change_batch_store
+                .workspace_binding_for_batch(&record.event.identity.batch_id)?
+                .state
+                == BatchState::Quarantined
+            {
+                return Err(change_batch_error(
+                    "ChangeBatch workspace remains quarantined",
+                ));
             }
             if record.receipt.as_ref().is_some_and(|receipt| {
                 matches!(
@@ -945,11 +1011,6 @@ impl JobWorkspaceRuntime {
         self.open_for_job(active, replacement)
     }
 
-    /// Leaves the exact durable workspace creation state at one crash point.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected interruption or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn interrupt_workspace_creation_for_test(
         &mut self,
@@ -957,17 +1018,15 @@ impl JobWorkspaceRuntime {
         replacement: Option<&ExecutionJobReplacementAuthority>,
         interruption: WorkspaceCreationInterruption,
     ) -> Result<(), JobWorkspaceError> {
-        self.manager
+        let partition = self.partition_manager(active)?;
+        partition
+            .as_ref()
+            .unwrap_or(&self.manager)
             .create_or_recover_interrupted(active, replacement, interruption)
             .map(|_| ())
             .map_err(Into::into)
     }
 
-    /// Leaves an exact workspace at one durable cleanup crash point.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected interruption or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn interrupt_workspace_cleanup_for_test(
         &mut self,
@@ -983,34 +1042,27 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Leaves a Creating intent after a normal creation error whose rollback fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns the injected rollback failure or any authority/filesystem failure.
     #[cfg(feature = "test-support")]
     pub fn fail_workspace_creation_rollback_for_test(
         &mut self,
         active: &ActiveJob,
         failure: WorkspaceCreationRollbackFailure,
     ) -> Result<(), JobWorkspaceError> {
-        self.manager
+        let partition = self.partition_manager(active)?;
+        partition
+            .as_ref()
+            .unwrap_or(&self.manager)
             .create_with_failed_rollback_for_test(active, failure)
             .map(|_| ())
             .map_err(Into::into)
     }
 
-    /// Freezes and verifies the live writer checkout into a Candidate upload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/foreign workspace, non-writer or cancelling Job,
-    /// unchanged checkout, or any Git verification failure.
     pub fn prepare_candidate(
         &mut self,
         active: &ActiveJob,
         execution_mode: RoleExecutionMode,
     ) -> Result<PreparedCandidateArtifact, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get_mut(&active.job.job_id.0)
@@ -1024,17 +1076,11 @@ impl JobWorkspaceRuntime {
         }
     }
 
-    /// Captures and verifies the clean candidate checkout used by a read-only
-    /// reviewer or verifier into its own Candidate upload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing/foreign workspace, an invalid verification Job, a
-    /// dirty checkout, or any Git/authority failure.
     pub fn prepare_verification(
         &mut self,
         active: &ActiveJob,
     ) -> Result<PreparedCandidateArtifact, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1042,17 +1088,102 @@ impl JobWorkspaceRuntime {
         if !same_authority(workspace.provenance(), active) {
             return Err(authority_error());
         }
-        match prepare_verification_artifact(active, workspace) {
-            Ok(prepared) => Ok(prepared),
-            Err(error) => Err(error.into()),
-        }
+        prepare_verification_artifact(active, workspace).map_err(Into::into)
     }
 
-    /// Returns the exact source tree this Job's checkout was sealed from.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing or foreign workspace.
+    pub(crate) async fn freeze_snapshot(
+        &mut self,
+        active: &ActiveJob,
+        request: &winwincode_execution_port::generated::SnapshotFreezeRequestMessage,
+        now: &Instant,
+    ) -> Result<winwincode_execution_port::generated::SnapshotFreezeReceiptMessage, JobWorkspaceError>
+    {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        let scope = ProtectedInputScope::new(workspace.layout().checkout(), &[])
+            .map_err(|_| change_batch_error("Snapshot protected input is unavailable"))?;
+        let probe_id = format!(
+            "{}:{}:{:?}",
+            request.request_id.0,
+            std::process::id(),
+            std::time::SystemTime::now()
+        );
+        let scratch = VerificationScratch::create(workspace.layout().root(), &probe_id, 0)
+            .map_err(|_| change_batch_error("Snapshot protection scratch is unavailable"))?;
+        let scratch_root = scratch.root().to_path_buf();
+        let result =
+            VerificationIsolation::open(scope, scratch, verification_helper_executable()).await;
+        let cleanup = fs::remove_dir_all(&scratch_root);
+        #[cfg(target_os = "linux")]
+        let launcher_cleanup = if scratch_root.with_extension("launcher").exists() {
+            fs::remove_dir_all(scratch_root.with_extension("launcher"))
+        } else {
+            Ok(())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let launcher_cleanup: std::io::Result<()> = Ok(());
+        let isolation =
+            result.map_err(|_| change_batch_error("Snapshot protection is unavailable"))?;
+        cleanup
+            .and(launcher_cleanup)
+            .map_err(|_| change_batch_error("Snapshot protection scratch cleanup failed"))?;
+        if !isolation.capability().allows_strong_pass() {
+            return Err(change_batch_error(
+                "Snapshot protection capability is unavailable",
+            ));
+        }
+        workspace
+            .retain_snapshot_freeze(request, now)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn bind_snapshot_dispatch(
+        &self,
+        message: &winwincode_execution_port::generated::SnapshotVerificationDispatchMessage,
+    ) -> Result<winwincode_execution_port::generated::SnapshotFreezeRequestMessage, JobWorkspaceError>
+    {
+        self.active
+            .get(&message.dispatch.job.job_id.0)
+            .ok_or_else(authority_error)?
+            .bind_snapshot_dispatch(message)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn snapshot_dispatch_is_bound(
+        &self,
+        dispatch: &winwincode_execution_port::generated::JobDispatchMessage,
+    ) -> Result<bool, JobWorkspaceError> {
+        self.active
+            .get(&dispatch.job.job_id.0)
+            .map_or(Ok(false), |workspace| {
+                workspace
+                    .snapshot_dispatch_is_bound(dispatch)
+                    .map_err(Into::into)
+            })
+    }
+
+    pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), JobWorkspaceError> {
+        self.active
+            .get_mut(&active.job.job_id.0)
+            .ok_or_else(authority_error)?
+            .renew_lease(active)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn workspace_authorities(&self) -> impl Iterator<Item = &WorkspaceProvenance> {
+        self.active.values().map(WorkerWorkspace::provenance)
+    }
+
+    pub(crate) fn has_capacity_for(&self, job_id: &ExecutionJobId, maximum: usize) -> bool {
+        maximum > 0 && (self.active.contains_key(&job_id.0) || self.active.len() < maximum)
+    }
+
     pub fn resolved_source_revision(
         &self,
         active: &ActiveJob,
@@ -1067,12 +1198,6 @@ impl JobWorkspaceRuntime {
         Ok(workspace.resolved_source_tree())
     }
 
-    /// Rebuilds terminal delegated-batch history from the durable store.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign workspace authority or a terminal receipt without its
-    /// matching terminal progress fact.
     pub fn delegated_batch_history(
         &self,
         active: &ActiveJob,
@@ -1115,13 +1240,6 @@ impl JobWorkspaceRuntime {
             .collect()
     }
 
-    /// Confirms that a stale-looking workspace revision belongs to the exact
-    /// already-retained proposal being replayed after its accepted tree was
-    /// committed.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign workspace authority or corrupt durable records.
     pub fn is_exact_delegated_identity_replay(
         &self,
         active: &ActiveJob,
@@ -1141,11 +1259,6 @@ impl JobWorkspaceRuntime {
             .any(|record| record.event.identity == *identity))
     }
 
-    /// Rebuilds Worker-owned bounded-loop counters before an Observer call.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched Job authority or corrupt durable counters.
     pub fn delegated_observer_counters(
         &self,
         active: &ActiveJob,
@@ -1197,11 +1310,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Resolves one durable Observer exchange to its exact `ChangeBatch`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown exchange or mismatched Job authority.
     pub fn observation_batch_id(
         &self,
         active: &ActiveJob,
@@ -1217,18 +1325,6 @@ impl JobWorkspaceRuntime {
         Ok(record.request.intent.identity.batch_id)
     }
 
-    /// Executes or replays one canonical proposal without ending its Job.
-    ///
-    /// The proposal, every progress transition, and the final receipt are
-    /// durable before this method returns. A replay with a terminal receipt
-    /// never invokes the executor again. The accepted revision only advances
-    /// through the exact revision gate after passing validation or an exact
-    /// observed checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, changed intent bytes, invalid plans/results,
-    /// or unavailable durable state.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::large_futures)]
     pub async fn execute_change_batch(
@@ -1237,6 +1333,73 @@ impl JobWorkspaceRuntime {
         event: &ChangeBatchProposalEvent,
         now: &Instant,
     ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        loop {
+            let now = clock.timestamp().ok_or_else(authority_error)?;
+            if let Some(executed) = self.poll_change_batch(active, event, &now).await? {
+                return Ok(executed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::large_futures)]
+    pub async fn poll_change_batch(
+        &mut self,
+        active: &ActiveJob,
+        event: &ChangeBatchProposalEvent,
+        now: &Instant,
+    ) -> Result<Option<ExecutedChangeBatch>, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(event, active)
+        {
+            return Err(authority_error());
+        }
+        if let Some(pending) = self.pending_validations.get(&active.job.job_id.0)
+            && pending.event != *event
+        {
+            return Err(authority_error());
+        }
+        self.require_live_validation_cleanup(&active.job.job_id)?;
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
+        if active.lifecycle == ActiveJobLifecycle::Running && now.0 >= active.lease.expires_at.0 {
+            self.cancel_validation(&active.job.job_id, now).await?;
+            return Err(authority_error());
+        }
+        if let Some(pending) = self.pending_validations.get(&active.job.job_id.0) {
+            if !pending.task.is_finished() {
+                return Ok(None);
+            }
+            let pending = self
+                .pending_validations
+                .remove(&active.job.job_id.0)
+                .ok_or_else(authority_error)?;
+            let completed = pending.task.await;
+            let current = clock.timestamp().ok_or_else(authority_error)?;
+            if completed.is_err() || pending.cancellation.cleanup_failed() {
+                self.retain_unconfirmed_validation_cleanup(&pending.state, &current)?;
+                return Err(validation_cleanup_error());
+            }
+            self.clear_confirmed_validation_cleanup(&pending.state)?;
+            return match completed {
+                Ok(Ok(validation)) => self
+                    .complete_batch_validation(active, pending.state, &validation, &clock)
+                    .map(Some),
+                Ok(Err(_)) => {
+                    let current = clock.timestamp().ok_or_else(authority_error)?;
+                    self.fail_batch_validation(active, pending.state, &current)
+                        .map(Some)
+                }
+                Err(_) => unreachable!("validation JoinError is gated before completion"),
+            };
+        }
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1265,14 +1428,14 @@ impl JobWorkspaceRuntime {
                 {
                     return Err(authority_error());
                 }
-                return Ok(ExecutedChangeBatch {
+                return Ok(Some(ExecutedChangeBatch {
                     progress,
                     receipt,
                     observation_request: self
                         .change_batch_store
                         .observation_request(&event.identity.batch_id)?,
                     replayed: true,
-                });
+                }));
             }
         }
         let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
@@ -1298,16 +1461,44 @@ impl JobWorkspaceRuntime {
             .batch_record(&event.identity.batch_id)?
             .and_then(|record| record.receipt)
         {
-            return Ok(ExecutedChangeBatch {
-                progress: self
-                    .change_batch_store
-                    .progress_events(&event.identity.batch_id)?,
-                receipt,
-                observation_request: self
-                    .change_batch_store
-                    .observation_request(&event.identity.batch_id)?,
-                replayed: true,
-            });
+            let mut progress = self
+                .change_batch_store
+                .progress_events(&event.identity.batch_id)?;
+            let result_revision = receipt
+                .result_revision
+                .clone()
+                .ok_or_else(authority_error)?;
+            let will_validate = self.validation_will_run(active, event, &receipt)?;
+            if will_validate
+                && progress
+                    .last()
+                    .is_some_and(|entry| entry.state == ChangeBatchProgressState::Applied)
+            {
+                append_progress_state(
+                    &mut self.change_batch_store,
+                    &mut progress,
+                    event,
+                    ChangeBatchProgressState::ValidationStarted,
+                    "ChangeBatch validation started",
+                    Vec::new(),
+                    now,
+                )?;
+            }
+            self.schedule_batch_validation(
+                active,
+                BatchValidationState {
+                    workspace_id,
+                    accepted_revision,
+                    result_revision,
+                    progress,
+                    receipt,
+                    retention,
+                    will_validate,
+                    event: event.clone(),
+                },
+                &clock,
+            )?;
+            return Ok(None);
         }
 
         let mut progress = prepare_execution_progress(&mut self.change_batch_store, event, now)?;
@@ -1373,12 +1564,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         if let ChangeBatchExecutionResult::StateUncertain { artifact_ref, .. } = &result {
             let receipt = exact_receipt(
@@ -1406,12 +1597,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         let applied_files = match &result {
             ChangeBatchExecutionResult::Applied { files, .. }
@@ -1422,7 +1613,7 @@ impl JobWorkspaceRuntime {
         let files = canonical_applied_file_summaries(&applied_files)?;
         let result_revision = resolve_checkout_tree(&checkout)?;
         let status = receipt_status(&result);
-        let mut receipt = exact_receipt(
+        let receipt = exact_receipt(
             event,
             &accepted_revision,
             Some(&result_revision),
@@ -1453,12 +1644,12 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
             progress.push(terminal);
-            return Ok(ExecutedChangeBatch {
+            return Ok(Some(ExecutedChangeBatch {
                 progress,
                 receipt,
                 observation_request: None,
                 replayed: retention == StoreRetention::Replay,
-            });
+            }));
         }
         let applied = next_progress(
             &progress,
@@ -1487,12 +1678,171 @@ impl JobWorkspaceRuntime {
                 now,
             )?;
         }
-        let validation = self
-            .run_result_validation(active, event, &receipt, &progress)
-            .await?;
+        let state = BatchValidationState {
+            workspace_id,
+            accepted_revision,
+            result_revision,
+            progress,
+            receipt,
+            retention,
+            will_validate,
+            event: event.clone(),
+        };
+        if !will_validate {
+            let validation =
+                run_result_validation(self.validation_input(active, event, &state.receipt)?)
+                    .await?;
+            return self
+                .complete_batch_validation(active, state, &validation, &clock)
+                .map(Some);
+        }
+        self.schedule_batch_validation(active, state, &clock)?;
+        Ok(None)
+    }
+
+    fn schedule_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        state: BatchValidationState,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<(), JobWorkspaceError> {
+        let validation = self.validation_input(active, &state.event, &state.receipt)?;
+        let cancellation = validation.cancellation.clone();
+        #[cfg(feature = "test-support")]
+        if std::mem::take(&mut self.force_next_validation_cleanup_failure) {
+            cancellation.force_cleanup_failure_for_test();
+        }
+        let current = self.validation_start_time(active, &state, clock)?;
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_cleanup_pending_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked.recv().map_err(|_| authority_error())?;
+        }
+        self.change_batch_store
+            .retain_validation_cleanup_pending(&state.workspace_id, &state.event.identity, &current)
+            .map_err(|_| {
+                let mut error = validation_cleanup_error();
+                error.stage = "validation_cancel_cleanup_pending";
+                error.cause_code = "VALIDATION_CLEANUP_PENDING_UNAVAILABLE";
+                error
+            })?;
+        if let Err(error) = self.validation_start_time(active, &state, clock) {
+            self.clear_confirmed_validation_cleanup(&state)?;
+            return Err(error);
+        }
+        let task = tokio::spawn(run_result_validation(validation));
+        self.pending_validations.insert(
+            active.job.job_id.0.clone(),
+            PendingBatchValidation {
+                event: state.event.clone(),
+                task,
+                cancellation,
+                state,
+            },
+        );
+        Ok(())
+    }
+
+    fn validation_start_time(
+        &self,
+        active: &ActiveJob,
+        state: &BatchValidationState,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<Instant, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if workspace.id() != state.workspace_id
+            || !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(&state.event, active)
+            || active.lifecycle != ActiveJobLifecycle::Running
+        {
+            return Err(authority_error());
+        }
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        if current.0 < active.lease.issued_at.0
+            || current.0 >= active.lease.expires_at.0
+            || clock
+                .start_deadline(&active.lease.issued_at, &active.lease.expires_at)
+                .is_none()
+        {
+            return Err(authority_error());
+        }
+        Ok(current)
+    }
+
+    fn fail_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        mut state: BatchValidationState,
+        now: &Instant,
+    ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(&state.event, active)
+        {
+            return Err(authority_error());
+        }
+        let terminal = next_progress(
+            &state.progress,
+            &state.event,
+            ChangeBatchProgressState::InfrastructureFailed,
+            "owned validation did not produce evidence; exact checkpoint quarantined",
+            Vec::new(),
+            now,
+        );
+        self.change_batch_store.retain_workspace_progress(
+            &state.workspace_id,
+            &terminal,
+            BatchState::ValidationPending,
+            BatchState::Quarantined,
+        )?;
+        state.progress.push(terminal);
+        Ok(ExecutedChangeBatch {
+            progress: state.progress,
+            receipt: state.receipt,
+            observation_request: None,
+            replayed: state.retention == StoreRetention::Replay,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn complete_batch_validation(
+        &mut self,
+        active: &ActiveJob,
+        state: BatchValidationState,
+        validation: &ValidationOutcome,
+        clock: &crate::driver_clock::DriverClock,
+    ) -> Result<ExecutedChangeBatch, JobWorkspaceError> {
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
+        let BatchValidationState {
+            workspace_id,
+            accepted_revision,
+            result_revision,
+            mut progress,
+            mut receipt,
+            retention,
+            will_validate,
+            event,
+        } = state;
+        let event = &event;
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active)
+            || !same_change_batch_lease_authority(event, active)
+            || active.lifecycle != ActiveJobLifecycle::Running
+            || now.0 >= active.lease.expires_at.0
+        {
+            return Err(authority_error());
+        }
         if !will_validate || validation.receipt.is_none() {
-            // No executable validation: the evidence ends at the exact apply
-            // checkpoint, with no decision and no observation.
             return Ok(ExecutedChangeBatch {
                 progress,
                 receipt,
@@ -1501,6 +1851,13 @@ impl JobWorkspaceRuntime {
             });
         }
         receipt.validation.clone_from(&validation.receipt);
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_completion_writer_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| authority_error())?;
+        }
         let decision = retain_validation_diagnostic_evaluation(
             &mut self.change_batch_store,
             event,
@@ -1516,15 +1873,16 @@ impl JobWorkspaceRuntime {
             now,
         )?;
         let observation_request = match &decision {
-            ValidationDiagnosticDisposition::BaselineUnavailable => build_observation_request(
-                &self.change_batch_store,
-                event,
-                &validation.selection,
-                active.job.goal.as_str(),
-                &receipt,
-            )?,
-            ValidationDiagnosticDisposition::Pass
-            | ValidationDiagnosticDisposition::RepairRequired { .. } => None,
+            ValidationDiagnosticDisposition::BaselineUnavailable if validation.result.is_some() => {
+                build_observation_request(
+                    &self.change_batch_store,
+                    event,
+                    &validation.selection,
+                    active.job.goal.as_str(),
+                    &receipt,
+                )?
+            }
+            _ => None,
         };
         if let Some(validation_receipt) = receipt.validation.as_ref() {
             validate_validation_receipt_binding(
@@ -1593,6 +1951,19 @@ impl JobWorkspaceRuntime {
             progress.push(repair);
         }
         if !observation_requested && decision == ValidationDiagnosticDisposition::Pass {
+            let current = clock.timestamp().ok_or_else(authority_error)?;
+            let now = &current;
+            let workspace = self
+                .active
+                .get(&active.job.job_id.0)
+                .ok_or_else(authority_error)?;
+            if !same_authority(workspace.provenance(), active)
+                || !same_change_batch_lease_authority(event, active)
+                || active.lifecycle != ActiveJobLifecycle::Running
+                || now.0 >= active.lease.expires_at.0
+            {
+                return Err(authority_error());
+            }
             let accepted = next_progress(
                 &progress,
                 event,
@@ -1610,6 +1981,8 @@ impl JobWorkspaceRuntime {
                     .as_ref()
                     .ok_or_else(|| change_batch_error("accepted batch has no exact delta"))?,
                 now,
+                CheckpointAcceptanceDeadline::from_clock(clock, &active.lease)
+                    .ok_or_else(authority_error)?,
             )? != ObservationGateResult::Accepted
             {
                 return Err(change_batch_error(
@@ -1628,12 +2001,6 @@ impl JobWorkspaceRuntime {
         })
     }
 
-    /// Reports whether this batch has an executable read-only validation
-    /// profile, without retaining any state.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid present validation configuration.
     fn validation_will_run(
         &self,
         active: &ActiveJob,
@@ -1653,144 +2020,23 @@ impl JobWorkspaceRuntime {
             &changed_paths,
         )
         .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
-        let commands: Vec<&ValidationCommandSpec> = selection
-            .command_ids
-            .iter()
-            .filter_map(|id| {
-                configuration.as_ref().and_then(|parsed| {
-                    parsed
-                        .configuration()
-                        .commands
-                        .iter()
-                        .find(|command| &command.id == id)
-                })
-            })
-            .filter(|command| matches!(command.phase, ValidationCommandPhase::Validation))
-            .collect();
+        let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
         Ok(selection.executable && !commands.is_empty())
     }
 
-    /// Runs the retained result state through its configured validation
-    /// profile, persisting every raw command output as a private Artifact.
-    ///
-    /// Read-only validation commands only: this module never mutates the
-    /// checkout, so formatter and writer phases belong to the deterministic
-    /// executor delivery and are never executed here.
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::large_futures)]
-    async fn run_result_validation(
-        &mut self,
+    fn validation_input(
+        &self,
         active: &ActiveJob,
         event: &ChangeBatchProposalEvent,
         receipt: &ChangeBatchReceipt,
-        progress: &[ChangeBatchProgressEvent],
-    ) -> Result<ValidationOutcome, JobWorkspaceError> {
+    ) -> Result<ValidationInput, JobWorkspaceError> {
         let workspace = self
             .active
             .get(&active.job.job_id.0)
             .ok_or_else(authority_error)?;
-        let checkout = workspace.layout().checkout().to_path_buf();
-        let configuration = load_validation_configuration(&checkout)?;
-        let changed_paths = git_changed_paths(receipt);
-        let selection = resolve_validation_profile(
-            configuration.as_ref(),
-            validation_profile_text(&event.proposal.validation_profile),
-            &changed_paths,
-        )
-        .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
-        let _ = progress;
-        let commands: Vec<&ValidationCommandSpec> = selection
-            .command_ids
-            .iter()
-            .filter_map(|id| {
-                configuration
-                    .as_ref()
-                    .and_then(|parsed| parsed.configuration().commands.iter().find(|c| &c.id == id))
-            })
-            .filter(|command| matches!(command.phase, ValidationCommandPhase::Validation))
-            .collect();
-        if !selection.executable || commands.is_empty() {
-            return Ok(ValidationOutcome {
-                selection,
-                receipt: None,
-                parser_failed: false,
-                baseline: None,
-                result: None,
-            });
-        }
-        let mut checks = Vec::new();
-        let mut artifact_refs = Vec::new();
-        let mut duration_millis = 0_i64;
-        let mut infrastructure = false;
-        let mut failed = false;
-        let mut parser_failed = false;
-        let mut parsed_batches = Vec::new();
-        for (ordinal, command) in commands.iter().enumerate() {
-            let mut run = run_validation_command(
-                &checkout,
-                command,
-                ordinal,
-                event,
-                self.validation_artifacts.as_mut(),
-            )
-            .await?;
-            if run.failed() && command.flaky_rerun_limit == Some(1) {
-                let retry = run_validation_command(
-                    &checkout,
-                    command,
-                    commands.len().saturating_add(ordinal),
-                    event,
-                    self.validation_artifacts.as_mut(),
-                )
-                .await?;
-                run.reconcile_bounded_rerun(retry);
-            }
-            duration_millis = duration_millis.saturating_add(run.duration_millis);
-            artifact_refs.extend(run.artifact_refs.iter().cloned());
-            checks.push(run.check_summary());
-            infrastructure |= run.infrastructure_failure();
-            failed |= run.failed();
-            if let (Some(version), false) = (
-                command.diagnostic_parser_version.as_ref(),
-                run.infrastructure_failure(),
-            ) {
-                match parse_diagnostics(version.clone(), &run.output, &checkout) {
-                    Ok(batch) => parsed_batches.push(batch),
-                    Err(_) => parser_failed = true,
-                }
-            } else if command.diagnostic_parser_version.is_some() {
-                parser_failed = true;
-            }
-            // An infrastructure failure proves nothing about the remaining
-            // profile, so the run stops instead of recording an incomplete
-            // snapshot as if it were complete.
-            if run.infrastructure_failure() {
-                break;
-            }
-        }
-        let status = if infrastructure {
-            ValidationReceiptStatus::InfrastructureError
-        } else if failed {
-            ValidationReceiptStatus::Failed
-        } else {
-            ValidationReceiptStatus::Passed
-        };
-        let result_revision = receipt.result_revision.clone();
-        let result = if parsed_batches.is_empty() {
-            None
-        } else {
-            build_diagnostic_baseline(
-                result_revision.clone().ok_or_else(|| {
-                    change_batch_error("validated ChangeBatch has no result tree")
-                })?,
-                &parsed_batches,
-            )
-            .ok()
-        };
-        let base_batch_id = event.identity.batch_id.clone();
         let baseline = self
             .change_batch_store
-            .diagnostic_baseline(&base_batch_id, &receipt.base_revision)?
+            .diagnostic_baseline(&event.identity.batch_id, &receipt.base_revision)?
             .or_else(|| {
                 retained_history_baseline(
                     &self.change_batch_store,
@@ -1800,35 +2046,199 @@ impl JobWorkspaceRuntime {
                 .ok()
                 .flatten()
             });
-        let receipt = ValidationReceipt {
-            artifact_refs,
-            base_revision: receipt.base_revision.clone(),
-            checks,
-            duration_millis,
-            profile: selection.profile.clone(),
-            result_revision,
-            status,
-        };
-        Ok(ValidationOutcome {
-            selection,
-            receipt: Some(receipt),
-            parser_failed,
+        Ok(ValidationInput {
+            active: active.clone(),
+            event: event.clone(),
+            receipt: receipt.clone(),
+            checkout: workspace.layout().checkout().to_path_buf(),
+            workspace_root: workspace.layout().root().to_path_buf(),
             baseline,
-            result,
+            artifacts: Arc::clone(&self.validation_artifacts),
+            cancellation: VerificationCancellation::default(),
         })
     }
 
-    /// Consumes and removes one exact Job workspace at terminal cleanup.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing active workspace, an unresolved durable batch, or a
-    /// cleanup failure.
+    pub(crate) async fn cancel_validation(
+        &mut self,
+        job_id: &ExecutionJobId,
+        now: &Instant,
+    ) -> Result<(), JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        self.require_live_validation_cleanup(job_id)?;
+        if let Some(pending) = self.pending_validations.remove(&job_id.0) {
+            pending.cancellation.cancel();
+            let joined = pending.task.await;
+            if joined.is_err() || pending.cancellation.cleanup_failed() {
+                let current = clock.timestamp().ok_or_else(authority_error)?;
+                self.retain_unconfirmed_validation_cleanup(&pending.state, &current)?;
+                return Err(validation_cleanup_error());
+            }
+            self.clear_confirmed_validation_cleanup(&pending.state)?;
+        }
+        Ok(())
+    }
+
+    fn require_confirmed_validation_cleanup(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<(), JobWorkspaceError> {
+        if self.unconfirmed_validation_cleanup.contains(&job_id.0)
+            || self
+                .change_batch_store
+                .validation_cleanup_record(job_id)?
+                .is_some()
+        {
+            return Err(validation_cleanup_error());
+        }
+        Ok(())
+    }
+
+    fn require_live_validation_cleanup(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<(), JobWorkspaceError> {
+        if self.unconfirmed_validation_cleanup.contains(&job_id.0) {
+            return Err(validation_cleanup_error());
+        }
+        let record = self.change_batch_store.validation_cleanup_record(job_id)?;
+        match (record, self.pending_validations.get(&job_id.0)) {
+            (None, None) => Ok(()),
+            (Some(record), Some(pending))
+                if record.cause_code == "VALIDATION_CLEANUP_PENDING"
+                    && record.identity == pending.event.identity
+                    && record.workspace_id == pending.state.workspace_id =>
+            {
+                Ok(())
+            }
+            _ => Err(validation_cleanup_error()),
+        }
+    }
+
+    fn clear_confirmed_validation_cleanup(
+        &mut self,
+        state: &BatchValidationState,
+    ) -> Result<(), JobWorkspaceError> {
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, writer_locked)) = self.validation_cleanup_clear_barrier.take() {
+            arrived.send(()).map_err(|_| authority_error())?;
+            writer_locked.recv().map_err(|_| authority_error())?;
+        }
+        if self
+            .change_batch_store
+            .clear_validation_cleanup_pending(&state.workspace_id, &state.event.identity)
+            .is_err()
+        {
+            self.unconfirmed_validation_cleanup
+                .insert(state.event.identity.job_id.0.clone());
+            let mut error = validation_cleanup_error();
+            error.stage = "validation_cancel_cleanup_clear";
+            error.cause_code = "VALIDATION_CLEANUP_CLEAR_UNAVAILABLE";
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn retain_unconfirmed_validation_cleanup(
+        &mut self,
+        state: &BatchValidationState,
+        now: &Instant,
+    ) -> Result<(), JobWorkspaceError> {
+        self.unconfirmed_validation_cleanup
+            .insert(state.event.identity.job_id.0.clone());
+        self.change_batch_store
+            .retain_validation_cleanup_failure(&state.workspace_id, &state.event.identity, now)
+            .map_err(|_| {
+                let mut error = validation_cleanup_error();
+                error.stage = "validation_cancel_cleanup_record";
+                error.cause_code = "VALIDATION_CLEANUP_RECORD_UNAVAILABLE";
+                error
+            })?;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn force_next_validation_cleanup_failure_for_test(&mut self) {
+        self.force_next_validation_cleanup_failure = true;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn delay_next_change_batch_apply_return_for_test(&mut self, delay: std::time::Duration) {
+        self.change_batch_executor = Box::new(DelayedDeterministicChangeBatchExecutor {
+            inner: DeterministicChangeBatchExecutor,
+            return_delay: Some(delay),
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_cleanup_pending_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_cleanup_pending_barrier = Some((arrived, writer_locked));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_cleanup_clear_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_cleanup_clear_barrier = Some((arrived, writer_locked));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_completion_writer_barrier_for_test(
+        &mut self,
+        arrived: std::sync::mpsc::Sender<()>,
+        writer_locked: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.validation_completion_writer_barrier = Some((arrived, writer_locked));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn delay_next_validation_cleanup_clear_for_test(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<Arc<std::sync::atomic::AtomicUsize>, JobWorkspaceError> {
+        self.change_batch_store
+            .delay_next_validation_cleanup_clear_for_test(delay)
+            .map_err(Into::into)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_pending_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_pending_for_test()
+            .map_err(Into::into)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn pending_validation_task_count_for_test(&self) -> usize {
+        self.pending_validations.len()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_diagnostic_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_diagnostic_for_test()
+            .map_err(Into::into)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn fail_validation_cleanup_clear_for_test(&self) -> Result<(), JobWorkspaceError> {
+        self.change_batch_store
+            .fail_validation_cleanup_clear_for_test()
+            .map_err(Into::into)
+    }
+
     pub fn close_job(
         &mut self,
         job_id: &ExecutionJobId,
         reason: WorkspaceCloseReason,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let workspace = self.active.get(&job_id.0).ok_or_else(authority_error)?;
         if self
             .change_batch_store
@@ -1847,6 +2257,7 @@ impl JobWorkspaceRuntime {
         job_id: &ExecutionJobId,
         reason: WorkspaceCloseReason,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let report = self
             .active
             .get_mut(&job_id.0)
@@ -1856,19 +2267,13 @@ impl JobWorkspaceRuntime {
         Ok(report)
     }
 
-    /// Consumes the checkout only after every durable batch reached a proven
-    /// terminal decision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing workspace, an unresolved durable batch, or a cleanup
-    /// failure.
     pub fn prepare_close_job(
         &mut self,
         job_id: &ExecutionJobId,
         reason: WorkspaceCloseReason,
         _now: &Instant,
     ) -> Result<WorkspaceCleanupReport, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(job_id)?;
         let workspace = self.active.get(&job_id.0).ok_or_else(authority_error)?;
         let unresolved = self
             .change_batch_store
@@ -1882,13 +2287,81 @@ impl JobWorkspaceRuntime {
         self.consume_workspace(job_id, reason)
     }
 
-    /// Returns whether this process owns an open checkout for the Job.
+    pub fn prepare_terminal_job_close(
+        &mut self,
+        active: &ActiveJob,
+        reason: WorkspaceCloseReason,
+        now: &Instant,
+    ) -> Result<Option<ChangeBatchProgressEvent>, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        let workspace_id = workspace.id().to_owned();
+        let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
+        let Some(binding) = binding.filter(|binding| binding.active_batch_id.is_some()) else {
+            self.prepare_close_job(&active.job.job_id, reason, now)?;
+            return Ok(None);
+        };
+        if reason == WorkspaceCloseReason::Completed {
+            return Err(change_batch_error(
+                "Successful Job has an unresolved ChangeBatch",
+            ));
+        }
+        let batch_id = binding
+            .active_batch_id
+            .as_ref()
+            .ok_or_else(authority_error)?;
+        let record = self
+            .change_batch_store
+            .batch_record(batch_id)?
+            .ok_or_else(authority_error)?;
+        if !same_change_batch_lease_authority(&record.event, active)
+            || self
+                .change_batch_store
+                .workspace_binding_for_batch(batch_id)?
+                != binding
+        {
+            return Err(authority_error());
+        }
+        let progress = self.change_batch_store.progress_events(batch_id)?;
+        let terminal = if binding.state == BatchState::Quarantined {
+            progress
+                .last()
+                .filter(|event| event.state == ChangeBatchProgressState::InfrastructureFailed)
+                .cloned()
+                .ok_or_else(authority_error)?
+        } else {
+            next_progress(
+                &progress,
+                &record.event,
+                ChangeBatchProgressState::InfrastructureFailed,
+                "Job ended with unresolved ChangeBatch; checkout retained for diagnosis",
+                Vec::new(),
+                now,
+            )
+        };
+        self.change_batch_store.retain_workspace_progress(
+            &workspace_id,
+            &terminal,
+            binding.state,
+            BatchState::Quarantined,
+        )?;
+        self.active.remove(&active.job.job_id.0);
+        Ok(Some(terminal))
+    }
+
     #[must_use]
     pub fn contains(&self, job_id: &ExecutionJobId) -> bool {
         self.active.contains_key(&job_id.0)
     }
 
     pub(crate) fn checkout_for_job(&self, active: &ActiveJob) -> Result<&Path, JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -1921,17 +2394,9 @@ impl JobWorkspaceRuntime {
         if !same_authority(workspace.provenance(), active) {
             return Err(authority_error());
         }
-        workspace
-            .snapshot_candidate()
-            .map(|_| ())
-            .map_err(Into::into)
+        workspace.freeze_candidate().map(|_| ()).map_err(Into::into)
     }
 
-    /// Returns the currently accepted tree that authorizes the next batch.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing active workspace or corrupt durable state.
     pub fn accepted_revision(
         &self,
         job_id: &ExecutionJobId,
@@ -1946,11 +2411,6 @@ impl JobWorkspaceRuntime {
             ))
     }
 
-    /// Returns whether the exchange belongs to a retained Observer intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt durable Observer state.
     pub fn is_observation_model_exchange(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -1968,12 +2428,6 @@ impl JobWorkspaceRuntime {
         Ok(record.is_some())
     }
 
-    /// Returns the exact unfinished Observer open for restart replay.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing current authority, a stale revision, or corrupt durable
-    /// exchange state.
     pub fn pending_observation_model_open(
         &self,
         active: &ActiveJob,
@@ -2010,14 +2464,12 @@ impl JobWorkspaceRuntime {
             .model_open
             .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
         validate_observation_model_open_payload(&open, &record.request)?;
+        if !same_observation_model_authority(&open, active) {
+            return Err(authority_error());
+        }
         Ok(Some(open))
     }
 
-    /// Terminalizes and returns the unfinished Observer open for Job cancel.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority or an unavailable durable cancellation write.
     pub fn cancel_pending_observation_model(
         &mut self,
         active: &ActiveJob,
@@ -2065,18 +2517,6 @@ impl JobWorkspaceRuntime {
         Ok(Some(open))
     }
 
-    /// Builds and durably retains the exact no-tools, strict-JSON one-shot
-    /// Provider open for one already-retained Observer intent.
-    ///
-    /// The returned message may be sent only after this method succeeds. An
-    /// exact replay returns the original message, including its first send
-    /// timestamp, so the Control Plane's durable Provider runtime invokes and
-    /// bills the exchange at most once.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/stale authority, changed intent bytes, unavailable
-    /// durable state, or a request that exceeds the bounded Provider shape.
     pub fn prepare_observation_model_open(
         &mut self,
         active: &ActiveJob,
@@ -2120,6 +2560,9 @@ impl JobWorkspaceRuntime {
                 .model_open
                 .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
             validate_observation_model_open_payload(&open, request)?;
+            if !same_observation_model_authority(&open, active) {
+                return Err(authority_error());
+            }
             return Ok(open);
         }
         let payload = observation_provider_payload(request, configuration)?;
@@ -2157,14 +2600,6 @@ impl JobWorkspaceRuntime {
         Ok(open)
     }
 
-    /// Applies one authority-bound Observer model chunk and, on a terminal
-    /// frame, durably routes its strict decision exactly once.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, gaps with changed bytes, tool/reasoning
-    /// frames, invalid payloads, or a decision that is not bound to the exact
-    /// retained intent.
     #[allow(clippy::too_many_lines)]
     pub fn accept_observation_model_chunk(
         &mut self,
@@ -2172,6 +2607,9 @@ impl JobWorkspaceRuntime {
         chunk: &ModelChunkMessage,
         now: &Instant,
     ) -> Result<Option<ObservationChunkApplication>, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let now = &current;
         let Some(record) = self
             .change_batch_store
             .observation_model_record(&chunk.model_exchange_id)?
@@ -2202,12 +2640,14 @@ impl JobWorkspaceRuntime {
                 active,
                 &binding.accepted_revision,
             );
-        if active.lifecycle != ActiveJobLifecycle::Running
+        if (active.lifecycle != ActiveJobLifecycle::Running && !terminal_replay)
             || !same_authority(workspace.provenance(), active)
             || !same_change_batch_identity_lease_authority(&intent.identity, active)
-            || chunk.lease != active.lease
-            || chunk.session_identity != active.session_identity
-            || chunk.worker_session_id != active.worker_session_id
+            || !same_observation_model_authority(retained_open, active)
+            || now.0 < active.lease.issued_at.0
+            || chunk.lease != retained_open.lease
+            || chunk.session_identity != retained_open.session_identity
+            || chunk.worker_session_id != retained_open.worker_session_id
             || (!terminal_replay
                 && (!same_change_batch_identity_authority(
                     &intent.identity,
@@ -2216,12 +2656,6 @@ impl JobWorkspaceRuntime {
                 ) || binding.state != BatchState::ObservationPending
                     || binding.active_batch_id.as_ref() != Some(&intent.identity.batch_id)
                     || binding.checkpoint_revision.as_ref() != Some(&intent.result_revision)))
-            || (terminal_replay
-                && !pending_terminal_route
-                && !matches!(
-                    binding.state,
-                    BatchState::Accepted | BatchState::RepairRequired | BatchState::Quarantined
-                ))
         {
             return Err(authority_error());
         }
@@ -2340,6 +2774,16 @@ impl JobWorkspaceRuntime {
         let intent_delta_digest = intent.delta_digest.clone();
         match receipt.response.decision {
             ObservationDecision::Accept => {
+                let current = clock.timestamp().ok_or_else(authority_error)?;
+                let now = &current;
+                if active.lifecycle != ActiveJobLifecycle::Running
+                    || !same_authority(workspace.provenance(), active)
+                    || !same_change_batch_identity_lease_authority(&intent.identity, active)
+                    || now.0 < active.lease.issued_at.0
+                    || now.0 >= active.lease.expires_at.0
+                {
+                    return Err(authority_error());
+                }
                 let accepted = next_progress(
                     &progress,
                     &stored.event,
@@ -2354,6 +2798,8 @@ impl JobWorkspaceRuntime {
                     &intent_result_revision,
                     &intent_delta_digest,
                     now,
+                    CheckpointAcceptanceDeadline::from_clock(&clock, &active.lease)
+                        .ok_or_else(authority_error)?,
                 )? != ObservationGateResult::Accepted
                 {
                     return Err(change_batch_error(
@@ -2415,16 +2861,6 @@ impl JobWorkspaceRuntime {
         }))
     }
 
-    /// Atomically records one externally produced post-apply validation or
-    /// observation progress fact.
-    ///
-    /// This seam persists externally produced facts but does not invoke a
-    /// validator or observer.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign authority, stale workspace state, or a progress fact
-    /// outside the bounded post-apply sequence.
     pub fn record_checkpoint_progress(
         &mut self,
         active: &ActiveJob,
@@ -2466,21 +2902,15 @@ impl JobWorkspaceRuntime {
             .map_err(Into::into)
     }
 
-    /// Accepts one checkpoint only after an exact typed observation fact.
-    ///
-    /// Stale or foreign revision and digest facts return `Stale` without
-    /// changing the accepted tree or releasing the Writer barrier.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable or corrupt durable state and invalid progress bytes.
     pub fn accept_observed_checkpoint(
         &mut self,
         active: &ActiveJob,
         progress: &ChangeBatchProgressEvent,
         observed_revision: &WorkspaceRevision,
         observed_delta_digest: &Sha256Digest,
+        now: &Instant,
     ) -> Result<ObservationGateResult, JobWorkspaceError> {
+        let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -2491,22 +2921,209 @@ impl JobWorkspaceRuntime {
             .ok_or_else(authority_error)?;
         if !same_authority(workspace.provenance(), active)
             || !same_change_batch_progress_authority(progress, active, &binding.accepted_revision)
+            || active.lifecycle != ActiveJobLifecycle::Running
         {
             return Ok(ObservationGateResult::Stale);
         }
+        let current = clock.timestamp().ok_or_else(authority_error)?;
+        let Some(deadline) = CheckpointAcceptanceDeadline::from_clock(&clock, &active.lease) else {
+            return Ok(ObservationGateResult::Stale);
+        };
         self.change_batch_store
             .accept_observed_checkpoint(
                 workspace.id(),
                 progress,
                 observed_revision,
                 observed_delta_digest,
-                &progress.occurred_at,
+                &current,
+                deadline,
             )
             .map_err(Into::into)
     }
 }
 
-/// Bounded outcome of one validation pass over the applied result state.
+#[derive(Debug)]
+struct PendingBatchValidation {
+    event: ChangeBatchProposalEvent,
+    task: tokio::task::JoinHandle<Result<ValidationOutcome, JobWorkspaceError>>,
+    cancellation: VerificationCancellation,
+    state: BatchValidationState,
+}
+
+#[derive(Debug)]
+struct BatchValidationState {
+    workspace_id: String,
+    accepted_revision: WorkspaceRevision,
+    result_revision: WorkspaceRevision,
+    progress: Vec<ChangeBatchProgressEvent>,
+    receipt: ChangeBatchReceipt,
+    retention: StoreRetention,
+    will_validate: bool,
+    event: ChangeBatchProposalEvent,
+}
+
+struct ValidationInput {
+    active: ActiveJob,
+    event: ChangeBatchProposalEvent,
+    receipt: ChangeBatchReceipt,
+    checkout: PathBuf,
+    workspace_root: PathBuf,
+    baseline: Option<DiagnosticBaseline>,
+    artifacts: Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
+    cancellation: VerificationCancellation,
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::large_futures)]
+async fn run_result_validation(
+    input: ValidationInput,
+) -> Result<ValidationOutcome, JobWorkspaceError> {
+    let ValidationInput {
+        active,
+        event,
+        receipt,
+        checkout,
+        workspace_root,
+        baseline,
+        artifacts,
+        cancellation,
+    } = input;
+    if cancellation.is_cancelled() {
+        return Err(change_batch_error("validation cancelled"));
+    }
+    let active = &active;
+    let event = &event;
+    let receipt = &receipt;
+    let configuration = load_validation_configuration(&checkout)?;
+    let changed_paths = git_changed_paths(receipt);
+    let selection = resolve_validation_profile(
+        configuration.as_ref(),
+        validation_profile_text(&event.proposal.validation_profile),
+        &changed_paths,
+    )
+    .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
+    let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
+    if !selection.executable || commands.is_empty() {
+        return Ok(ValidationOutcome {
+            selection,
+            receipt: None,
+            parser_failed: false,
+            baseline: None,
+            result: None,
+        });
+    }
+    let scratch_identity = format!(
+        "{}:{}:{:x}:{}:{}",
+        active.job.job_id.0,
+        active.worker_session_id.0,
+        Sha256::digest(serde_json::to_vec(&event.identity).map_err(|_| {
+            change_batch_error("verification scratch identity cannot be encoded")
+        })?),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| change_batch_error("verification generation clock is invalid"))?
+            .as_nanos()
+    );
+    let scope = ProtectedInputScope::new(&checkout, &changed_paths)
+        .map_err(|_| change_batch_error("protected verification input scope is invalid"))?;
+    let scratch = VerificationScratch::create(workspace_root, &scratch_identity, 0)
+        .map_err(|_| change_batch_error("verification scratch cannot be allocated"))?;
+    let isolation = VerificationIsolation::open_with_cancellation(
+        scope,
+        scratch,
+        verification_helper_executable(),
+        cancellation.clone(),
+    )
+    .await
+    .map_err(|_| change_batch_error("verification isolation cannot be established"))?;
+    let isolation_binding = IsolationBinding::from(&isolation);
+    let mut checks = Vec::new();
+    let mut artifact_refs = Vec::new();
+    let mut duration_millis = 0_i64;
+    let mut infrastructure = false;
+    let mut failed = false;
+    let mut parser_failed = false;
+    let mut parsed_batches = Vec::new();
+    for (ordinal, command) in commands.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(change_batch_error("validation cancelled"));
+        }
+        let mut run = if isolation.capability().allows_strong_pass() {
+            run_validation_command(&isolation, command, ordinal, event, &artifacts).await?
+        } else {
+            ValidationCommandRun::capability_unavailable(
+                &command.id,
+                &isolation_binding,
+                match isolation.capability() {
+                    ProtectionCapability::Unavailable { reason, .. } => reason.clone(),
+                    ProtectionCapability::Available { .. } => unreachable!(),
+                },
+            )
+        };
+        if run.failed() && command.flaky_rerun_limit == Some(1) {
+            let retry = run_validation_command(
+                &isolation,
+                command,
+                commands.len().saturating_add(ordinal),
+                event,
+                &artifacts,
+            )
+            .await?;
+            run.reconcile_bounded_rerun(retry);
+        }
+        duration_millis = duration_millis.saturating_add(run.duration_millis);
+        artifact_refs.extend(run.artifact_refs.iter().cloned());
+        checks.push(run.check_summary());
+        infrastructure |= run.infrastructure_failure();
+        failed |= run.failed();
+        if let (Some(version), false) = (
+            command.diagnostic_parser_version.as_ref(),
+            run.infrastructure_failure(),
+        ) {
+            match parse_diagnostics(version.clone(), &run.output, &checkout) {
+                Ok(batch) => parsed_batches.push(batch),
+                Err(_) => parser_failed = true,
+            }
+        } else if command.diagnostic_parser_version.is_some() {
+            parser_failed = true;
+        }
+        if run.infrastructure_failure() {
+            break;
+        }
+    }
+    let status = validation_receipt_status(infrastructure, failed);
+    let result_revision = receipt.result_revision.clone();
+    let result = if parsed_batches.is_empty() {
+        None
+    } else {
+        build_diagnostic_baseline(
+            result_revision
+                .clone()
+                .ok_or_else(|| change_batch_error("validated ChangeBatch has no result tree"))?,
+            &parsed_batches,
+        )
+        .ok()
+    };
+    let receipt = ValidationReceipt {
+        artifact_refs,
+        base_revision: receipt.base_revision.clone(),
+        checks,
+        duration_millis,
+        profile: selection.profile.clone(),
+        result_revision,
+        status,
+    };
+    Ok(ValidationOutcome {
+        selection,
+        receipt: Some(receipt),
+        parser_failed,
+        baseline,
+        result,
+    })
+}
+
+#[derive(Debug)]
 struct ValidationOutcome {
     selection: ValidationProfileSelection,
     receipt: Option<ValidationReceipt>,
@@ -2515,7 +3132,29 @@ struct ValidationOutcome {
     result: Option<DiagnosticBaseline>,
 }
 
-/// One bounded command outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IsolationBinding {
+    scope_version: u8,
+    scope_digest: String,
+    backend: String,
+    scratch_id: String,
+}
+
+impl From<&VerificationIsolation> for IsolationBinding {
+    fn from(isolation: &VerificationIsolation) -> Self {
+        let backend = match isolation.capability() {
+            ProtectionCapability::Available { backend }
+            | ProtectionCapability::Unavailable { backend, .. } => backend.clone(),
+        };
+        Self {
+            scope_version: isolation.scope().version(),
+            scope_digest: isolation.scope().digest().to_owned(),
+            backend,
+            scratch_id: isolation.scratch().id().to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValidationCommandOutcome {
     Passed,
@@ -2523,22 +3162,42 @@ enum ValidationCommandOutcome {
     Flaky,
     TimedOut,
     Overflowed,
+    CapabilityUnavailable,
 }
 
-/// One executed read-only validation command.
 struct ValidationCommandRun {
     command_id: String,
     outcome: ValidationCommandOutcome,
     duration_millis: i64,
     artifact_refs: Vec<ArtifactReference>,
     output: Vec<u8>,
+    isolation: IsolationBinding,
+    detail: Option<String>,
 }
 
 impl ValidationCommandRun {
+    fn capability_unavailable(
+        command_id: &str,
+        isolation: &IsolationBinding,
+        reason: String,
+    ) -> Self {
+        Self {
+            command_id: command_id.to_owned(),
+            outcome: ValidationCommandOutcome::CapabilityUnavailable,
+            duration_millis: 0,
+            artifact_refs: Vec::new(),
+            output: Vec::new(),
+            isolation: isolation.clone(),
+            detail: Some(reason),
+        }
+    }
+
     fn infrastructure_failure(&self) -> bool {
         matches!(
             self.outcome,
-            ValidationCommandOutcome::TimedOut | ValidationCommandOutcome::Overflowed
+            ValidationCommandOutcome::TimedOut
+                | ValidationCommandOutcome::Overflowed
+                | ValidationCommandOutcome::CapabilityUnavailable
         )
     }
 
@@ -2577,17 +3236,90 @@ impl ValidationCommandRun {
                 ValidationCheckStatus::Failed,
                 "known-flaky command failed before its bounded rerun passed",
             ),
+            ValidationCommandOutcome::CapabilityUnavailable => (
+                ValidationCheckStatus::InfrastructureError,
+                "protected input enforcement is unavailable",
+            ),
         };
+        let mut summary = format!(
+            "{summary}; isolation={} scope-v{}={} scratch={}",
+            self.isolation.backend,
+            self.isolation.scope_version,
+            self.isolation.scope_digest,
+            self.isolation.scratch_id
+        );
+        if let Some(detail) = self.detail.as_ref() {
+            summary.push_str("; ");
+            summary.push_str(detail);
+        }
         ValidationCheckSummary {
             diagnostic_digest: None,
             name: self.command_id.clone(),
             status,
-            summary: summary.to_owned(),
+            summary: bounded_check_summary(&summary),
         }
     }
 }
 
-/// Maps a canonical environment variable name to its process key.
+fn bounded_check_summary(summary: &str) -> String {
+    summary.chars().take(500).collect()
+}
+
+const fn validation_receipt_status(infrastructure: bool, failed: bool) -> ValidationReceiptStatus {
+    if infrastructure {
+        ValidationReceiptStatus::InfrastructureError
+    } else if failed {
+        ValidationReceiptStatus::Failed
+    } else {
+        ValidationReceiptStatus::Passed
+    }
+}
+
+fn exact_validation_commands<'a>(
+    configuration: Option<
+        &'a winwincode_execution_port::validation_config::ParsedValidationConfiguration,
+    >,
+    selection: &ValidationProfileSelection,
+) -> Result<Vec<&'a ValidationCommandSpec>, JobWorkspaceError> {
+    if !selection.executable {
+        return Ok(Vec::new());
+    }
+    let configuration = configuration.ok_or_else(|| {
+        change_batch_error("executable validation profile has no exact configuration")
+    })?;
+    let mut seen = HashSet::new();
+    let mut selected = Vec::new();
+    for command_id in &selection.command_ids {
+        if !seen.insert(command_id.as_str()) {
+            return Err(change_batch_error(
+                "validation profile repeats a command binding",
+            ));
+        }
+        let matching: Vec<_> = configuration
+            .configuration()
+            .commands
+            .iter()
+            .filter(|command| &command.id == command_id)
+            .collect();
+        let command = match matching.as_slice() {
+            [command] => *command,
+            _ => {
+                return Err(change_batch_error(
+                    "validation profile command binding is missing or ambiguous",
+                ));
+            }
+        };
+        if matches!(command.phase, ValidationCommandPhase::Validation) {
+            selected.push(command);
+        }
+    }
+    Ok(selected)
+}
+
+fn verification_helper_executable() -> Option<PathBuf> {
+    std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").map(PathBuf::from)
+}
+
 const fn environment_name(
     name: &winwincode_execution_port::generated::ValidationEnvironmentName,
 ) -> &'static str {
@@ -2601,7 +3333,6 @@ const fn environment_name(
     }
 }
 
-/// Reads the repository validation configuration from an exact checkout.
 fn load_validation_configuration(
     checkout: &Path,
 ) -> Result<
@@ -2627,104 +3358,63 @@ fn load_validation_configuration(
         .map_err(|_| change_batch_error("validation configuration is invalid"))
 }
 
-/// Executes one read-only validation command inside the checkout.
-///
-/// The command runs in its own process group without a shell, with an
-/// allowlisted environment, a hard output cap, and a hard deadline. Every
-/// output stream is durably persisted as a private Artifact before it is used.
+fn working_directory_within(checkout: &Path, working_directory: &Path) -> Option<PathBuf> {
+    match (
+        fs::canonicalize(checkout),
+        fs::canonicalize(working_directory),
+    ) {
+        (Ok(root), Ok(resolved)) if resolved.starts_with(&root) => Some(resolved),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::large_futures)]
 async fn run_validation_command(
-    checkout: &Path,
+    isolation: &VerificationIsolation,
     command: &ValidationCommandSpec,
     ordinal: usize,
     event: &ChangeBatchProposalEvent,
-    artifacts: &mut dyn ValidationArtifactPort,
+    artifacts: &Arc<Mutex<Box<dyn ValidationArtifactPort>>>,
 ) -> Result<ValidationCommandRun, JobWorkspaceError> {
     if command.network || !matches!(command.phase, ValidationCommandPhase::Validation) {
         return Err(change_batch_error(
             "validation command exceeds the read-only validation boundary",
         ));
     }
+    let checkout = isolation.scope().root();
     let working_directory = if command.working_directory == "." {
         checkout.to_path_buf()
     } else {
         checkout.join(&command.working_directory)
     };
-    if !working_directory.starts_with(checkout) {
+    let Some(working_directory) = working_directory_within(checkout, &working_directory) else {
         return Err(change_batch_error(
             "validation command working directory leaves the checkout",
         ));
-    }
-    let mut process = Command::new(&command.argv[0]);
-    process
-        .args(&command.argv[1..])
-        .current_dir(&working_directory)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+    };
+    let mut environment = HashMap::new();
+    environment.insert("PATH".to_owned(), std::env::var("PATH").unwrap_or_default());
     for variable in &command.environment {
-        process.env(environment_name(&variable.name), &variable.value);
+        environment.insert(
+            environment_name(&variable.name).to_owned(),
+            variable.value.clone(),
+        );
     }
     let deadline =
         tokio::time::Duration::from_millis(u64::try_from(command.timeout_millis).unwrap_or(1));
     let started = std::time::Instant::now();
-    let mut child = process
-        .spawn()
-        .map_err(|_| change_batch_error("validation command cannot be started"))?;
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| change_batch_error("validation command output cannot be captured"))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| change_batch_error("validation command output cannot be captured"))?;
     let limit = usize::try_from(command.output_limit_bytes).unwrap_or(1);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut overflow = false;
-    let read = async {
-        loop {
-            let mut out_chunk = [0_u8; 8192];
-            let mut err_chunk = [0_u8; 8192];
-            let (left, right) = tokio::join!(
-                stdout_pipe.read(&mut out_chunk),
-                stderr_pipe.read(&mut err_chunk)
-            );
-            let (left, right) = (left.unwrap_or(0), right.unwrap_or(0));
-            if left == 0 && right == 0 {
-                break;
-            }
-            for (target, source) in [
-                (&mut stdout, &out_chunk[..left]),
-                (&mut stderr, &err_chunk[..right]),
-            ] {
-                if target.len() >= limit {
-                    overflow = true;
-                } else {
-                    let remaining = limit - target.len();
-                    let bound = source.len().min(remaining);
-                    target.extend_from_slice(&source[..bound]);
-                    overflow |= bound < source.len();
-                }
-            }
-        }
-    };
-    let timed_out = tokio::time::timeout(deadline, read).await.is_err();
-    let exited_success = if timed_out {
-        let _ = child.start_kill();
-        false
-    } else {
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| change_batch_error("validation command cannot be reaped"))?;
-        status.success()
-    };
+    let output = isolation
+        .run(
+            &command.argv,
+            &working_directory,
+            environment,
+            deadline,
+            limit,
+        )
+        .await
+        .map_err(|_| change_batch_error("isolated validation command failed"))?;
     let duration_millis = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let mut artifact_refs = Vec::new();
     let stdout_media = command
@@ -2736,17 +3426,20 @@ async fn run_validation_command(
     for (stream, bytes, media_type) in [
         (
             ValidationArtifactStream::Stdout,
-            stdout.clone(),
+            output.stdout.clone(),
             stdout_media,
         ),
         (
             ValidationArtifactStream::Stderr,
-            stderr,
+            output.stderr.clone(),
             "text/plain; charset=utf-8",
         ),
     ] {
+        let mut artifact_port = artifacts
+            .lock()
+            .map_err(|_| change_batch_error("validation Artifact store lock failed"))?;
         let reference = persist_validation_artifact(
-            artifacts,
+            artifact_port.as_mut(),
             event,
             ordinal,
             &command.id,
@@ -2756,11 +3449,11 @@ async fn run_validation_command(
         )?;
         artifact_refs.push(reference);
     }
-    let outcome = if timed_out {
+    let outcome = if output.timed_out {
         ValidationCommandOutcome::TimedOut
-    } else if overflow {
+    } else if output.overflowed {
         ValidationCommandOutcome::Overflowed
-    } else if exited_success {
+    } else if output.status.success() {
         ValidationCommandOutcome::Passed
     } else {
         ValidationCommandOutcome::Failed
@@ -2770,11 +3463,12 @@ async fn run_validation_command(
         outcome,
         duration_millis,
         artifact_refs,
-        output: stdout,
+        output: output.stdout,
+        isolation: IsolationBinding::from(isolation),
+        detail: None,
     })
 }
 
-/// Persists one exact validation output stream and proves its digest.
 fn persist_validation_artifact(
     port: &mut dyn ValidationArtifactPort,
     proposal: &ChangeBatchProposalEvent,
@@ -2803,8 +3497,6 @@ fn persist_validation_artifact(
     Ok(artifact)
 }
 
-/// Loads the retained result baseline whose exact result tree equals one
-/// base revision, so the next batch is judged against proven history only.
 fn retained_history_baseline(
     store: &ChangeBatchStore,
     job_id: &ExecutionJobId,
@@ -2820,7 +3512,6 @@ fn retained_history_baseline(
     Ok(None)
 }
 
-/// Resolves the exact post-apply checkout tree through Git's index writer.
 fn resolve_checkout_tree(checkout: &Path) -> Result<WorkspaceRevision, JobWorkspaceError> {
     let write = std::process::Command::new("git")
         .arg("-C")
@@ -2856,12 +3547,10 @@ fn resolve_checkout_tree(checkout: &Path) -> Result<WorkspaceRevision, JobWorksp
     Ok(WorkspaceRevision(format!("git-tree:{tree_id}")))
 }
 
-/// Lists the portable paths one receipt changed against its base tree.
 fn git_changed_paths(receipt: &ChangeBatchReceipt) -> Vec<String> {
     receipt.files.iter().map(|file| file.path.clone()).collect()
 }
 
-/// Proves the proposal patch digest before any durable effect.
 fn verify_proposal_patch_digest(event: &ChangeBatchProposalEvent) -> Result<(), JobWorkspaceError> {
     let derived = Sha256Digest(format!(
         "sha256:{:x}",
@@ -3036,6 +3725,15 @@ fn same_authority(provenance: &WorkspaceProvenance, active: &ActiveJob) -> bool 
     provenance == &expected
 }
 
+fn same_observation_model_authority(open: &ModelOpenMessage, active: &ActiveJob) -> bool {
+    let mut original = open.lease.clone();
+    original.expires_at = active.lease.expires_at.clone();
+    original == active.lease
+        && open.lease.expires_at.0 <= active.lease.expires_at.0
+        && open.session_identity == active.session_identity
+        && open.worker_session_id == active.worker_session_id
+}
+
 fn same_change_batch_lease_authority(event: &ChangeBatchProposalEvent, active: &ActiveJob) -> bool {
     event.identity.job_id == active.job.job_id
         && event.identity.attempt == active.job.attempt
@@ -3088,10 +3786,7 @@ fn same_change_batch_progress_authority(
         && event.identity.workspace_revision == *expected_revision
 }
 
-/// Resolves the private Worker-owned store root beside one workspace root.
 fn change_batch_store_root(workspace_root: &Path) -> Result<PathBuf, JobWorkspaceError> {
-    // The store directory is the canonical sibling of the runtime root, so
-    // the durable database lives at `<parent>/.workspaces-change-batches`.
     workspace_root
         .parent()
         .map(Path::to_path_buf)
@@ -3107,6 +3802,13 @@ fn authority_error() -> JobWorkspaceError {
 
 fn change_batch_error(message: &'static str) -> JobWorkspaceError {
     JobWorkspaceError::new(JobWorkspaceErrorCode::ChangeBatch, message)
+}
+
+fn validation_cleanup_error() -> JobWorkspaceError {
+    let mut error = change_batch_error("validation cancellation cleanup is unconfirmed");
+    error.stage = "validation_cancel_cleanup";
+    error.cause_code = "VALIDATION_CLEANUP_UNCONFIRMED";
+    error
 }
 
 const fn validation_profile_text(profile: &ValidationProfileName) -> &'static str {
@@ -3481,17 +4183,17 @@ fn parse_observation_model_chunk(
                 .is_some_and(|value| {
                     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
                 })
-                && object.get("endTurn").and_then(serde_json::Value::as_bool) == Some(true) =>
+                && matches!(
+                    object.get("endTurn"),
+                    None | Some(serde_json::Value::Null | serde_json::Value::Bool(true))
+                ) =>
         {
-            let model_usage = terminal_model_usage(object);
+            let model_usage = terminal_model_usage(object)
+                .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0));
             ParsedObservationModelChunk {
                 response_delta: Vec::new(),
-                terminal_status: Some(if model_usage.is_some() {
-                    "completed"
-                } else {
-                    "provider_error"
-                }),
-                model_usage,
+                terminal_status: Some("completed"),
+                model_usage: Some(model_usage),
             }
         }
         "error"
@@ -3532,13 +4234,19 @@ fn terminal_model_usage(
         .and_then(serde_json::Value::as_u64)
         .and_then(|cost| i64::try_from(cost).ok())
         .filter(|cost| (0..=9_007_199_254_740_991).contains(cost));
-    total_tokens
-        .zip(actual_cost_microunits)
-        .map(|(tokens, cost_microunits)| ExecutionOutcomeUsage {
-            cost_microunits,
+    let mut usage = total_tokens.map_or_else(
+        || ExecutionOutcomeUsage::unknown(0, 0),
+        |tokens| ExecutionOutcomeUsage {
+            cost_microunits: None,
             runtime_millis: 0,
-            tokens,
-        })
+            tokens: Some(tokens),
+            known_tokens: tokens,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        },
+    );
+    usage.cost_microunits = actual_cost_microunits;
+    (total_tokens.is_some() || actual_cost_microunits.is_some()).then_some(usage)
 }
 
 fn observation_receipt_from_terminal(
@@ -3547,11 +4255,17 @@ fn observation_receipt_from_terminal(
 ) -> Result<ObservationReceipt, JobWorkspaceError> {
     let intent = &record.request.intent;
     let (response, source, usage) = if completed {
-        if let (Ok(response), Some(usage)) = (
-            parse_observation_response_strict(&record.response_bytes, intent),
-            record.model_usage.clone(),
-        ) {
-            (response, ObservationSource::Model, Some(usage))
+        if let Ok(response) = parse_observation_response_strict(&record.response_bytes, intent) {
+            (
+                response,
+                ObservationSource::Model,
+                Some(
+                    record
+                        .model_usage
+                        .clone()
+                        .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0)),
+                ),
+            )
         } else {
             (
                 observation_infrastructure_response(intent),
@@ -3582,16 +4296,6 @@ fn observation_receipt_from_terminal(
     Ok(receipt)
 }
 
-/// Builds the one bounded Observer evidence pack for an inconclusive
-/// validation whose exact result the Worker already retained.
-///
-/// Returns `None` when the bounded input itself carries sensitive material:
-/// such evidence is never sent to an independent Provider route.
-///
-/// # Errors
-///
-/// Rejects evidence that is not an inconclusive validation, exceeds its
-/// bounded capacity, or cannot be canonically digested.
 #[allow(clippy::too_many_lines)]
 fn build_observation_request(
     store: &ChangeBatchStore,
@@ -3867,16 +4571,6 @@ const PROMPT_INJECTION_MARKERS: [&str; 9] = [
     "\"decision\":\"accept\"",
 ];
 
-/// Computes and durably retains the deterministic diagnostic decision for one
-/// validated batch against its accepted baseline.
-///
-/// A missing baseline never becomes blame: the decision is recorded with the
-/// exact evidence that existed, so the routed Observer intent can be replayed
-/// byte-for-byte after a restart.
-///
-/// # Errors
-///
-/// Rejects unavailable durable state or an incomparable baseline pair.
 #[allow(clippy::too_many_arguments)]
 fn retain_validation_diagnostic_evaluation(
     store: &mut ChangeBatchStore,
@@ -3925,8 +4619,43 @@ fn retain_validation_diagnostic_evaluation(
 
 #[cfg(test)]
 mod validation_rerun_tests {
-    use super::{ValidationCommandOutcome, ValidationCommandRun};
-    use winwincode_execution_port::generated::ValidationCheckStatus;
+    use super::{
+        IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
+        exact_validation_commands, validation_receipt_status, working_directory_within,
+    };
+    use winwincode_execution_port::{
+        generated::{ValidationCheckStatus, ValidationReceiptStatus},
+        validation_config::{parse_validation_configuration, resolve_validation_profile},
+    };
+
+    #[test]
+    fn validation_working_directory_rejects_symlink_and_dotdot_escapes() {
+        let base = std::env::temp_dir().join(format!(
+            "wwc-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkout = base.join("checkout");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, checkout.join("escape")).unwrap();
+        assert_eq!(
+            working_directory_within(&checkout, &checkout),
+            Some(std::fs::canonicalize(&checkout).unwrap())
+        );
+        assert_eq!(
+            working_directory_within(&checkout, &checkout.join("src")),
+            Some(std::fs::canonicalize(checkout.join("src")).unwrap())
+        );
+        assert!(working_directory_within(&checkout, &checkout.join("escape")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("../outside")).is_none());
+        assert!(working_directory_within(&checkout, &checkout.join("missing")).is_none());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn a_passing_bounded_rerun_cannot_hide_the_original_failure() {
@@ -3947,6 +4676,128 @@ mod validation_rerun_tests {
             duration_millis,
             artifact_refs: Vec::new(),
             output: Vec::new(),
+            isolation: IsolationBinding {
+                scope_version: 1,
+                scope_digest: "sha256:scope".to_owned(),
+                backend: "test-backend".to_owned(),
+                scratch_id: "test-scratch".to_owned(),
+            },
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn executable_command_binding_rejects_missing_and_duplicate_ids() {
+        let configuration = parse_validation_configuration(
+            r#"schemaVersion = 1
+
+[[commands]]
+id = "format"
+phase = "formatter"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "check"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "rust"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "types"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[profiles]]
+name = "changed"
+commandIds = ["format", "check", "rust", "types"]
+[[profiles]]
+name = "affected"
+commandIds = ["check", "rust", "types"]
+[[profiles]]
+name = "fast"
+commandIds = ["check", "rust", "types"]
+[[profiles]]
+name = "final"
+commandIds = ["check", "rust", "types"]
+"#,
+        )
+        .expect("parse exact test configuration");
+        let selection = resolve_validation_profile(Some(&configuration), "changed", &[])
+            .expect("resolve exact test profile");
+        assert_eq!(
+            exact_validation_commands(Some(&configuration), &selection)
+                .expect("bind exact command")
+                .len(),
+            3
+        );
+
+        let mut missing = selection.clone();
+        missing.command_ids = vec!["missing".to_owned()];
+        assert!(exact_validation_commands(Some(&configuration), &missing).is_err());
+
+        let mut duplicate = selection.clone();
+        duplicate.command_ids = vec!["check".to_owned(), "check".to_owned()];
+        assert!(exact_validation_commands(Some(&configuration), &duplicate).is_err());
+    }
+
+    #[test]
+    fn unavailable_protection_is_infrastructure_and_never_a_pass() {
+        for backend in ["macos-seatbelt-v1", "linux-codex-sandbox-v1"] {
+            let isolation = IsolationBinding {
+                scope_version: 1,
+                scope_digest: "sha256:scope".to_owned(),
+                backend: backend.to_owned(),
+                scratch_id: "test-scratch".to_owned(),
+            };
+            let run = ValidationCommandRun::capability_unavailable(
+                "check",
+                &isolation,
+                "forced capability failure".to_owned(),
+            );
+
+            assert!(run.infrastructure_failure());
+            assert!(!run.failed());
+            assert_eq!(run.artifact_refs.len(), 0);
+            assert_eq!(
+                run.check_summary().status,
+                ValidationCheckStatus::InfrastructureError
+            );
+            assert_eq!(
+                validation_receipt_status(run.infrastructure_failure(), run.failed()),
+                ValidationReceiptStatus::InfrastructureError
+            );
         }
     }
 }

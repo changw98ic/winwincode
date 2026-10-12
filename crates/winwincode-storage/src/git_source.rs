@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Trusted local Git reconstruction for immutable candidate Artifacts.
-//!
-//! The Artifact contains only a candidate commit hint. This adapter reads the
-//! controlled repository and rebuilds every commit/tree/diff/path/hunk value;
-//! values reported by a Worker are never copied into a validated source fact.
-
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -26,14 +20,12 @@ const MAX_DIFF_BYTES: usize = 268_435_456;
 const MAX_CONTENT_BYTES: usize = 268_435_456;
 static NEXT_BUNDLE_FILE: AtomicU64 = AtomicU64::new(1);
 
-/// State of one path rebuilt at the candidate commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitSourcePathState {
     Present,
     Deleted,
 }
 
-/// One exact path/object relation rebuilt from Git.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourcePath {
     path: String,
@@ -58,14 +50,12 @@ impl GitSourcePath {
     }
 }
 
-/// One hunk identity computed from the exact Git diff bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourceHunk {
     file_path: String,
     hunk_sha256: String,
 }
 
-/// Closed file status rebuilt from one exact retained Candidate range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitCandidateReviewFileStatus {
     Added,
@@ -76,7 +66,6 @@ pub enum GitCandidateReviewFileStatus {
     TypeChanged,
 }
 
-/// Closed content classification for exact Git diff bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitCandidateReviewFileEncoding {
     Utf8,
@@ -84,7 +73,6 @@ pub enum GitCandidateReviewFileEncoding {
     Unknown8Bit,
 }
 
-/// Secret-free file metadata rebuilt from controlled Git.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitCandidateReviewFile {
     path: String,
@@ -133,7 +121,6 @@ impl GitCandidateReviewFile {
     }
 }
 
-/// Opaque, validated changed-file inventory for one exact Candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedGitCandidateReview {
     candidate_commit_id: String,
@@ -164,7 +151,6 @@ impl ValidatedGitCandidateReview {
     }
 }
 
-/// Opaque, validated unified-diff bytes for one trusted Candidate path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedGitCandidateDiff {
     path: String,
@@ -213,7 +199,6 @@ impl ValidatedGitCandidateDiff {
     }
 }
 
-/// Opaque, bounded bytes from one trusted file at the retained Candidate commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedGitCandidateFileContent {
     path: String,
@@ -250,16 +235,6 @@ impl GitSourceHunk {
     }
 }
 
-/// Opaque result issued only after an Artifact and controlled repository agree.
-///
-/// It is intentionally not deserializable and has no public constructor.
-///
-/// ```compile_fail
-/// use winwincode_storage::ValidatedGitSourceArtifact;
-///
-/// let _: ValidatedGitSourceArtifact = serde_json::from_str("{}")?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedGitSourceArtifact {
     repository_locator: String,
@@ -272,18 +247,10 @@ pub struct ValidatedGitSourceArtifact {
     changed_paths: Vec<GitSourcePath>,
     changed_hunks: Vec<GitSourceHunk>,
     artifact: ArtifactRecord,
+    content_digest: winwincode_domain::Sha256Digest,
 }
 
-/// Replaceable trusted source adapter. The opaque result can only be created
-/// inside this crate, so callers may select an adapter but cannot self-report
-/// commit/tree/diff/path identities.
 pub trait GitSourceResolver: Send {
-    /// Rebuilds one candidate identity from controlled source and exact
-    /// Artifact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when source or Artifact facts do not agree.
     fn resolve_candidate(
         &self,
         artifact: &ArtifactObject,
@@ -291,23 +258,10 @@ pub trait GitSourceResolver: Send {
         base_revision: &str,
     ) -> Result<ValidatedGitSourceArtifact, ArtifactError>;
 
-    /// Returns the canonical root used to resolve local repositories, when
-    /// this adapter has one.  The Control Plane uses this exact root for Git
-    /// retention so source reconstruction and durable references cannot drift
-    /// to different repository trees.  Remote adapters may leave this unset.
     fn controlled_repository_root(&self) -> Option<&Path> {
         None
     }
 
-    /// Rebuilds a closed changed-file inventory from an already validated
-    /// Candidate source.
-    ///
-    /// Adapter implementations that cannot provide review reads fail closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an Artifact error when the exact retained source cannot be
-    /// revalidated or this adapter does not implement review reads.
     fn candidate_review(
         &self,
         _source: &ValidatedGitSourceArtifact,
@@ -317,16 +271,6 @@ pub trait GitSourceResolver: Send {
         ))
     }
 
-    /// Rebuilds exact unified-diff bytes for one path selected from the trusted
-    /// Candidate inventory.
-    ///
-    /// Adapter implementations that cannot provide review reads fail closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an Artifact error when the source or path is invalid, the
-    /// retained Git facts changed, or this adapter does not implement review
-    /// reads.
     fn candidate_diff(
         &self,
         _source: &ValidatedGitSourceArtifact,
@@ -337,15 +281,6 @@ pub trait GitSourceResolver: Send {
         ))
     }
 
-    /// Reads one exact file blob from the retained Candidate commit.
-    ///
-    /// Adapter implementations that cannot provide trusted file reads fail
-    /// closed. The path must already be present in the Candidate inventory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an Artifact error when the source or path cannot be revalidated
-    /// or the adapter cannot provide trusted file reads.
     fn candidate_file_content(
         &self,
         _source: &ValidatedGitSourceArtifact,
@@ -358,6 +293,11 @@ pub trait GitSourceResolver: Send {
 }
 
 impl ValidatedGitSourceArtifact {
+    #[must_use]
+    pub fn content_digest(&self) -> &winwincode_domain::Sha256Digest {
+        &self.content_digest
+    }
+
     #[must_use]
     pub fn repository_locator(&self) -> &str {
         &self.repository_locator
@@ -409,19 +349,12 @@ impl ValidatedGitSourceArtifact {
     }
 }
 
-/// Resolves only repository locators below one configured root.
 pub struct LocalGitSourceResolver {
     allowed_root: PathBuf,
     artifact_cache: bool,
 }
 
 impl LocalGitSourceResolver {
-    /// Opens the controlled repository root.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the root is missing or cannot be
-    /// canonicalized.
     pub fn open(allowed_root: impl AsRef<Path>) -> Result<Self, ArtifactError> {
         let allowed_root = fs::canonicalize(allowed_root).map_err(|error| {
             ArtifactError::adapter(format!(
@@ -439,10 +372,6 @@ impl LocalGitSourceResolver {
         })
     }
 
-    /// Opens a private Git cache reconstructed only from authenticated candidate Artifacts.
-    ///
-    /// # Errors
-    /// Fails if the cache directory cannot be created or opened.
     pub fn open_artifact_cache(root: impl AsRef<Path>) -> Result<Self, ArtifactError> {
         fs::create_dir_all(root.as_ref())
             .map_err(|error| ArtifactError::adapter(error.to_string()))?;
@@ -451,14 +380,6 @@ impl LocalGitSourceResolver {
         Ok(resolver)
     }
 
-    /// Rebuilds one candidate identity from a complete, exact candidate
-    /// Artifact and a repository beneath the configured root.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign media/kind, malformed or extra manifest fields,
-    /// missing/diverged commits, empty changes, non-portable paths, Git command
-    /// failures, and any unsupported diff size.
     pub fn resolve_candidate(
         &self,
         artifact: &ArtifactObject,
@@ -510,7 +431,6 @@ impl LocalGitSourceResolver {
         )
     }
 
-    /// Returns the canonical repository root selected at adapter startup.
     #[must_use]
     pub fn controlled_repository_root(&self) -> &Path {
         &self.allowed_root
@@ -1028,6 +948,7 @@ fn rebuild_candidate_source(
         &revision_range,
         &changed_path_names,
     )?;
+    let content_digest = candidate_content_digest(repository, &candidate_commit_id)?;
     Ok(ValidatedGitSourceArtifact {
         repository_locator: repository_locator.to_owned(),
         requested_base_revision: base_revision.to_owned(),
@@ -1036,10 +957,66 @@ fn rebuild_candidate_source(
         candidate_commit_id,
         candidate_tree_id,
         diff_sha256,
+        content_digest,
         changed_paths,
         changed_hunks,
         artifact,
     })
+}
+
+fn candidate_content_digest(
+    repository: &Path,
+    commit: &str,
+) -> Result<winwincode_domain::Sha256Digest, ArtifactError> {
+    let listing = git_output(
+        repository,
+        &[
+            "ls-tree".into(),
+            "-r".into(),
+            "-z".into(),
+            "--full-tree".into(),
+            commit.into(),
+        ],
+        "candidate content inventory",
+    )?;
+    let mut hash = Sha256::new();
+    for record in listing
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| ArtifactError::invalid("candidate tree record is malformed"))?;
+        let header = std::str::from_utf8(&record[..separator])
+            .map_err(|_| ArtifactError::invalid("candidate tree header is not UTF-8"))?;
+        let path = decode_path(&record[separator + 1..])?;
+        portable_path(&path)?;
+        let fields: Vec<_> = header.split(' ').collect();
+        if fields.len() != 3 || !matches!(fields[0], "100644" | "100755") || fields[1] != "blob" {
+            return Err(ArtifactError::invalid(
+                "candidate tree contains an unsupported link or object type",
+            ));
+        }
+        let blob = git_output(
+            repository,
+            &["cat-file".into(), "blob".into(), fields[2].into()],
+            "candidate content",
+        )?;
+        if blob.len() > MAX_CONTENT_BYTES {
+            return Err(ArtifactError::invalid(
+                "candidate content exceeds the supported limit",
+            ));
+        }
+        for field in [path.as_bytes(), fields[0].as_bytes(), blob.as_slice()] {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field);
+        }
+    }
+    Ok(winwincode_domain::Sha256Digest(format!(
+        "sha256:{:x}",
+        hash.finalize()
+    )))
 }
 
 fn require_descendant(
@@ -1339,57 +1316,6 @@ fn hunk_sections(diff: &[u8]) -> Result<Vec<&[u8]>, ArtifactError> {
         .collect())
 }
 
-/// Maps replacement hunks to one containing source hunk using trusted Git ranges.
-// ponytail: require whole-hunk containment; add changed-line mapping if wider
-// Git context prevents an otherwise in-scope repair from being accepted.
-pub(crate) fn rework_hunk_origins(
-    previous: &[u8],
-    delta: &[u8],
-) -> Result<Vec<(String, String)>, ArtifactError> {
-    fn range(hunk: &[u8], index: usize, sign: char) -> Result<(u64, u64), ArtifactError> {
-        let header = hunk.split(|byte| *byte == b'\n').next().unwrap_or_default();
-        let field = std::str::from_utf8(header)
-            .ok()
-            .filter(|line| line.starts_with("@@ "))
-            .and_then(|line| line.split_ascii_whitespace().nth(index))
-            .and_then(|field| field.strip_prefix(sign))
-            .ok_or_else(|| ArtifactError::invalid("rework requires text Git hunks"))?;
-        let (start, count) = field.split_once(',').unwrap_or((field, "1"));
-        let start = start
-            .parse::<u64>()
-            .map_err(|_| ArtifactError::invalid("invalid Git hunk start"))?;
-        let count = count
-            .parse::<u64>()
-            .map_err(|_| ArtifactError::invalid("invalid Git hunk length"))?;
-        Ok((
-            start,
-            start
-                .checked_add(count)
-                .ok_or_else(|| ArtifactError::invalid("Git hunk range overflow"))?,
-        ))
-    }
-    let sources = hunk_sections(previous)?
-        .into_iter()
-        .map(|hunk| Ok((format!("{:x}", Sha256::digest(hunk)), range(hunk, 2, '+')?)))
-        .collect::<Result<Vec<_>, ArtifactError>>()?;
-    hunk_sections(delta)?
-        .into_iter()
-        .map(|hunk| {
-            let (start, end) = range(hunk, 1, '-')?;
-            let matches = sources
-                .iter()
-                .filter(|(_, (left, right))| *left <= start && end <= *right)
-                .collect::<Vec<_>>();
-            let [source] = matches.as_slice() else {
-                return Err(ArtifactError::conflict(
-                    "replacement hunk escapes or ambiguously overlaps its source scope",
-                ));
-            };
-            Ok((format!("{:x}", Sha256::digest(hunk)), source.0.clone()))
-        })
-        .collect()
-}
-
 fn git_output(
     repository: &Path,
     arguments: &[OsString],
@@ -1506,17 +1432,4 @@ fn git_object_id(value: &str, field: &str) -> Result<(), ArtifactError> {
         )));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod rework_hunk_tests {
-    use super::rework_hunk_origins;
-    #[test]
-    fn maps_only_an_exact_contained_source_range() {
-        let source = b"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
-        let delta = b"@@ -1,3 +1,3 @@\n a\n-B\n+C\n c\n";
-        assert_eq!(rework_hunk_origins(source, delta).unwrap().len(), 1);
-        assert!(rework_hunk_origins(source, b"@@ -8,3 +8,3 @@\n-x\n+y\n").is_err());
-        assert!(rework_hunk_origins(source, b"Binary files differ\n").is_err());
-    }
 }

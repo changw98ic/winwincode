@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The canonical Delivery aggregate over one `WorkItem`/`WorkRun` graph.
-//!
-//! The public structs in the child modules are draft/snapshot facts. A caller
-//! cannot persist one until [`Delivery::try_from_snapshot`] has validated the
-//! whole aggregate. `Delivery` exposes no mutable access, so every value that
-//! crosses the command or store seam keeps the aggregate invariants.
-
 pub(crate) mod attention;
 pub mod candidate;
 pub mod evidence;
 pub mod rework;
+pub mod same_candidate;
 mod session_binding;
 mod spec;
 pub mod verdict;
@@ -32,7 +26,7 @@ pub(crate) use candidate::assert_frozen_candidate_current;
 pub use candidate::{
     CandidateHunkFact, CandidatePathFact, CandidatePathState, DurableCandidateArtifactInput,
     DurableCandidateSourceInput, FreezeCandidateFacts, FrozenDeliveryCandidate,
-    ValidatedGitSnapshotFact, freeze_delivery_candidate,
+    SealedCandidateSource, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType, VerifiedEvidenceOutcome};
 pub use session_binding::{
@@ -66,12 +60,6 @@ macro_rules! domain_identifier {
         pub struct $name(pub String);
 
         impl $name {
-            /// Builds a validated legacy Delivery identifier.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`DeliveryValidationError`] when the value is not a
-            /// portable identifier accepted by the current Delivery records.
             pub fn new(value: impl Into<String>) -> Result<Self, DeliveryValidationError> {
                 let value = value.into();
                 portable_identifier(&value, stringify!($name))?;
@@ -140,6 +128,32 @@ pub(crate) fn validation_error(
         path: path.into(),
         message: message.into(),
     }
+}
+
+fn reject_legacy_evidence_graph(bytes: &[u8]) -> Result<(), DeliveryValidationError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        validation_error(
+            DeliveryValidationErrorCode::InvalidShape,
+            "delivery",
+            error.to_string(),
+        )
+    })?;
+    let Some(evidence) = value.get("evidence").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, item) in evidence.iter().enumerate() {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        if object.contains_key("candidateRef") || object.contains_key("candidateDigest") {
+            return Err(validation_error(
+                DeliveryValidationErrorCode::InvalidShape,
+                format!("delivery.evidence[{index}]"),
+                "legacy candidateRef/candidateDigest evidence graph is not importable",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -340,6 +354,8 @@ pub struct DeliverySnapshot {
     pub status: DeliveryStatus,
     pub spec: DeliverySpec,
     pub session_bindings: Vec<SessionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_candidate_reverification: Option<same_candidate::SameCandidateReverificationFact>,
     pub attention_items: Vec<AttentionItem>,
     pub evidence: Vec<EvidenceRef>,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -356,12 +372,6 @@ pub struct Delivery {
 }
 
 impl Delivery {
-    /// Validates a complete snapshot and freezes it behind the aggregate.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryValidationError`] for any invalid fact or broken
-    /// relationship across the ten canonical objects.
     pub fn try_from_snapshot(
         mut snapshot: DeliverySnapshot,
     ) -> Result<Self, DeliveryValidationError> {
@@ -369,13 +379,8 @@ impl Delivery {
         Ok(Self { snapshot })
     }
 
-    /// Decodes and validates one strict canonical snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryValidationError`] for malformed JSON, missing or
-    /// extra fields, invalid values, or broken aggregate relationships.
     pub fn decode_json(bytes: &[u8]) -> Result<Self, DeliveryValidationError> {
+        reject_legacy_evidence_graph(bytes)?;
         let snapshot = serde_json::from_slice(bytes).map_err(|error| {
             validation_error(
                 DeliveryValidationErrorCode::InvalidShape,
@@ -386,12 +391,6 @@ impl Delivery {
         Self::try_from_snapshot(snapshot)
     }
 
-    /// Encodes the validated canonical snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if the JSON encoder cannot represent the
-    /// snapshot.
     pub fn encode_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&self.snapshot)
     }
@@ -445,6 +444,7 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             format!("invalid WorkRun aggregate: {error:?}"),
         )
     })?;
+    same_candidate::validate_fact(snapshot)?;
     schema_version(snapshot.schema_version, "delivery.schemaVersion")?;
     canonical_delivery_id(&snapshot.id.0, "delivery.id")?;
     positive(snapshot.revision, "delivery.revision")?;
@@ -522,9 +522,6 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             .map(|thread_id| thread_id.0.as_str()),
         "delivery.sessionBindings.codexThreadId",
     )?;
-    // A long-lived local Worker process may execute sequential WorkRuns. Its
-    // process-generation and fencing identities are intentionally reused;
-    // WorkerSession, CodexThread, and lease identities remain per execution.
     duplicate_ids(
         snapshot
             .session_bindings
@@ -754,7 +751,8 @@ fn validate_verdict_relationships(
         for evidence_id in &result.evidence_refs {
             let reference = evidence_by_id.get(evidence_id.0.as_str());
             if reference.is_none_or(|reference| {
-                reference.candidate_ref != verdict.candidate_ref
+                reference.candidate_id != verdict.candidate_id
+                    || reference.snapshot_id != verdict.snapshot_id
                     || reference.created_at_millis > result.evaluated_at_millis
             }) {
                 return Err(validation_error(
@@ -821,10 +819,6 @@ pub(crate) fn test_fixture() -> DeliverySnapshot {
         .expect("checked Delivery fixture shape")
 }
 
-/// Seals deterministic runtime authority and rebuilds test `WorkRun` records.
-///
-/// The binding profile and attempt are explicit fixture input. This performs
-/// no role guessing, attempt promotion, or legacy run translation.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn rebuild_test_work_runs_from_bindings(snapshot: &mut DeliverySnapshot) {
     let Some(template) = snapshot.work_run_aggregate.runs.first().cloned() else {

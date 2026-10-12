@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Delivery application services.
-//!
-//! These modules decide product facts and return immutable effects. They do
-//! not run Codex, schedule its internal work, or publish before persistence.
-
 use std::{error::Error, fmt};
 
 use crate::domain::{Delivery, MAX_SAFE_INTEGER};
 
 pub mod attention;
+pub mod candidate_rejection;
 pub mod failure_router;
 pub mod session_binding;
 pub mod solution_review;

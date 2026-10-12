@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::fmt;
+use std::time::Duration;
+
+use winwincode_execution_port::jev_decision::{
+    ContextDecision, ContextDecisionInput, ContextHypotheses, JevDecisionError, JevPolicy,
+    NliProbabilities, decide_context, validate_policy,
+};
+
+use crate::{
+    JevAttemptFailure, JevExecutionOptions, JevHypothesis, JevProviderErrorKind, JevRun,
+    JevRuntime, JevScores,
+};
+
+#[derive(Clone, serde::Serialize)]
+pub struct JevContextRequest {
+    pub task: String,
+    pub candidate: String,
+    pub protected: bool,
+    pub archive_eligible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JevContextEvaluation {
+    pub hypotheses: ContextHypotheses,
+    pub decision: ContextDecision,
+}
+
+impl fmt::Debug for JevContextRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JevContextRequest")
+            .field("task", &"<private>")
+            .field("candidate", &"<private>")
+            .field("protected", &self.protected)
+            .field("archive_eligible", &self.archive_eligible)
+            .finish()
+    }
+}
+
+impl JevRuntime {
+    pub async fn evaluate_context(
+        &self,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+    ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
+        self.evaluate_context_authorized(input, policy, options, &|| true)
+            .await
+    }
+
+    pub(crate) async fn evaluate_context_authorized(
+        &self,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
+        validate_policy(policy)?;
+        if input.task.trim().is_empty() || input.candidate.trim().is_empty() {
+            return Err(JevDecisionError::InvalidMetadata);
+        }
+        let premise =
+            serde_json::json!({ "task": input.task, "candidate": input.candidate }).to_string();
+        let hypotheses = [
+            "The candidate is a required system fact or hard constraint for the task.",
+            "The candidate is useful for completing the current task.",
+            "The candidate remains useful in compact or archived form.",
+            "The candidate is noise or superseded information that is safe to discard.",
+        ]
+        .map(|hypothesis| JevHypothesis {
+            premise: premise.clone(),
+            hypothesis: hypothesis.to_owned(),
+        });
+        let run = self
+            .batch_evaluate_authorized(hypotheses.into(), options, can_start)
+            .await;
+        let mut failures = run.failures;
+        let mut value = None;
+        if let (Some(batch), Some(observation)) = (&run.value, &run.observation) {
+            if let [critical, relevant, compressible, disposable] = batch.evaluations.as_slice() {
+                let context = ContextDecisionInput {
+                    provider: observation.provider_id.clone(),
+                    model: observation
+                        .resolved_model_id
+                        .as_ref()
+                        .unwrap_or(&observation.model_id)
+                        .clone(),
+                    protected: input.protected,
+                    archive_eligible: input.archive_eligible,
+                    hypotheses: ContextHypotheses {
+                        critical: probabilities(*critical),
+                        relevant: probabilities(*relevant),
+                        compressible: probabilities(*compressible),
+                        disposable: probabilities(*disposable),
+                    },
+                };
+                value = decide_context(&context, policy)
+                    .map(|decision| JevContextEvaluation {
+                        hypotheses: context.hypotheses,
+                        decision,
+                    })
+                    .ok();
+            }
+            if value.is_none() {
+                failures.push(JevAttemptFailure {
+                    provider_id: observation.provider_id.clone(),
+                    kind: JevProviderErrorKind::InvalidResponse,
+                    latency: Duration::ZERO,
+                    network: Some(
+                        winwincode_network::NetworkFailure::new(
+                            winwincode_network::ErrorKind::ProtocolInvalid,
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::Decode,
+                        )
+                        .with_diagnostic(
+                            winwincode_network::NetworkDiagnostic::new(
+                                winwincode_network::DiagnosticCode::ResponseInvariant,
+                            ),
+                        ),
+                    ),
+                    attempt: None,
+                    connection_wait: false,
+                });
+            }
+        }
+        Ok(JevRun {
+            value,
+            observation: run.observation,
+            failures,
+        })
+    }
+}
+
+fn probabilities(scores: JevScores) -> NliProbabilities {
+    NliProbabilities {
+        entailment: f64::from(scores.entailment),
+        contradiction: f64::from(scores.contradiction),
+        neutral: f64::from(scores.neutral),
+    }
+}

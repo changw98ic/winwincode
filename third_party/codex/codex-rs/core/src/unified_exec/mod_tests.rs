@@ -863,3 +863,39 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn original_process_receipt_is_scoped_to_session_and_call_identity() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let opened = exec_command(
+        &session, &turn, "sleep 30", /*yield_time_ms*/ 10, /*workdir*/ None,
+    )
+    .await?;
+    let process_id = opened.process_id.expect("live process");
+    let manager = &session.services.unified_exec_manager;
+    assert_eq!(
+        manager.reconcile_original_call(&session, "call").await,
+        codex_state::ToolRecoveryEvidence::Running {
+            business_id: process_id.to_string()
+        }
+    );
+    assert_eq!(
+        manager
+            .reconcile_original_call(&session, "other-call")
+            .await,
+        codex_state::ToolRecoveryEvidence::Unconfirmed
+    );
+    let (other_session, _) = test_session_and_turn().await;
+    assert_eq!(
+        manager
+            .reconcile_original_call(&other_session, "call")
+            .await,
+        codex_state::ToolRecoveryEvidence::Unconfirmed
+    );
+    assert!(session.terminate_background_terminal(process_id).await);
+    assert_eq!(
+        manager.reconcile_original_call(&session, "call").await,
+        codex_state::ToolRecoveryEvidence::Unconfirmed
+    );
+    Ok(())
+}

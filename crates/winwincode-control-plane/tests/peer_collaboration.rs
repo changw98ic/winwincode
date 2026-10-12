@@ -135,14 +135,15 @@ fn submit(
 
 fn evidence(candidate: char) -> EvidenceRef {
     EvidenceRef {
-        schema_version: 1,
+        schema_version: winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION,
         id: EvidenceId(id("evd", 1)),
         delivery_id: DeliveryId(id("dlv", 1)),
         delivery_spec_id: DeliverySpecId("spec-v1".to_owned()),
         delivery_spec_revision: 1,
         work_run_id: WorkRunId(id("wrn", 1)),
         session_binding_id: SessionBindingId("binding:verifier".to_owned()),
-        candidate_ref: format!("git-candidate:{}", digest(candidate).0),
+        candidate_id: winwincode_domain::CandidateId(id("cnd", u64::from(candidate))),
+        snapshot_id: winwincode_domain::SnapshotId(id("snap", u64::from(candidate))),
         evidence_type: EvidenceRefType::Test,
         source_ref: "runtime-event:1".to_owned(),
         created_at_millis: 1_800_000_000_000,

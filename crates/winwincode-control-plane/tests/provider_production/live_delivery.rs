@@ -714,7 +714,7 @@ fn prepare_current_stage(
     let fencing_token = FencingToken(seed.to_string());
     let lease = ExecutionLeaseStamp {
         attempt: job.attempt,
-        expires_at: job.limits.deadline_at.clone(),
+        expires_at: job.limits.deadline_at.clone().expect("bounded fixture"),
         fencing_token: fencing_token.clone(),
         issued_at: submitted_at.clone(),
         job_id: job.job_id.clone(),
@@ -758,6 +758,7 @@ fn prepare_current_stage(
     let authority =
         session_binding_authority(active, lease.issued_at.clone(), lease.expires_at.clone());
     let binding_message = SessionBindingMessage {
+        snapshot_id: None,
         attempt: job.attempt,
         bound_at: submitted_at.clone(),
         codex_thread_id,
@@ -933,9 +934,9 @@ fn configure_stage_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 8,
         max_queued: 8,
-        token_budget: 1_000_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 3_600_000,
+        token_budget: Some(1_000_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(3_600_000),
     };
     let pool = WorkerPoolId(id("wpl", 1));
     let boundaries = admission_boundaries(&queue_scope, &pool);
@@ -956,9 +957,9 @@ fn configure_stage_admission(
                 repository_access: ExecutionRepositoryAccess::IsolatedWrite {
                     worktree_key: format!("live-delivery:{}", job.job_id.0),
                 },
-                reserved_tokens: 100_000,
-                reserved_cost_microunits: 100_000,
-                runtime_limit_millis: 3_600_000,
+                reserved_tokens: Some(100_000),
+                reserved_cost_microunits: Some(100_000),
+                runtime_limit_millis: Some(3_600_000),
                 submitted_at: message.lease.issued_at.clone(),
             })
             .expect("reserve Delivery execution");
@@ -1239,6 +1240,7 @@ fn upload_candidate(
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let artifact_id = ArtifactId(id("art", seed));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),
@@ -1254,6 +1256,7 @@ fn upload_candidate(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: stage.binding.sent_at.clone(),
         session_identity: stage.binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: stage.binding.worker_session_id.clone(),
     };
     let opened = control_plane
@@ -1274,6 +1277,7 @@ fn upload_candidate(
         sent_at: stage.binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: stage.binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: stage.binding.worker_session_id.clone(),
     };
     let accepted = control_plane
@@ -1310,11 +1314,11 @@ fn commit_stage_success(
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "real Provider Delivery stage completed".to_owned(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: i64::try_from(provider.terminal.admission.actual_cost_micros)
-                    .expect("safe Provider cost"),
+                cost_microunits: provider.terminal.admission.actual_cost_micros.map(|cost| i64::try_from(cost).expect("safe Provider cost")),
                 runtime_millis: 1,
-                tokens: i64::try_from(provider.terminal.admission.actual_tokens)
-                    .expect("safe Provider tokens"),
+                tokens: Some(i64::try_from(provider.terminal.admission.actual_tokens).expect("safe Provider tokens")),
+                known_tokens: i64::try_from(provider.terminal.admission.actual_tokens).expect("safe Provider tokens"),
+                accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1686,7 +1690,7 @@ struct ProviderRunEvidence {
 #[serde(rename_all = "camelCase")]
 struct ExpectedUsage {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
@@ -1741,7 +1745,10 @@ fn live_evidence(
                     cache_write_input_tokens: source.usage.cache_write_input_tokens,
                     output_tokens: source.usage.output_tokens,
                     reasoning_output_tokens: source.usage.reasoning_output_tokens,
-                    cost_micros: source.usage.cost_micros,
+                    cost_micros: source
+                        .usage
+                        .cost_micros
+                        .expect("fixture includes explicit Provider pricing"),
                 },
             }
         })

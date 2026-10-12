@@ -80,7 +80,6 @@ impl PublicationStepState {
     }
 }
 
-/// Secret-safe current result of one canonical Publication operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationStepDetail {
     kind: PublicationOperationKind,
@@ -122,7 +121,6 @@ impl PublicationStepDetail {
     }
 }
 
-/// One verified Publication journal revision reduced to closed public status facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationStatusHistory {
     revision: u64,
@@ -166,7 +164,6 @@ impl PublicationStatusHistory {
     }
 }
 
-/// Bounded result of a fully verified Publication state and journal read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationDetail {
     publication: Publication,
@@ -513,11 +510,6 @@ impl Publication {
         self.updated_at_millis
     }
 
-    /// Builds the secret-safe projection fact owned by the publication ledger.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a revision or timestamp outside the generated public contract.
     pub fn result_fact(&self) -> Result<PublicationResultFact, PublicationError> {
         let revision = i64::try_from(self.revision).map_err(|_| {
             PublicationError::corrupt("publication revision exceeds the public range")
@@ -545,11 +537,6 @@ pub struct PublicationPublishCommand {
 }
 
 impl PublicationPublishCommand {
-    /// Builds one closed publish command from canonical public identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed publication, Delivery, candidate, or target identity.
     pub fn try_new(
         publication_id: PublicationId,
         delivery_id: DeliveryId,
@@ -586,11 +573,6 @@ pub struct PublicationCancelCommand {
 }
 
 impl PublicationCancelCommand {
-    /// Builds one closed cancellation command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed publication identifier or cancellation reason.
     pub fn try_new(
         publication_id: PublicationId,
         reason: impl Into<String>,
@@ -627,11 +609,6 @@ pub struct PublicationCommandContext {
 }
 
 impl PublicationCommandContext {
-    /// Builds the durable receipt and optimistic-revision context for one command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed command digest, revision, or timestamp.
     pub fn try_new(
         receipt_identity: PublicationReceiptIdentity,
         command_digest: Sha256Digest,
@@ -773,18 +750,10 @@ impl From<PublicationStorageError> for PublicationError {
     }
 }
 
-/// Durable Publication ledger backed by the canonical product-state store.
-///
-/// The wrapper keeps generic state, journal, receipt, and outbox details inside this crate.
 pub struct PublicationLedger<'storage> {
     storage: Box<dyn PublicationStorage + 'storage>,
 }
 
-/// Read-only view of the canonical Publication ledger.
-///
-/// This view delegates to the same state-and-journal verifier as the mutable
-/// coordinator. Projection adapters therefore cannot decode a second copy of
-/// the Publication format or treat an unverified state row as authority.
 pub struct PublicationReadLedger<'storage> {
     storage: Box<dyn PublicationStorage + 'storage>,
 }
@@ -797,22 +766,10 @@ impl<'storage> PublicationReadLedger<'storage> {
         }
     }
 
-    /// Reads one Publication after validating its complete durable journal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, malformed, or internally inconsistent Publication,
-    /// or an unavailable canonical storage adapter.
     pub fn get(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
         load_publication(self.storage.as_ref(), publication_id)
     }
 
-    /// Reads one Publication and returns only the newest bounded history after
-    /// validating every durable journal record.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the same missing, malformed, or inconsistent facts as `get`.
     pub fn detail(
         &self,
         publication_id: &PublicationId,
@@ -838,12 +795,6 @@ impl<'storage> PublicationReadLedger<'storage> {
         })
     }
 
-    /// Replays the exact Publication created by one durable command receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a changed command digest, malformed receipt, or unavailable
-    /// canonical storage. A missing receipt returns `None`.
     pub fn replay(
         &self,
         identity: &PublicationReceiptIdentity,
@@ -1043,12 +994,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         }
     }
 
-    /// Persists one immutable publication intent before any provider operation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale authority, conflicting request identity, duplicate publication identity,
-    /// invalid storage state, or an atomic storage failure.
     pub fn publish(
         &mut self,
         context: &PublicationCommandContext,
@@ -1084,20 +1029,10 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         self.ledger.create(context, &publication)
     }
 
-    /// Reads one publication only after validating its full durable journal.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, malformed, or internally inconsistent publication.
     pub fn get(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
         self.ledger.load(publication_id)
     }
 
-    /// Reconciles the next durable operation with the provider, in canonical order.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid durable state, provider contract violations, or storage failures.
     pub fn resume(
         &mut self,
         publication_id: &PublicationId,
@@ -1168,11 +1103,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         }
     }
 
-    /// Cancels only the Publication aggregate and records an exact replayable receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a stale revision, terminal publication, invalid time, or storage failure.
     pub fn cancel(
         &mut self,
         context: &PublicationCommandContext,

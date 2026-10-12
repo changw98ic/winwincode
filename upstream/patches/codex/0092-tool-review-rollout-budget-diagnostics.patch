@@ -1,0 +1,28 @@
+diff --git a/codex-rs/core/tests/suite/rollout_budget.rs b/codex-rs/core/tests/suite/rollout_budget.rs
+index 991cac1d..cd216816 100644
+--- a/codex-rs/core/tests/suite/rollout_budget.rs
++++ b/codex-rs/core/tests/suite/rollout_budget.rs
+@@ -267,6 +267,23 @@ async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
+     let [request] = requests.as_slice() else {
+         anyhow::bail!("expected 1 follow-up request, got {}", requests.len());
+     };
++    if rollout_budget_texts(request).last()
++        != Some(&rollout_budget_message(/*remaining_tokens*/ 50))
++    {
++        let root_usage = test.codex.token_usage_info().await.map(|info| {
++            (
++                info.total_token_usage.total_tokens,
++                info.last_token_usage.total_tokens,
++            )
++        });
++        let child_usage = child_thread.token_usage_info().await.map(|info| {
++            (
++                info.total_token_usage.total_tokens,
++                info.last_token_usage.total_tokens,
++            )
++        });
++        eprintln!("rollout_budget_usage_totals_and_last root={root_usage:?} child={child_usage:?}");
++    }
+     assert_eq!(
+         rollout_budget_texts(request).last(),
+         Some(&rollout_budget_message(/*remaining_tokens*/ 50))

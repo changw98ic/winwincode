@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable command/test output Artifact uploads.
-//!
-//! This is deliberately a small companion to the candidate upload ledger. It
-//! retains the exact bounded, redacted bytes and the generated
-//! `artifact.open`/`artifact.chunk` frames before transport. Runtime evidence
-//! may only publish the reference returned after the final Artifact ACK.
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rusqlite::{OptionalExtension as _, Transaction, params};
+use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
@@ -27,9 +20,9 @@ use crate::{
     store::{AdapterStore, AdapterStoreError},
 };
 
-/// A bounded, already-redacted command/test output stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticArtifactUpload {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub run_key: String,
     pub job: ExecutionJob,
     pub scope: ExecutionScope,
@@ -46,11 +39,27 @@ pub struct DiagnosticArtifactUpload {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticArtifactAuthority {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub job: ExecutionJob,
     pub scope: ExecutionScope,
     pub lease: ExecutionLeaseStamp,
     pub worker_session_id: WorkerSessionId,
     pub session_identity: SessionIdentity,
+}
+
+impl DiagnosticArtifactAuthority {
+    pub(crate) fn matches_current(&self, current: &Self) -> bool {
+        self.snapshot_id == current.snapshot_id
+            && self.job == current.job
+            && self.scope == current.scope
+            && self.worker_session_id == current.worker_session_id
+            && self.session_identity == current.session_identity
+            && (self.lease == current.lease
+                || winwincode_execution_port::execution_identity::retained_lease_matches_current(
+                    &self.lease,
+                    &current.lease,
+                ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,18 +91,9 @@ pub enum DiagnosticArtifactAckOutcome {
 const DIAGNOSTIC_CHUNK_BYTES: usize = 64 * 1024;
 const PENDING: &str = "pending";
 
-/// Maximum bytes retained for one command/test output Artifact.
 pub const MAX_DIAGNOSTIC_OUTPUT_BYTES: usize = 256 * 1024;
-/// Keep individual model/body lines bounded even when the whole output is small.
 pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 1_024;
 
-/// Bounds and redacts Core command output before it becomes durable.
-///
-/// This keeps the output useful for diagnosis while applying the same safety
-/// boundary as the Device log recorder: control bytes are removed, common
-/// credential-bearing lines are replaced, and local absolute paths are
-/// masked. The raw Core `formatted_output` is intentionally excluded because
-/// it is model-facing content rather than process output.
 pub fn sanitize_command_output(stdout: &str, stderr: &str) -> Vec<u8> {
     let mut result = Vec::new();
     append_sanitized(&mut result, "[stdout]\n", stdout);
@@ -101,10 +101,6 @@ pub fn sanitize_command_output(stdout: &str, stderr: &str) -> Vec<u8> {
     result
 }
 
-/// Stable opaque source identity for a Core command invocation.
-///
-/// Call IDs are transport correlation data and must not become externally
-/// visible artifact names or source identifiers.
 pub fn canonical_command_source_id(turn_id: &str, call_id: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"winwincode.diagnostic-command-source.v1");
@@ -128,8 +124,6 @@ fn append_sanitized(output: &mut Vec<u8>, label: &str, source: &str) {
             .chars()
             .filter(|ch| !ch.is_control() || *ch == '\t')
             .collect();
-        // Device worker_logs drops an overlong line as a whole. Doing the
-        // same here avoids a byte truncation that could split UTF-8.
         if cleaned.len() > MAX_DIAGNOSTIC_LINE_BYTES {
             continue;
         }
@@ -354,18 +348,7 @@ pub(crate) struct DiagnosticArtifactOutbox {
 
 impl DiagnosticArtifactOutbox {
     pub(crate) fn open(store: AdapterStore) -> Result<Self, AdapterStoreError> {
-        store
-            .lock()?
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS diagnostic_artifact_upload (
-               artifact_id TEXT PRIMARY KEY NOT NULL,
-               authority_key TEXT NOT NULL,
-               record_json BLOB NOT NULL
-             );
-             CREATE UNIQUE INDEX IF NOT EXISTS diagnostic_artifact_authority_idx
-               ON diagnostic_artifact_upload(authority_key);",
-            )
-            .map_err(|_| AdapterStoreError::Unavailable)?;
+        prepare_diagnostic_job_route(&store)?;
         Ok(Self { store })
     }
 
@@ -377,7 +360,7 @@ impl DiagnosticArtifactOutbox {
         self.store.transaction(|tx| {
             if let Some(existing) = load_by_authority(tx, &record.authority_key)? {
                 existing.validate()?;
-                if existing != record {
+                if !existing.same_upload(&record) {
                     return Err(AdapterStoreError::Conflict);
                 }
                 return Ok(RetainedDiagnosticArtifact {
@@ -488,22 +471,28 @@ impl DiagnosticArtifactOutbox {
     ) -> Result<Vec<ArtifactReference>, AdapterStoreError> {
         let conn = self.store.lock()?;
         let mut stmt = conn
-            .prepare("SELECT record_json FROM diagnostic_artifact_upload ORDER BY artifact_id ASC")
+            .prepare("SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE job_id = ?1 ORDER BY artifact_id ASC")
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let records = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .query_map([&authority.job.job_id.0], diagnostic_envelope_row)
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let mut result = Vec::new();
-        for row in records {
-            let bytes = row.map_err(|_| AdapterStoreError::Unavailable)?;
-            let record: StoredDiagnosticArtifact =
-                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
-            record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_some() {
-                result.push(record.reference());
+        let outcome = (|| {
+            let mut result = Vec::new();
+            for row in records {
+                let record =
+                    decode_diagnostic_envelope(row.map_err(|_| AdapterStoreError::Unavailable)?)?;
+                record.validate()?;
+                if record.authority().matches_current(authority) && record.final_ack.is_some() {
+                    result.push(record.reference());
+                }
             }
-        }
-        Ok(result)
+            Ok(result)
+        })();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_query(
+            stmt.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        outcome
     }
 
     pub(crate) fn has_pending(
@@ -512,22 +501,200 @@ impl DiagnosticArtifactOutbox {
     ) -> Result<bool, AdapterStoreError> {
         let conn = self.store.lock()?;
         let mut stmt = conn
-            .prepare("SELECT record_json FROM diagnostic_artifact_upload")
+            .prepare("SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE job_id = ?1 ORDER BY artifact_id ASC")
             .map_err(|_| AdapterStoreError::Unavailable)?;
         let records = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .query_map([&authority.job.job_id.0], diagnostic_envelope_row)
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        for row in records {
-            let record: StoredDiagnosticArtifact =
-                serde_json::from_slice(&row.map_err(|_| AdapterStoreError::Unavailable)?)
-                    .map_err(|_| AdapterStoreError::Corrupt)?;
-            record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_none() {
-                return Ok(true);
+        let outcome = (|| {
+            let mut pending = false;
+            for row in records {
+                let record =
+                    decode_diagnostic_envelope(row.map_err(|_| AdapterStoreError::Unavailable)?)?;
+                record.validate()?;
+                pending |=
+                    record.authority().matches_current(authority) && record.final_ack.is_none();
+            }
+            Ok(pending)
+        })();
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_query(
+            stmt.get_status(rusqlite::StatementStatus::VmStep),
+        );
+        outcome
+    }
+}
+
+const DIAGNOSTIC_JOB_ROUTE_MIGRATION: &str = "diagnostic-artifact-job-route-v1";
+const DIAGNOSTIC_UPLOAD_SCHEMA: &str = r"CREATE TABLE diagnostic_artifact_upload (
+  artifact_id TEXT PRIMARY KEY NOT NULL,
+  authority_key TEXT NOT NULL,
+  job_id TEXT NOT NULL CHECK(length(job_id) > 0),
+  record_json BLOB NOT NULL
+);";
+const DIAGNOSTIC_AUTHORITY_INDEX: &str = r"CREATE UNIQUE INDEX diagnostic_artifact_authority_idx
+  ON diagnostic_artifact_upload(authority_key);";
+const DIAGNOSTIC_JOB_INDEX: &str = r"CREATE INDEX diagnostic_artifact_job_idx
+  ON diagnostic_artifact_upload(job_id, artifact_id);";
+const DIAGNOSTIC_ROUTE_GUARD: &str = r"CREATE TRIGGER diagnostic_artifact_route_immutable
+  BEFORE UPDATE OF artifact_id, authority_key, job_id ON diagnostic_artifact_upload
+  WHEN NEW.artifact_id IS NOT OLD.artifact_id
+    OR NEW.authority_key IS NOT OLD.authority_key
+    OR NEW.job_id IS NOT OLD.job_id
+  BEGIN SELECT RAISE(ABORT, 'diagnostic artifact route is immutable'); END;";
+
+fn diagnostic_schema_definition(
+    tx: &Transaction<'_>,
+    kind: &str,
+    name: &str,
+) -> Result<Option<String>, AdapterStoreError> {
+    tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+        params![kind, name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)
+}
+
+fn validate_diagnostic_route_layout(tx: &Transaction<'_>) -> Result<(), AdapterStoreError> {
+    for (kind, name, definition) in [
+        (
+            "table",
+            "diagnostic_artifact_upload",
+            DIAGNOSTIC_UPLOAD_SCHEMA,
+        ),
+        (
+            "index",
+            "diagnostic_artifact_authority_idx",
+            DIAGNOSTIC_AUTHORITY_INDEX,
+        ),
+        ("index", "diagnostic_artifact_job_idx", DIAGNOSTIC_JOB_INDEX),
+        (
+            "trigger",
+            "diagnostic_artifact_route_immutable",
+            DIAGNOSTIC_ROUTE_GUARD,
+        ),
+    ] {
+        if diagnostic_schema_definition(tx, kind, name)?.as_deref()
+            != Some(definition.trim().trim_end_matches(';'))
+        {
+            return Err(AdapterStoreError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+fn validate_legacy_diagnostic_columns(tx: &Transaction<'_>) -> Result<(), AdapterStoreError> {
+    let mut statement = tx
+        .prepare("PRAGMA table_info(diagnostic_artifact_upload)")
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let expected = [
+        ("artifact_id".to_owned(), "TEXT".to_owned(), true, None, 1),
+        ("authority_key".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("record_json".to_owned(), "BLOB".to_owned(), true, None, 0),
+    ];
+    if columns != expected {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+fn prepare_diagnostic_job_route(store: &AdapterStore) -> Result<(), AdapterStoreError> {
+    let mut connection = store.lock()?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let applied = tx
+        .query_row(
+            "SELECT 1 FROM codex_store_migration WHERE migration_key=?1",
+            [DIAGNOSTIC_JOB_ROUTE_MIGRATION],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .is_some();
+    if applied {
+        validate_diagnostic_route_layout(&tx)?;
+        tx.commit().map_err(|_| AdapterStoreError::Unavailable)?;
+        return Ok(());
+    }
+    if diagnostic_schema_definition(&tx, "table", "diagnostic_artifact_upload_route_legacy_v1")?
+        .is_some()
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    if diagnostic_schema_definition(&tx, "table", "diagnostic_artifact_upload")?.is_some() {
+        validate_legacy_diagnostic_columns(&tx)?;
+        tx.execute_batch("ALTER TABLE diagnostic_artifact_upload RENAME TO diagnostic_artifact_upload_route_legacy_v1;")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        tx.execute_batch(DIAGNOSTIC_UPLOAD_SCHEMA)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        {
+            let mut statement = tx.prepare(
+                "SELECT artifact_id, authority_key, record_json FROM diagnostic_artifact_upload_route_legacy_v1 ORDER BY artifact_id",
+            ).map_err(|_| AdapterStoreError::Unavailable)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            for row in rows {
+                let (artifact_id, authority_key, bytes) =
+                    row.map_err(|_| AdapterStoreError::Unavailable)?;
+                let record: StoredDiagnosticArtifact =
+                    serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+                if record.descriptor.artifact_id.0 != artifact_id
+                    || record.authority_key != authority_key
+                {
+                    return Err(AdapterStoreError::Corrupt);
+                }
+                record.validate()?;
+                tx.execute(
+                    "INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, job_id, record_json) VALUES (?1, ?2, ?3, ?4)",
+                    params![artifact_id, authority_key, record.job.job_id.0, bytes],
+                ).map_err(|_| AdapterStoreError::Unavailable)?;
             }
         }
-        Ok(false)
+        tx.execute_batch("DROP TABLE diagnostic_artifact_upload_route_legacy_v1;")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    } else {
+        tx.execute_batch(DIAGNOSTIC_UPLOAD_SCHEMA)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
     }
+    for definition in [
+        DIAGNOSTIC_AUTHORITY_INDEX,
+        DIAGNOSTIC_JOB_INDEX,
+        DIAGNOSTIC_ROUTE_GUARD,
+    ] {
+        tx.execute_batch(definition)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    validate_diagnostic_route_layout(&tx)?;
+    tx.execute(
+        "INSERT INTO codex_store_migration(migration_key) VALUES (?1)",
+        [DIAGNOSTIC_JOB_ROUTE_MIGRATION],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    tx.commit().map_err(|_| AdapterStoreError::Unavailable)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -548,7 +715,10 @@ struct StoredDiagnosticArtifact {
 impl StoredDiagnosticArtifact {
     #[allow(clippy::too_many_lines)]
     fn from_upload(upload: &DiagnosticArtifactUpload) -> Result<Self, AdapterStoreError> {
-        if upload.run_key.is_empty()
+        if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+            &upload.job.execution_profile,
+            upload.snapshot_id.as_ref(),
+        ) || upload.run_key.is_empty()
             || upload.bytes.is_empty()
             || upload.bytes.len() > MAX_DIAGNOSTIC_OUTPUT_BYTES
             || upload.source_id.is_empty()
@@ -585,6 +755,7 @@ impl StoredDiagnosticArtifact {
                 .map_err(|_| AdapterStoreError::Conflict)?,
         };
         let open = ArtifactOpenMessage {
+            replaces_artifact_id: None,
             artifact: descriptor.clone(),
             kind: ArtifactOpenMessageKind::ArtifactOpen,
             lease: upload.lease.clone(),
@@ -601,6 +772,7 @@ impl StoredDiagnosticArtifact {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
+            snapshot_id: upload.snapshot_id.clone(),
             worker_session_id: upload.worker_session_id.clone(),
         };
         let chunks = upload
@@ -631,6 +803,7 @@ impl StoredDiagnosticArtifact {
                         i64::try_from(sequence).map_err(|_| AdapterStoreError::Conflict)?,
                     ),
                     session_identity: upload.session_identity.clone(),
+                    snapshot_id: upload.snapshot_id.clone(),
                     worker_session_id: upload.worker_session_id.clone(),
                 })
             })
@@ -652,7 +825,21 @@ impl StoredDiagnosticArtifact {
         Ok(record)
     }
 
+    fn same_upload(&self, other: &Self) -> bool {
+        self.authority_key == other.authority_key
+            && self.run_key == other.run_key
+            && self.job == other.job
+            && self.scope == other.scope
+            && self.source_id == other.source_id
+            && self.bytes == other.bytes
+            && self.descriptor == other.descriptor
+            && self.open == other.open
+            && self.chunks == other.chunks
+    }
+
     fn validate(&self) -> Result<(), AdapterStoreError> {
+        #[cfg(test)]
+        crate::storage_mechanism_regression::diagnostic_validation(self.bytes.len());
         let exact_authority_key = authority_key(
             &self.open.lease,
             &self.open.worker_session_id,
@@ -671,7 +858,10 @@ impl StoredDiagnosticArtifact {
         let expected_file_name = format!("{}.log", self.source_id);
         let final_sequence =
             u64::try_from(self.chunks.len()).map_err(|_| AdapterStoreError::Corrupt)?;
-        if self.run_key.is_empty()
+        if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+            &self.job.execution_profile,
+            self.open.snapshot_id.as_ref(),
+        ) || self.run_key.is_empty()
             || self.bytes.is_empty()
             || self.bytes.len() > MAX_DIAGNOSTIC_OUTPUT_BYTES
             || self.source_id.is_empty()
@@ -744,6 +934,7 @@ impl StoredDiagnosticArtifact {
                 let sequence = u64::try_from(index + 1).map_err(|_| AdapterStoreError::Corrupt)?;
                 if decoded.as_slice() != expected_bytes
                     || chunk.artifact_id != self.descriptor.artifact_id
+                    || chunk.snapshot_id != self.open.snapshot_id
                     || chunk.lease != self.open.lease
                     || chunk.worker_session_id != self.open.worker_session_id
                     || chunk.session_identity != self.open.session_identity
@@ -791,6 +982,7 @@ impl StoredDiagnosticArtifact {
     }
     fn authority(&self) -> DiagnosticArtifactAuthority {
         DiagnosticArtifactAuthority {
+            snapshot_id: self.open.snapshot_id.clone(),
             job: self.job.clone(),
             scope: self.scope.clone(),
             lease: self.open.lease.clone(),
@@ -835,43 +1027,72 @@ fn canonical_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String {
         &format!("{:x}", digest.finalize())[..26].to_ascii_uppercase()
     )
 }
+type DiagnosticEnvelope = (String, String, String, Vec<u8>);
+
+fn diagnostic_envelope_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiagnosticEnvelope> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn decode_diagnostic_envelope(
+    (artifact_id, authority_key, job_id, bytes): DiagnosticEnvelope,
+) -> Result<StoredDiagnosticArtifact, AdapterStoreError> {
+    let record: StoredDiagnosticArtifact =
+        serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+    if record.descriptor.artifact_id.0 != artifact_id
+        || record.authority_key != authority_key
+        || record.job.job_id.0 != job_id
+    {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(record)
+}
+
 fn load_by_authority(
     tx: &Transaction<'_>,
     key: &str,
 ) -> Result<Option<StoredDiagnosticArtifact>, AdapterStoreError> {
-    let bytes = tx
-        .query_row(
-            "SELECT record_json FROM diagnostic_artifact_upload WHERE authority_key = ?1",
-            params![key],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    bytes
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
-        .transpose()
+    tx.query_row(
+        "SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE authority_key = ?1",
+        params![key],
+        diagnostic_envelope_row,
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)?
+    .map(decode_diagnostic_envelope)
+    .transpose()
 }
+
 fn load_by_artifact(
     tx: &Transaction<'_>,
     id: &ArtifactId,
 ) -> Result<Option<StoredDiagnosticArtifact>, AdapterStoreError> {
-    let bytes = tx
-        .query_row(
-            "SELECT record_json FROM diagnostic_artifact_upload WHERE artifact_id = ?1",
-            params![id.0],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    bytes
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
-        .transpose()
+    tx.query_row(
+        "SELECT artifact_id, authority_key, job_id, record_json FROM diagnostic_artifact_upload WHERE artifact_id = ?1",
+        params![id.0],
+        diagnostic_envelope_row,
+    )
+    .optional()
+    .map_err(|_| AdapterStoreError::Unavailable)?
+    .map(decode_diagnostic_envelope)
+    .transpose()
 }
+
 fn save(tx: &Transaction<'_>, record: &StoredDiagnosticArtifact) -> Result<(), AdapterStoreError> {
     let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
-    tx.execute("INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, record_json) VALUES (?1, ?2, ?3) ON CONFLICT(artifact_id) DO UPDATE SET record_json=excluded.record_json", params![record.descriptor.artifact_id.0, record.authority_key, bytes]).map_err(|_| AdapterStoreError::Unavailable)?;
+    let changed = tx.execute(
+        "INSERT INTO diagnostic_artifact_upload(artifact_id, authority_key, job_id, record_json)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(artifact_id) DO UPDATE SET record_json=excluded.record_json
+         WHERE diagnostic_artifact_upload.authority_key=excluded.authority_key
+           AND diagnostic_artifact_upload.job_id=excluded.job_id",
+        params![record.descriptor.artifact_id.0, record.authority_key, record.job.job_id.0, bytes],
+    ).map_err(|_| AdapterStoreError::Unavailable)?;
+    if changed != 1 {
+        return Err(AdapterStoreError::Conflict);
+    }
     Ok(())
 }
+
 fn compact(
     tx: &Transaction<'_>,
     record: &StoredDiagnosticArtifact,
@@ -949,6 +1170,8 @@ fn is_final_ack_status(status: &LeaseWriteStatus) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("storage_diagnostic_regression.rs");
+    include!("storage_diagnostic_migration_tests.rs");
     use std::path::PathBuf;
 
     use winwincode_domain::{ExecutionAckSequence, ExecutionSequence};
@@ -990,6 +1213,7 @@ mod tests {
             .expect("artifact open");
         let open: ArtifactOpenMessage = serde_json::from_value(open_value.clone()).expect("open");
         DiagnosticArtifactUpload {
+            snapshot_id: None,
             run_key: "run_fixture_opaque".to_owned(),
             scope: job.scope.clone(),
             job,
@@ -1010,6 +1234,7 @@ mod tests {
         retained: &RetainedDiagnosticArtifact,
     ) -> ArtifactAckMessage {
         ArtifactAckMessage {
+            retained_artifact: None,
             ack_sequence: ExecutionAckSequence(
                 i64::try_from(upload.bytes.chunks(DIAGNOSTIC_CHUNK_BYTES).len())
                     .expect("diagnostic chunk count"),
@@ -1064,6 +1289,116 @@ mod tests {
         assert!(!source.contains("turn-secret"));
         assert!(!source.contains("call-secret"));
         assert!(source.starts_with("command_"));
+    }
+
+    #[test]
+    fn command_evidence_wait_and_reference_survive_current_lease_renewal() {
+        let root = test_root("renewal-wait");
+        let mut upload = fixture_upload(b"real command output".to_vec());
+        upload.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
+        upload.lease.expires_at = Instant("2030-01-01T00:05:00.000Z".into());
+        upload.created_at = Instant("2030-01-01T00:01:00.000Z".into());
+        let store = AdapterStore::open(&root).expect("store");
+        let outbox = DiagnosticArtifactOutbox::open(store.clone()).expect("outbox");
+        let retained = outbox.retain(&upload).expect("retain command evidence");
+        let original = retained.deliveries.clone();
+        let mut current = retained.authority.clone();
+        current.lease.expires_at = Instant("2030-01-01T00:10:00.000Z".into());
+        assert!(
+            outbox.has_pending(&current).expect("renewed evidence wait"),
+            "renewal cannot bypass the required final Artifact ACK"
+        );
+        assert!(outbox.accepted_references(&current).unwrap().is_empty());
+        outbox
+            .apply_ack(&ack(&upload, &retained))
+            .expect("original final ACK");
+        assert!(!outbox.has_pending(&current).unwrap());
+        assert_eq!(
+            outbox.accepted_references(&current).unwrap(),
+            vec![retained.artifact.clone()]
+        );
+        let persisted = store
+            .transaction(|tx| load_by_artifact(tx, &retained.artifact.artifact_id))
+            .unwrap()
+            .unwrap();
+        let mut original_chunks = Vec::new();
+        for delivery in original {
+            match delivery.message {
+                ExecutionPortMessage::ArtifactOpenMessage(open) => assert_eq!(persisted.open, open),
+                ExecutionPortMessage::ArtifactChunkMessage(chunk) => original_chunks.push(chunk),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(persisted.chunks, original_chunks);
+        drop(outbox);
+        drop(store);
+        let reopened = DiagnosticArtifactOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        assert_eq!(
+            reopened.accepted_references(&current).unwrap(),
+            vec![retained.artifact]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renewed_command_evidence_keeps_all_pending_uploads_and_rejects_foreign_authority() {
+        let root = test_root("renewal-all-outputs");
+        let mut first = fixture_upload(b"first command output".to_vec());
+        first.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
+        first.lease.expires_at = Instant("2030-01-01T00:05:00.000Z".into());
+        first.created_at = Instant("2030-01-01T00:01:00.000Z".into());
+        let outbox = DiagnosticArtifactOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let retained = outbox.retain(&first).unwrap();
+        let mut current = retained.authority.clone();
+        current.lease.expires_at = Instant("2030-01-01T00:10:00.000Z".into());
+        for mutation in 0..11 {
+            let mut foreign = current.clone();
+            match mutation {
+                0 => foreign.lease.fencing_token.0.push('2'),
+                1 => foreign.lease.worker_id.0.push('2'),
+                2 => foreign.lease.worker_instance_id.0.push('2'),
+                3 => foreign.lease.attempt += 1,
+                4 => foreign.lease.lease_id.0.push('2'),
+                5 => foreign.lease.expires_at = Instant("2030-01-01T00:04:00.000Z".into()),
+                6 => foreign.worker_session_id.0.push('2'),
+                7 => foreign.session_identity.product_session_id.0.push('2'),
+                8 => foreign.job.payload_digest.0.push('2'),
+                9 => {
+                    let mut scope = serde_json::to_value(&foreign.scope).unwrap();
+                    scope["workRunId"] = serde_json::json!("wrn_foreign");
+                    foreign.scope = serde_json::from_value(scope).unwrap();
+                }
+                _ => {
+                    foreign.snapshot_id =
+                        Some(winwincode_domain::SnapshotId("snap_foreign".into()));
+                }
+            }
+            assert!(
+                !outbox.has_pending(&foreign).unwrap(),
+                "foreign authority {mutation}"
+            );
+            assert!(outbox.accepted_references(&foreign).unwrap().is_empty());
+        }
+        let mut second = first.clone();
+        second.source_id.push_str("_second");
+        second.file_name = format!("{}.log", second.source_id);
+        second.lease = current.lease.clone();
+        let later = outbox.retain(&second).unwrap();
+        outbox.apply_ack(&ack(&first, &retained)).unwrap();
+        assert!(
+            outbox.has_pending(&current).unwrap(),
+            "the second output still needs its final ACK"
+        );
+        assert_eq!(
+            outbox.accepted_references(&current).unwrap(),
+            vec![retained.artifact.clone()]
+        );
+        outbox.apply_ack(&ack(&second, &later)).unwrap();
+        assert!(!outbox.has_pending(&current).unwrap());
+        let mut expected = vec![retained.artifact, later.artifact];
+        expected.sort_by(|a, b| a.artifact_id.0.cmp(&b.artifact_id.0));
+        assert_eq!(outbox.accepted_references(&current).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -234,7 +234,6 @@ fn transitions_are_atomic_replayable_and_survive_an_abrupt_restart() {
         .expect_err("changed transition replay");
     assert_eq!(conflict.kind(), StorageErrorKind::RequestConflict);
 
-    // Deliberately drop the live connection without the explicit close path.
     drop(storage);
 
     let mut restarted_storage = SqliteStorage::open(&root).expect("storage restart");

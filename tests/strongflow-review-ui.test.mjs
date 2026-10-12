@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import test from 'node:test'
+import { sharedCoreActivity, diagnosticCoreActivity, agentWaitCoreActivity } from './fixtures/core-tool-activity.mjs'
 import { JSDOM } from 'jsdom'
 
 const root = resolve(import.meta.dirname, '..')
@@ -34,7 +35,9 @@ const deliveryId = 'dlv_00000000000000000000000042'
 const workRunId = 'wrn_00000000000000000000000042'
 const evidenceId = 'evd_00000000000000000000000042'
 const artifactId = 'art_00000000000000000000000042'
-const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+const candidateId = 'cnd_00000000000000000000000042'
+const snapshotId = 'snap_00000000000000000000000042'
+const candidateRef = `refs/winwincode/candidates/${'c'.repeat(40)}`
 const scope = {
   kind: 'repository',
   organizationId: 'org_00000000000000000000000001',
@@ -53,6 +56,7 @@ const readCursor = {
   eventCursor: { scope, stream: { kind: 'delivery', deliveryId }, sequence: 0, eventId: null },
 }
 const candidate = {
+  candidateId, candidateDigest: `sha256:${'d'.repeat(64)}`,
   candidateRef,
   deliverySpecId: 'spec-review',
   deliverySpecRevision: 1,
@@ -64,12 +68,13 @@ const candidate = {
   frozenAt: '2026-09-11T00:00:00.000Z',
 }
 const evidence = {
+  candidateId, snapshotId,
   id: evidenceId,
   deliverySpecId: 'spec-review',
   deliverySpecRevision: 1,
   workRunId,
   sessionBindingId: 'binding-1',
-  candidateRef,
+
   type: 'command',
   sourceRef: 'runtime:command:42',
   createdAt: '2026-09-11T00:01:00.000Z',
@@ -80,6 +85,7 @@ const acceptanceCriteria = [
   { id: 'criterion-three', description: 'Docs checked', required: false, verificationMethod: null },
 ]
 const verdict = {
+  candidateId, snapshotId,
   id: 'verdict-1', deliverySpecId: 'spec-review', deliverySpecRevision: 1,
   candidateRef, producedAt: '2026-09-11T00:02:00.000Z', status: 'fail',
   unresolvedFindings: ['review pending'],
@@ -132,7 +138,7 @@ test('applying requires current candidate, current specification and resolvable 
     { ...state, detail: { ...state.detail, verdict } },
     { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, candidateRef: 'other-version' } } },
     { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, criteria: [state.detail.verdict.criteria[0]] } } },
-    { ...state, detail: { ...state.detail, evidence: [{ ...evidence, candidateRef: 'other-version' }] } },
+    { ...state, detail: { ...state.detail, evidence: [{ ...evidence, snapshotId: 'snap_00000000000000000000000099' }] } },
   ]) assert.equal(candidateCanApply(changed), false)
 })
 
@@ -216,12 +222,12 @@ function fixtureClient(pendingSolution = null) {
                 ],
               } : null,
               activities: Array.from({ length: sessionIndex === 0 ? 101 : 1 }, (_, activityIndex) => ({
-                callId: sessionIndex === 0 && activityIndex === 0 ? 'call-42' : `call-${sessionIndex}-${activityIndex}`,
+                callId: sessionIndex === 0 && activityIndex === 100 ? 'call-42' : `call-${sessionIndex}-${activityIndex}`,
                 activityType: 'command', command: 'node --test',
                 status: sessionIndex === 0 ? 'failed' : 'completed',
                 outcome: sessionIndex === 0 ? 'task-failed' : 'succeeded',
                 exitCode: sessionIndex === 0 ? 1 : 0,
-                sourceRef: sessionIndex === 0 && activityIndex === 0
+                sourceRef: sessionIndex === 0 && activityIndex === 100
                   ? 'runtime:command:42'
                   : `runtime:command:${sessionIndex}:${activityIndex}`,
               })),
@@ -247,7 +253,7 @@ function fixtureClient(pendingSolution = null) {
               artifactId, kind: 'log', digest: `sha256:${'e'.repeat(64)}`,
               fileName: 'failure.log', mediaType: 'text/plain', sizeBytes: 6,
               previewMode: 'inline_text',
-              provenance: { candidateRef, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
+              provenance: { candidateId, snapshotId, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
             }] },
           })
         case 'evidence.artifact.content.get': {
@@ -259,7 +265,7 @@ function fixtureClient(pendingSolution = null) {
               artifactId, kind: 'log', digest: `sha256:${'e'.repeat(64)}`,
               fileName: 'failure.log', mediaType: 'text/plain', sizeBytes: 6,
               previewMode: 'inline_text',
-              provenance: { candidateRef, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
+              provenance: { candidateId, snapshotId, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
             },
             evidence, contentEncoding: 'utf-8', previewMode: 'inline_text',
             dataBase64: Buffer.from(text).toString('base64'), encoding: 'base64',
@@ -288,7 +294,7 @@ test('review preview classes keep executable and binary content out of the DOM p
 })
 
 test('browser-facing runtime text redacts credentials, paths, and internal identities', () => {
-  const candidate = 'git-candidate:sha256:' + 'a'.repeat(64)
+  const candidate = 'refs/winwincode/candidates/' + 'a'.repeat(40)
   const value = redactPublicText([
     'aUtHoRiZaTiOn: BeArEr super-secret-token',
     'TOKEN=top-secret',
@@ -300,7 +306,7 @@ test('browser-facing runtime text redacts credentials, paths, and internal ident
     '用户验收条件：登录后显示相对路径 src/app.ts，短 commit 1a2b3c4d',
     'diff:\n- const value = 1\n+ const value = 2',
   ].join('\n'))
-  assert.doesNotMatch(value, /super-secret-token|top-secret|\/Users\/alice|C:\\Users\\alice|git-candidate:|runtime:command:|sourceRef=|source_ref:|wrn_000/u)
+  assert.doesNotMatch(value, /super-secret-token|top-secret|\/Users\/alice|C:\\Users\\alice|refs\/winwincode\/candidates\/|runtime:command:|sourceRef=|source_ref:|wrn_000/u)
   assert.match(value, /\[REDACTED\]|\[REDACTED PATH\]|\[CANDIDATE\]|\[INTERNAL ID\]/u)
   assert.match(value, /用户验收条件：登录后显示相对路径 src\/app\.ts，短 commit 1a2b3c4d/u)
   assert.match(value, /diff:\n- const value = 1\n\+ const value = 2/u)
@@ -452,7 +458,7 @@ test('review reads bounded current facts, continues ranges, and preserves histor
     workingPlan: { completed: 1, inProgress: 1, pending: 1, total: 3, sourceRef: 'runtime:plan:42' },
     acceptedCriteria: { accepted: 1, failed: 1, inconclusive: 0, infraError: 0, pending: 1, total: 3 },
   })
-  assert.equal(model.state.segments[0].activities[0].sourceRef, 'runtime:command:42')
+  assert.equal(model.state.segments[0].activities.at(-1).sourceRef, 'runtime:command:42')
   assert.equal(model.snippetFor(model.state.segments[0].key, 'call-42').workRunId, workRunId)
 
   await model.openPreview('src/main.ts')
@@ -617,4 +623,40 @@ test('rendered diff marks line changes while keeping code text inert', () => {
   assert.deepEqual([...standalone.querySelectorAll('.wwc-diff-content')].map(row => row.textContent), [
     ' @@ -1 +1 @@\n', '−remove\n', ' keep\n', '+add\n',
   ])
+})
+
+test('StrongFlow retains and renders canonical Core facts through the view model', async () => {
+  const base = fixtureClient()
+  const activities = [sharedCoreActivity(), diagnosticCoreActivity(), agentWaitCoreActivity()]
+  const client = {
+    ...base,
+    async query(request) {
+      const result = await base.query(request)
+      if (request.query === 'runtime.projection.get') {
+        result.result.sessions[0].activities = activities
+      }
+      return result
+    },
+  }
+  let request = 0
+  const model = createStrongFlowReviewViewModel({ client, scope, deliveryId,
+    actor: { kind: 'human', id: 'hum_00000000000000000000000001' },
+    nextRequestId: () => `req_${String(++request).padStart(26, '0')}` })
+  await model.start()
+  assert.deepEqual(model.state.segments[0].activities, activities)
+  const document = new JSDOM('<!doctype html><body><main></main></body>').window.document
+  const annotations = createStrongFlowReviewAnnotations()
+  const mounted = detailModule.mountStrongFlowReviewDetail({ root: document.querySelector('main'), model, annotations })
+  const rows = [...document.querySelectorAll('.wwc-runtime-activity')]
+  const sharing = rows.find(row => row.dataset.runtimeCallId === activities[0].callId)
+  const diagnosis = rows.find(row => row.dataset.runtimeCallId === activities[1].callId)
+  assert.match(sharing.textContent, /public_smoke · 已取消.*父请求 #1.*合并等待请求 #7.*输入来源已验证/su)
+  assert.match(diagnosis.textContent, /疑似等待成环 · 已提示模型.*public_smoke · 调用 logical-8/su)
+  assert.match(diagnosis.textContent, /代码运行 cell-1 → Agent agent-2 · 期限 2030-01-01T00:00:00.000Z/u)
+  const waiting = rows.find(row => row.dataset.runtimeCallId === activities[2].callId)
+  assert.match(waiting.textContent, /代码运行 cell-1.*等待 Agent agent-2.*等待状态待核对.*等待期限 2030-01-01T00:00:00.000Z/su)
+  assert.equal(diagnosis.querySelector('script'), null)
+  mounted.close()
+  annotations.close()
+  model.close()
 })

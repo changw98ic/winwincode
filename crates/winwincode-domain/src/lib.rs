@@ -1,33 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared identifiers and value objects for `WinWinCode`.
-//!
-//! The declarations are generated from `schema/winwincode/v1`; the canonical
-//! JSON Schema remains their only source. Hand-written domain modules add
-//! objects whose lifecycle lives in code rather than in the schema.
-
 mod generated;
 mod git_candidate_artifact;
+mod git_diff;
+mod snapshot;
 mod user_account;
 mod verification_command;
 
 pub use generated::*;
 pub use git_candidate_artifact::{GitCandidateArtifactManifest, GitCandidateArtifactManifestError};
+pub use git_diff::{GitHunkOriginError, rework_hunk_origins};
+pub use snapshot::{
+    CanonicalSnapshot, SnapshotBindingError, SnapshotIdentityError, SnapshotVerificationBinding,
+    seal_snapshot, verify_snapshot_seal,
+};
 pub use user_account::{UserAccount, UserAccountError, UserAccountErrorKind};
 pub use verification_command::{
-    observed_verification_command_digest, observed_verification_command_is_test,
-    verification_method_digest,
+    observed_verification_command_digest, observed_verification_command_is_check,
+    observed_verification_command_is_test, verification_method_digest,
 };
 
-/// Returns whether `value` is the canonical Delivery identifier defined by the
-/// public schema.
 #[must_use]
 pub fn is_canonical_delivery_id(value: &str) -> bool {
     is_canonical_prefixed_id(value, "dlv_")
 }
 
-/// Checks the schema's uppercase Crockford identifier under an expected prefix.
-/// Callers supply the fixed prefix of the identifier type they accept.
 #[must_use]
 pub fn is_canonical_prefixed_id(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|identifier| {

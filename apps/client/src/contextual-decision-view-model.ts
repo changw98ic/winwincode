@@ -11,12 +11,6 @@ import type {
   WorkRunId,
 } from './generated/contracts.js'
 
-/**
- * UI-502 embeds the decisions of the current Session/WorkRun context where the
- * user already is.  This module is a pure projection of one server snapshot: it
- * never queries, never caches, and never owns business state, so the global
- * the task board and Chat keep exactly one shared server truth.
- */
 export type ContextualDecisionKind = 'input' | 'approval' | 'attention'
 
 export type ContextualDecisionUrgency =
@@ -25,38 +19,29 @@ export type ContextualDecisionUrgency =
   | 'expired'
   | 'binding-invalid'
 
-/**
- * One offered answer.  An Input option carries the canonical `value` the Worker
- * expects; a Delivery Attention option describes a choice and carries none.
- */
 export interface ContextualDecisionOption {
   readonly id: string
   readonly label: string
   readonly value: string | null
 }
 
-/** One Delivery Attention item together with the exact Delivery binding. */
 export interface ContextualDecisionAttention {
   readonly projection: DeliveryAttentionProjection
   readonly deliveryId: DeliveryId
   readonly deliveryRevision: number
 }
 
-/** The page-owned snapshot slice a contextual decision card projects. */
 export interface ContextualDecisionSource {
   readonly inputs: readonly ChatInputInteractionProjection[]
   readonly approvals: readonly ApprovalProjection[]
   readonly attention: readonly ContextualDecisionAttention[]
   readonly nowMillis: number
-  /** Highest number of decisions one card renders; the rest are counted. */
   readonly limit?: number
 }
 
 export interface ContextualDecisionItem {
   readonly kind: ContextualDecisionKind
-  /** Stable server identity: inputRequestId, ApprovalId, or AttentionItemId. */
   readonly id: string
-  /** Producer text: never rendered raw, the card binds it before display. */
   readonly title: string
   readonly urgency: ContextualDecisionUrgency
   readonly blocking: boolean
@@ -68,12 +53,10 @@ export interface ContextualDecisionItem {
   readonly productSessionId: ProductSessionId | null
   readonly workRunId: WorkRunId | null
   readonly deliveryId: DeliveryId | null
-  /** Input answers only; every other kind stays null. */
   readonly mode: InteractiveInputMode | null
-  /** Input answers only: an empty text response is a valid answer. */
   readonly allowEmpty: boolean
+  readonly allowOther: boolean
   readonly options: readonly ContextualDecisionOption[]
-  /** True when the decision must carry a written reason or resolution. */
   readonly requiresNote: boolean
 }
 
@@ -91,13 +74,9 @@ export interface ContextualDecisionView {
 }
 
 export interface ContextualDecisionPresentationOptions {
-  /** The page is still loading or replacing its snapshot. */
   readonly loading?: boolean
-  /** One decision command is already in flight for this page. */
   readonly busy?: boolean
-  /** Access, transport, or lifecycle state that forbids every decision. */
   readonly pageUnavailable?: boolean
-  /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
 
@@ -107,7 +86,6 @@ export interface ContextualDecisionPresentation {
   readonly counts: ContextualDecisionCounts
 }
 
-/** Render limit shared by Chat and StrongFlow: the card stays first-screen sized. */
 export const DEFAULT_CONTEXTUAL_DECISION_LIMIT = 4
 
 const URGENCY_RANK: Readonly<Record<ContextualDecisionUrgency, number>> = Object.freeze({
@@ -117,7 +95,6 @@ const URGENCY_RANK: Readonly<Record<ContextualDecisionUrgency, number>> = Object
   'binding-invalid': 3,
 })
 
-/** Shared fail-closed binding check for every pending-decision projection. */
 function bindingIsComplete(binding: {
   readonly productSessionId: ProductSessionId
   readonly sessionIdentity: {
@@ -171,6 +148,7 @@ function inputDecision(
     deliveryId: null,
     mode: projection.mode,
     allowEmpty: projection.allowEmpty,
+    allowOther: projection.mode === 'single_choice' && projection.allowOther === true,
     options,
     requiresNote: false,
   }
@@ -199,6 +177,7 @@ function approvalDecision(
     deliveryId: null,
     mode: null,
     allowEmpty: false,
+    allowOther: false,
     options: Object.freeze([]),
     requiresNote: true,
   }
@@ -209,8 +188,6 @@ function attentionDecision(
   source: ContextualDecisionAttention,
 ): ContextualDecisionItem {
   const projection = source.projection
-  // The card is a display projection: a producer that omits the option list
-  // loses its choices here instead of taking the mounted page down.
   const options: readonly ContextualDecisionOption[] = (projection.options ?? []).map(option =>
     Object.freeze({ id: option.id, label: option.label, value: null })
   )
@@ -230,13 +207,13 @@ function attentionDecision(
     deliveryId: source.deliveryId,
     mode: null,
     allowEmpty: false,
+    allowOther: false,
     options,
     requiresNote: true,
   }
   return Object.freeze({ ...item, urgency: urgencyOf(item) })
 }
 
-/** Canonical browsing order: blocking first, soonest expiry next, stable identity. */
 export function orderedContextualDecisions(
   items: readonly ContextualDecisionItem[],
 ): readonly ContextualDecisionItem[] {
@@ -260,7 +237,6 @@ export interface BoundedContextualDecisions {
   readonly omitted: number
 }
 
-/** One bounded card slice: identity is stable, so keyed rows never reshuffle. */
 export function boundedContextualDecisions(
   items: readonly ContextualDecisionItem[],
   limit: number,
@@ -276,7 +252,6 @@ export function boundedContextualDecisions(
   })
 }
 
-/** Project one page-owned snapshot slice into the contextual decision card facts. */
 export function contextualDecisions(source: ContextualDecisionSource): ContextualDecisionView {
   const limit = source.limit ?? DEFAULT_CONTEXTUAL_DECISION_LIMIT
   const decisions = [
@@ -297,7 +272,6 @@ export function contextualDecisions(source: ContextualDecisionSource): Contextua
   })
 }
 
-/** Map one card snapshot to the visible, non-live card text and capability. */
 export function contextualDecisionPresentation(
   view: ContextualDecisionView,
   options: ContextualDecisionPresentationOptions = {},
@@ -319,7 +293,6 @@ export function contextualDecisionPresentation(
   })
 }
 
-/** Whether one row keeps its controls reachable, and the visible state label. */
 export function contextualDecisionCapability(
   item: ContextualDecisionItem,
   presentation: ContextualDecisionPresentation,
@@ -337,7 +310,6 @@ export function contextualDecisionCapability(
   return Object.freeze({ disabled, stateLabel })
 }
 
-/** The kind label of one decision row; never derived from producer text. */
 export function contextualDecisionKindLabel(kind: ContextualDecisionKind): string {
   if (kind === 'input') return '输入请求'
   if (kind === 'approval') return '工具审批'

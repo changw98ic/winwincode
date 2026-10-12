@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Versioned test-asset manifests and bounded Delivery evidence bindings.
-//!
-//! A manifest is an artifact owned outside the Control Plane. This module only
-//! derives compact references, evidence bindings, and invalidation facts from
-//! a validated manifest; it does not introduce another Delivery aggregate.
-
 use std::{
     collections::HashSet,
     error::Error,
@@ -24,7 +18,6 @@ const MAX_TEXT_LENGTH: usize = 4_096;
 const MAX_ASSETS: usize = 10_000;
 const MAX_REQUIREMENTS: usize = 1_000;
 
-/// Whether a test is an accepted product authority or a candidate proposal.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestAssetAuthority {
@@ -32,7 +25,6 @@ pub enum TestAssetAuthority {
     Candidate,
 }
 
-/// Whether an Executor may update the asset through a manifest transition.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestAssetMutability {
@@ -47,7 +39,6 @@ pub enum TestAssetLifecycle {
     Retired,
 }
 
-/// Only canonical assets can carry an automatic requirement gate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestAssetGate {
@@ -55,7 +46,6 @@ pub enum TestAssetGate {
     RequirementBlocking,
 }
 
-/// One content-addressed test asset in a versioned manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAsset {
@@ -73,8 +63,6 @@ pub struct TestAsset {
 }
 
 impl TestAsset {
-    /// Candidate tests are advisory unless they are promoted into the
-    /// canonical manifest by its owner.
     #[must_use]
     pub fn candidate(
         id: impl Into<String>,
@@ -117,10 +105,10 @@ impl TestAsset {
     }
 }
 
-/// Versioned artifact describing the exact test assets for one candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetManifest {
+    pub candidate_id: winwincode_domain::CandidateId,
     pub schema_version: u8,
     pub id: String,
     pub revision: u64,
@@ -130,13 +118,6 @@ pub struct TestAssetManifest {
 }
 
 impl TestAssetManifest {
-    /// Validates the current manifest contract and its deterministic ordering.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unsupported versions, malformed identities or
-    /// digests, duplicate entries, non-canonical ordering, and candidate tests
-    /// that attempt to become automatic gates.
     pub fn validate(&self) -> Result<(), TestAssetManifestError> {
         if self.schema_version != TEST_ASSET_MANIFEST_SCHEMA_VERSION {
             return Err(manifest_error(
@@ -151,6 +132,13 @@ impl TestAssetManifest {
                 TestAssetManifestErrorCode::InvalidValue,
                 "revision",
                 "manifest revision must be positive",
+            ));
+        }
+        if !winwincode_domain::is_canonical_prefixed_id(&self.candidate_id.0, "cnd_") {
+            return Err(manifest_error(
+                TestAssetManifestErrorCode::InvalidValue,
+                "candidateId",
+                "manifest CandidateId is invalid",
             ));
         }
         bounded_text(&self.candidate_ref, "candidateRef")?;
@@ -187,11 +175,6 @@ impl TestAssetManifest {
         Ok(())
     }
 
-    /// Returns the compact identity retained by evidence and verdict facts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the manifest is not valid.
     pub fn artifact_ref(&self) -> Result<TestAssetManifestRef, TestAssetManifestError> {
         self.validate()?;
         let encoded = serde_json::to_vec(self).map_err(|error| {
@@ -208,13 +191,6 @@ impl TestAssetManifest {
         })
     }
 
-    /// Binds one existing canonical test `EvidenceRef` to an exact manifest
-    /// revision and asset content hash.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-test Evidence, another candidate, or a missing/retired
-    /// asset.
     pub fn bind_evidence(
         &self,
         evidence: &EvidenceRef,
@@ -228,10 +204,10 @@ impl TestAssetManifest {
                 "only test EvidenceRef values can bind to TestAsset",
             ));
         }
-        if evidence.candidate_ref != self.candidate_ref {
+        if evidence.candidate_id != self.candidate_id {
             return Err(manifest_error(
                 TestAssetManifestErrorCode::EvidenceMismatch,
-                "evidence.candidateRef",
+                "evidence.candidateId",
                 "EvidenceRef belongs to another candidate",
             ));
         }
@@ -255,6 +231,8 @@ impl TestAssetManifest {
         }
 
         Ok(TestAssetEvidenceBinding {
+            candidate_id: evidence.candidate_id.clone(),
+            snapshot_id: evidence.snapshot_id.clone(),
             evidence_ref_id: evidence.id.clone(),
             candidate_ref: self.candidate_ref.clone(),
             manifest_ref,
@@ -265,7 +243,6 @@ impl TestAssetManifest {
     }
 }
 
-/// Compact external artifact identity stored by the Control Plane.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetManifestRef {
@@ -274,10 +251,11 @@ pub struct TestAssetManifestRef {
     pub digest_sha256: String,
 }
 
-/// Exact link from an existing Delivery `EvidenceRef` to one `TestAsset`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetEvidenceBinding {
+    candidate_id: winwincode_domain::CandidateId,
+    snapshot_id: winwincode_domain::SnapshotId,
     evidence_ref_id: EvidenceId,
     candidate_ref: String,
     manifest_ref: TestAssetManifestRef,
@@ -318,7 +296,6 @@ impl TestAssetEvidenceBinding {
     }
 }
 
-/// Identity retained when a verdict consumes test-asset Evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetVerdictBinding {
@@ -329,19 +306,15 @@ pub struct TestAssetVerdictBinding {
 }
 
 impl TestAssetVerdictBinding {
-    /// Binds a verdict only to test Evidence that it actually cites.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched manifest/candidate identities, duplicate Evidence,
-    /// or bindings not cited by the verdict.
     pub fn new(
         verdict: &DeliveryVerdict,
         manifest: &TestAssetManifest,
         evidence: &[TestAssetEvidenceBinding],
     ) -> Result<Self, TestAssetManifestError> {
         let manifest_ref = manifest.artifact_ref()?;
-        if verdict.candidate_ref != manifest.candidate_ref {
+        if verdict.candidate_ref != manifest.candidate_ref
+            || verdict.candidate_id != manifest.candidate_id
+        {
             return Err(manifest_error(
                 TestAssetManifestErrorCode::VerdictMismatch,
                 "verdict.candidateRef",
@@ -365,6 +338,8 @@ impl TestAssetVerdictBinding {
         let mut unique = HashSet::with_capacity(evidence.len());
         for (index, binding) in evidence.iter().enumerate() {
             if binding.candidate_ref != manifest.candidate_ref
+                || binding.candidate_id != verdict.candidate_id
+                || binding.snapshot_id != verdict.snapshot_id
                 || binding.manifest_ref != manifest_ref
             {
                 return Err(manifest_error(
@@ -447,12 +422,6 @@ pub enum TestAssetManifestActor {
     Executor,
 }
 
-/// Validates a replacement of one manifest revision.
-///
-/// # Errors
-///
-/// Rejects identity/revision jumps and every Executor create, update, delete,
-/// retire, or promotion that touches canonical or protected assets.
 pub fn validate_manifest_transition(
     previous: &TestAssetManifest,
     next: &TestAssetManifest,
@@ -515,8 +484,6 @@ pub enum TestAssetVerdictInvalidationReason {
     CandidateAndManifestChanged,
 }
 
-/// Bounded fact saved when the current candidate or manifest no longer agrees
-/// with the identities used for a verdict.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetVerdictInvalidation {
@@ -566,12 +533,6 @@ impl TestAssetVerdictInvalidation {
     }
 }
 
-/// Produces a compact invalidation fact instead of retaining the manifest in
-/// canonical Delivery state.
-///
-/// # Errors
-///
-/// Returns an error when the current candidate or manifest is malformed.
 pub fn detect_verdict_invalidation(
     binding: &TestAssetVerdictBinding,
     current_candidate_ref: &str,

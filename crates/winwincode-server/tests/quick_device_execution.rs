@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The FLOW-100.4 Quick Chat native Codex continuous execution path over the
-//! real composed Server application: a `chat.submit` turn of a session with a
-//! durable launch anchor is dispatched to the launched Device `WorkerSession`
-//! (the launch material becomes the device session's bound `ExecutionPort`
-//! identity and the queued job receives its device facts, which exclude it
-//! from every local claim), while a session without an anchor keeps the
-//! supervised local execution path unchanged. A permission-gate denial
-//! dispatches nothing.
-
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
@@ -28,8 +19,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, OrganizationId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, UserActor, UserActorKind, UserId, WorkRunId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    RequestId, Sha256Digest, UserActor, UserActorKind, UserId, WorkerId, WorkerInstanceId,
+    WorkspaceId,
 };
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
@@ -47,6 +38,172 @@ use winwincode_storage::{
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture crosses production authentication, durable import, and replay"
+)]
+fn production_accounting_consumes_signed_receipts_after_execution_authority_expires() {
+    use winwincode_control_plane::{
+        RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator, RemoteWorkerCredential,
+        RemoteWorkerPrincipal,
+    };
+    use winwincode_execution_port::{
+        accounting::{
+            AttemptAccountingStatement, PendingAccountingPage, ProviderAccountingReceipt,
+        },
+        action_enforcement::ActionEnforcementSigningKey,
+        generated::{ExecutionLeaseStamp, ExecutionPortMessage},
+        transport::ExecutionPortCore,
+    };
+    use winwincode_server::{
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
+    };
+    struct Expired;
+    impl RemoteWorkerAuthenticator for Expired {
+        fn authenticate(
+            &self,
+            _: &RemoteWorkerCredential,
+            _: &Instant,
+        ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
+            Err(RemoteWorkerAuthenticationError::revoked())
+        }
+        fn ensure_active(
+            &self,
+            _: &RemoteWorkerPrincipal,
+            _: &Instant,
+        ) -> Result<(), RemoteWorkerAuthenticationError> {
+            Err(RemoteWorkerAuthenticationError::revoked())
+        }
+    }
+    struct NoExecution;
+    impl ExecutionPortCore for NoExecution {
+        type Output = Vec<ExecutionPortMessage>;
+        type Error = std::convert::Infallible;
+        fn accept(&mut self, _: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
+            panic!("financial authority must not execute")
+        }
+    }
+    let root = temporary_root("production-accounting");
+    let application = compose_application(&root);
+    let repository = serde_json::from_value(repository_scope_json(1)).unwrap();
+    let scheduler = RepositoryRuntimeScheduler::from_application(
+        &application,
+        repository,
+        WorkerId(id("wrk", 1)),
+        WorkerInstanceId(id("wki", 1)),
+        "financial-test",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    let key = ActionEnforcementSigningKey::from_bytes([9; 32]).unwrap();
+    let exchange =
+        ProductionRemoteWorkerExchange::new(&root, Arc::new(Expired), scheduler, NoExecution)
+            .with_accounting_key(key.clone());
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
+    storage.execution_registry().unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let lease: ExecutionLeaseStamp = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "model.open")
+            .unwrap()["lease"]
+            .clone(),
+    )
+    .unwrap();
+    let record = winwincode_storage::ExecutionLeaseRecord {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: u64::try_from(lease.attempt).unwrap(),
+        fencing_token: lease.fencing_token.clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    };
+    let fixture_db = rusqlite::Connection::open(storage.database_path()).unwrap();
+    fixture_db
+        .execute(
+            "INSERT INTO execution_attempt_accounting_pending VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                lease.job_id.0,
+                lease.attempt,
+                serde_json::to_string(&record).unwrap(),
+                lease.expires_at.0
+            ],
+        )
+        .unwrap();
+    drop(fixture_db);
+    let token = key.accounting_query_token();
+    let now = instant("2027-01-15T08:00:00.000Z");
+    assert_eq!(
+        exchange
+            .accounting("wrong", None, 0, now.clone())
+            .unwrap_err()
+            .status_code(),
+        401
+    );
+    let page: PendingAccountingPage =
+        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
+            .unwrap();
+    assert_eq!(page.leases, vec![lease.clone()]);
+    let mut statement = AttemptAccountingStatement {
+        lease,
+        manifest: vec!["primary:receipt".into()],
+        receipts: vec![ProviderAccountingReceipt {
+            slot: "primary:receipt".into(),
+            model_exchange_id: winwincode_domain::ModelExchangeId(id("mdl", 1)),
+            provider_id: "provider-fixture".into(),
+            provider_receipt_id: "receipt-1".into(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: Some(9),
+            cost_microunits: Some(4),
+        }],
+        signature: Sha256Digest(String::new()),
+    };
+    statement.sign(&key).unwrap();
+    let body = statement.encode().unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            exchange
+                .accounting(&token.0, Some(&body), 0, now.clone())
+                .unwrap(),
+            b"{}"
+        );
+    }
+    let page: PendingAccountingPage =
+        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
+            .unwrap();
+    assert!(page.leases.is_empty());
+    statement.receipts[0].tokens = Some(10);
+    assert_eq!(
+        exchange
+            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now.clone())
+            .unwrap_err()
+            .status_code(),
+        401
+    );
+    statement.sign(&key).unwrap();
+    assert_eq!(
+        exchange
+            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now)
+            .unwrap_err()
+            .status_code(),
+        400
+    );
+    drop(storage);
+    drop(exchange);
+    drop(application);
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 struct RecordingPublisher;
 
@@ -133,6 +290,13 @@ fn principal(user: &str) -> AuthenticatedPrincipal {
 }
 
 fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
+    compose_application_with_runtime(root, Some(3_600))
+}
+
+fn compose_application_with_runtime(
+    root: &Path,
+    runtime: Option<i64>,
+) -> StandaloneControlPlaneApplication {
     let hub = Arc::new(
         DurableEventHub::open(root.join("events"), DurableEventHubConfig::default())
             .expect("open event hub"),
@@ -154,7 +318,7 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
         repository_scope,
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        runtime,
         1_073_741_824,
     )
     .expect("execution config");
@@ -168,8 +332,6 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
     )
     .expect("compose application")
 }
-
-// ---- durable staging over the same product-state database ------------------
 
 fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     let node = format!("cnd_{}", suffix(seed));
@@ -281,7 +443,6 @@ fn stage_occupied_lease(
     (occupied.occupancy_lease_id, occupied.fencing_token)
 }
 
-/// The device identities one staged launch anchor exposes to the test.
 #[allow(clippy::struct_field_names)]
 struct AnchorLaunch {
     worker_launch_grant_id: String,
@@ -301,6 +462,14 @@ fn stage_anchor(
     binding: &str,
     product_session_id: &str,
 ) -> AnchorLaunch {
+    let client_instance = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(node)
+        .unwrap()
+        .unwrap()
+        .current_instance_id
+        .unwrap();
     let worker_launch_grant_id = format!("wlg_{}", suffix(seed));
     let worker_session_id = format!("wsn_{}", suffix(seed + 50));
     let worker_id = format!("wrk_{}", suffix(seed + 51));
@@ -308,7 +477,7 @@ fn stage_anchor(
     let issuance = LaunchGrantIssuance::try_new(
         worker_launch_grant_id.clone(),
         node,
-        format!("cix_{}", suffix(seed + 40)),
+        client_instance,
         user,
         lease_id,
         fencing_token,
@@ -318,7 +487,7 @@ fn stage_anchor(
         worker_instance_id.clone(),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
+        None,
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");
@@ -333,8 +502,6 @@ fn stage_anchor(
     }
 }
 
-/// Settles the device launch acknowledgement exactly like the client exchange
-/// does, so the anchor grant reaches its post-launch `consumed` state.
 fn settle_launch(storage: &mut SqliteStorage, anchor: &AnchorLaunch, lease_id: &str, token: u64) {
     let settlement = LaunchAckSettlement::try_new(
         &anchor.worker_launch_grant_id,
@@ -355,8 +522,6 @@ fn settle_launch(storage: &mut SqliteStorage, anchor: &AnchorLaunch, lease_id: &
         winwincode_storage::LaunchAckOutcome::Consumed(_)
     ));
 }
-
-// ---- generated command helpers ---------------------------------------------
 
 fn session_create_request(request: u64, session: u64, user: &str, node: &str) -> CommandRequest {
     serde_json::from_value(serde_json::json!({
@@ -409,7 +574,6 @@ fn open_storage(root: &Path) -> SqliteStorage {
     SqliteStorage::open(root).expect("open staging storage")
 }
 
-/// The one queued job of the test's repository scope.
 fn queued_job_id(storage: &mut SqliteStorage) -> ExecutionJobId {
     let jobs = storage
         .repository_scheduler()
@@ -481,8 +645,18 @@ fn claim_locally(
 
 #[test]
 fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
+    assert_anchored_runtime(Some(3_600));
+}
+
+#[test]
+fn unlimited_device_turn_persists_unlimited_job_and_reservation() {
+    assert_anchored_runtime(None);
+}
+
+#[allow(clippy::too_many_lines)]
+fn assert_anchored_runtime(runtime: Option<i64>) {
     let root = temporary_root("anchored-dispatch");
-    let application = compose_application(&root);
+    let application = compose_application_with_runtime(&root, runtime);
     let holder = id("usr", 1);
     {
         let mut storage = open_storage(&root);
@@ -526,8 +700,6 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
     let job_id = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
-        // The launch material is the device session's durable ExecutionPort
-        // identity, and the job carries the exact device worker facts.
         let bound = binding_snapshot(&mut storage, &format!("wsn_{}", suffix(154)))
             .expect("the device session is bound");
         assert_eq!(bound.state.as_str(), "bound");
@@ -543,22 +715,37 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
         assert_eq!(facts.holder_user_id, holder);
         assert_eq!(facts.repository_binding_id, format!("rbd_{}", suffix(102)));
         assert_eq!(facts.product_session_id, Some(id("psn", 1)));
-        // The job itself stays queued for the device worker.
         let record = storage
             .load_execution_job_record(&job_id)
             .expect("job record")
             .expect("queued job");
+        let job: serde_json::Value =
+            serde_json::from_slice(&record.dispatch_payload).expect("durable job");
+        assert_eq!(
+            job["limits"]["maxRuntimeSeconds"],
+            serde_json::json!(runtime)
+        );
+        assert_eq!(job["limits"]["deadlineAt"].is_null(), runtime.is_none());
+        let reservation = storage
+            .execution_admission()
+            .expect("admission")
+            .load_reservation_by_job(&job_id)
+            .expect("reservation lookup")
+            .expect("reservation");
+        assert_eq!(reservation.reserved_tokens, None);
+        assert_eq!(reservation.reserved_cost_microunits, None);
+        assert_eq!(
+            reservation.runtime_limit_millis,
+            runtime.map(|seconds| u64::try_from(seconds).unwrap() * 1000)
+        );
         assert_eq!(record.state, ExecutionJobState::Queued);
         job_id
     };
-    // The local embedded worker cannot claim the device-owned job: the
-    // queue selection excludes it, so a local drive finds nothing.
     {
         let mut storage = open_storage(&root);
         let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 400);
         assert!(claim_locally(&mut storage, 401, &worker_id, &worker_instance_id).is_none());
     }
-    // The job still waits for its device worker, not for a local slot.
     let storage = open_storage(&root);
     let record = storage
         .load_execution_job_record(&job_id)
@@ -702,8 +889,6 @@ fn a_gate_denial_dispatches_nothing() {
     assert_eq!(denial.status(), 403);
     assert_eq!(denial.code(), "ACCESS_DENIED");
 
-    // No dispatch fact exists for the refused turn: the gate runs before the
-    // turn is committed, so nothing was bound and nothing was queued.
     let mut storage = open_storage(&root);
     assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(854))).is_none());
     let jobs = storage
@@ -747,7 +932,6 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
             &binding,
             &id("psn", 1),
         );
-        // The launch is revoked before the device ever accepted it.
         WorkerLaunchGrantService::new(&mut storage)
             .revoke(
                 &anchor.worker_launch_grant_id,
@@ -768,7 +952,6 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
     assert_eq!(denial.status(), 409);
     assert_eq!(denial.code(), "WRONG_STATE");
 
-    // The dead anchor never binds a worker session and never attaches facts.
     let mut storage = open_storage(&root);
     assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(954))).is_none());
     let jobs = storage

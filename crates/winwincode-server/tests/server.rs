@@ -70,8 +70,6 @@ fn fixture_scope(seed: u8) -> Scope {
     })
 }
 
-/// Opens one account authority plus its session manager on a shared
-/// directory so restarts observe the same durable state.
 fn open_auth(
     directory: &std::path::Path,
     proof: &str,
@@ -93,12 +91,31 @@ fn open_auth(
 }
 
 #[derive(Default)]
+struct BlockingCall {
+    entered: tokio::sync::Notify,
+    started: Mutex<Option<std::time::Instant>>,
+}
+
+impl BlockingCall {
+    fn pause(&self) {
+        *self.started.lock().unwrap() = Some(std::time::Instant::now());
+        self.entered.notify_one();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.lock().unwrap().unwrap().elapsed()
+    }
+}
+
+#[derive(Default)]
 struct FakeApi {
     commands: Mutex<Vec<(String, Value)>>,
     queries: Mutex<Vec<(String, Value)>>,
     subscriptions: Mutex<Vec<Value>>,
     event_senders: Mutex<Vec<mpsc::Sender<Value>>>,
     shutdowns: AtomicU64,
+    blocking: Arc<BlockingCall>,
 }
 
 impl ControlPlaneApiPort for FakeApi {
@@ -107,6 +124,14 @@ impl ControlPlaneApiPort for FakeApi {
         principal: &AuthenticatedPrincipal,
         request: Value,
     ) -> Result<Value, ApiError> {
+        assert_ne!(
+            request.get("command").and_then(Value::as_str),
+            Some("fixture.panic"),
+            "private fixture panic {FIXTURE_SECRET}"
+        );
+        if request.get("command").and_then(Value::as_str) == Some("fixture.slow") {
+            self.blocking.pause();
+        }
         self.commands
             .lock()
             .expect("command lock")
@@ -121,6 +146,14 @@ impl ControlPlaneApiPort for FakeApi {
     }
 
     fn query(&self, principal: &AuthenticatedPrincipal, request: Value) -> Result<Value, ApiError> {
+        assert_ne!(
+            request.get("query").and_then(Value::as_str),
+            Some("fixture.panic"),
+            "private fixture panic {FIXTURE_SECRET}"
+        );
+        if request.get("query").and_then(Value::as_str) == Some("fixture.slow") {
+            self.blocking.pause();
+        }
         self.queries
             .lock()
             .expect("query lock")
@@ -329,7 +362,6 @@ fn login_body(username: &str, password: &str) -> String {
     .to_string()
 }
 
-/// One password login exchange; returns the raw HTTP response.
 async fn login_response(address: SocketAddr, username: &str, password: &str) -> String {
     http_request(
         address,
@@ -342,7 +374,6 @@ async fn login_response(address: SocketAddr, username: &str, password: &str) -> 
     .await
 }
 
-/// One password login exchange; asserts a created session.
 async fn login_as(address: SocketAddr, username: &str, password: &str) -> (String, Value) {
     let response = login_response(address, username, password).await;
     assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
@@ -1393,6 +1424,433 @@ async fn bootstrap_cookie_https(
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one TLS fixture covers authentication headers and both accounting methods"
+)]
+async fn accounting_https_route_is_separate_and_preserves_query_and_receipt_bytes() {
+    use winwincode_server::{
+        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
+    };
+    type FinancialCall = (String, Option<Vec<u8>>, u64);
+    #[derive(Default)]
+    struct FinancialBoundary {
+        calls: Mutex<Vec<FinancialCall>>,
+        execution_calls: AtomicU64,
+    }
+    impl RemoteWorkerExchangePort for FinancialBoundary {
+        fn accounting(
+            &self,
+            token: &str,
+            body: Option<&[u8]>,
+            offset: u64,
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((token.into(), body.map(<[u8]>::to_vec), offset));
+            Ok(b"{}".to_vec())
+        }
+        fn exchange(
+            &self,
+            credential: Vec<u8>,
+            body: &[u8],
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            assert_eq!(credential, b"execution-token");
+            let request =
+                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
+            assert!(request.supports_acceptance_receipt());
+            self.execution_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(
+                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
+                    Vec::new(),
+                    true,
+                )
+                .unwrap()
+                .encode()
+                .unwrap(),
+            )
+        }
+    }
+    let directory = test_directory("accounting-https-route");
+    fs::create_dir_all(&directory).unwrap();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_path = directory.join("certificate.pem");
+    let private_key_path = directory.join("private-key.pem");
+    fs::write(&certificate_path, cert.pem()).unwrap();
+    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "https://control.example",
+        ServerTls::Pem {
+            certificate_path,
+            private_key_path,
+        },
+        BTreeSet::from(["https://client.example".into()]),
+        directory.join("data"),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let sessions = auth();
+    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
+    let boundary = Arc::new(FinancialBoundary::default());
+    let running = start_server_with_remote_worker(
+        config,
+        sessions,
+        authenticator,
+        Arc::new(FakeApi::default()),
+        Some(boundary.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let tls_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    for (method, headers, body, status) in [
+        ("GET", "", "", 401),
+        (
+            "GET",
+            "Authorization: Bearer financial-token\r\nAuthorization: Bearer duplicate\r\n",
+            "",
+            401,
+        ),
+        (
+            "GET",
+            "Authorization: Bearer financial-token\r\nX-Accounting-Offset: invalid\r\n",
+            "",
+            400,
+        ),
+        (
+            "GET",
+            "Authorization: Bearer financial-token\r\nX-Accounting-Offset: 100\r\n",
+            "",
+            200,
+        ),
+        (
+            "POST",
+            "Authorization: Bearer financial-token\r\n",
+            "{\"receipt\":\"exact-bytes\"}",
+            200,
+        ),
+    ] {
+        let tcp = TcpStream::connect(running.local_address()).await.unwrap();
+        let mut tls = connector
+            .connect(ServerName::try_from("localhost").unwrap().to_owned(), tcp)
+            .await
+            .unwrap();
+        let request = format!(
+            "{method} /internal/v1/execution-port/accounting HTTP/1.1\r\nHost: control.example\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        tls.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status}")),
+            "{response}"
+        );
+    }
+    assert_eq!(
+        *boundary.calls.lock().unwrap(),
+        vec![
+            ("financial-token".into(), None, 100),
+            (
+                "financial-token".into(),
+                Some(b"{\"receipt\":\"exact-bytes\"}".to_vec()),
+                0
+            )
+        ]
+    );
+    assert_eq!(boundary.execution_calls.load(Ordering::Relaxed), 0);
+    #[cfg(all(feature = "local-worker", unix))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use winwincode_codex::WorkerExecutionPort;
+        use winwincode_execution_port::generated::ExecutionPortMessage;
+        use winwincode_worker::remote_transport::RemoteWorkerPort;
+        let credential = directory.join("execution-credential");
+        fs::write(&credential, b"execution-token").unwrap();
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["kind"] == "worker.heartbeat")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = &message else {
+            panic!("heartbeat")
+        };
+        let (mut port, handle) = RemoteWorkerPort::open(
+            &format!("https://localhost:{}", running.local_address().port()),
+            cert.der().as_ref(),
+            credential,
+            heartbeat.worker_id.clone(),
+            heartbeat.worker_instance_id.clone(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        port.send(message).await.unwrap();
+        assert!(handle.terminal_error().is_none());
+        assert_eq!(boundary.execution_calls.load(Ordering::Relaxed), 1);
+    }
+    running.shutdown().await.unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one native TLS fixture observes control and Worker progress on a single async thread"
+)]
+async fn assert_blocking_handler_preserves_other_route(blocked_route: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use winwincode_codex::WorkerExecutionPort;
+    use winwincode_execution_port::generated::ExecutionPortMessage;
+    use winwincode_server::{
+        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
+    };
+    use winwincode_worker::remote_transport::RemoteWorkerPort;
+
+    struct Boundary {
+        blocking: Arc<BlockingCall>,
+        slow: bool,
+    }
+    impl RemoteWorkerExchangePort for Boundary {
+        fn exchange(
+            &self,
+            credential: Vec<u8>,
+            body: &[u8],
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            assert_eq!(credential, b"execution-token");
+            let request =
+                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
+            assert!(request.supports_acceptance_receipt());
+            if self.slow {
+                self.blocking.pause();
+            }
+            Ok(
+                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
+                    Vec::new(),
+                    true,
+                )
+                .unwrap()
+                .encode()
+                .unwrap(),
+            )
+        }
+    }
+    async fn tls_request(connector: TlsConnector, address: SocketAddr, request: String) -> String {
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let mut tls = connector
+            .connect(ServerName::try_from("localhost").unwrap().to_owned(), tcp)
+            .await
+            .unwrap();
+        tls.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+    let directory = test_directory("blocking-handler-progress");
+    fs::create_dir_all(&directory).unwrap();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_path = directory.join("certificate.pem");
+    let private_key_path = directory.join("private-key.pem");
+    fs::write(&certificate_path, cert.pem()).unwrap();
+    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
+    let configuration = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "https://control.example",
+        ServerTls::Pem {
+            certificate_path,
+            private_key_path,
+        },
+        BTreeSet::from(["https://client.example".into()]),
+        directory.join("data"),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let sessions = auth();
+    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
+    let api = Arc::new(FakeApi::default());
+    let worker_gate = Arc::new(BlockingCall::default());
+    let boundary = Arc::new(Boundary {
+        blocking: worker_gate.clone(),
+        slow: blocked_route == "exchange",
+    });
+    let running = start_server_with_remote_worker(
+        configuration,
+        sessions,
+        authenticator,
+        api.clone(),
+        Some(boundary),
+        None,
+    )
+    .await
+    .unwrap();
+    let address = running.local_address();
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let tls_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    let server_name = ServerName::try_from("localhost").unwrap().to_owned();
+    let cookie = bootstrap_cookie_https(&connector, &server_name, address).await;
+    let credential = directory.join("execution-credential");
+    fs::write(&credential, b"execution-token").unwrap();
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let message: ExecutionPortMessage = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "worker.heartbeat")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = &message else {
+        panic!("heartbeat")
+    };
+    let (mut port, handle) = RemoteWorkerPort::open(
+        &format!("https://localhost:{}", address.port()),
+        cert.der().as_ref(),
+        credential,
+        heartbeat.worker_id.clone(),
+        heartbeat.worker_instance_id.clone(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let elapsed = if blocked_route == "exchange" {
+        let worker = tokio::spawn(async move {
+            port.send(message).await.unwrap();
+        });
+        worker_gate.entered.notified().await;
+        let response = tls_request(connector, address, cookie_post("/api/v1/queries",
+            r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.fast"}"#,
+            "https://client.example", &cookie)).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let elapsed = worker_gate.elapsed();
+        worker.await.unwrap();
+        elapsed
+    } else {
+        let (path, body) = if blocked_route == "command" {
+            (
+                "/api/v1/commands",
+                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","command":"fixture.slow"}"#,
+            )
+        } else {
+            (
+                "/api/v1/queries",
+                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.slow"}"#,
+            )
+        };
+        let request = cookie_post(path, body, "https://client.example", &cookie);
+        let control = tokio::spawn(tls_request(connector, address, request));
+        api.blocking.entered.notified().await;
+        port.send(message).await.unwrap();
+        let elapsed = api.blocking.elapsed();
+        assert!(control.await.unwrap().starts_with("HTTP/1.1 200"));
+        elapsed
+    };
+    assert!(handle.terminal_error().is_none());
+    running.shutdown().await.unwrap();
+    fs::remove_dir_all(directory).unwrap();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "{blocked_route} blocked the other native route for {elapsed:?}"
+    );
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_control_query_keeps_worker_exchange_responsive() {
+    assert_blocking_handler_preserves_other_route("query").await;
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_control_command_keeps_worker_exchange_responsive() {
+    assert_blocking_handler_preserves_other_route("command").await;
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_worker_exchange_keeps_control_query_responsive() {
+    assert_blocking_handler_preserves_other_route("exchange").await;
+}
+
+#[tokio::test]
+async fn blocking_api_panic_keeps_request_identity_and_returns_safe_unavailable() {
+    let api = Arc::new(FakeApi::default());
+    let running = start_server(config("127.0.0.1:0".parse().unwrap()), auth(), api.clone())
+        .await
+        .unwrap();
+    let address = running.local_address();
+    let cookie = bootstrap_cookie(address).await;
+    for (path, kind) in [
+        ("/api/v1/commands", "command"),
+        ("/api/v1/queries", "query"),
+    ] {
+        let body = json!({
+            "schemaVersion": "winwincode/v1",
+            "requestId": "req_00000000000000000000000001",
+            kind: "fixture.panic",
+        })
+        .to_string();
+        let response = http_request(
+            address,
+            &cookie_post(path, &body, "https://client.example", &cookie),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("access-control-allow-origin: https://client.example"));
+        assert!(!response.contains(FIXTURE_SECRET));
+        assert!(!response.contains("private fixture panic"));
+        let envelope: ErrorEnvelope = serde_json::from_value(response_json(&response)).unwrap();
+        assert_eq!(envelope.request_id.0, "req_00000000000000000000000001");
+        let Error::RetryableError(error) = envelope.error else {
+            panic!("blocking task failure must remain retryable");
+        };
+        assert_eq!(error.code, RetryableErrorCode::ServiceUnavailable);
+        assert!(error.retryable);
+    }
+    assert!(api.commands.lock().unwrap().is_empty());
+    assert!(api.queries.lock().unwrap().is_empty());
+    running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn separate_origin_uses_https_and_wss_with_the_same_session() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let directory = test_directory("winwincode-server-tls-test");
@@ -1505,7 +1963,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     .expect("start server");
     let address = running.local_address();
 
-    // A wrong proof while the gate is open is a plain authentication failure.
     let wrong_proof =
         initialize_owner(address, "wrong-proof", "third", "third-owner-password").await;
     assert!(
@@ -1525,8 +1982,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     assert!(manager.initialized_owner().is_some());
     drop(accounts);
 
-    // After initialization every proof is refused with the explicit
-    // wrong-state rejection, including on the same live Server.
     let second = initialize_owner(
         address,
         "proof-initialization",
@@ -1545,8 +2000,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
     running.shutdown().await.expect("shutdown");
     drop(manager);
 
-    // After restart the durable marker keeps initialization closed even for a
-    // fresh proof, while the durable Owner logs in normally.
     let (restarted_accounts, restarted_manager) =
         open_auth(&directory, "proof-after-restart", vec![fixture_scope(1)]);
     assert!(restarted_manager.initialized_owner().is_some());
@@ -1605,8 +2058,6 @@ async fn login_rate_limiting_returns_an_explicit_error() {
     );
     assert!(limited.contains("RATE_LIMITED"), "{limited}");
 
-    // An unknown username has its own budget and still receives a generic
-    // authentication failure rather than the Owner's rate-limit response.
     let unknown = login_response(address, "ada", OWNER_PASSWORD).await;
     assert!(
         unknown.starts_with("HTTP/1.1 401 Unauthorized"),
@@ -1742,7 +2193,6 @@ async fn unauthenticated_requests_are_rejected() {
         "{no_cookie_password_change}"
     );
 
-    // An uninitialized Server refuses password logins outright.
     let early_login = login_response(address, "owner", OWNER_PASSWORD).await;
     assert!(
         early_login.starts_with("HTTP/1.1 401 Unauthorized"),
@@ -1762,8 +2212,6 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
     .expect("start server");
     let address = running.local_address();
 
-    // Unauthenticated and credential-free: the probe publishes exactly the
-    // schema version, initialization state, and authentication mode.
     let before = http_request(
         address,
         &origin_get("/api/v1/server/initialization", "https://client.example"),
@@ -1794,9 +2242,6 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
 #[tokio::test]
 async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     let directory = test_directory("winwincode-cli-owner-bootstrap-test");
-    // The CLI's first-Owner command writes the account without the
-    // session-store marker; the Server must still refuse a browser bootstrap
-    // and report itself initialized through the shared active-Owner fact.
     let accounts = Arc::new(UserAccountService::open(&directory).expect("account service"));
     accounts
         .initialize_owner(
@@ -1806,7 +2251,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
         )
         .expect("CLI first owner");
     let (_, manager) = open_auth(&directory, "proof-late-bootstrap", vec![fixture_scope(1)]);
-    // The CLI path leaves no durable session-store marker behind.
     assert!(manager_marker_is_absent(&directory));
     let running = start_server(
         config("127.0.0.1:0".parse().expect("address")),
@@ -1825,7 +2269,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
     assert_eq!(response_json(&status)["initialized"], json!(true));
 
-    // A fresh bootstrap proof cannot create a second Owner.
     let bootstrap = initialize_owner(
         address,
         "proof-late-bootstrap",
@@ -1839,7 +2282,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     );
     assert!(bootstrap.contains("WRONG_STATE"), "{bootstrap}");
 
-    // The closed loop: the CLI-created Owner signs in normally.
     let (cookie, session) = login_as(address, OWNER_USERNAME, OWNER_PASSWORD).await;
     assert_eq!(session["actor"]["kind"], "user");
     assert!(
@@ -1852,7 +2294,6 @@ async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
     fs::remove_dir_all(directory).expect("remove CLI-owner directory");
 }
 
-/// Reads whether the session store carries a durable initialization marker.
 fn manager_marker_is_absent(directory: &std::path::Path) -> bool {
     let database_path = directory
         .join("auth-sessions")

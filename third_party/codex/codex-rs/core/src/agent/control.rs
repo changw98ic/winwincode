@@ -118,6 +118,7 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    pub(crate) completion_waits: Arc<crate::tools::agent_wait_graph::CompletionWaitGraph>,
 }
 
 impl Default for AgentControl {
@@ -145,6 +146,7 @@ impl AgentControl {
             v2_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
             rollout_budget: Arc::default(),
+            completion_waits: Arc::default(),
         };
         if let Some(rollout_budget) = rollout_budget {
             control.rollout_budget.configure(rollout_budget);
@@ -410,6 +412,17 @@ impl AgentControl {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         Ok(thread.subscribe_status())
+    }
+
+    /// Resolve a completion target through the current live tree, never a model-declared owner.
+    pub(crate) async fn completion_wait_owner(&self, agent_id: ThreadId) -> CodexResult<String> {
+        self.ensure_agent_known(agent_id)?;
+        let state = self.upgrade()?;
+        let thread = state.get_thread(agent_id).await?;
+        if !Arc::ptr_eq(&self.state, &thread.session.services.agent_control.state) {
+            return Err(CodexErr::ThreadNotFound(agent_id));
+        }
+        Ok(crate::tools::ExecutionFacts::current_owner(&thread.session))
     }
 
     pub(crate) async fn format_environment_context_subagents(

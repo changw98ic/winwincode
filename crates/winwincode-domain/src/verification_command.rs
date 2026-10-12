@@ -6,13 +6,11 @@ use crate::Sha256Digest;
 
 const DIGEST_DOMAIN: &[u8] = b"winwincode-verification-command-v1\0";
 
-/// Returns the sealed identity of one approved verification command.
 #[must_use]
 pub fn verification_method_digest(method: &str) -> Option<Sha256Digest> {
     Some(command_digest(canonical_command(method)?.as_bytes()))
 }
 
-/// Returns the same sealed identity for an observed process invocation.
 #[must_use]
 pub fn observed_verification_command_digest(command: &[String]) -> Option<Sha256Digest> {
     Some(command_digest(
@@ -20,7 +18,6 @@ pub fn observed_verification_command_digest(command: &[String]) -> Option<Sha256
     ))
 }
 
-/// Classifies an observed command from its executable and leading arguments.
 #[must_use]
 pub fn observed_verification_command_is_test(command: &[String]) -> bool {
     let Some(tokens) = observed_command_tokens(command) else {
@@ -58,6 +55,45 @@ pub fn observed_verification_command_is_test(command: &[String]) -> bool {
     }
 }
 
+#[must_use]
+pub fn observed_verification_command_is_check(command: &[String]) -> bool {
+    if observed_verification_command_is_test(command) {
+        return true;
+    }
+    let Some(tokens) = observed_command_tokens(command) else {
+        return false;
+    };
+    let tokens = tokens
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let tokens = match tokens.as_slice() {
+        [corepack, rest @ ..] if corepack == "corepack" => rest,
+        tokens => tokens,
+    };
+    match tokens {
+        [tool, subcommand, ..] if tool == "cargo" => {
+            matches!(subcommand.as_str(), "check" | "clippy" | "build")
+                || (subcommand == "fmt" && tokens.iter().any(|arg| arg == "--check"))
+        }
+        [tool, rest @ ..] if matches!(tool.as_str(), "pnpm" | "npm" | "yarn" | "bun") => {
+            let script = match rest {
+                [run, script, ..] if run == "run" => Some(script.as_str()),
+                [script, ..] => Some(script.as_str()),
+                _ => None,
+            };
+            matches!(
+                script,
+                Some(
+                    "lint" | "build" | "typecheck" | "verify" | "format:check" | "contracts:check"
+                )
+            )
+        }
+        [tool, ..] if tool == "tsc" => true,
+        _ => false,
+    }
+}
+
 fn canonical_observed_command(command: &[String]) -> Option<String> {
     match command {
         [shell, flag, script]
@@ -67,23 +103,113 @@ fn canonical_observed_command(command: &[String]) -> Option<String> {
             canonical_command(script)
         }
         [] => None,
-        command
-            if command.iter().all(|argument| {
-                !argument.is_empty()
-                    && !argument
-                        .chars()
-                        .any(|character| character.is_ascii_whitespace())
-            }) =>
-        {
-            canonical_command(&command.join(" "))
-        }
-        _ => None,
+        command => Some(canonical_argv(command)),
     }
 }
 
 fn canonical_command(command: &str) -> Option<String> {
     let normalized = command.trim();
-    (!normalized.is_empty()).then(|| normalized.to_owned())
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(literal_shell_argv(normalized).map_or_else(
+        || format!("shell:{normalized}"),
+        |arguments| canonical_argv(&arguments),
+    ))
+}
+
+fn canonical_argv(arguments: &[String]) -> String {
+    let mut identity = String::from("argv:");
+    for argument in arguments {
+        identity.push_str(&argument.len().to_string());
+        identity.push(':');
+        identity.push_str(argument);
+    }
+    identity
+}
+
+fn literal_shell_argv(command: &str) -> Option<Vec<String>> {
+    let mut arguments = Vec::new();
+    let mut argument = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut characters = command.chars();
+    while let Some(character) = characters.next() {
+        if matches!(character, '\0' | '\n' | '\r') {
+            return None;
+        }
+        match (quote, character) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('"'), '$' | '`')
+            | (
+                None,
+                '$' | '`' | '*' | '?' | '[' | ']' | '~' | ';' | '|' | '&' | '<' | '>' | '(' | ')'
+                | '{' | '}' | '#',
+            ) => return None,
+            (Some('"'), '\\') => {
+                let escaped = characters.next()?;
+                if matches!(escaped, '\0' | '\n' | '\r') {
+                    return None;
+                }
+                if !matches!(escaped, '$' | '`' | '"' | '\\') {
+                    argument.push('\\');
+                }
+                argument.push(escaped);
+            }
+            (Some('\'' | '"'), _) => argument.push(character),
+            (None, '\'' | '"') => {
+                quote = Some(character);
+                started = true;
+            }
+            (None, '\\') => {
+                let escaped = characters.next()?;
+                if matches!(escaped, '\0' | '\n' | '\r') {
+                    return None;
+                }
+                argument.push(escaped);
+                started = true;
+            }
+            (None, ' ' | '\t') => {
+                if started {
+                    arguments.push(std::mem::take(&mut argument));
+                    started = false;
+                }
+            }
+            (None, _) => {
+                argument.push(character);
+                started = true;
+            }
+            _ => return None,
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        arguments.push(argument);
+    }
+    let executable = arguments.first()?;
+    if executable.is_empty()
+        || executable.contains('=')
+        || matches!(
+            executable.as_str(),
+            "!" | "if"
+                | "then"
+                | "else"
+                | "fi"
+                | "for"
+                | "while"
+                | "until"
+                | "case"
+                | "do"
+                | "done"
+                | "function"
+                | "time"
+        )
+    {
+        return None;
+    }
+    Some(arguments)
 }
 
 fn observed_command_tokens(command: &[String]) -> Option<Vec<&str>> {
@@ -125,6 +251,21 @@ mod tests {
     }
 
     #[test]
+    fn literal_shell_quoting_does_not_change_verification_identity() {
+        let method = "'/usr/bin/python3' '-I' '/scripts/smoke.py' '--verify-source' '.'";
+        let observed = [
+            "/bin/zsh",
+            "-lc",
+            "/usr/bin/python3 -I /scripts/smoke.py --verify-source .",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            verification_method_digest(method),
+            observed_verification_command_digest(&observed)
+        );
+    }
+
+    #[test]
     fn command_identity_preserves_semantically_relevant_whitespace_and_argv_boundaries() {
         assert_ne!(
             verification_method_digest("printf 'a b'"),
@@ -132,8 +273,46 @@ mod tests {
         );
         assert_eq!(
             observed_verification_command_digest(&["printf".to_owned(), "a b".to_owned(),]),
-            None
+            verification_method_digest("printf 'a b'")
         );
+        assert_ne!(
+            verification_method_digest("printf a b"),
+            verification_method_digest("printf 'a b'")
+        );
+        assert_eq!(
+            verification_method_digest("printf ''"),
+            observed_verification_command_digest(&["printf".to_owned(), String::new()])
+        );
+        assert_eq!(
+            verification_method_digest("printf 'a'\\''b'"),
+            verification_method_digest("printf \"a'b\"")
+        );
+    }
+
+    #[test]
+    fn shell_expansions_and_control_flow_do_not_match_literal_argv() {
+        for script in [
+            "printf $HOME",
+            "printf ~",
+            "printf *",
+            "printf $(id)",
+            "printf `id`",
+            "printf a; true",
+            "printf a || true",
+            "printf a > output",
+            "printf a\ntrue",
+            "X=y printf a",
+        ] {
+            let argv = script
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_ne!(
+                verification_method_digest(script),
+                observed_verification_command_digest(&argv),
+                "{script}"
+            );
+        }
     }
 
     #[test]
@@ -148,5 +327,26 @@ mod tests {
             "run".to_owned(),
             "test".to_owned(),
         ]));
+    }
+    #[test]
+    fn advisory_checks_recognize_shell_invocations_without_argument_false_positives() {
+        for argv in [
+            vec!["/bin/zsh", "-lc", "corepack pnpm typecheck"],
+            vec!["cargo", "fmt", "--all", "--", "--check"],
+            vec!["cargo", "test"],
+        ] {
+            assert!(observed_verification_command_is_check(
+                &argv.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+        for argv in [
+            vec!["printf", "build"],
+            vec!["cargo", "fmt"],
+            vec!["/bin/zsh", "-lc", "cargo check; printf done"],
+        ] {
+            assert!(!observed_verification_command_is_check(
+                &argv.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
     }
 }

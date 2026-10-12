@@ -1,0 +1,1026 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::{
+    FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy,
+    FileSystemSpecialPath, NetworkSandboxPolicy,
+};
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
+use codex_utils_pty::process_group::kill_process_group;
+use sandboxing::{
+    SandboxCommand, SandboxManager, SandboxTransformRequest, SandboxType, SandboxablePreference,
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt as _;
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+
+pub const PROTECTED_INPUT_SCOPE_VERSION: u8 = 1;
+
+const PROTECTED_INPUT_CATEGORIES: &[&str] = &[
+    "source",
+    "tests",
+    "build-scripts",
+    "lockfiles",
+    "controlled-config",
+];
+
+#[derive(Debug)]
+pub struct IsolationError {
+    message: String,
+}
+
+impl IsolationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IsolationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IsolationError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedInputScope {
+    version: u8,
+    root: PathBuf,
+    declared_paths: Vec<String>,
+    digest: String,
+}
+
+#[derive(Serialize)]
+struct ProtectedInputScopeDigest<'a> {
+    version: u8,
+    root: &'a Path,
+    categories: &'static [&'static str],
+    declared_paths: &'a [String],
+}
+
+impl ProtectedInputScope {
+    pub fn new(root: impl AsRef<Path>, declared_paths: &[String]) -> Result<Self, IsolationError> {
+        let root = canonical_directory(root.as_ref(), "protected input root")?;
+        let mut normalized = declared_paths.to_vec();
+        normalized.sort();
+        normalized.dedup();
+        for relative in &normalized {
+            resolve_below(&root, Path::new(relative), "protected input declaration")?;
+        }
+        let mut value = serde_json::to_value(ProtectedInputScopeDigest {
+            version: PROTECTED_INPUT_SCOPE_VERSION,
+            root: root.as_path(),
+            categories: PROTECTED_INPUT_CATEGORIES,
+            declared_paths: &normalized,
+        })
+        .map_err(|_| IsolationError::new("protected input scope cannot be encoded"))?;
+        if let Some(object) = value.as_object_mut() {
+            let mut entries: Vec<_> = object.iter().collect();
+            entries.sort_by_key(|(key, _)| key.as_str());
+            value = serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            );
+        }
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|_| IsolationError::new("protected input scope cannot be hashed"))?;
+        Ok(Self {
+            version: PROTECTED_INPUT_SCOPE_VERSION,
+            root,
+            declared_paths: normalized,
+            digest: format!("sha256:{:x}", Sha256::digest(bytes)),
+        })
+    }
+
+    pub const fn version(&self) -> u8 {
+        self.version
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn categories(&self) -> &'static [&'static str] {
+        PROTECTED_INPUT_CATEGORIES
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationScratch {
+    id: String,
+    root: PathBuf,
+    home: PathBuf,
+    temporary: PathBuf,
+    build: PathBuf,
+    cache: PathBuf,
+    output: PathBuf,
+}
+
+impl VerificationScratch {
+    pub fn create(
+        workspace_root: impl AsRef<Path>,
+        run_identity: &str,
+        ordinal: usize,
+    ) -> Result<Self, IsolationError> {
+        let base = canonical_directory(workspace_root.as_ref(), "verification scratch base")?;
+        if run_identity.is_empty() || run_identity.len() > 4096 {
+            return Err(IsolationError::new(
+                "verification scratch identity is invalid",
+            ));
+        }
+        let mut identity_digest = Sha256::new();
+        identity_digest.update([PROTECTED_INPUT_SCOPE_VERSION]);
+        identity_digest.update(run_identity.as_bytes());
+        identity_digest.update(ordinal.to_be_bytes());
+        let id = format!("vs-{:x}", identity_digest.finalize());
+        let pool = base.join("verification");
+        fs::create_dir_all(&pool).map_err(|error| {
+            IsolationError::new(format!(
+                "verification scratch pool cannot be created: {error}"
+            ))
+        })?;
+        let root = pool.join(&id);
+        fs::create_dir(&root).map_err(|error| {
+            IsolationError::new(format!("verification scratch cannot be created: {error}"))
+        })?;
+        let scratch = Self {
+            id,
+            home: root.join("home"),
+            temporary: root.join("tmp"),
+            build: root.join("build"),
+            cache: root.join("cache"),
+            output: root.join("output"),
+            root,
+        };
+        for directory in [
+            scratch.home.as_path(),
+            scratch.temporary.as_path(),
+            scratch.build.as_path(),
+            scratch.cache.as_path(),
+            scratch.output.as_path(),
+        ] {
+            fs::create_dir(directory).map_err(|error| {
+                IsolationError::new(format!(
+                    "verification scratch child cannot be created: {error}"
+                ))
+            })?;
+        }
+        Ok(scratch)
+    }
+
+    pub fn sibling(&self, run_id: &str, ordinal: usize) -> Result<Self, IsolationError> {
+        let base = self
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| IsolationError::new("verification scratch has no workspace root"))?;
+        Self::create(base, run_id, ordinal.saturating_add(1))
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn temporary(&self) -> &Path {
+        &self.temporary
+    }
+
+    pub fn build(&self) -> &Path {
+        &self.build
+    }
+
+    pub fn cache(&self) -> &Path {
+        &self.cache
+    }
+
+    pub fn output(&self) -> &Path {
+        &self.output
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProtectionCapability {
+    Available { backend: String },
+    Unavailable { backend: String, reason: String },
+}
+
+impl ProtectionCapability {
+    pub const fn allows_strong_pass(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerificationIsolation {
+    scope: ProtectedInputScope,
+    scratch: VerificationScratch,
+    helper_executable: Option<PathBuf>,
+    capability: ProtectionCapability,
+    cancellation: VerificationCancellation,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerificationCancellation {
+    requested: tokio::sync::watch::Sender<bool>,
+    cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "test-support"))]
+    force_cleanup_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for VerificationCancellation {
+    fn default() -> Self {
+        Self {
+            requested: tokio::sync::watch::channel(false).0,
+            cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-support"))]
+            force_cleanup_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl VerificationCancellation {
+    pub fn cancel(&self) {
+        self.requested.send_replace(true);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.requested.borrow()
+    }
+
+    pub(crate) fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_cleanup_failure(&self) {
+        self.cleanup_failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn force_cleanup_failure_for_test(&self) {
+        self.force_cleanup_failure
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.requested.subscribe();
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
+    }
+}
+
+#[derive(Debug)]
+pub struct IsolatedOutput {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+    pub overflowed: bool,
+}
+
+impl IsolatedOutput {
+    pub fn stderr_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.stderr)
+    }
+}
+
+impl VerificationIsolation {
+    pub async fn open(
+        scope: ProtectedInputScope,
+        scratch: VerificationScratch,
+        helper_executable: Option<PathBuf>,
+    ) -> Result<Self, IsolationError> {
+        Self::open_with_cancellation(
+            scope,
+            scratch,
+            helper_executable,
+            VerificationCancellation::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_cancellation(
+        scope: ProtectedInputScope,
+        scratch: VerificationScratch,
+        helper_executable: Option<PathBuf>,
+        cancellation: VerificationCancellation,
+    ) -> Result<Self, IsolationError> {
+        let scratch_root = canonical_directory(&scratch.root, "verification scratch root")?;
+        if paths_overlap(&scope.root, &scratch_root) {
+            return Err(IsolationError::new(
+                "verification scratch overlaps protected input",
+            ));
+        }
+        let scratch = VerificationScratch {
+            home: scratch_root.join("home"),
+            temporary: scratch_root.join("tmp"),
+            build: scratch_root.join("build"),
+            cache: scratch_root.join("cache"),
+            output: scratch_root.join("output"),
+            root: scratch_root,
+            ..scratch
+        };
+        let mut candidate = Self {
+            scope,
+            scratch,
+            helper_executable,
+            cancellation,
+            capability: ProtectionCapability::Unavailable {
+                backend: platform_backend_name().to_owned(),
+                reason: "capability probe has not completed".to_owned(),
+            },
+        };
+        candidate.capability = match Box::pin(candidate.probe()).await {
+            Ok(()) => ProtectionCapability::Available {
+                backend: platform_backend_name().to_owned(),
+            },
+            Err(error) => ProtectionCapability::Unavailable {
+                backend: platform_backend_name().to_owned(),
+                reason: error.to_string(),
+            },
+        };
+        if candidate.cancellation.is_cancelled() {
+            return Err(IsolationError::new("verification cancelled"));
+        }
+        Ok(candidate)
+    }
+
+    #[must_use]
+    pub fn cancellation_handle(&self) -> VerificationCancellation {
+        self.cancellation.clone()
+    }
+
+    pub const fn capability(&self) -> &ProtectionCapability {
+        &self.capability
+    }
+
+    pub const fn scope(&self) -> &ProtectedInputScope {
+        &self.scope
+    }
+
+    pub const fn scratch(&self) -> &VerificationScratch {
+        &self.scratch
+    }
+
+    pub const fn allows_strong_pass_with(capability: &ProtectionCapability) -> bool {
+        capability.allows_strong_pass()
+    }
+
+    pub async fn run(
+        &self,
+        argv: &[String],
+        working_directory: &Path,
+        environment: HashMap<String, String>,
+        timeout: Duration,
+        output_limit_bytes: usize,
+    ) -> Result<IsolatedOutput, IsolationError> {
+        let command = self.command(argv, working_directory, environment)?;
+        Box::pin(run_isolated_command(
+            command,
+            timeout,
+            output_limit_bytes,
+            &self.cancellation,
+        ))
+        .await
+    }
+
+    pub fn command(
+        &self,
+        argv: &[String],
+        working_directory: &Path,
+        environment: HashMap<String, String>,
+    ) -> Result<Command, IsolationError> {
+        if !self.capability.allows_strong_pass() {
+            return Err(IsolationError::new(
+                "protected input enforcement is unavailable",
+            ));
+        }
+        self.command_without_capability_gate(argv, working_directory, environment)
+    }
+
+    fn command_without_capability_gate(
+        &self,
+        argv: &[String],
+        working_directory: &Path,
+        mut environment: HashMap<String, String>,
+    ) -> Result<Command, IsolationError> {
+        let (program, arguments) = argv
+            .split_first()
+            .ok_or_else(|| IsolationError::new("verification command argv must not be empty"))?;
+        let working_directory =
+            canonical_directory(working_directory, "verification command working directory")?;
+        if !working_directory.starts_with(&self.scope.root) {
+            return Err(IsolationError::new(
+                "verification working directory leaves the protected input root",
+            ));
+        }
+        let request =
+            self.sandbox_request(program, arguments, &working_directory, &mut environment)?;
+        let (program, arguments) = request
+            .command
+            .split_first()
+            .ok_or_else(|| IsolationError::new("sandbox launcher is empty"))?;
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .current_dir(request.cwd.to_abs_path().map_err(|error| {
+                IsolationError::new(format!("sandbox cwd cannot be recovered: {error}"))
+            })?)
+            .env_clear()
+            .envs(request.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        if let Some(arg0) = request.arg0 {
+            command.arg0(arg0);
+        }
+        Ok(command)
+    }
+
+    fn sandbox_request(
+        &self,
+        program: &str,
+        arguments: &[String],
+        working_directory: &Path,
+        environment: &mut HashMap<String, String>,
+    ) -> Result<sandboxing::SandboxExecRequest, IsolationError> {
+        let policy = self.permission_profile()?;
+        let manager = SandboxManager::new();
+        let sandbox = manager.select_initial(
+            &policy,
+            SandboxablePreference::Require,
+            WindowsSandboxLevel::Disabled,
+            false,
+        );
+        if sandbox == SandboxType::None {
+            return Err(IsolationError::new(
+                "host cannot enforce protected verification input",
+            ));
+        }
+        environment.entry("PATH".to_owned()).or_insert_with(|| {
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned())
+        });
+        for (name, path) in [
+            ("HOME", self.scratch.home.as_path()),
+            ("TMPDIR", self.scratch.temporary.as_path()),
+            ("TEMP", self.scratch.temporary.as_path()),
+            ("TMP", self.scratch.temporary.as_path()),
+        ] {
+            environment.insert(name.to_owned(), path_string(path)?);
+        }
+        environment.insert("WWC_SCRATCH".to_owned(), path_string(&self.scratch.root)?);
+        environment.insert(
+            "WWC_CACHE_DIR".to_owned(),
+            path_string(&self.scratch.cache)?,
+        );
+        environment.insert(
+            "WWC_OUTPUT_DIR".to_owned(),
+            path_string(&self.scratch.output)?,
+        );
+        environment.insert(
+            "CARGO_TARGET_DIR".to_owned(),
+            path_string(&self.scratch.build)?,
+        );
+        environment.insert(
+            "PYTHONPYCACHEPREFIX".to_owned(),
+            path_string(&self.scratch.cache.join("python"))?,
+        );
+        environment.insert(
+            "npm_config_cache".to_owned(),
+            path_string(&self.scratch.cache.join("npm"))?,
+        );
+        let mut command = vec![program.to_owned()];
+        command.extend(arguments.iter().cloned());
+        manager
+            .transform(SandboxTransformRequest {
+                command: SandboxCommand {
+                    program: program.into(),
+                    args: arguments.to_vec(),
+                    cwd: PathUri::from_abs_path(&absolute_path(working_directory)?),
+                    env: environment.clone(),
+                    managed_network: None,
+                    additional_permissions: None,
+                },
+                permissions: &policy,
+                sandbox,
+                enforce_managed_network: false,
+                environment_id: None,
+                network: None,
+                sandbox_policy_cwd: &PathUri::from_abs_path(&absolute_path(&self.scope.root)?),
+                codex_linux_sandbox_exe: self.helper_executable.as_deref(),
+                use_legacy_landlock: false,
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                windows_sandbox_private_desktop: false,
+            })
+            .map_err(|error| IsolationError::new(error.to_string()))
+    }
+
+    fn permission_profile(&self) -> Result<PermissionProfile, IsolationError> {
+        let root = FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        };
+        let scratch = FileSystemPath::from(absolute_path(&self.scratch.root)?);
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(root, FileSystemAccessMode::Read),
+            FileSystemSandboxEntry::new(scratch, FileSystemAccessMode::Write),
+            #[cfg(not(target_os = "linux"))]
+            FileSystemSandboxEntry::new(
+                FileSystemPath::from(absolute_path(Path::new("/dev/null"))?),
+                FileSystemAccessMode::Write,
+            ),
+        ]);
+        Ok(PermissionProfile::from_runtime_permissions(
+            &policy,
+            NetworkSandboxPolicy::Restricted,
+        ))
+    }
+
+    async fn probe(&mut self) -> Result<(), IsolationError> {
+        #[cfg(target_os = "linux")]
+        if let Some(helper) = &mut self.helper_executable {
+            let source = fs::canonicalize(&*helper)
+                .map_err(|error| IsolationError::new(format!("sandbox helper: {error}")))?;
+            let directory = self.scratch.root.with_extension("launcher");
+            fs::create_dir(&directory)
+                .map_err(|error| IsolationError::new(format!("sandbox launcher: {error}")))?;
+            let alias = directory.join("codex-linux-sandbox");
+            std::os::unix::fs::symlink(source, &alias)
+                .map_err(|error| IsolationError::new(format!("sandbox launcher alias: {error}")))?;
+            *helper = alias;
+        }
+        let probe_root = self.scratch.root.with_extension("probe");
+        fs::create_dir(&probe_root)
+            .map_err(|error| IsolationError::new(format!("probe directory: {error}")))?;
+        let result = self.probe_at(&probe_root).await;
+        let cleanup = fs::remove_dir_all(&probe_root)
+            .map_err(|error| IsolationError::new(format!("probe cleanup: {error}")));
+        result.and(cleanup)
+    }
+
+    async fn probe_at(&self, probe_root: &Path) -> Result<(), IsolationError> {
+        let source = probe_root.join("source");
+        let created = probe_root.join("created");
+        let child = probe_root.join("child");
+        let grandchild = probe_root.join("grandchild");
+        fs::write(&source, b"sealed").map_err(|error| {
+            IsolationError::new(format!("isolation probe input cannot be created: {error}"))
+        })?;
+        let script = r#"set -eu
+blocked() { ! "$@"; }
+blocked /bin/sh -c 'printf x > "$WWC_PROBE_CREATED"'
+blocked /bin/sh -c 'printf x > "$WWC_PROBE_SOURCE"'
+blocked /bin/sh -c 'rm -f "$WWC_PROBE_SOURCE"'
+blocked /bin/sh -c 'mv "$WWC_PROBE_SOURCE" "$WWC_PROBE_SOURCE.moved"'
+blocked /bin/sh -c 'printf x > "$WWC_SCRATCH/replacement" && mv "$WWC_SCRATCH/replacement" "$WWC_PROBE_SOURCE"'
+blocked /bin/sh -c 'cp "$WWC_PROBE_SOURCE" "$WWC_SCRATCH/original" && printf changed > "$WWC_PROBE_SOURCE" && cp "$WWC_SCRATCH/original" "$WWC_PROBE_SOURCE"'
+blocked /bin/sh -c 'ln -s "$WWC_PROBE_SOURCE" "$WWC_SCRATCH/source-link" && printf changed > "$WWC_SCRATCH/source-link"'
+blocked /bin/sh -c 'ln "$WWC_PROBE_SOURCE" "$WWC_SCRATCH/source-hardlink" && printf changed > "$WWC_SCRATCH/source-hardlink"'
+blocked /bin/sh -c '/bin/sh -c '\''printf x > "$WWC_PROBE_CHILD"'\'''
+blocked /bin/sh -c '/bin/sh -c '\''printf x > "$WWC_PROBE_GRANDCHILD"'\'''
+blocked /bin/sh -c '/bin/sh -c '\''printf changed > "$WWC_PROBE_SOURCE"'\'''
+printf ok > "$WWC_SCRATCH/probe-ok"
+test "$(cat "$WWC_PROBE_SOURCE")" = sealed
+test ! -e "$WWC_PROBE_CREATED"
+test ! -e "$WWC_PROBE_CHILD"
+test ! -e "$WWC_PROBE_GRANDCHILD"
+"#;
+        let mut environment = HashMap::new();
+        environment.insert("WWC_PROBE_SOURCE".to_owned(), path_string(&source)?);
+        environment.insert("WWC_PROBE_CREATED".to_owned(), path_string(&created)?);
+        environment.insert("WWC_PROBE_CHILD".to_owned(), path_string(&child)?);
+        environment.insert("WWC_PROBE_GRANDCHILD".to_owned(), path_string(&grandchild)?);
+        let command = self.command_without_capability_gate(
+            &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            &self.scope.root,
+            environment,
+        )?;
+        let output = Box::pin(run_isolated_command(
+            command,
+            Duration::from_secs(10),
+            1024 * 1024,
+            &self.cancellation,
+        ))
+        .await?;
+        if !output.status.success() || output.timed_out || output.overflowed {
+            return Err(IsolationError::new(format!(
+                "isolation mutation probe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    }
+}
+
+struct ProcessGroupGuard(Option<i32>);
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.0 {
+            let _ = kill_process_group_by_id(process_group);
+        }
+    }
+}
+
+async fn run_isolated_command(
+    mut command: Command,
+    timeout: Duration,
+    output_limit_bytes: usize,
+    cancellation: &VerificationCancellation,
+) -> Result<IsolatedOutput, IsolationError> {
+    if cancellation.is_cancelled() {
+        return Err(IsolationError::new("verification cancelled"));
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    command.kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        IsolationError::new(format!(
+            "isolated verification command cannot start: {error}"
+        ))
+    })?;
+    let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
+    let mut process_group_guard = ProcessGroupGuard(process_group);
+    let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
+    else {
+        terminate_process_group(&mut child, process_group, cancellation).await?;
+        process_group_guard.0 = None;
+        return Err(IsolationError::new(
+            "isolated command output cannot be captured",
+        ));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut overflowed = false;
+    let read = drain_isolated_output(
+        &mut stdout_pipe,
+        &mut stderr_pipe,
+        &mut stdout,
+        &mut stderr,
+        &mut overflowed,
+        output_limit_bytes,
+    );
+    let read_result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            terminate_process_group(&mut child, process_group, cancellation).await?;
+            process_group_guard.0 = None;
+            return Err(IsolationError::new("verification cancelled"));
+        }
+        result = tokio::time::timeout_at(deadline, Box::pin(read)) => result,
+    };
+    let mut timed_out = read_result.is_err();
+    let read_error = if timed_out {
+        None
+    } else {
+        match read_result {
+            Ok(result) => result.err(),
+            Err(_) => unreachable!(),
+        }
+    };
+    let status = if timed_out || overflowed || read_error.is_some() {
+        terminate_process_group(&mut child, process_group, cancellation).await?
+    } else if let Some(Ok(status)) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        result = tokio::time::timeout_at(deadline, child.wait()) => Some(result),
+    } {
+        let status = status.map_err(|error| {
+            cancellation.record_cleanup_failure();
+            IsolationError::new(format!("isolated command cannot be reaped: {error}"))
+        })?;
+        if let Some(process_group) = process_group {
+            kill_process_group_by_id(process_group).inspect_err(|_| {
+                cancellation.record_cleanup_failure();
+            })?;
+        }
+        status
+    } else {
+        timed_out = !cancellation.is_cancelled();
+        terminate_process_group(&mut child, process_group, cancellation).await?
+    };
+    if cancellation.is_cancelled() {
+        process_group_guard.0 = None;
+        return Err(IsolationError::new("verification cancelled"));
+    }
+    if let Some(error) = read_error {
+        return Err(error);
+    }
+    process_group_guard.0 = None;
+    Ok(IsolatedOutput {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+        overflowed,
+    })
+}
+
+async fn drain_isolated_output(
+    stdout_pipe: &mut ChildStdout,
+    stderr_pipe: &mut ChildStderr,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    overflowed: &mut bool,
+    output_limit_bytes: usize,
+) -> Result<(), IsolationError> {
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    loop {
+        let mut out_chunk = [0_u8; 8192];
+        let mut err_chunk = [0_u8; 8192];
+        if !stdout_open && !stderr_open {
+            break;
+        }
+        tokio::select! {
+            left = stdout_pipe.read(&mut out_chunk), if stdout_open => {
+                let left = left.map_err(|error| {
+                    IsolationError::new(format!("isolated command stdout failed: {error}"))
+                })?;
+                if left == 0 {
+                    stdout_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stdout, &out_chunk[..left], output_limit_bytes);
+                }
+            }
+            right = stderr_pipe.read(&mut err_chunk), if stderr_open => {
+                let right = right.map_err(|error| {
+                    IsolationError::new(format!("isolated command stderr failed: {error}"))
+                })?;
+                if right == 0 {
+                    stderr_open = false;
+                } else {
+                    *overflowed |= extend_bounded(stderr, &err_chunk[..right], output_limit_bytes);
+                }
+            }
+        }
+        if *overflowed {
+            break;
+        }
+    }
+    Ok::<(), IsolationError>(())
+}
+
+fn extend_bounded(target: &mut Vec<u8>, source: &[u8], output_limit_bytes: usize) -> bool {
+    let remaining = output_limit_bytes.saturating_sub(target.len());
+    let bound = source.len().min(remaining);
+    target.extend_from_slice(&source[..bound]);
+    bound < source.len()
+}
+
+async fn terminate_process_group(
+    child: &mut Child,
+    process_group: Option<i32>,
+    cancellation: &VerificationCancellation,
+) -> Result<std::process::ExitStatus, IsolationError> {
+    let group_result = process_group.map(kill_process_group_by_id).transpose();
+    let _ = child.start_kill();
+    let status = child.wait().await.map_err(|error| {
+        cancellation.record_cleanup_failure();
+        IsolationError::new(format!("isolated command cannot be reaped: {error}"))
+    })?;
+    group_result.inspect_err(|_| {
+        cancellation.record_cleanup_failure();
+    })?;
+    #[cfg(any(test, feature = "test-support"))]
+    if cancellation
+        .force_cleanup_failure
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        cancellation.record_cleanup_failure();
+        return Err(IsolationError::new(
+            "verification cleanup confirmation fault",
+        ));
+    }
+    Ok(status)
+}
+
+fn kill_process_group_by_id(process_group: i32) -> Result<(), IsolationError> {
+    let process_group = u32::try_from(process_group)
+        .map_err(|_| IsolationError::new("isolated command process group is invalid"))?;
+    kill_process_group(process_group).map_err(|error| {
+        IsolationError::new(format!(
+            "isolated command process group cannot be terminated: {error}"
+        ))
+    })
+}
+
+const fn platform_backend_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos-seatbelt-v1"
+    } else if cfg!(target_os = "linux") {
+        "linux-codex-sandbox-v1"
+    } else {
+        "unsupported"
+    }
+}
+
+fn absolute_path(path: &Path) -> Result<AbsolutePathBuf, IsolationError> {
+    AbsolutePathBuf::try_from(path.to_path_buf()).map_err(|error| {
+        IsolationError::new(format!("absolute isolation path is invalid: {error}"))
+    })
+}
+
+fn path_string(path: &Path) -> Result<String, IsolationError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| IsolationError::new("verification path is not valid UTF-8"))
+}
+
+fn canonical_directory(path: &Path, context: &str) -> Result<PathBuf, IsolationError> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| IsolationError::new(format!("{context} cannot be resolved: {error}")))?;
+    if !canonical.is_dir() {
+        return Err(IsolationError::new(format!("{context} is not a directory")));
+    }
+    Ok(canonical)
+}
+
+fn resolve_below(root: &Path, relative: &Path, context: &str) -> Result<PathBuf, IsolationError> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(IsolationError::new(format!("{context} is not a safe path")));
+    }
+    let mut resolved = root.to_path_buf();
+    for component in relative.components() {
+        resolved.push(component);
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(IsolationError::new(format!(
+                    "{context} contains a symbolic link"
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(IsolationError::new(format!(
+                    "{context} cannot be resolved: {error}"
+                )));
+            }
+        }
+    }
+    let mut existing_ancestor = resolved.clone();
+    while !existing_ancestor.exists() {
+        if !existing_ancestor.pop() {
+            return Err(IsolationError::new(format!("{context} leaves its root")));
+        }
+    }
+    let canonical = fs::canonicalize(&existing_ancestor)
+        .map_err(|error| IsolationError::new(format!("{context} cannot be resolved: {error}")))?;
+    if !canonical.starts_with(root) {
+        return Err(IsolationError::new(format!("{context} leaves its root")));
+    }
+    let tail = resolved
+        .strip_prefix(existing_ancestor)
+        .map_err(|_| IsolationError::new(format!("{context} leaves its root")))?;
+    Ok(canonical.join(tail))
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn early_eof_does_not_remove_the_process_exit_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let descendant = root.path().join("descendant.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "exec 1>&- 2>&-; sleep 10 & printf '%s' \"$!\" > \"$1\"; sleep 1",
+                "fixture",
+            ])
+            .arg(&descendant)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let began = std::time::Instant::now();
+        let result = run_isolated_command(
+            command,
+            Duration::from_millis(100),
+            1024,
+            &VerificationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert!(result.timed_out, "EOF is not proof of process termination");
+        assert!(began.elapsed() < Duration::from_millis(800));
+        let pid = fs::read_to_string(descendant).unwrap();
+        for _ in 0..20 {
+            let status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&status.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("descendant must be terminated with the verification process group");
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_reaps_the_command_before_returning() {
+        for close_output in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let leader = root.path().join("leader.pid");
+            let descendant = root.path().join("descendant.pid");
+            let mut command = Command::new("/bin/sh");
+            let script = format!(
+                "{}sleep 30 & printf '%s' \"$!\" > \"$2\"; printf '%s' \"$$\" > \"$1\"; wait",
+                if close_output { "exec 1>&- 2>&-; " } else { "" }
+            );
+            command
+                .args(["-c", &script, "fixture"])
+                .arg(&leader)
+                .arg(&descendant)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let cancellation = VerificationCancellation::default();
+            let task_cancellation = cancellation.clone();
+            let task = tokio::spawn(async move {
+                run_isolated_command(command, Duration::from_secs(40), 1024, &task_cancellation)
+                    .await
+            });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !leader.exists() || fs::read_to_string(&leader).unwrap_or_default().is_empty() {
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            cancellation.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "cancelled commands produce no accepted output"
+            );
+            let pid = fs::read_to_string(&leader).unwrap();
+            let leader_status = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&leader_status.stdout)
+                    .trim()
+                    .is_empty(),
+                "direct child must already be reaped when cancellation returns"
+            );
+            let descendant_pid = fs::read_to_string(&descendant).unwrap();
+            let mut terminated = false;
+            for _ in 0..20 {
+                let status = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &descendant_pid])
+                    .output()
+                    .unwrap();
+                let state = String::from_utf8_lossy(&status.stdout);
+                if state.trim().is_empty() || state.trim().starts_with('Z') {
+                    terminated = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(terminated, "process-group descendants must be terminated");
+        }
+    }
+}

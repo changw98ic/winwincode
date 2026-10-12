@@ -287,9 +287,9 @@ fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage)
         goal: "execute the authenticated model request".to_owned(),
         job_id: message.lease.job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: Instant("2030-01-01T00:05:00.000Z".to_owned()),
+            deadline_at: Some(Instant("2030-01-01T00:05:00.000Z".to_owned())),
             max_artifact_bytes: 1_000_000,
-            max_runtime_seconds: 300,
+            max_runtime_seconds: Some(300),
         },
         payload_digest: message.request.payload_digest.clone(),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -383,7 +383,7 @@ fn normal_ack(message: &ModelOpenMessage, seed: u64, sequence: i64) -> ModelAckM
     acknowledgement
 }
 
-fn assert_current_and_expired_ack_authority(
+fn assert_ack_identity_survives_lease_expiry(
     gateway: &ProviderGateway<'_>,
     message: &ModelOpenMessage,
 ) {
@@ -392,10 +392,14 @@ fn assert_current_and_expired_ack_authority(
         .expect("current Worker ack authority");
     let mut expired = normal_ack(message, 143, 1);
     expired.sent_at = expired.lease.expires_at.clone();
+    gateway
+        .validate_worker_acknowledgement(&expired)
+        .expect("acknowledging the original stream grants no new execution authority");
+    expired.lease.fencing_token = FencingToken("999".to_owned());
     assert_eq!(
         gateway
             .validate_worker_acknowledgement(&expired)
-            .expect_err("expired Worker ack is denied")
+            .expect_err("a different execution cannot acknowledge this stream")
             .kind(),
         ProviderGatewayErrorKind::IdentityDenied
     );
@@ -575,6 +579,7 @@ fn pause_frames(
     let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
     let mut events = vec![
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-runtime-pause".to_owned(),
         },
         ProviderStreamEvent::TextStarted { index: 0 },
@@ -584,6 +589,7 @@ fn pause_frames(
         delta: format!("fragment-{index}"),
     }));
     events.push(ProviderStreamEvent::TextEnded { index: 0 });
+    events.push(ProviderStreamEvent::TextStarted { index: 1 });
     let frames = events
         .into_iter()
         .flat_map(|event| converter.ingest(event).expect("convert pause frame"))
@@ -599,6 +605,7 @@ fn terminal_frames(
     let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
     [
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-runtime-terminal".to_owned(),
         },
         ProviderStreamEvent::TextStarted { index: 0 },
@@ -967,6 +974,7 @@ impl RuntimeFixture {
         authority.close().expect("close pause authority");
     }
 
+    #[allow(clippy::too_many_lines)]
     fn assert_terminal_final_ack_recovery(mut self) {
         let authority = DurableModelExchangeAuthority::open(&self.root)
             .expect("open durable exchange authority");
@@ -1005,7 +1013,7 @@ impl RuntimeFixture {
                     &frames,
                     Some(ProviderGatewayTerminal::Completed {
                         usage: usage(),
-                        actual_cost_micros: 15,
+                        actual_cost_micros: Some(15),
                     }),
                     &self.message.sent_at,
                 )
@@ -1023,6 +1031,59 @@ impl RuntimeFixture {
             .restarted_ack(&acknowledgement)
             .expect("replay lost final-ack response");
         assert_terminal_ack_replay(first, replay);
+        let authority = DurableModelExchangeAuthority::open(&self.root).unwrap();
+        let raw_digest: String = {
+            let connection = Connection::open(authority.database_path()).unwrap();
+            let digest = connection.query_row(
+                "SELECT ack_digest FROM internal_provider_exchange_final_acks WHERE model_exchange_id=?1",
+                [&self.message.model_exchange_id.0], |row| row.get(0),
+            ).unwrap();
+            connection
+                .execute_batch("DROP TABLE internal_provider_exchange_final_ack_semantics;")
+                .unwrap();
+            digest
+        };
+        authority.close().unwrap();
+        let mut duplicate = acknowledgement.clone();
+        duplicate.status = LeaseWriteStatus::Duplicate;
+        duplicate.message_id = ExecutionMessageId(id("xmsg", 174));
+        duplicate.sent_at = Instant("2030-01-01T00:00:01Z".into());
+        let replay = self
+            .restarted_ack(&duplicate)
+            .expect("Accepted to Duplicate is the same final confirmation");
+        assert!(
+            matches!(replay, winwincode_control_plane::ModelExecutionAckReceipt::Acknowledged(ref receipt) if receipt.pool.replayed)
+        );
+        let authority = DurableModelExchangeAuthority::open(&self.root).unwrap();
+        let connection = Connection::open(authority.database_path()).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT ack_digest FROM internal_provider_exchange_final_acks WHERE model_exchange_id=?1",
+            [&self.message.model_exchange_id.0], |row| row.get::<_, String>(0),
+        ).unwrap(), raw_digest, "upgrade must preserve the original transport proof");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM internal_provider_exchange_final_ack_semantics",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        authority.close().unwrap();
+        let mut replay_request = duplicate.clone();
+        replay_request.replay_from_sequence = Some(winwincode_domain::ExecutionSequence(1));
+        assert!(
+            self.restarted_ack(&replay_request).is_err(),
+            "replay requests are not final success confirmations"
+        );
+        let mut failure = cancellation_ack(&self.message, 175);
+        failure.ack_sequence = duplicate.ack_sequence;
+        assert!(
+            self.restarted_ack(&failure).is_err(),
+            "a cancellation cannot reuse the successful tombstone"
+        );
         let mut changed = acknowledgement.clone();
         changed.ack_sequence.0 -= 1;
         assert_eq!(
@@ -1441,7 +1502,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
                 }
             },
             actual_tokens: 0,
-            actual_cost_micros: 0,
+            actual_cost_micros: Some(0),
             revision,
             idempotent_replay: revision > 1,
         })
@@ -1472,7 +1533,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         let revision = self.terminals.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(ModelReservationTerminalReceipt {
@@ -1491,7 +1552,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
 const fn usage() -> ProviderTokenUsage {
     ProviderTokenUsage {
         input_tokens: 10,
-        cached_input_tokens: 0,
+        cached_input_tokens: Some(0),
         cache_write_input_tokens: 0,
         output_tokens: 5,
         reasoning_output_tokens: 0,
@@ -1552,7 +1613,7 @@ fn admission_policy(decision: ModelRoutePolicyDecision) -> ModelAdmissionPolicyL
             tokens_per_minute: 100_000,
             concurrent_requests: 100,
             token_budget: 1_000_000,
-            cost_budget_micros: 1_000_000,
+            cost_budget_micros: Some(1_000_000),
         },
     )
     .expect("Gateway policy fixture")
@@ -1779,7 +1840,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a.sent_at,
             )
@@ -1790,7 +1851,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a.sent_at,
             )
@@ -1824,7 +1885,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a2.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a2.sent_at,
             )
@@ -1924,7 +1985,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
             .as_ref()
             .expect("completed settlement charge")
             .cost_micros,
-        15
+        Some(15)
     );
     assert_eq!(
         accepted[2]
@@ -2029,7 +2090,7 @@ fn restored_gateway_forces_the_durable_pool_read_decision_to_the_adapter() {
     restarted
         .restore_durable_exchange(&durable)
         .expect("restore durable exchange");
-    assert_current_and_expired_ack_authority(&restarted, &message);
+    assert_ack_identity_survives_lease_expiry(&restarted, &message);
     assert!(
         !restarted
             .set_provider_read_paused(&message.model_exchange_id, false)
@@ -2371,7 +2432,6 @@ fn strict_json_schema_is_rejected_before_anthropic_credentials_admission_or_prov
         81,
         StructuredOutputSupport::Unsupported,
     );
-    // Deliberately omit CredentialReference state: capability routing must reject first.
     configure_session(&mut storage, 83, 81, "anthropic", "claude-fixture", 81);
 
     let identity = FakeIdentity {
@@ -2968,6 +3028,48 @@ fn assert_provider_error_releases_admission(
 #[test]
 fn provider_admission_release_preserves_every_adapter_failure_category() {
     for (label, seed, error, expected) in [
+        (
+            "quota-adapter-request-invalid",
+            341,
+            ProviderAdapterError::request_invalid(),
+            ProviderGatewayErrorKind::AdapterRequestInvalid,
+        ),
+        (
+            "quota-adapter-request-translation",
+            351,
+            ProviderAdapterError::request_translation(),
+            ProviderGatewayErrorKind::AdapterRequestTranslation,
+        ),
+        (
+            "quota-adapter-request-limit",
+            361,
+            ProviderAdapterError::request_size_limit(),
+            ProviderGatewayErrorKind::AdapterRequestSizeLimit,
+        ),
+        (
+            "quota-adapter-response-content-type",
+            371,
+            ProviderAdapterError::response_content_type(),
+            ProviderGatewayErrorKind::AdapterResponseContentType,
+        ),
+        (
+            "quota-adapter-connection",
+            381,
+            ProviderAdapterError::connection(),
+            ProviderGatewayErrorKind::AdapterConnection,
+        ),
+        (
+            "quota-adapter-upstream",
+            391,
+            ProviderAdapterError::upstream(),
+            ProviderGatewayErrorKind::AdapterUpstream,
+        ),
+        (
+            "quota-adapter-identity",
+            401,
+            ProviderAdapterError::identity_conflict(),
+            ProviderGatewayErrorKind::AdapterIdentityConflict,
+        ),
         (
             "quota-adapter-rejected",
             301,

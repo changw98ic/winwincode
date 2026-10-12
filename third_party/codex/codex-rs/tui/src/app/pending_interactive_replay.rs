@@ -33,8 +33,7 @@ impl ElicitationRequestKey {
 //
 // We keep both fast lookup sets (for snapshot filtering by call_id/request key) and
 // turn-indexed queues/vectors so turn completion or interruption can clear
-// stale prompts tied to a turn. `request_user_input` removal is FIFO because
-// the overlay answers queued prompts in FIFO order for a shared `turn_id`.
+// stale prompts tied to a turn. Input replies resolve the exact (turn, call).
 pub(super) struct PendingInteractiveReplayState {
     exec_approval_call_ids: HashSet<String>,
     exec_approval_call_ids_by_turn_id: HashMap<String, Vec<String>>,
@@ -43,7 +42,7 @@ pub(super) struct PendingInteractiveReplayState {
     elicitation_requests: HashSet<ElicitationRequestKey>,
     request_permissions_call_ids: HashSet<String>,
     request_permissions_call_ids_by_turn_id: HashMap<String, Vec<String>>,
-    request_user_input_call_ids: HashSet<String>,
+    request_user_input_call_ids: HashSet<(String, String)>,
     request_user_input_call_ids_by_turn_id: HashMap<String, Vec<String>>,
     pending_requests_by_request_id: HashMap<AppServerRequestId, PendingInteractiveRequest>,
 }
@@ -140,18 +139,16 @@ impl PendingInteractiveReplayState {
                     },
                 );
             }
-            // `Op::UserInputAnswer` identifies the turn, not the prompt call_id. The UI
-            // answers queued prompts for the same turn in FIFO order, so remove the oldest
-            // queued call_id for that turn.
-            AppCommand::UserInputAnswer { id, .. } => {
+            AppCommand::UserInputAnswer { id, call_id, .. } => {
                 let mut remove_turn_entry = false;
                 if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.get_mut(id) {
-                    if !call_ids.is_empty() {
-                        let call_id = call_ids.remove(0);
-                        self.request_user_input_call_ids.remove(&call_id);
+                    if let Some(index) = call_ids.iter().position(|queued| queued == call_id) {
+                        call_ids.remove(index);
+                        self.request_user_input_call_ids
+                            .remove(&(id.clone(), call_id.clone()));
                         self.pending_requests_by_request_id.retain(
                             |_, pending| {
-                                !matches!(pending, PendingInteractiveRequest::RequestUserInput { item_id, .. } if *item_id == call_id)
+                                !matches!(pending, PendingInteractiveRequest::RequestUserInput { turn_id, item_id } if turn_id==id && item_id == call_id)
                             },
                         );
                     }
@@ -215,7 +212,7 @@ impl PendingInteractiveReplayState {
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
                 self.request_user_input_call_ids
-                    .insert(params.item_id.clone());
+                    .insert((params.turn_id.clone(), params.item_id.clone()));
                 self.request_user_input_call_ids_by_turn_id
                     .entry(params.turn_id.clone())
                     .or_default()
@@ -310,7 +307,8 @@ impl PendingInteractiveReplayState {
                     ));
             }
             ServerRequest::ToolRequestUserInput { params, .. } => {
-                self.request_user_input_call_ids.remove(&params.item_id);
+                self.request_user_input_call_ids
+                    .remove(&(params.turn_id.clone(), params.item_id.clone()));
                 let mut remove_turn_entry = false;
                 if let Some(call_ids) = self
                     .request_user_input_call_ids_by_turn_id
@@ -363,9 +361,9 @@ impl PendingInteractiveReplayState {
                     params.server_name.clone(),
                     request_id.clone(),
                 )),
-            ServerRequest::ToolRequestUserInput { params, .. } => {
-                self.request_user_input_call_ids.contains(&params.item_id)
-            }
+            ServerRequest::ToolRequestUserInput { params, .. } => self
+                .request_user_input_call_ids
+                .contains(&(params.turn_id.clone(), params.item_id.clone())),
             ServerRequest::PermissionsRequestApproval { params, .. } => {
                 self.request_permissions_call_ids.contains(&params.item_id)
             }
@@ -387,7 +385,8 @@ impl PendingInteractiveReplayState {
     fn clear_request_user_input_turn(&mut self, turn_id: &str) {
         if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.remove(turn_id) {
             for call_id in call_ids {
-                self.request_user_input_call_ids.remove(&call_id);
+                self.request_user_input_call_ids
+                    .remove(&(turn_id.into(), call_id));
             }
         }
         self.pending_requests_by_request_id.retain(
@@ -512,7 +511,8 @@ impl PendingInteractiveReplayState {
                 );
             }
             PendingInteractiveRequest::RequestUserInput { turn_id, item_id } => {
-                self.request_user_input_call_ids.remove(&item_id);
+                self.request_user_input_call_ids
+                    .remove(&(turn_id.clone(), item_id.clone()));
                 Self::remove_call_id_from_turn_map_entry(
                     &mut self.request_user_input_call_ids_by_turn_id,
                     &turn_id,
@@ -598,6 +598,38 @@ mod tests {
                 is_blocking: true,
                 auto_resolution_ms: None,
             },
+        }
+    }
+
+    #[test]
+    fn input_replay_same_call_in_distinct_turns_resolves_only_exact_turn() {
+        for removal in 0..4 {
+            let mut state = super::PendingInteractiveReplayState::default();
+            let first = request_user_input_request("same-call", "turn-1");
+            let mut second = request_user_input_request("same-call", "turn-2");
+            if let ServerRequest::ToolRequestUserInput { request_id, .. } = &mut second {
+                *request_id = AppServerRequestId::Integer(9);
+            }
+            state.note_server_request(&first);
+            state.note_server_request(&second);
+            match removal {
+                0 => state.note_outbound_op(Op::UserInputAnswer {
+                    id: "turn-1".into(),
+                    call_id: "same-call".into(),
+                    response: ToolRequestUserInputResponse {
+                        answers: std::collections::HashMap::new(),
+                    },
+                }),
+                1 => state.note_evicted_server_request(&first),
+                2 => state.clear_request_user_input_turn("turn-1"),
+                _ => state.remove_request(&AppServerRequestId::Integer(1)),
+            }
+            assert!(!state.should_replay_snapshot_request(&first));
+            assert!(
+                state.should_replay_snapshot_request(&second),
+                "another turn owns an independent waiter"
+            );
+            assert_eq!(state.pending_requests_by_request_id.len(), 1);
         }
     }
 
@@ -719,6 +751,7 @@ mod tests {
 
         store.note_outbound_op(&Op::UserInputAnswer {
             id: "turn-1".to_string(),
+            call_id: "call-1".into(),
             response: ToolRequestUserInputResponse {
                 answers: HashMap::new(),
             },
@@ -810,6 +843,7 @@ mod tests {
 
         store.note_outbound_op(&Op::UserInputAnswer {
             id: "turn-1".to_string(),
+            call_id: "call-1".into(),
             response: ToolRequestUserInputResponse {
                 answers: HashMap::new(),
             },
@@ -838,6 +872,7 @@ mod tests {
 
         store.note_outbound_op(&Op::UserInputAnswer {
             id: "turn-1".to_string(),
+            call_id: "call-1".into(),
             response: ToolRequestUserInputResponse {
                 answers: HashMap::new(),
             },

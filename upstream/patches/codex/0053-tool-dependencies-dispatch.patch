@@ -1,0 +1,271 @@
+diff --git a/codex-rs/core/src/tools/execution_facts.rs b/codex-rs/core/src/tools/execution_facts.rs
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -7,6 +7,8 @@
+ use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::Mutex;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ 
+ use codex_state::StateRuntime;
+ use codex_state::ToolAttemptClaim;
+@@ -86,10 +88,13 @@
+ /// Held only for the new logical request. A replay never executes hooks or the handler.
+ pub(super) struct ToolFactRecord {
+     service: Arc<ExecutionFacts>,
+-    store: Arc<StateRuntime>,
+-    sequence: i64,
+-    owner_id: String,
+-    attempt_id: String,
++    pub(super) store: Arc<StateRuntime>,
++    pub(super) sequence: i64,
++    pub(super) owner_id: String,
++    pub(super) attempt_id: String,
++    shared: AtomicBool,
++    completed: AtomicBool,
++    settled: AtomicBool,
+ }
+ 
+ pub(super) enum ToolFactAdmission {
+@@ -193,6 +198,9 @@
+                 sequence: fact.request_sequence,
+                 owner_id,
+                 attempt_id: uuid::Uuid::new_v4().to_string(),
++                shared: AtomicBool::new(false),
++                completed: AtomicBool::new(false),
++                settled: AtomicBool::new(false),
+             })),
+             ToolRequestObservation::Replay(fact) => {
+                 Ok(ToolFactAdmission::Replay(ToolFactReplay { service, store, fact: Box::new(fact), owner_id }))
+@@ -206,6 +214,7 @@
+     }
+ 
+     pub(super) async fn deny(&self) -> Result<(), FunctionCallError> {
++        self.settled.store(true, Ordering::Release);
+         self.store
+             .deny_tool_request(self.sequence)
+             .await
+@@ -217,9 +226,7 @@
+         invocation: &ToolInvocation,
+         runtime: &dyn CoreToolRuntime,
+     ) -> Result<(), FunctionCallError> {
+-        let operation = digest(
+-            serde_json::json!({ "tool": invocation.tool_name.to_string(), "definition": runtime.spec(), "input": semantic_input(&invocation.payload) }),
+-        );
++        let operation = operation_digest(invocation, runtime);
+         match self
+             .store
+             .claim_tool_attempt(
+@@ -246,7 +253,22 @@
+         }
+     }
+ 
++    pub(super) async fn link_shared(
++        &self,
++        fact: codex_state::ToolSharingFact,
++    ) -> Result<(), FunctionCallError> {
++        self.store
++            .link_tool_sharing(&fact)
++            .await
++            .map_err(storage_error)?;
++        self.shared.store(true, Ordering::Release);
++        Ok(())
++    }
++
+     pub(super) async fn completed(&self, encoded: Option<String>) -> Result<(), FunctionCallError> {
++        if self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire) {
++            return Ok(());
++        }
+         let execution = if encoded.is_some() {
+             ToolExecutionStatus::Completed
+         } else {
+@@ -261,36 +283,55 @@
+                 encoded.as_deref(),
+             )
+             .await
+-            .map_err(storage_error)
++            .map_err(storage_error)?;
++        self.completed.store(true, Ordering::Release);
++        Ok(())
+     }
+ 
+     pub(super) async fn rejected(&self, message: &str) -> Result<(), FunctionCallError> {
+-        self.store
+-            .decide_tool_output(
+-                self.sequence,
+-                &self.attempt_id,
+-                &self.owner_id,
+-                ToolOutputDisposition::Rejected,
+-                Some(message),
+-            )
+-            .await
+-            .map_err(storage_error)
++        self.decide_output(ToolOutputDisposition::Rejected, message)
++            .await
+     }
+ 
+     pub(super) async fn accepted(&self, encoded: String) -> Result<(), FunctionCallError> {
+-        self.store
+-            .decide_tool_output(
+-                self.sequence,
+-                &self.attempt_id,
+-                &self.owner_id,
+-                ToolOutputDisposition::Accepted,
+-                Some(&encoded),
+-            )
+-            .await
+-            .map_err(storage_error)
++        self.decide_output(ToolOutputDisposition::Accepted, &encoded)
++            .await
++    }
++
++    async fn decide_output(
++        &self,
++        disposition: ToolOutputDisposition,
++        body: &str,
++    ) -> Result<(), FunctionCallError> {
++        if self.shared.load(Ordering::Acquire) {
++            self.store
++                .decide_shared_tool_output(self.sequence, disposition, body)
++                .await
++                .map_err(storage_error)?;
++        } else {
++            self.store
++                .decide_tool_output(
++                    self.sequence,
++                    &self.attempt_id,
++                    &self.owner_id,
++                    disposition,
++                    Some(body),
++                )
++                .await
++                .map_err(storage_error)?;
++        }
++        self.settled.store(true, Ordering::Release);
++        Ok(())
+     }
+ 
+     pub(super) async fn offered(&self) -> Result<(), FunctionCallError> {
++        if self.shared.load(Ordering::Acquire) {
++            return self
++                .store
++                .offer_shared_tool_output(self.sequence)
++                .await
++                .map_err(storage_error);
++        }
+         self.store
+             .offer_tool_output(self.sequence, &self.attempt_id, &self.owner_id)
+             .await
+@@ -300,12 +341,33 @@
+ 
+ impl Drop for ToolFactRecord {
+     fn drop(&mut self) {
++        if (self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire))
++            && !self.settled.load(Ordering::Acquire)
++            && let Ok(runtime) = tokio::runtime::Handle::try_current()
++        {
++            let store = Arc::clone(&self.store);
++            let sequence = self.sequence;
++            runtime.spawn(async move {
++                if let Err(error) = store.cancel_tool_waiter(sequence).await {
++                    tracing::warn!(%error, "logical tool waiter cancellation was not persisted");
++                }
++            });
++        }
+         self.service
+             .active_requests
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+             .remove(&self.sequence);
+     }
++}
++
++pub(super) fn operation_digest(
++    invocation: &ToolInvocation,
++    runtime: &dyn CoreToolRuntime,
++) -> String {
++    digest(
++        serde_json::json!({"tool": invocation.tool_name.to_string(), "definition": runtime.spec(), "input": semantic_input(&invocation.payload)}),
++    )
+ }
+ 
+ pub(super) fn snapshot(result: &AnyToolResult) -> Result<String, FunctionCallError> {
+@@ -329,6 +391,8 @@
+         "success": result.result.success_for_logging(),
+         "effective_input": payload_value(&result.payload),
+         "continuation": result.continuation,
++        "post_hook_input": result.post_tool_use_payload.as_ref().map(|p| &p.tool_input),
++        "post_hook_response": result.post_tool_use_payload.as_ref().map(|p| &p.tool_response),
+     }))
+     .map_err(storage_error)
+ }
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -569,7 +569,7 @@
+                     codex_code_mode::PUBLIC_TOOL_NAME | codex_code_mode::WAIT_TOOL_NAME
+                 ));
+         let facts = match super::execution_facts::ToolFactRecord::begin(&invocation).await? {
+-            super::execution_facts::ToolFactAdmission::New(facts) => facts,
++            super::execution_facts::ToolFactAdmission::New(facts) => Arc::new(facts),
+             super::execution_facts::ToolFactAdmission::Replay(replay) => {
+                 if direct_surface_rejected {
+                     return Err(FunctionCallError::RespondToModel(format!(
+@@ -749,7 +749,9 @@
+             return Err(err);
+         }
+ 
+-        facts.claim(&invocation, tool.as_ref()).await?;
++        let dispatch =
++            super::tool_sharing::ToolDispatch::prepare(&invocation, tool.clone(), facts.clone())
++                .await?;
+         super::tool_diagnostics::ToolDiagnostics::refresh(&invocation.session).await;
+         notify_tool_start(&invocation).await;
+         let mut control_tool_analytics = tool
+@@ -787,7 +789,7 @@
+                     let tool = tool.clone();
+                     let response_cell = &response_cell;
+                     async move {
+-                        match handle_any_tool(tool.as_ref(), invocation_for_tool).await {
++                        match dispatch.run(invocation_for_tool, tool).await {
+                             Ok(result) => {
+                                 let preview = result.result.log_preview();
+                                 let success = result.result.success_for_logging();
+@@ -904,9 +906,27 @@
+                         });
+                     }
+                 }
++                if let Err(error) =
++                    super::tool_sharing::revalidate_delivery(&invocation, tool.as_ref(), &facts)
++                        .await
++                {
++                    facts
++                        .rejected("shared_result_authority_or_input_expired")
++                        .await?;
++                    dispatch_trace.record_failed(&error);
++                    return Err(error);
++                }
+                 facts
+                     .accepted(super::execution_facts::snapshot(&result)?)
+                     .await?;
++                facts
++                    .store
++                    .record_verified_tool_progress(
++                        &invocation.session.thread_id.to_string(),
++                        facts.sequence,
++                    )
++                    .await
++                    .map_err(super::execution_facts::storage_error)?;
+                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+                 if let Some(continuation) = &result.continuation
+                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
+@@ -953,7 +973,7 @@
+     true
+ }
+ 
+-async fn handle_any_tool(
++pub(super) async fn handle_any_tool(
+     tool: &dyn CoreToolRuntime,
+     invocation: ToolInvocation,
+ ) -> Result<AnyToolResult, FunctionCallError> {

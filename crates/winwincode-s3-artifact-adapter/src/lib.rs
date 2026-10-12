@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Product-neutral S3-compatible Artifact byte transport.
-//!
-//! Deployment routing, credentials, and encryption policy are supplied for each
-//! request by the composing product. This crate retains no bucket, prefix,
-//! region, key, proxy, or retention configuration.
-
 use std::{collections::BTreeSet, fmt, io::Read as _, sync::Arc, time::Duration};
 
 use serde::Serialize;
@@ -22,7 +16,6 @@ const MAX_CONTROL_RESPONSE_BYTES: usize = 1_024 * 1_024;
 const MAX_ATTEMPTS: u8 = 3;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable S3 adapter failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum S3ArtifactErrorKind {
     Invalid,
@@ -34,7 +27,6 @@ pub enum S3ArtifactErrorKind {
     CorruptResponse,
 }
 
-/// Secret-safe S3 adapter failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct S3ArtifactError {
     kind: S3ArtifactErrorKind,
@@ -60,7 +52,6 @@ impl fmt::Display for S3ArtifactError {
 
 impl std::error::Error for S3ArtifactError {}
 
-/// TLS trust roots for one S3-compatible endpoint.
 #[derive(Clone)]
 pub enum S3ArtifactTlsRoots {
     WebPki,
@@ -79,7 +70,6 @@ impl fmt::Debug for S3ArtifactTlsRoots {
     }
 }
 
-/// Bounded request deadlines.
 #[derive(Clone, Copy, Debug)]
 pub struct S3ArtifactTimeouts {
     pub connect: Duration,
@@ -87,7 +77,6 @@ pub struct S3ArtifactTimeouts {
     pub total: Duration,
 }
 
-/// Bounded multipart, response, and retry limits.
 #[derive(Clone, Copy, Debug)]
 pub struct S3ArtifactLimits {
     pub max_part_bytes: usize,
@@ -96,7 +85,6 @@ pub struct S3ArtifactLimits {
     pub max_attempts: u8,
 }
 
-/// Product-neutral HTTPS transport policy.
 #[derive(Clone, Debug)]
 pub struct S3ArtifactTransportConfig {
     timeouts: S3ArtifactTimeouts,
@@ -105,11 +93,6 @@ pub struct S3ArtifactTransportConfig {
 }
 
 impl S3ArtifactTransportConfig {
-    /// Creates a WebPKI-verified, no-proxy, no-redirect transport policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero, inconsistent, or excessive limits.
     pub fn try_new(
         timeouts: S3ArtifactTimeouts,
         limits: S3ArtifactLimits,
@@ -123,11 +106,6 @@ impl S3ArtifactTransportConfig {
         Ok(config)
     }
 
-    /// Installs an explicit non-empty DER trust-root set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or oversized root sets and certificates.
     pub fn with_specific_tls_roots(mut self, roots: Vec<Vec<u8>>) -> Result<Self, S3ArtifactError> {
         if roots.is_empty()
             || roots.len() > 32
@@ -164,7 +142,6 @@ impl S3ArtifactTransportConfig {
     }
 }
 
-/// S3-compatible HTTP method exposed to request-policy ports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum S3ArtifactMethod {
     Get,
@@ -185,16 +162,10 @@ impl S3ArtifactMethod {
     }
 }
 
-/// Validated request headers returned by an injected policy port.
 #[derive(Clone, Default)]
 pub struct S3ArtifactHeaders(Vec<(String, String)>);
 
 impl S3ArtifactHeaders {
-    /// Validates bounded headers without retaining them in the adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate, reserved, malformed, or unbounded headers.
     pub fn try_new(values: Vec<(String, String)>) -> Result<Self, S3ArtifactError> {
         if values.len() > MAX_HEADER_COUNT {
             return Err(invalid());
@@ -228,7 +199,6 @@ impl fmt::Debug for S3ArtifactHeaders {
     }
 }
 
-/// Immutable request facts used by identity and encryption policy ports.
 pub struct S3ArtifactRequestContext<'a> {
     method: S3ArtifactMethod,
     url: &'a str,
@@ -282,7 +252,6 @@ impl S3ArtifactRequestContext<'_> {
     }
 }
 
-/// Bounded response headers available to the encryption verifier.
 pub struct S3ArtifactResponseHeaders(Vec<(String, String)>);
 
 impl S3ArtifactResponseHeaders {
@@ -304,36 +273,19 @@ impl fmt::Debug for S3ArtifactResponseHeaders {
     }
 }
 
-/// Supplies per-attempt authorization headers without fixing a credential scheme.
 pub trait S3ArtifactIdentityPort: Send + Sync {
-    /// Authorizes one exact request after encryption headers are known.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when current identity cannot authorize the request.
     fn authorize(
         &self,
         request: &S3ArtifactRequestContext<'_>,
     ) -> Result<S3ArtifactHeaders, S3ArtifactError>;
 }
 
-/// Supplies and verifies deployment-owned encryption policy.
 pub trait S3ArtifactEncryptionPort: Send + Sync {
-    /// Returns encryption headers for one exact request.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when the deployment policy cannot authorize encryption.
     fn request_headers(
         &self,
         request: &S3ArtifactRequestContext<'_>,
     ) -> Result<S3ArtifactHeaders, S3ArtifactError>;
 
-    /// Verifies the response against the same deployment encryption policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing or mismatched encryption receipt.
     fn verify_response(
         &self,
         request: &S3ArtifactRequestContext<'_>,
@@ -341,7 +293,6 @@ pub trait S3ArtifactEncryptionPort: Send + Sync {
     ) -> Result<(), S3ArtifactError>;
 }
 
-/// Verified byte range tied to the complete content address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct S3ArtifactRangeRead {
     bytes: Vec<u8>,
@@ -372,7 +323,6 @@ impl S3ArtifactRangeRead {
     }
 }
 
-/// Stateless verified-HTTPS S3-compatible byte adapter.
 #[derive(Clone)]
 pub struct S3ArtifactAdapter {
     config: S3ArtifactTransportConfig,
@@ -382,11 +332,6 @@ pub struct S3ArtifactAdapter {
 }
 
 impl S3ArtifactAdapter {
-    /// Builds a no-proxy, no-redirect, rustls-verified adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid network limits or trust roots.
     pub fn try_new(
         config: S3ArtifactTransportConfig,
         identity: Arc<dyn S3ArtifactIdentityPort>,
@@ -426,11 +371,6 @@ impl S3ArtifactAdapter {
         })
     }
 
-    /// Uploads one idempotent multipart chunk.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid facts, changed replay, authorization failure, or transport failure.
     pub fn put_chunk(
         &self,
         upload_url: &str,
@@ -482,11 +422,6 @@ impl S3ArtifactAdapter {
         Ok(())
     }
 
-    /// Completes one multipart upload and binds the full digest and size.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid facts, a corrupt receipt, authorization failure, or transport failure.
     pub fn finalize(
         &self,
         upload_url: &str,
@@ -540,11 +475,6 @@ impl S3ArtifactAdapter {
         Ok(())
     }
 
-    /// Reads and verifies one complete object.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid URL/digest, authorization failure, corrupt bytes, or transport failure.
     pub fn read(
         &self,
         object_url: &str,
@@ -582,11 +512,6 @@ impl S3ArtifactAdapter {
         Ok(Some(response.body))
     }
 
-    /// Reads and verifies one inclusive byte range.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed ranges, authorization failure, corrupt bytes, or transport failure.
     pub fn read_range(
         &self,
         object_url: &str,
@@ -644,11 +569,6 @@ impl S3ArtifactAdapter {
         }))
     }
 
-    /// Idempotently removes one complete object.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid routing, authorization failure, or transport failure.
     pub fn delete(&self, object_url: &str, digest: &Sha256Digest) -> Result<(), S3ArtifactError> {
         validate_base_url(object_url)?;
         digest_hex(digest)?;
@@ -666,11 +586,6 @@ impl S3ArtifactAdapter {
         require_one_of_statuses(&response, &[204, 404], &operation_id)
     }
 
-    /// Idempotently removes one unfinished multipart upload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid routing/identity, authorization failure, or transport failure.
     pub fn abort_upload(
         &self,
         upload_url: &str,

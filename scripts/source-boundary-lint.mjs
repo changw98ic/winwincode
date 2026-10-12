@@ -321,7 +321,9 @@ function executionNetworkFindings() {
       if (!path.endsWith('.rs')) continue
       const text = readText(path)
       if (text === null) continue
-      if (/\b(?:ureq|reqwest|hyper)::|@deepseek-ai\/|\bDshModelPort\b|\bctx\.llm\b/iu.test(text)) {
+      const serverTransport = relativePath(path) === 'crates/winwincode-worker/src/remote_transport.rs'
+      if (/@deepseek-ai\/|\bDshModelPort\b|\bctx\.llm\b/iu.test(text)
+        || (!serverTransport && /\b(?:ureq|reqwest|hyper)::/u.test(text))) {
         findings.push(finding(path, 'execution-network-or-legacy-authority'))
       }
     }

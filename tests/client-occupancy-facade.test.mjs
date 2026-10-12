@@ -27,8 +27,6 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/client-occupancy-tests')
-// Plain module paths keep one ControlPlaneClientError class identity across
-// the facade, the wire seam, the view-model, and these assertions.
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
@@ -520,9 +518,6 @@ test('every rejection keeps the stable shape over network, auth, and unknown cod
   assert.equal(authentication.kind, 'authentication')
   assert.equal(clientOccupancyErrorCategory(authentication), 'unavailable')
 
-  // A rejection outside the one error identity can only arrive through the
-  // injected-client seam; the facade still collapses it into the honest
-  // unavailable failure instead of passing it through.
   const alien = createClientOccupancyFacade({
     client: baseClient({
       async occupancyStatus() {

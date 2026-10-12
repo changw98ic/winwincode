@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable peer-session collaboration for the personal Community runtime.
-//!
-//! The Control Plane is the only writer. Agent sessions submit typed requests
-//! and results; this service resolves stable Agent identities, validates every
-//! transition, and commits the catalog plus its receipt atomically.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -36,7 +30,6 @@ const RATE_WINDOW_MILLIS: u64 = 60_000;
 const MAX_REQUESTS_PER_WINDOW: usize = 20;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Stable peer-collaboration failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerCollaborationErrorKind {
     InvalidRequest,
@@ -52,7 +45,6 @@ pub enum PeerCollaborationErrorKind {
     Corrupt,
 }
 
-/// Secret-safe peer-collaboration error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerCollaborationError {
     kind: PeerCollaborationErrorKind,
@@ -64,7 +56,6 @@ impl PeerCollaborationError {
         Self { kind, message }
     }
 
-    /// Returns the stable machine-readable error category.
     #[must_use]
     pub const fn kind(&self) -> PeerCollaborationErrorKind {
         self.kind
@@ -95,21 +86,13 @@ impl From<StorageError> for PeerCollaborationError {
     }
 }
 
-/// Trusted clock failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerCollaborationClockError;
 
-/// Clock used for durable ordering and rate limiting.
 pub trait PeerCollaborationClock: Send {
-    /// Returns Unix epoch milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the trusted clock is unavailable.
     fn now_millis(&mut self) -> Result<u64, PeerCollaborationClockError>;
 }
 
-/// System implementation of the trusted clock.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemPeerCollaborationClock;
 
@@ -123,7 +106,6 @@ impl PeerCollaborationClock for SystemPeerCollaborationClock {
     }
 }
 
-/// Current availability of one stable Agent identity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAvailability {
@@ -132,7 +114,6 @@ pub enum AgentAvailability {
     Working,
 }
 
-/// Durable Agent Directory row.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDirectoryEntry {
@@ -142,7 +123,6 @@ pub struct AgentDirectoryEntry {
     pub updated_at_millis: u64,
 }
 
-/// Human-usable directory selector. Callers never need an Agent UUID.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AgentSelector {
@@ -150,7 +130,6 @@ pub enum AgentSelector {
     Capability { capability: WorkerCapabilityFeature },
 }
 
-/// Controller-owned directory update.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDirectoryCommand {
@@ -161,14 +140,12 @@ pub struct AgentDirectoryCommand {
     pub availability: AgentAvailability,
 }
 
-/// One directory query result cut.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentDirectorySnapshot {
     pub catalog_revision: u64,
     pub agents: Vec<AgentDirectoryEntry>,
 }
 
-/// Authenticated runtime identity supplied by the Controller, not by the model.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerSessionPrincipal {
@@ -176,7 +153,6 @@ pub struct PeerSessionPrincipal {
     pub session_id: WorkerSessionId,
 }
 
-/// Bounded references are passed instead of copying chat or workspace content.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationContextRef {
@@ -195,7 +171,6 @@ pub enum CollaborationContextRef {
     },
 }
 
-/// Typed collaboration request payload.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationPayload {
@@ -220,7 +195,6 @@ pub enum CollaborationPayload {
     },
 }
 
-/// Closed request kind used by the read projection.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationRequestKind {
@@ -230,7 +204,6 @@ pub enum CollaborationRequestKind {
     ReviewRequest,
 }
 
-/// Whether an answer is an opinion or is supported as an authoritative fact.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerClassification {
@@ -238,7 +211,6 @@ pub enum AnswerClassification {
     AuthoritativeFact,
 }
 
-/// Typed result returned to the original requester.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationResult {
@@ -263,7 +235,6 @@ pub enum CollaborationResult {
     },
 }
 
-/// Durable delivery lifecycle.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationRequestState {
@@ -273,12 +244,10 @@ pub enum CollaborationRequestState {
     Completed,
 }
 
-/// Stable collaboration request identity.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct CollaborationRequestId(pub String);
 
-/// Canonical durable request. Requester identity is filled from the principal.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationRequest {
@@ -296,7 +265,6 @@ pub struct CollaborationRequest {
     pub updated_at_millis: u64,
 }
 
-/// Request submission contains no requester identity field.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitCollaborationCommand {
@@ -308,7 +276,6 @@ pub struct SubmitCollaborationCommand {
     pub payload: CollaborationPayload,
 }
 
-/// Target-side state transition reported to the Controller.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationAdvanceAction {
@@ -317,7 +284,6 @@ pub enum CollaborationAdvanceAction {
     Complete { result: CollaborationResult },
 }
 
-/// Idempotent collaboration transition command.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdvanceCollaborationCommand {
@@ -327,7 +293,6 @@ pub struct AdvanceCollaborationCommand {
     pub action: CollaborationAdvanceAction,
 }
 
-/// Secret-safe durable mutation receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PeerCollaborationReceipt {
@@ -337,7 +302,6 @@ pub struct PeerCollaborationReceipt {
     pub idempotent_replay: bool,
 }
 
-/// Read lane used by the non-UI collaboration projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerCollaborationLane {
@@ -346,7 +310,6 @@ pub enum PeerCollaborationLane {
     Waiting,
 }
 
-/// Candidate freshness derived from the current candidate digest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewFreshness {
@@ -355,7 +318,6 @@ pub enum ReviewFreshness {
     Stale,
 }
 
-/// Bounded list row. It intentionally contains no question, answer, context, or evidence body.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerCollaborationProjection {
@@ -379,7 +341,6 @@ struct PeerCollaborationState {
     requests: BTreeMap<CollaborationRequestId, CollaborationRequest>,
 }
 
-/// Durable personal peer-collaboration service.
 pub struct PeerCollaborationService<'a> {
     storage: &'a mut dyn ProductStateStorage,
     clock: Box<dyn PeerCollaborationClock>,
@@ -399,21 +360,10 @@ impl<'a> PeerCollaborationService<'a> {
         Self { storage, clock }
     }
 
-    /// Returns the current catalog revision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects corrupt durable state or a storage failure.
     pub fn catalog_revision(&self) -> Result<u64, PeerCollaborationError> {
         Ok(self.load_state()?.revision)
     }
 
-    /// Applies one Controller-owned Agent Directory update.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identities, invalid availability/session pairings, stale
-    /// revisions, conflicting request ids, or storage failures.
     pub fn sync_agent(
         &mut self,
         command: &AgentDirectoryCommand,
@@ -457,11 +407,6 @@ impl<'a> PeerCollaborationService<'a> {
         )
     }
 
-    /// Finds Agents by a human identity label or capability.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid selectors or corrupt durable state.
     pub fn find_agents(
         &self,
         selector: &AgentSelector,
@@ -485,12 +430,6 @@ impl<'a> PeerCollaborationService<'a> {
         })
     }
 
-    /// Queues one typed request after resolving its target from the directory.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unknown sessions, stale revisions, duplicates, loops, excess hops,
-    /// rate-limit excess, invalid payloads, or storage failures.
     pub fn submit(
         &mut self,
         principal: &PeerSessionPrincipal,
@@ -561,12 +500,6 @@ impl<'a> PeerCollaborationService<'a> {
         )
     }
 
-    /// Applies one target-side delivery, acknowledgement, or completion report.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign Agents, stale revisions, illegal transitions, mismatched
-    /// result types, candidate changes, or storage failures.
     pub fn advance(
         &mut self,
         principal: &PeerSessionPrincipal,
@@ -627,11 +560,6 @@ impl<'a> PeerCollaborationService<'a> {
         )
     }
 
-    /// Reads one complete request for its source or target Agent only.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign or stale sessions and unknown requests.
     pub fn get(
         &self,
         principal: &PeerSessionPrincipal,
@@ -650,12 +578,6 @@ impl<'a> PeerCollaborationService<'a> {
         Ok(request.clone())
     }
 
-    /// Builds the bounded Inbox/Delegated/Waiting projection for one current Agent.
-    /// Candidate freshness is derived from the supplied current `WorkItem` digests.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/stale sessions, malformed candidate digests, or corrupt state.
     pub fn project(
         &self,
         principal: &PeerSessionPrincipal,
@@ -996,7 +918,7 @@ fn validate_result(result: &CollaborationResult) -> Result<(), PeerCollaboration
 }
 
 fn validate_evidence(reference: &EvidenceRef) -> Result<(), PeerCollaborationError> {
-    if reference.schema_version != 1
+    if reference.schema_version != winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION
         || reference.delivery_spec_revision == 0
         || reference.delivery_spec_revision > MAX_SAFE_INTEGER
     {
@@ -1007,7 +929,8 @@ fn validate_evidence(reference: &EvidenceRef) -> Result<(), PeerCollaborationErr
     validate_text(&reference.delivery_spec_id.0, 128)?;
     validate_id(&reference.work_run_id.0, "wrn_")?;
     validate_token(&reference.session_binding_id.0, 128)?;
-    validate_text(&reference.candidate_ref, 2_000)?;
+    validate_id(&reference.candidate_id.0, "cnd_")?;
+    validate_id(&reference.snapshot_id.0, "snap_")?;
     validate_text(&reference.source_ref, 2_000)?;
     validate_millis(reference.created_at_millis)
 }

@@ -405,8 +405,6 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
     'task board page',
   )
   await waitFor(() => readinessItems(fixture.rootElement).length === 6, 'checklist re-render')
-  // The closed Settings feature discards its Scope snapshot by contract, so the
-  // checklist re-reads once on the next surface; it must never poll per render.
   await new Promise(resolvePromise => setTimeout(resolvePromise, 120))
   for (const name of [
     'credential.reference.list',
@@ -436,7 +434,6 @@ test('recheck after completing the steps reports ready and issues fresh reads', 
     node.className === 'wwc-readiness-recheck'
   ))
   recheck.dispatchEvent({ type: 'click' })
-  // Once every check passes, the shell hides the whole onboarding checklist.
   await waitFor(
     () => readinessSection(fixture.rootElement).textContent.includes('通过 6/6')
       && readinessSection(fixture.rootElement).hidden === true,

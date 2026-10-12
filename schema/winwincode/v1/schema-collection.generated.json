@@ -465,6 +465,7 @@
     "ApprovalActionReasonCode": {
       "enum": [
         "sandbox_escalation",
+        "mcp_permission",
         "network_access",
         "filesystem_write"
       ],
@@ -964,6 +965,7 @@
         "reasonCode": {
           "enum": [
             "sandbox_escalation",
+            "mcp_permission",
             "network_access",
             "filesystem_write"
           ],
@@ -1125,6 +1127,10 @@
         "replayFromSequence": {
           "$ref": "#/$defs/ExecutionSequence"
         },
+        "retainedArtifact": {
+          "$ref": "#/$defs/ArtifactReference",
+          "description": "An already complete predecessor retained instead of uploading it again. Only returned for a replacement open, with ackSequence zero."
+        },
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         },
@@ -1191,6 +1197,9 @@
         },
         "sessionIdentity": {
           "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "workerSessionId": {
           "$ref": "#/$defs/WorkerSessionId"
@@ -1284,6 +1293,10 @@
         "messageId": {
           "$ref": "#/$defs/ExecutionMessageId"
         },
+        "replacesArtifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Replaces an unfinished upload of identical candidate bytes under the same authority, or retains its completed reference. Uses a new artifact and message identity."
+        },
         "requestId": {
           "$ref": "#/$defs/RequestId"
         },
@@ -1295,6 +1308,9 @@
         },
         "sessionIdentity": {
           "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "workerSessionId": {
           "$ref": "#/$defs/WorkerSessionId"
@@ -1567,7 +1583,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -1744,7 +1760,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -1939,7 +1955,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -2049,7 +2065,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -2892,6 +2908,10 @@
         "allowEmpty": {
           "type": "boolean"
         },
+        "allowOther": {
+          "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation.",
+          "type": "boolean"
+        },
         "binding": {
           "$ref": "#/$defs/ChatInteractionBindingProjection"
         },
@@ -3252,133 +3272,6 @@
       ],
       "type": "object"
     },
-    "ClientAccessChallengeAckMessage": {
-      "additionalProperties": false,
-      "description": "Confirms that the challenged connect code generation is still valid on the Device Client; the Control Plane may create the ClientAccessGrant only after this ACK.",
-      "properties": {
-        "challengeId": {
-          "$ref": "#/$defs/ClientAccessChallengeId"
-        },
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "connectCodeId": {
-          "$ref": "#/$defs/ClientConnectCodeId"
-        },
-        "expectedRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "idempotencyKey": {
-          "$ref": "#/$defs/IdempotencyKey"
-        },
-        "kind": {
-          "const": "client.access.challenge_ack"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        },
-        "status": {
-          "$ref": "#/$defs/ClientChallengeAckStatus"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "challengeId",
-        "connectCodeId",
-        "status",
-        "expectedRevision",
-        "idempotencyKey"
-      ],
-      "title": "client.access.challenge_ack",
-      "type": "object",
-      "x-authority": "access-write",
-      "x-direction": "client-to-control-plane",
-      "x-message-class": "command"
-    },
-    "ClientAccessChallengeId": {
-      "description": "Identity of one pending access challenge sent to the Device Client before a grant is created.",
-      "pattern": "^cac_[0-9A-HJKMNP-TV-Z]{26}$",
-      "type": "string"
-    },
-    "ClientAccessChallengeMessage": {
-      "additionalProperties": false,
-      "description": "Asks the Device Client to verify that the challenged connect code generation is still valid before a ClientAccessGrant is created; the plaintext code never crosses this contract.",
-      "properties": {
-        "challengeId": {
-          "$ref": "#/$defs/ClientAccessChallengeId"
-        },
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "codeDigest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "connectCodeId": {
-          "$ref": "#/$defs/ClientConnectCodeId"
-        },
-        "expiresAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "kind": {
-          "const": "client.access.challenge"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "requesterUserId": {
-          "$ref": "#/$defs/UserId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "challengeId",
-        "connectCodeId",
-        "codeDigest",
-        "requesterUserId",
-        "expiresAt"
-      ],
-      "title": "client.access.challenge",
-      "type": "object",
-      "x-authority": "access-write",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "request"
-    },
     "ClientAccessGrant": {
       "additionalProperties": false,
       "description": "Many-to-many user-to-client permission relation. A grant never implies occupancy. Ownership: Control Plane.",
@@ -3733,18 +3626,9 @@
       "title": "ClientCapacityReport",
       "type": "object"
     },
-    "ClientChallengeAckStatus": {
-      "description": "Device Client verdict for one access challenge.",
-      "enum": [
-        "confirmed",
-        "stale_generation"
-      ],
-      "title": "ClientChallengeAckStatus",
-      "type": "string"
-    },
     "ClientCommandAckMessage": {
       "additionalProperties": false,
-      "description": "Universal idempotent acknowledgement for control-plane-to-client commands that have no dedicated ack message.",
+      "description": "Durable command result in either direction. Server reports rejected client commands; Device acknowledges server commands without a dedicated result. Transport acknowledgement alone does not imply business success.",
       "properties": {
         "clientInstanceId": {
           "$ref": "#/$defs/ClientInstanceId"
@@ -3798,7 +3682,7 @@
       "title": "client.command_ack",
       "type": "object",
       "x-authority": "control-ack",
-      "x-direction": "client-to-control-plane",
+      "x-direction": "bidirectional",
       "x-message-class": "ack"
     },
     "ClientConnectCode": {
@@ -3991,9 +3875,6 @@
           "$ref": "#/$defs/ClientConnectCodePublishedMessage"
         },
         {
-          "$ref": "#/$defs/ClientAccessChallengeAckMessage"
-        },
-        {
           "$ref": "#/$defs/ClientOccupancyAckMessage"
         },
         {
@@ -4027,12 +3908,6 @@
           "$ref": "#/$defs/ClientCommandAckMessage"
         },
         {
-          "$ref": "#/$defs/ClientEnrollmentAcceptedMessage"
-        },
-        {
-          "$ref": "#/$defs/ClientAccessChallengeMessage"
-        },
-        {
           "$ref": "#/$defs/ClientOccupancyOfferMessage"
         },
         {
@@ -4055,9 +3930,6 @@
         },
         {
           "$ref": "#/$defs/ClientLockMessage"
-        },
-        {
-          "$ref": "#/$defs/ClientCredentialRotateMessage"
         },
         {
           "$ref": "#/$defs/ClientProviderReportMessage"
@@ -4098,7 +3970,6 @@
         "client.hello",
         "client.heartbeat",
         "client.connect_code.published",
-        "client.access.challenge_ack",
         "client.occupancy.ack",
         "client.occupancy.rejected",
         "client.repository.upsert",
@@ -4110,8 +3981,6 @@
         "client.candidate.retained",
         "client.candidate.apply_result",
         "client.command_ack",
-        "client.enrollment_accepted",
-        "client.access.challenge",
         "client.occupancy.offer",
         "client.occupancy.release",
         "client.occupancy.force_fence",
@@ -4120,7 +3989,6 @@
         "client.worker.stop",
         "client.candidate.apply",
         "client.client_lock",
-        "client.credential_rotate",
         "client.provider.report",
         "client.provider.apply",
         "client.extension.apply",
@@ -4133,128 +4001,11 @@
       "title": "ClientControlMessageKind",
       "type": "string"
     },
-    "ClientCredentialRotateMessage": {
-      "additionalProperties": false,
-      "description": "Requests device credential rotation; the rotation handshake and credential material stay outside this contract.",
-      "properties": {
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "expectedRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "idempotencyKey": {
-          "$ref": "#/$defs/IdempotencyKey"
-        },
-        "kind": {
-          "const": "client.credential_rotate"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "reason": {
-          "$ref": "#/$defs/ClientCredentialRotateReason"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "reason",
-        "expectedRevision",
-        "idempotencyKey"
-      ],
-      "title": "client.credential_rotate",
-      "type": "object",
-      "x-authority": "control-command",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "command"
-    },
-    "ClientCredentialRotateReason": {
-      "description": "Why device credential rotation is requested; credential material itself never crosses this contract.",
-      "enum": [
-        "scheduled",
-        "suspected_compromise"
-      ],
-      "title": "ClientCredentialRotateReason",
-      "type": "string"
-    },
     "ClientDisplayName": {
       "description": "User-chosen display name for a ClientNode or repository binding.",
       "maxLength": 200,
       "minLength": 1,
       "type": "string"
-    },
-    "ClientEnrollmentAcceptedMessage": {
-      "additionalProperties": false,
-      "description": "Completes enrollment and returns the stable public Client ID; the public Client ID is not a credential. Device credential material never crosses this contract.",
-      "properties": {
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "heartbeatIntervalMs": {
-          "maximum": 300000,
-          "minimum": 1000,
-          "type": "integer"
-        },
-        "kind": {
-          "const": "client.enrollment_accepted"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "publicClientId": {
-          "$ref": "#/$defs/PublicClientId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        },
-        "serverTime": {
-          "$ref": "#/$defs/Instant"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "publicClientId",
-        "serverTime",
-        "heartbeatIntervalMs"
-      ],
-      "title": "client.enrollment_accepted",
-      "type": "object",
-      "x-authority": "device-enrollment",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "response"
     },
     "ClientEnrollMessage": {
       "additionalProperties": false,
@@ -5831,6 +5582,16 @@
         "occurredAt": {
           "$ref": "#/$defs/Instant"
         },
+        "processClosure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientWorkerProcessClosure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         },
@@ -5937,6 +5698,46 @@
       "x-authority": "control-command",
       "x-direction": "control-plane-to-client",
       "x-message-class": "command"
+    },
+    "ClientWorkerProcessClosure": {
+      "additionalProperties": false,
+      "description": "Authenticated Device proof of an exact launch process closure; current reporter instance is distinct from the original launch instance.",
+      "properties": {
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "neverStarted": {
+          "type": "boolean"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "processBootDigest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reportingClientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "workerLaunchGrantId": {
+          "$ref": "#/$defs/WorkerLaunchGrantId"
+        }
+      },
+      "required": [
+        "workerLaunchGrantId",
+        "clientInstanceId",
+        "reportingClientInstanceId",
+        "occupancyFencingToken",
+        "neverStarted",
+        "processBootDigest"
+      ],
+      "type": "object"
     },
     "ClientWorkerReconcileMessage": {
       "additionalProperties": false,
@@ -6084,6 +5885,16 @@
         },
         "occurredAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "processClosure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientWorkerProcessClosure"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
@@ -6599,8 +6410,11 @@
         "candidateDigest": {
           "$ref": "#/$defs/Sha256Digest"
         },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -6627,6 +6441,9 @@
           "minLength": 1,
           "type": "string"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "workRunId": {
           "$ref": "#/$defs/WorkRunId"
         }
@@ -6641,7 +6458,9 @@
         "diffSha256",
         "workRunId",
         "attempt",
-        "sessionBindingId"
+        "sessionBindingId",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -8792,6 +8611,700 @@
         "sessionIdentity"
       ],
       "type": "object"
+    },
+    "CoreToolAgentWaitProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "edge": {
+          "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
+        }
+      },
+      "required": [
+        "edge",
+        "state"
+      ],
+      "type": "object"
+    },
+    "CoreToolCallProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "attemptId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "cellId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolOutputDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolOutputDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolExecutionState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputValidation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolInputValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logicalId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "parentCallId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentRequestSequence": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionSequence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "toolName": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestSequence",
+        "logicalId",
+        "toolName",
+        "parentCallId",
+        "cellId",
+        "attemptId",
+        "execution",
+        "disposition",
+        "delivery",
+        "cancelled",
+        "inputValidation",
+        "parentRequestSequence"
+      ],
+      "type": "object"
+    },
+    "CoreToolCallReference": {
+      "additionalProperties": false,
+      "properties": {
+        "cellId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logicalId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "parentCallId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "toolName": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestSequence",
+        "logicalId",
+        "toolName",
+        "parentCallId",
+        "cellId"
+      ],
+      "type": "object"
+    },
+    "CoreToolCellLifecycle": {
+      "enum": [
+        "live",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "CoreToolCellProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "cellId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/CoreToolCellLifecycle"
+        },
+        "parentRequestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        }
+      },
+      "required": [
+        "sequence",
+        "cellId",
+        "parentRequestSequence",
+        "lifecycle"
+      ],
+      "type": "object"
+    },
+    "CoreToolDiagnosticDelivery": {
+      "enum": [
+        "queued",
+        "offered"
+      ],
+      "type": "string"
+    },
+    "CoreToolDiagnosticKind": {
+      "enum": [
+        "repeated_operation",
+        "alternating_cycle",
+        "branch_expansion",
+        "wait_cycle",
+        "unavailable_wait"
+      ],
+      "type": "string"
+    },
+    "CoreToolDiagnosticProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "delivery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnosticId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/CoreToolCallReference"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "evidenceVersion": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "kind": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "question": {
+          "oneOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "waitGraph": {
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+          },
+          "maxItems": 8,
+          "type": "array"
+        }
+      },
+      "required": [
+        "diagnosticId",
+        "evidenceVersion",
+        "kind",
+        "question",
+        "evidence",
+        "delivery"
+      ],
+      "type": "object"
+    },
+    "CoreToolExecutionState": {
+      "enum": [
+        "running",
+        "completed",
+        "uncertain"
+      ],
+      "type": "string"
+    },
+    "CoreToolFactKind": {
+      "enum": [
+        "request",
+        "cell",
+        "wait",
+        "reconciliation",
+        "diagnostic",
+        "progress",
+        "diagnostic_response",
+        "sharing",
+        "waiter_cancellation",
+        "input_binding",
+        "input_validation",
+        "agent_wait"
+      ],
+      "type": "string"
+    },
+    "CoreToolInputValidation": {
+      "enum": [
+        "verified",
+        "mismatch",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "CoreToolOutputDelivery": {
+      "enum": [
+        "pending",
+        "offered"
+      ],
+      "type": "string"
+    },
+    "CoreToolOutputDisposition": {
+      "enum": [
+        "pending",
+        "accepted",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "CoreToolRecoveryProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "businessId": {
+          "oneOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exitCode": {
+          "oneOf": [
+            {
+              "maximum": 2147483647,
+              "minimum": -2147483648,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolRecoveryState"
+        }
+      },
+      "required": [
+        "requestSequence",
+        "state",
+        "businessId",
+        "exitCode"
+      ],
+      "type": "object"
+    },
+    "CoreToolRecoveryState": {
+      "enum": [
+        "unavailable",
+        "unconfirmed",
+        "running",
+        "exited"
+      ],
+      "type": "string"
+    },
+    "CoreToolRuntimeFactPayload": {
+      "additionalProperties": false,
+      "description": "Original payload-free Codex Core tool fact carried by a lease-bound runtime.event. The source cursor is independent of the Worker transport sequence.",
+      "properties": {
+        "factJson": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": "winwincode.core-tool-fact.v1",
+          "type": "string"
+        },
+        "sourceSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "sourceThreadId": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sourceThreadId",
+        "sourceSequence",
+        "factJson"
+      ],
+      "type": "object"
+    },
+    "CoreToolRuntimeProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "agentWait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolAgentWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "call": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolCallProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cell": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolCellProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnosis": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolDiagnosticProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreToolFactKind"
+        },
+        "recovery": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolRecoveryProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sharing": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolSharingProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "sourceThreadId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "wait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sourceThreadId",
+        "sourceSequence",
+        "kind",
+        "call",
+        "cell",
+        "wait",
+        "diagnosis",
+        "sharing",
+        "recovery"
+      ],
+      "type": "object"
+    },
+    "CoreToolSharingKind": {
+      "enum": [
+        "reuse",
+        "merged"
+      ],
+      "type": "string"
+    },
+    "CoreToolSharingProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CoreToolSharingKind"
+        },
+        "sourceAttemptId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceRequestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        }
+      },
+      "required": [
+        "sourceRequestSequence",
+        "sourceAttemptId",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitEdgeProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "deadlineUnixMs": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "logicalId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "source": {
+          "$ref": "#/$defs/CoreToolWaitNodeProjection"
+        },
+        "targetCount": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitNodeProjection"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "treeId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "treeId",
+        "requestSequence",
+        "logicalId",
+        "source",
+        "targets",
+        "targetCount",
+        "deadlineUnixMs"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitNodeKind": {
+      "enum": [
+        "thread",
+        "cell"
+      ],
+      "type": "string"
+    },
+    "CoreToolWaitNodeProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "cellId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreToolWaitNodeKind"
+        },
+        "ownerId": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "scopeId": {
+          "oneOf": [
+            {
+              "maxLength": 80,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "threadId",
+        "ownerId",
+        "cellId",
+        "scopeId"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
+        },
+        "targetCellSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        }
+      },
+      "required": [
+        "requestSequence",
+        "targetCellSequence",
+        "state"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitState": {
+      "enum": [
+        "waiting",
+        "settled"
+      ],
+      "type": "string"
     },
     "Count": {
       "maximum": 9007199254740991,
@@ -11557,9 +12070,8 @@
       "additionalProperties": false,
       "description": "Evidence stores a bounded source reference, never copied runtime logs or command output.",
       "properties": {
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "createdAt": {
           "$ref": "#/$defs/Instant"
@@ -11581,6 +12093,9 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "sourceRef": {
           "maxLength": 1024,
@@ -11610,10 +12125,11 @@
         "deliverySpecRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
         "type",
         "sourceRef",
-        "createdAt"
+        "createdAt",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -12075,7 +12591,7 @@
           "$ref": "#/$defs/Sha256Digest"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "diffSha256": {
@@ -12119,7 +12635,7 @@
       "description": "Exact requested subset of the current failed candidate. The Controller independently verifies WorkItem ownership, sealed Git hunks, current failed Evidence and durable rework history.",
       "properties": {
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "diffSha256": {
@@ -12451,8 +12967,11 @@
     "DeliveryVerdictProjection": {
       "additionalProperties": false,
       "properties": {
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "criteria": {
@@ -12481,6 +13000,9 @@
         "producedAt": {
           "$ref": "#/$defs/Instant"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "status": {
           "enum": [
             "pass",
@@ -12508,7 +13030,9 @@
         "status",
         "criteria",
         "unresolvedFindings",
-        "producedAt"
+        "producedAt",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -12811,6 +13335,18 @@
     },
     "DeviceProviderConfig": {
       "additionalProperties": false,
+      "not": {
+        "properties": {
+          "protocol": {
+            "not": {
+              "const": "openai_responses"
+            }
+          }
+        },
+        "required": [
+          "responsesStructuredOutput"
+        ]
+      },
       "properties": {
         "displayName": {
           "maxLength": 200,
@@ -12843,6 +13379,10 @@
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
+        },
+        "responsesStructuredOutput": {
+          "$ref": "#/$defs/DeviceResponsesStructuredOutput",
+          "description": "Structured output transport for openai_responses. Omission uses json_schema. Explicit text uses the API default text format with schema instructions and local validation."
         }
       },
       "required": [
@@ -12886,7 +13426,11 @@
     "DeviceProviderProtocol": {
       "enum": [
         "anthropic_messages",
-        "canonical"
+        "openai_chat_completions",
+        "openai_responses",
+        "canonical",
+        "codex_chatgpt",
+        "chatgpt_plan"
       ],
       "type": "string"
     },
@@ -13046,6 +13590,14 @@
         "repositoryBindingId"
       ],
       "type": "object"
+    },
+    "DeviceResponsesStructuredOutput": {
+      "enum": [
+        "json_schema",
+        "json_object",
+        "text"
+      ],
+      "type": "string"
     },
     "DiagnosticBaseline": {
       "additionalProperties": false,
@@ -13376,11 +13928,19 @@
     "Evidence": {
       "additionalProperties": false,
       "properties": {
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "contractRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
         },
         "criterionId": {
           "$ref": "#/$defs/CriterionId"
@@ -13416,6 +13976,12 @@
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "sourceEventId": {
           "maxLength": 256,
           "minLength": 1,
@@ -13428,6 +13994,9 @@
         },
         "verificationPlanId": {
           "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
         },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
@@ -13442,14 +14011,19 @@
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "criterionId",
         "workItemId",
-        "workRunId",
-        "candidateDigest",
         "producer",
         "producerExecutionIdentity",
         "sourceEventId",
@@ -13804,9 +14378,8 @@
       "additionalProperties": false,
       "description": "Public provenance only. Worker, lease, fence, object key, path, and credential facts stay server-owned.",
       "properties": {
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -13823,6 +14396,9 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "workRunId": {
           "$ref": "#/$defs/WorkRunId"
         }
@@ -13832,8 +14408,9 @@
         "deliveryRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
-        "evidenceId"
+        "evidenceId",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -13981,9 +14558,8 @@
         "atCursor": {
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -14002,6 +14578,9 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "sourceRef": {
           "maxLength": 1024,
@@ -14030,11 +14609,12 @@
         "atCursor",
         "readPageLimit",
         "evidenceId",
-        "candidateRef",
         "workRunId",
         "sessionBindingId",
         "type",
-        "sourceRef"
+        "sourceRef",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -14386,9 +14966,42 @@
     },
     "ExecutionLimits": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "deadlineAt": {
+                "$ref": "#/$defs/Instant"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "maxRuntimeSeconds": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deadlineAt": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "deadlineAt": {
-          "$ref": "#/$defs/Instant"
+          "description": "Null explicitly means no runtime deadline. Must be null together with maxRuntimeSeconds.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxArtifactBytes": {
           "maximum": 1099511627776,
@@ -14396,9 +15009,17 @@
           "type": "integer"
         },
         "maxRuntimeSeconds": {
-          "maximum": 604800,
-          "minimum": 1,
-          "type": "integer"
+          "description": "Null explicitly means no runtime deadline. Must be null together with deadlineAt.",
+          "oneOf": [
+            {
+              "maximum": 604800,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -14521,7 +15142,22 @@
     "ExecutionOutcomeUsage": {
       "additionalProperties": false,
       "properties": {
+        "accountingStatus": {
+          "enum": [
+            "known",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "costMicrounits": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "knownTokens": {
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
@@ -14534,13 +15170,18 @@
         "tokens": {
           "maximum": 9007199254740991,
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
         "runtimeMillis",
         "tokens",
-        "costMicrounits"
+        "costMicrounits",
+        "knownTokens",
+        "accountingStatus"
       ],
       "type": "object"
     },
@@ -14578,12 +15219,38 @@
         "SEQUENCE_GAP",
         "MESSAGE_CONFLICT",
         "ARTIFACT_DIGEST_MISMATCH",
+        "SNAPSHOT_BINDING_MISSING",
+        "SNAPSHOT_BINDING_MISMATCH",
         "MODEL_STREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_INVALID",
+        "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+        "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+        "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+        "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+        "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+        "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+        "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
+        "DEVICE_PROVIDER_CONNECTION_FAILED",
+        "DEVICE_PROVIDER_UPSTREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_REJECTED",
+        "DEVICE_PROVIDER_RATE_LIMITED",
+        "DEVICE_PROVIDER_UNAVAILABLE",
+        "DEVICE_PROVIDER_INVALID_CONFIGURATION",
+        "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED",
+        "DEVICE_PROVIDER_TRANSPORT_FAILED",
+        "DEVICE_PROVIDER_RESPONSE_TOO_LARGE",
+        "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED",
+        "DEVICE_MODEL_IDENTITY_CONFLICT",
+        "DEVICE_MODEL_PAUSED",
+        "DEVICE_MODEL_INTERRUPTED",
+        "DEVICE_JEV_UNAVAILABLE",
         "INPUT_CLOSED",
         "APPROVAL_DENIED",
         "CANCELLED",
         "EXECUTION_FAILED",
-        "INFRASTRUCTURE_ERROR"
+        "INFRASTRUCTURE_ERROR",
+        "CANDIDATE_UNCHANGED",
+        "CANDIDATE_PREPARATION_FAILED"
       ],
       "type": "string"
     },
@@ -14595,9 +15262,6 @@
         },
         {
           "$ref": "#/$defs/WorkerRegistrationResultMessage"
-        },
-        {
-          "$ref": "#/$defs/WorkerCapabilitiesMessage"
         },
         {
           "$ref": "#/$defs/WorkerHeartbeatMessage"
@@ -14673,6 +15337,15 @@
         },
         {
           "$ref": "#/$defs/ActionEnforcementReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotVerificationDispatchMessage"
         }
       ],
       "title": "ExecutionPortMessage"
@@ -14797,8 +15470,14 @@
           "pattern": "^[0-9a-f]{40,64}$",
           "type": "string"
         },
+        "candidateDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -14839,7 +15518,9 @@
         "candidateCommitId",
         "candidateTreeId",
         "diffSha256",
-        "frozenAt"
+        "frozenAt",
+        "candidateId",
+        "candidateDigest"
       ],
       "type": "object"
     },
@@ -14853,6 +15534,11 @@
       "maxLength": 140,
       "minLength": 3,
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9._-])?$",
+      "type": "string"
+    },
+    "GitObjectId": {
+      "description": "Exact SHA-1 or SHA-256 Git object identity.",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
     },
     "GitRefName": {
@@ -14908,6 +15594,10 @@
       "description": "Requests one typed user input through the Control Plane product session.",
       "properties": {
         "allowEmpty": {
+          "type": "boolean"
+        },
+        "allowOther": {
+          "description": "Allows a free-form value only for single_choice. Omitted or false keeps the offered choices closed. True is invalid for text and confirmation.",
           "type": "boolean"
         },
         "choices": {
@@ -15401,6 +16091,9 @@
         },
         "sentAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -16207,7 +16900,7 @@
           }
         }
       ],
-      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
       "properties": {
         "ackSequence": {
           "$ref": "#/$defs/ExecutionAckSequence"
@@ -20439,7 +21132,7 @@
           "$ref": "#/$defs/ActorId"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "deliveryId": {
@@ -21229,7 +21922,7 @@
     },
     "RepairLoopBudget": {
       "additionalProperties": false,
-      "description": "Immutable upper bounds for one repair loop. maxRepairRounds is canonically fixed at three; Observer calls, primary-model calls, tokens, cost, wall time, ChangeBatches, and serialized context bytes are audited independently.",
+      "description": "Immutable bounds for one repair loop. Null usage, elapsed-time and call limits are unbounded. Structural repair rounds, batches and context bytes remain bounded.",
       "properties": {
         "maxChangeBatches": {
           "maximum": 4,
@@ -21244,12 +21937,18 @@
         "maxObserverCalls": {
           "maximum": 4,
           "minimum": 1,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "maxPrimaryModelCalls": {
           "maximum": 8,
           "minimum": 1,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "maxRepairRounds": {
           "const": 3,
@@ -21260,17 +21959,26 @@
         "maxTotalCostMicrounits": {
           "maximum": 9007199254740991,
           "minimum": 1,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "maxTotalTokens": {
           "maximum": 10000000,
           "minimum": 1,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "maxWallTimeMillis": {
           "maximum": 3600000,
           "minimum": 1000,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -21400,17 +22108,17 @@
           "type": "integer"
         },
         "elapsedMillis": {
-          "maximum": 3600000,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "observerCalls": {
-          "maximum": 4,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
         "primaryModelCalls": {
-          "maximum": 8,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
@@ -21425,7 +22133,7 @@
           "type": "integer"
         },
         "totalTokens": {
-          "maximum": 10000000,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }
@@ -21988,6 +22696,9 @@
             }
           ]
         },
+        "coreTool": {
+          "$ref": "#/$defs/CoreToolRuntimeProjection"
+        },
         "exitCode": {
           "oneOf": [
             {
@@ -22037,7 +22748,8 @@
     "RuntimeActivityType": {
       "enum": [
         "command",
-        "test"
+        "test",
+        "tool"
       ],
       "type": "string"
     },
@@ -23165,6 +23877,9 @@
         "sessionIdentity": {
           "$ref": "#/$defs/SessionIdentity"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "sourceIdentity": {
           "$ref": "#/$defs/SessionBindingSourceIdentity"
         },
@@ -23801,6 +24516,296 @@
     "Sha256Digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
+    },
+    "Snapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "baseCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "baseTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "createdAtMillis": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diffSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "immutable": {
+          "const": true,
+          "type": "boolean"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "validationSeal": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "createdAtMillis",
+        "immutable"
+      ],
+      "type": "object"
+    },
+    "SnapshotFreezeReceipt": {
+      "additionalProperties": false,
+      "description": "Worker-owned exact execution fact for one freeze request. Control Plane validates the Candidate and receipt, then allocates the product SnapshotId; workers cannot allocate or carry that identity.",
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "baseCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "baseTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "diffSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "frozenAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "validationSeal": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "#/$defs/WorkerInstanceId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptId",
+        "requestId",
+        "candidateId",
+        "workRunId",
+        "workerId",
+        "workerInstanceId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "frozenAt"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "type": "object",
+      "x-authority": "lease-write",
+      "x-direction": "worker-to-control-plane"
+    },
+    "SnapshotFreezeReceiptMessage": {
+      "additionalProperties": false,
+      "description": "Returns exact Worker freeze facts for one durable Control Plane request.",
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_receipt"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "receipt": {
+          "$ref": "#/$defs/SnapshotFreezeReceipt"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "receipt",
+        "lease"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "type": "object",
+      "x-authority": "lease-write",
+      "x-direction": "worker-to-control-plane"
+    },
+    "SnapshotFreezeRequestMessage": {
+      "additionalProperties": false,
+      "description": "Materializes and protects one sealed Candidate for the exact planned dispatch, without starting execution. Control Plane allocates Snapshot identity after receipt acceptance.",
+      "properties": {
+        "baseTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidate": {
+          "$ref": "#/$defs/Candidate"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "kind": {
+          "const": "snapshot.freeze_request"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "candidate",
+        "repositoryId",
+        "lease",
+        "baseTreeId",
+        "contentDigest",
+        "dispatch"
+      ],
+      "title": "snapshot.freeze_request",
+      "type": "object",
+      "x-authority": "control-command",
+      "x-direction": "control-plane-to-worker"
+    },
+    "SnapshotId": {
+      "description": "Canonical ULID for one immutable code snapshot under verification.",
+      "pattern": "^snap_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "SnapshotVerificationDispatchMessage": {
+      "additionalProperties": false,
+      "description": "Starts the exact planned verification only after Control Plane has committed this canonical Snapshot and binding.",
+      "properties": {
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "kind": {
+          "const": "snapshot.verify"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/Snapshot"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "dispatch",
+        "snapshot"
+      ],
+      "title": "snapshot.verify",
+      "type": "object",
+      "x-authority": "control-command",
+      "x-direction": "control-plane-to-worker"
     },
     "SolutionReviewComponentProjection": {
       "additionalProperties": false,
@@ -25752,11 +26757,19 @@
     "Verdict": {
       "additionalProperties": false,
       "properties": {
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "contractRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
         },
         "evidenceIds": {
           "items": {
@@ -25768,8 +26781,7 @@
           "uniqueItems": true
         },
         "id": {
-          "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$",
-          "type": "string"
+          "$ref": "#/$defs/VerdictId"
         },
         "planRevision": {
           "$ref": "#/$defs/Revision"
@@ -25779,6 +26791,12 @@
         },
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "status": {
           "enum": [
@@ -25792,27 +26810,43 @@
         "verificationPlanId": {
           "$ref": "#/$defs/VerificationPlanId"
         },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
         },
         "workItemId": {
           "$ref": "#/$defs/WorkItemId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "workItemId",
-        "candidateDigest",
         "status",
         "evidenceIds",
         "revision"
       ],
       "type": "object"
+    },
+    "VerdictId": {
+      "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
     },
     "VerificationPlan": {
       "additionalProperties": false,
@@ -25905,6 +26939,134 @@
       "pattern": "^vpl_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
+    "VerificationSession": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "id": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "VerificationSessionId": {
+      "pattern": "^vsn_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "VerifierResult": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "evidenceIds": {
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          },
+          "maxItems": 100,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "$ref": "#/$defs/VerifierResultId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ],
+          "type": "string"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
+        "evidenceIds",
+        "status"
+      ],
+      "type": "object"
+    },
+    "VerifierResultId": {
+      "pattern": "^vrs_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
     "WorkContract": {
       "additionalProperties": false,
       "properties": {
@@ -25988,54 +27150,6 @@
     "WorkContractId": {
       "pattern": "^wct_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
-    },
-    "WorkerCapabilitiesMessage": {
-      "additionalProperties": false,
-      "description": "Replaces the registered capability snapshot for the current Worker instance.",
-      "properties": {
-        "capabilities": {
-          "$ref": "#/$defs/WorkerCapabilitySet"
-        },
-        "kind": {
-          "const": "worker.capabilities"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ExecutionMessageId"
-        },
-        "observedAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "requestId": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sentAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "workerId": {
-          "$ref": "#/$defs/WorkerId"
-        },
-        "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "sentAt",
-        "requestId",
-        "workerId",
-        "workerInstanceId",
-        "observedAt",
-        "capabilities"
-      ],
-      "title": "worker.capabilities",
-      "type": "object",
-      "x-authority": "worker-registry",
-      "x-direction": "worker-to-control-plane"
     },
     "WorkerCapabilityFeature": {
       "enum": [
@@ -26448,7 +27562,15 @@
           "$ref": "#/$defs/WorkerSessionId"
         },
         "workRunId": {
-          "$ref": "#/$defs/WorkRunId"
+          "description": "WorkRun anchor; omitted or null for ProductSession Chat.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -26459,7 +27581,6 @@
         "occupancyFencingToken",
         "repositoryBindingId",
         "productSessionId",
-        "workRunId",
         "workerSessionId",
         "workerId",
         "workerInstanceId",
@@ -26643,6 +27764,11 @@
         "startedAt": {
           "$ref": "#/$defs/Instant"
         },
+        "usageAccountingVersion": {
+          "maximum": 2,
+          "minimum": 2,
+          "type": "integer"
+        },
         "workerId": {
           "$ref": "#/$defs/WorkerId"
         },
@@ -26659,7 +27785,8 @@
         "workerId",
         "workerInstanceId",
         "startedAt",
-        "capabilities"
+        "capabilities",
+        "usageAccountingVersion"
       ],
       "title": "worker.register",
       "type": "object",
@@ -27485,7 +28612,7 @@
       "additionalProperties": false,
       "properties": {
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "deliverySpecId": {
@@ -27502,11 +28629,23 @@
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "workContract": {
           "$ref": "#/$defs/WorkContract"
         },
         "workItem": {
           "$ref": "#/$defs/WorkItem"
+        },
+        "workPlan": {
+          "description": "Control Plane-owned task DAG for this WorkContract revision. The dispatched workItem must be an identical node in this plan.",
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
         }
       },
       "required": [
@@ -27667,7 +28806,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:fe0da56b06a48137e5c570d7d11ea53bcc476d9f694112b3709aa93d585a1695",
+  "x-source-digest": "sha256:0c2454a5c027fb0dbd7f2bdef66708ad77b00203f4d6386c0d29fa763d20776b",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

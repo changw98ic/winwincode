@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { renderRuntimeActivity } from './runtime-activity.js'
 import {
   retentionLabel,
   mountStrongFlowReviewAnnotations,
@@ -27,10 +28,6 @@ export interface StrongFlowReviewDetailOptions {
   readonly model: StrongFlowReviewViewModel
   readonly annotations: StrongFlowReviewAnnotations
   readonly candidateActions?: Omit<CandidateApplicationOptions, 'root' | 'model'>
-  /**
-   * Text previews download as plain text through this seam. Production wires a
-   * Blob download; tests capture the payload instead of touching the network.
-   */
   readonly onDownload?: (fileName: string, bytes: Uint8Array, mediaType: string) => void
 }
 
@@ -110,11 +107,6 @@ function fileNameFor(path: string): string {
   return `${base}.diff.txt`
 }
 
-/**
- * VER-12 bounded delivery export. Only schema-owned identities, enums and
- * counts leave the page; free-form descriptions, findings, source refs, logs
- * and paths deliberately remain in the authorized interactive view.
- */
 export function deliveryReportText(state: StrongFlowReviewState): string | null {
   const detail = state.detail
   if (detail === null) return null
@@ -157,11 +149,6 @@ export function deliveryReportText(state: StrongFlowReviewState): string | null 
   ].join('\n')
 }
 
-/**
- * RUN-07 safe preview rendering. Text chunks are the only bytes ever placed in
- * the DOM, always through `textContent`; degraded classes render their reason
- * instead of content, so HTML/SVG and binary never enter the page.
- */
 function renderPreview(
   document: Document,
   file: StrongFlowReviewState['files'][number],
@@ -324,7 +311,7 @@ function renderSegment(
   item.dataset.reviewSegmentIndex = String(segmentIndex + 1)
   const head = element(document, 'p', 'wwc-review-segment-head')
   head.textContent = `${ROLE_LABEL[segment.role ?? ''] ?? '执行'} · 第 ${String(segment.attempt)} 次运行`
-    + (segment.truncated ? ' · 已达单会话活动上限（仅展示前 100 条）' : '')
+    + (segment.truncated ? ' · 最多展示最近 100 条活动' : '')
   const list = element(document, 'ul', 'wwc-review-activities')
   if (segment.activities.length === 0) {
     const empty = element(document, 'li', 'wwc-review-activity-empty')
@@ -335,14 +322,7 @@ function renderSegment(
     const row = element(document, 'li', 'wwc-review-activity')
     row.dataset.reviewActivityIndex = String(activityIndex + 1)
     row.dataset.reviewOutcome = activity.outcome
-    const command = element(document, 'span', 'wwc-review-activity-command')
-    command.textContent = redactPublicText(activity.command ?? `(${activity.activityType})`)
-    const fact = element(document, 'span', 'wwc-review-activity-fact')
-    fact.textContent = `${activity.status} · outcome ${activity.outcome}`
-      + (activity.exitCode === null ? '' : ` · 退出码 ${activity.exitCode}`)
-    const source = element(document, 'span', 'wwc-review-activity-source')
-    source.textContent = '执行结果来源已绑定当前运行'
-    row.append(command, fact, source)
+    row.append(renderRuntimeActivity(document, activity))
     if (activity.outcome === 'task-failed' || activity.outcome === 'timed-out') {
       row.append(button(
         document,
@@ -459,7 +439,6 @@ function renderEvidenceArtifact(
   return box
 }
 
-/** RUN-07/VER-07 review surface: real Control Plane projections, safe degradation. */
 export function mountStrongFlowReviewDetail(
   options: StrongFlowReviewDetailOptions,
 ): StrongFlowReviewDetailPage {
@@ -792,7 +771,6 @@ export function mountStrongFlowReviewDetail(
     resultHeading.textContent = '完成情况'
     const results = new Map((detail.verdict?.criteria ?? []).map(result => [result.criterionId, result.verdict]))
     const outcome = element(document, 'ul', 'wwc-review-outcomes')
-    // Show unresolved criteria first; the acceptance tab always retains the full list.
     const criteria = [...requirements.acceptanceCriteria].sort((a, b) =>
       Number(results.get(a.id) === 'pass') - Number(results.get(b.id) === 'pass'))
     for (const criterion of criteria.slice(0, 3)) {

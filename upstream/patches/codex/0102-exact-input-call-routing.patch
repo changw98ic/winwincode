@@ -1,0 +1,1682 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 08a0bb00..43ca8012 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -767,12 +767,14 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 is_blocking: request.is_blocking,
+                 auto_resolution_ms: request.auto_resolution_ms,
+             };
++            let input_call_id = params.item_id.clone();
+             let (pending_request_id, rx) = outgoing
+                 .send_request(ServerRequestPayload::ToolRequestUserInput(params))
+                 .await;
+             tokio::spawn(async move {
+                 on_request_user_input_response(
+                     event_turn_id,
++                    input_call_id,
+                     pending_request_id,
+                     rx,
+                     conversation,
+@@ -1649,6 +1651,7 @@ async fn handle_error_notification(
+ 
+ async fn on_request_user_input_response(
+     event_turn_id: String,
++    input_call_id: String,
+     pending_request_id: RequestId,
+     receiver: oneshot::Receiver<ClientRequestResult>,
+     conversation: Arc<CodexThread>,
+@@ -1669,6 +1672,7 @@ async fn on_request_user_input_response(
+             if let Err(err) = conversation
+                 .submit(Op::UserInputAnswer {
+                     id: event_turn_id,
++                    call_id: input_call_id,
+                     response: empty,
+                 })
+                 .await
+@@ -1685,6 +1689,7 @@ async fn on_request_user_input_response(
+             if let Err(err) = conversation
+                 .submit(Op::UserInputAnswer {
+                     id: event_turn_id,
++                    call_id: input_call_id,
+                     response: empty,
+                 })
+                 .await
+@@ -1720,6 +1725,7 @@ async fn on_request_user_input_response(
+     if let Err(err) = conversation
+         .submit(Op::UserInputAnswer {
+             id: event_turn_id,
++            call_id: input_call_id,
+             response,
+         })
+         .await
+diff --git a/codex-rs/core/src/mcp_skill_dependencies.rs b/codex-rs/core/src/mcp_skill_dependencies.rs
+index fdb1cb10..d89caf17 100644
+--- a/codex-rs/core/src/mcp_skill_dependencies.rs
++++ b/codex-rs/core/src/mcp_skill_dependencies.rs
+@@ -299,14 +299,14 @@ async fn should_install_mcp_dependencies(
+     };
+     let sub_id = &turn_context.sub_id;
+     let call_id = format!("mcp-deps-{sub_id}");
+-    let response_fut = sess.request_user_input(turn_context, call_id, args);
++    let response_fut = sess.request_user_input(turn_context, call_id.clone(), args);
+     let response = tokio::select! {
+         biased;
+         _ = cancellation_token.cancelled() => {
+             let empty = RequestUserInputResponse {
+                 answers: HashMap::new(),
+             };
+-            sess.notify_user_input_response(sub_id, empty.clone()).await;
++            sess.notify_user_input_response(sub_id, &call_id, empty.clone()).await;
+             empty
+         }
+         response = response_fut => response.unwrap_or_else(|| RequestUserInputResponse {
+diff --git a/codex-rs/core/src/session/elicitation_holders_tests.rs b/codex-rs/core/src/session/elicitation_holders_tests.rs
+index 0966b233..9a6908c1 100644
+--- a/codex-rs/core/src/session/elicitation_holders_tests.rs
++++ b/codex-rs/core/src/session/elicitation_holders_tests.rs
+@@ -187,7 +187,7 @@ async fn request_user_input_holds_an_elicitation_until_response() {
+         answers: HashMap::new(),
+     };
+     session
+-        .notify_user_input_response(&turn_context.sub_id, response)
++        .notify_user_input_response(&turn_context.sub_id, "call-1", response)
+         .await;
+ 
+     request.await.expect("request user input task");
+@@ -195,18 +195,17 @@ async fn request_user_input_holds_an_elicitation_until_response() {
+ }
+ 
+ #[tokio::test]
+-async fn request_user_input_response_waits_for_restarted_turn_waiter() {
++async fn unregistered_input_response_is_rejected_until_exact_restarted_waiter_exists() {
+     let (session, turn_context, events) = make_session_and_context_with_rx().await;
+     let response = RequestUserInputResponse {
+         answers: HashMap::new(),
+     };
+ 
+-    // The Worker can replay the durable response before the replacement
+-    // Session has installed an ActiveTurn. The response must remain available
+-    // for the exact request_user_input call created by that resumed turn.
+-    session
+-        .notify_user_input_response(&turn_context.sub_id, response.clone())
+-        .await;
++    assert!(
++        !session
++            .notify_user_input_response(&turn_context.sub_id, "call-restarted", response.clone())
++            .await
++    );
+     *session.active_turn.lock().await = Some(ActiveTurn::default());
+ 
+     let request = tokio::spawn({
+@@ -231,8 +230,149 @@ async fn request_user_input_response_waits_for_restarted_turn_waiter() {
+         .recv()
+         .await
+         .expect("restarted request user input event");
++    tokio::task::yield_now().await;
++    assert!(
++        !request.is_finished(),
++        "an unregistered old response cannot settle a future call"
++    );
++    assert!(
++        session
++            .notify_user_input_response(&turn_context.sub_id, "call-restarted", response.clone())
++            .await
++    );
+     assert_eq!(
+         request.await.expect("restarted request task"),
+         Some(response)
+     );
+ }
++
++#[tokio::test]
++async fn concurrent_same_turn_input_calls_preserve_each_original_waiter() {
++    let (session, turn_context, events) = make_session_and_context_with_rx().await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    let spawn = |call_id: &'static str| {
++        let session = session.clone();
++        let turn_context = turn_context.clone();
++        tokio::spawn(async move {
++            session
++                .request_user_input(
++                    turn_context.as_ref(),
++                    call_id.to_owned(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: true,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        })
++    };
++    let first = spawn("parallel-input-1");
++    events.recv().await.expect("first actual input event");
++    let second = spawn("parallel-input-2");
++    events.recv().await.expect("second actual input event");
++    tokio::task::yield_now().await;
++    assert!(
++        !first.is_finished(),
++        "second call must not cancel the first original waiter"
++    );
++    assert!(!second.is_finished());
++    let response = |answer: &str| RequestUserInputResponse {
++        answers: HashMap::from([(
++            "same-question".into(),
++            codex_protocol::request_user_input::RequestUserInputAnswer {
++                answers: vec![answer.into()],
++            },
++        )]),
++    };
++    let second_response = response("second-answer");
++    assert!(
++        session
++            .notify_user_input_response(
++                &turn_context.sub_id,
++                "parallel-input-2",
++                second_response.clone()
++            )
++            .await
++    );
++    assert_eq!(
++        second.await.expect("second input task"),
++        Some(second_response)
++    );
++    assert!(
++        !first.is_finished(),
++        "reverse-order answer settles only its exact original waiter"
++    );
++    let first_response = response("first-answer");
++    assert!(
++        session
++            .notify_user_input_response(
++                &turn_context.sub_id,
++                "parallel-input-1",
++                first_response.clone()
++            )
++            .await
++    );
++    assert_eq!(first.await.expect("first input task"), Some(first_response));
++}
++
++#[tokio::test]
++async fn late_cancelled_and_unknown_input_calls_cannot_answer_another_same_turn_waiter() {
++    let (session, turn, events) = make_session_and_context_with_rx().await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    let spawn = |id: &'static str| {
++        let session = session.clone();
++        let turn = turn.clone();
++        tokio::spawn(async move {
++            session
++                .request_user_input(
++                    turn.as_ref(),
++                    id.into(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: true,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        })
++    };
++    let cancelled = spawn("cancelled-A");
++    events.recv().await.unwrap();
++    let response = RequestUserInputResponse {
++        answers: HashMap::new(),
++    };
++    cancelled.abort();
++    assert!(
++        cancelled.await.unwrap_err().is_cancelled(),
++        "original response receiver was actually cancelled"
++    );
++    let duplicate = spawn("cancelled-A");
++    assert_eq!(
++        duplicate.await.unwrap(),
++        None,
++        "same incarnation cannot reinstall a cancelled exact call"
++    );
++    let current = spawn("current-B");
++    events.recv().await.unwrap();
++    for id in ["cancelled-A", "unknown-call", ""] {
++        assert!(
++            !session
++                .notify_user_input_response(&turn.sub_id, id, response.clone())
++                .await
++        );
++    }
++    assert_eq!(
++        spawn("cancelled-A").await.unwrap(),
++        None,
++        "late answer must not erase the old-call tombstone"
++    );
++    tokio::task::yield_now().await;
++    assert!(!current.is_finished());
++    assert!(
++        session
++            .notify_user_input_response(&turn.sub_id, "current-B", response.clone())
++            .await
++    );
++    assert_eq!(current.await.unwrap(), Some(response));
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index e9727e64..3b16106f 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -214,9 +214,11 @@ pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDec
+ pub async fn request_user_input_response(
+     sess: &Arc<Session>,
+     id: String,
++    call_id: String,
+     response: RequestUserInputResponse,
+ ) {
+-    sess.notify_user_input_response(&id, response).await;
++    sess.notify_user_input_response(&id, &call_id, response)
++        .await;
+ }
+ 
+ pub async fn request_permissions_response(
+@@ -616,8 +618,12 @@ pub(super) async fn submission_loop(
+                     patch_approval(&sess, id, decision).await;
+                     false
+                 }
+-                Op::UserInputAnswer { id, response } => {
+-                    request_user_input_response(&sess, id, response).await;
++                Op::UserInputAnswer {
++                    id,
++                    call_id,
++                    response,
++                } => {
++                    request_user_input_response(&sess, id, call_id, response).await;
+                     false
+                 }
+                 Op::RequestPermissionsResponse { id, response } => {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 825850bb..8ede9123 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2723,33 +2723,18 @@ impl Session {
+         let _elicitation = self.services.elicitations.register();
+         let sub_id = turn_context.sub_id.clone();
+         let (tx_response, rx_response) = oneshot::channel();
+-        let event_id = sub_id.clone();
+-        let (queued_response, prev_entry) = {
++        let key = (sub_id.clone(), call_id.clone());
++        // The exact waiter is installed before its event becomes observable.
++        // An unregistered answer remains in the host's durable input record;
++        // Core never guesses the next call or caches an unknown response.
++        {
+             let mut active = self.active_turn.lock().await;
+-            match active.as_mut() {
+-                Some(at) => {
+-                    let mut ts = at.turn_state.lock().await;
+-                    if let Some(response) = ts.take_pending_user_input_response(&sub_id) {
+-                        (Some(response), None)
+-                    } else {
+-                        let mut pending = self.pending_user_input_responses.lock().await;
+-                        match pending.remove(&sub_id) {
+-                            Some(response) => (Some(response), None),
+-                            None => (
+-                                None,
+-                                ts.insert_pending_user_input(sub_id.clone(), tx_response),
+-                            ),
+-                        }
+-                    }
+-                }
+-                None => {
+-                    let mut pending = self.pending_user_input_responses.lock().await;
+-                    (pending.remove(&sub_id), None)
+-                }
++            let at = active.as_mut()?;
++            let mut ts = at.turn_state.lock().await;
++            if ts.insert_pending_user_input(key, tx_response).is_some() {
++                warn!("Duplicate exact user input waiter rejected");
++                return None;
+             }
+-        };
+-        if prev_entry.is_some() {
+-            warn!("Overwriting existing pending user input for sub_id: {event_id}");
+         }
+ 
+         let event = EventMsg::RequestUserInput(RequestUserInputEvent {
+@@ -2765,10 +2750,7 @@ impl Session {
+         #[cfg(feature = "mechanism-test-support")]
+         crate::mechanism_interaction_test_barrier::record_request(&event);
+         self.send_event(turn_context, event).await;
+-        let response = match queued_response {
+-            Some(response) => Some(response),
+-            None => rx_response.await.ok(),
+-        };
++        let response = rx_response.await.ok();
+         #[cfg(feature = "mechanism-test-support")]
+         if response.is_some() {
+             crate::mechanism_interaction_test_barrier::record_waiter_consumed("input", &sub_id);
+@@ -2783,51 +2765,30 @@ impl Session {
+     pub async fn notify_user_input_response(
+         &self,
+         sub_id: &str,
++        call_id: &str,
+         response: RequestUserInputResponse,
+-    ) {
+-        let (entry, replaced_response, response_to_send) = {
++    ) -> bool {
++        let entry = {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+-                Some(at) => {
+-                    let mut ts = at.turn_state.lock().await;
+-                    match ts.remove_pending_user_input(sub_id) {
+-                        Some(entry) => (Some(entry), None, Some(response)),
+-                        None => {
+-                            let replaced =
+-                                ts.insert_pending_user_input_response(sub_id.to_string(), response);
+-                            (None, replaced, None)
+-                        }
+-                    }
+-                }
+-                None => {
+-                    let mut pending = self.pending_user_input_responses.lock().await;
+-                    let replaced = pending.insert(sub_id.to_string(), response);
+-                    (None, replaced, None)
+-                }
++                Some(at) => at
++                    .turn_state
++                    .lock()
++                    .await
++                    .remove_pending_user_input(&(sub_id.to_owned(), call_id.to_owned())),
++                None => None,
+             }
+         };
+-        match entry {
+-            Some(tx_response) => {
+-                #[cfg(feature = "mechanism-test-support")]
+-                crate::mechanism_interaction_test_barrier::record_response_delivery(
+-                    "input", "sent",
+-                );
+-                if let Some(response) = response_to_send {
+-                    tx_response.send(response).ok();
+-                }
+-            }
+-            None => {
+-                #[cfg(feature = "mechanism-test-support")]
+-                crate::mechanism_interaction_test_barrier::record_response_delivery(
+-                    "input", "buffered",
+-                );
+-                if replaced_response.is_some() {
+-                    warn!("Overwriting queued user input response for sub_id: {sub_id}");
+-                } else {
+-                    debug!("Queued user input response until turn waiter is restored: {sub_id}");
+-                }
+-            }
+-        }
++        let Some(tx_response) = entry else {
++            #[cfg(feature = "mechanism-test-support")]
++            crate::mechanism_interaction_test_barrier::record_response_delivery(
++                "input", "rejected",
++            );
++            return false;
++        };
++        #[cfg(feature = "mechanism-test-support")]
++        crate::mechanism_interaction_test_barrier::record_response_delivery("input", "sent");
++        tx_response.send(response).is_ok()
+     }
+ 
+     #[expect(
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 2a4ee991..f8f5ad84 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -60,10 +60,6 @@ pub(crate) struct Session {
+     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+     pub(crate) conversation: Arc<RealtimeConversationManager>,
+     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+-    /// Input responses may be delivered by the host while a restarted turn
+-    /// is still being installed. Keep those responses at session scope until
+-    /// the exact turn recreates its in-memory waiter.
+-    pub(crate) pending_user_input_responses: Mutex<HashMap<String, RequestUserInputResponse>>,
+     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+     pub(crate) input_queue: InputQueue,
+     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+@@ -1458,7 +1454,6 @@ impl Session {
+                 mcp_prewarm_task: std::sync::Mutex::new(None),
+                 conversation: Arc::new(RealtimeConversationManager::new()),
+                 active_turn: Mutex::new(None),
+-                pending_user_input_responses: Mutex::new(HashMap::new()),
+                 async_hook_results,
+                 input_queue: InputQueue::new(),
+                 guardian_review_session: GuardianReviewSessionManager::default(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index d93260fc..ef44f4ba 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6008,7 +6008,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
+-        pending_user_input_responses: Mutex::new(HashMap::new()),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+@@ -8220,7 +8219,6 @@ where
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
+-        pending_user_input_responses: Mutex::new(HashMap::new()),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+index c1119c88..bb6c2103 100644
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -89,11 +89,9 @@ pub(crate) struct RunningTask {
+ pub(crate) struct TurnState {
+     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+-    pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
+-    // A response can arrive during recovery before the resumed turn has
+-    // recreated its in-memory waiter. Keep it on the turn so the next
+-    // request_user_input call can consume it instead of dropping it.
+-    pending_user_input_responses: HashMap<String, RequestUserInputResponse>,
++    // None is a retired exact call. It cannot acquire a new waiter in this turn.
++    pending_user_input:
++        HashMap<(String, String), Option<oneshot::Sender<RequestUserInputResponse>>>,
+     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
+     mcp_tool_approval_metadata: HashMap<String, (Option<McpInvocation>, McpToolApprovalMetadata)>,
+     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+@@ -132,7 +130,6 @@ impl TurnState {
+         self.pending_approvals.clear();
+         self.pending_request_permissions.clear();
+         self.pending_user_input.clear();
+-        self.pending_user_input_responses.clear();
+         self.pending_elicitations.clear();
+         self.mcp_tool_approval_metadata.clear();
+         self.pending_dynamic_tools.clear();
+@@ -156,32 +153,23 @@ impl TurnState {
+ 
+     pub(crate) fn insert_pending_user_input(
+         &mut self,
+-        key: String,
++        key: (String, String),
+         tx: oneshot::Sender<RequestUserInputResponse>,
+     ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+-        self.pending_user_input.insert(key, tx)
++        match self.pending_user_input.entry(key) {
++            std::collections::hash_map::Entry::Vacant(entry) => {
++                entry.insert(Some(tx));
++                None
++            }
++            std::collections::hash_map::Entry::Occupied(_) => Some(tx),
++        }
+     }
+ 
+     pub(crate) fn remove_pending_user_input(
+         &mut self,
+-        key: &str,
++        key: &(String, String),
+     ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+-        self.pending_user_input.remove(key)
+-    }
+-
+-    pub(crate) fn insert_pending_user_input_response(
+-        &mut self,
+-        key: String,
+-        response: RequestUserInputResponse,
+-    ) -> Option<RequestUserInputResponse> {
+-        self.pending_user_input_responses.insert(key, response)
+-    }
+-
+-    pub(crate) fn take_pending_user_input_response(
+-        &mut self,
+-        key: &str,
+-    ) -> Option<RequestUserInputResponse> {
+-        self.pending_user_input_responses.remove(key)
++        self.pending_user_input.get_mut(key).and_then(Option::take)
+     }
+ 
+     pub(crate) fn insert_pending_elicitation(
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+index ce213e39..babbba7d 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+@@ -131,6 +131,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode() {
+     session
+         .notify_user_input_response(
+             &request_event.turn_id,
++            &request_event.call_id,
+             RequestUserInputResponse {
+                 answers: HashMap::new(),
+             },
+@@ -202,6 +203,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
+     session
+         .notify_user_input_response(
+             &request_event.turn_id,
++            &request_event.call_id,
+             RequestUserInputResponse {
+                 answers: HashMap::new(),
+             },
+diff --git a/codex-rs/core/tests/suite/mcp_tool_exposure.rs b/codex-rs/core/tests/suite/mcp_tool_exposure.rs
+index 97e2e07d..f77c5841 100644
+--- a/codex-rs/core/tests/suite/mcp_tool_exposure.rs
++++ b/codex-rs/core/tests/suite/mcp_tool_exposure.rs
+@@ -1125,6 +1125,7 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
+ 
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+diff --git a/codex-rs/core/tests/suite/mcp_turn_metadata.rs b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
+index 6f020865..53ad2586 100644
+--- a/codex-rs/core/tests/suite/mcp_turn_metadata.rs
++++ b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
+@@ -739,6 +739,7 @@ async fn mcp_tool_call_metadata_records_prior_request_user_input_tool() -> Resul
+ 
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
+index 69969628..1105fa01 100644
+--- a/codex-rs/core/tests/suite/model_switching.rs
++++ b/codex-rs/core/tests/suite/model_switching.rs
+@@ -608,6 +608,7 @@ async fn settings_update_during_active_turn_applies_to_next_turn_only() -> Resul
+ 
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+diff --git a/codex-rs/core/tests/suite/remote_env.rs b/codex-rs/core/tests/suite/remote_env.rs
+index 43819b1e..5fb77ccb 100644
+--- a/codex-rs/core/tests/suite/remote_env.rs
++++ b/codex-rs/core/tests/suite/remote_env.rs
+@@ -830,6 +830,7 @@ async fn settings_update_does_not_retarget_active_turn_environment() -> Result<(
+     assert_eq!(snapshot.workspace_roots, vec![next_cwd.clone()]);
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+@@ -970,6 +971,7 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
+     serve_environment_info(listener).await;
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+@@ -2543,6 +2545,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once()
+     serve_environment_info(listener).await;
+     test.codex
+         .submit(Op::UserInputAnswer {
++            call_id: request.call_id.clone(),
+             id: request.turn_id,
+             response: RequestUserInputResponse {
+                 answers: HashMap::from([(
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index c77eaaa9..0ee6f4ef 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -633,6 +633,8 @@ pub enum Op {
+     UserInputAnswer {
+         /// Turn id for the in-flight request.
+         id: String,
++        /// Exact call id from the original RequestUserInput event.
++        call_id: String,
+         /// User-provided answers.
+         response: RequestUserInputResponse,
+     },
+diff --git a/codex-rs/tui/src/app/app_server_requests.rs b/codex-rs/tui/src/app/app_server_requests.rs
+index 5e5d0b98..a955e42b 100644
+--- a/codex-rs/tui/src/app/app_server_requests.rs
++++ b/codex-rs/tui/src/app/app_server_requests.rs
+@@ -62,6 +62,8 @@ pub(crate) enum ResolvedAppServerRequest {
+         id: String,
+     },
+     UserInput {
++        thread_id: String,
++        turn_id: String,
+         call_id: String,
+     },
+     McpElicitation {
+@@ -75,7 +77,7 @@ pub(super) struct PendingAppServerRequests {
+     exec_approvals: HashMap<(String, String), AppServerRequestId>,
+     file_change_approvals: HashMap<(String, String), AppServerRequestId>,
+     permissions_approvals: HashMap<(String, String), AppServerRequestId>,
+-    user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
++    user_inputs: HashMap<(String, String), VecDeque<PendingUserInputRequest>>,
+     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+ }
+ 
+@@ -144,7 +146,10 @@ impl PendingAppServerRequests {
+             }
+             ServerRequest::ToolRequestUserInput { request_id, params } => {
+                 self.user_inputs
+-                    .entry(params.turn_id.clone())
++                    .entry((
++                        Self::canonical_thread_id(&params.thread_id),
++                        params.turn_id.clone(),
++                    ))
+                     .or_default()
+                     .push_back(PendingUserInputRequest {
+                         item_id: params.item_id.clone(),
+@@ -260,8 +265,12 @@ impl PendingAppServerRequests {
+                     })
+                 })
+                 .transpose()?,
+-            AppCommand::UserInputAnswer { id, response } => self
+-                .pop_user_input_request_for_turn(id)
++            AppCommand::UserInputAnswer {
++                id,
++                call_id,
++                response,
++            } => self
++                .pop_user_input_request_for_call(&thread_id, id, call_id)
+                 .map(|pending| {
+                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
+                         request_id: pending.request_id,
+@@ -338,8 +347,10 @@ impl PendingAppServerRequests {
+             });
+         }
+ 
+-        if let Some(pending) = self.remove_user_input_request(request_id) {
++        if let Some((turn_id, pending)) = self.remove_user_input_request(&thread_id, request_id) {
+             return Some(ResolvedAppServerRequest::UserInput {
++                thread_id,
++                turn_id,
+                 call_id: pending.item_id,
+             });
+         }
+@@ -393,40 +404,45 @@ impl PendingAppServerRequests {
+         }
+     }
+ 
+-    fn pop_user_input_request_for_turn(
++    fn pop_user_input_request_for_call(
+         &mut self,
++        thread_id: &str,
+         turn_id: &str,
++        call_id: &str,
+     ) -> Option<PendingUserInputRequest> {
+-        let pending = self
+-            .user_inputs
+-            .get_mut(turn_id)
+-            .and_then(VecDeque::pop_front);
+-        if self
+-            .user_inputs
+-            .get(turn_id)
+-            .is_some_and(VecDeque::is_empty)
+-        {
+-            self.user_inputs.remove(turn_id);
++        let key = (thread_id.to_owned(), turn_id.to_owned());
++        let pending = self.user_inputs.get_mut(&key).and_then(|requests| {
++            let index = requests
++                .iter()
++                .position(|request| request.item_id == call_id)?;
++            requests.remove(index)
++        });
++        if self.user_inputs.get(&key).is_some_and(VecDeque::is_empty) {
++            self.user_inputs.remove(&key);
+         }
+         pending
+     }
+ 
+     fn remove_user_input_request(
+         &mut self,
++        thread_id: &str,
+         request_id: &AppServerRequestId,
+-    ) -> Option<PendingUserInputRequest> {
+-        let (turn_id, index) = self.user_inputs.iter().find_map(|(turn_id, queue)| {
++    ) -> Option<(String, PendingUserInputRequest)> {
++        let (key, index) = self.user_inputs.iter().find_map(|(key, queue)| {
++            if key.0 != thread_id {
++                return None;
++            }
+             queue
+                 .iter()
+                 .position(|pending| &pending.request_id == request_id)
+-                .map(|index| (turn_id.clone(), index))
++                .map(|index| (key.clone(), index))
+         })?;
+-        let queue = self.user_inputs.get_mut(&turn_id)?;
+-        let removed = queue.remove(index);
++        let queue = self.user_inputs.get_mut(&key)?;
++        let removed = queue.remove(index)?;
+         if queue.is_empty() {
+-            self.user_inputs.remove(&turn_id);
++            self.user_inputs.remove(&key);
+         }
+-        removed
++        Some((key.1, removed))
+     }
+ }
+ 
+@@ -756,6 +772,7 @@ mod tests {
+                 "thread-1",
+                 &Op::UserInputAnswer {
+                     id: "turn-2".to_string(),
++                    call_id: "tool-1".into(),
+                     response: ToolRequestUserInputResponse {
+                         answers: std::iter::once((
+                             "question".to_string(),
+@@ -1007,13 +1024,15 @@ mod tests {
+         assert_eq!(
+             pending.resolve_notification("thread-1", &AppServerRequestId::Integer(8)),
+             Some(ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn-1".to_string(),
+                 call_id: "tool-1".to_string(),
+             })
+         );
+     }
+ 
+     #[test]
+-    fn same_turn_user_input_answers_resolve_app_server_requests_fifo() {
++    fn same_turn_user_input_answers_resolve_exact_app_server_requests_in_reverse_order() {
+         let mut pending = PendingAppServerRequests::default();
+         for (request_id, item_id) in [(8, "tool-1"), (9, "tool-2")] {
+             pending.note_server_request(&ServerRequest::ToolRequestUserInput {
+@@ -1037,6 +1056,7 @@ mod tests {
+                 "thread-1",
+                 &Op::UserInputAnswer {
+                     id: "turn-1".to_string(),
++                    call_id: "tool-2".into(),
+                     response: response.clone(),
+                 },
+             )
+@@ -1047,13 +1067,133 @@ mod tests {
+                 "thread-1",
+                 &Op::UserInputAnswer {
+                     id: "turn-1".to_string(),
++                    call_id: "tool-1".into(),
+                     response,
+                 },
+             )
+             .expect("user input response should serialize")
+             .expect("second user input request should be pending");
+ 
+-        assert_eq!(first_response.request_id, AppServerRequestId::Integer(8));
+-        assert_eq!(second_response.request_id, AppServerRequestId::Integer(9));
++        assert_eq!(first_response.request_id, AppServerRequestId::Integer(9));
++        assert_eq!(second_response.request_id, AppServerRequestId::Integer(8));
++    }
++
++    #[test]
++    fn user_input_answers_and_resolution_notifications_keep_thread_turn_call_identity() {
++        let mut pending = PendingAppServerRequests::default();
++        for (request_id, thread_id, turn_id) in [
++            (8, "thread-1", "turn-1"),
++            (9, "thread-1", "turn-2"),
++            (10, "thread-2", "turn-1"),
++        ] {
++            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
++                request_id: AppServerRequestId::Integer(request_id),
++                params: ToolRequestUserInputParams {
++                    thread_id: thread_id.to_string(),
++                    turn_id: turn_id.to_string(),
++                    item_id: "same-call".to_string(),
++                    questions: Vec::new(),
++                    is_blocking: true,
++                    auto_resolution_ms: None,
++                },
++            });
++        }
++        assert_eq!(
++            pending.resolve_notification("thread-2", &AppServerRequestId::Integer(9)),
++            None
++        );
++        let answer = Op::UserInputAnswer {
++            id: "turn-1".to_string(),
++            call_id: "same-call".to_string(),
++            response: ToolRequestUserInputResponse {
++                answers: HashMap::new(),
++            },
++        };
++        let foreign = pending.take_resolution("thread-3", &answer).unwrap();
++        assert!(foreign.is_none());
++        assert_eq!(
++            pending
++                .take_resolution("thread-2", &answer)
++                .unwrap()
++                .unwrap()
++                .request_id,
++            AppServerRequestId::Integer(10)
++        );
++        assert_eq!(
++            pending.resolve_notification("thread-1", &AppServerRequestId::Integer(9)),
++            Some(ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn-2".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(
++            pending
++                .take_resolution("thread-1", &answer)
++                .unwrap()
++                .unwrap()
++                .request_id,
++            AppServerRequestId::Integer(8)
++        );
++        assert!(
++            pending
++                .take_resolution("thread-1", &answer)
++                .unwrap()
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn queued_user_input_answer_resolves_the_source_thread_after_active_thread_changes() {
++        use crate::app_event::AppEvent;
++        use crate::app_event_sender::AppEventSender;
++        let source_thread = codex_protocol::ThreadId::new();
++        let active_thread = codex_protocol::ThreadId::new();
++        let mut pending = PendingAppServerRequests::default();
++        for (request_id, thread_id) in [(8, source_thread), (9, active_thread)] {
++            pending.note_server_request(&ServerRequest::ToolRequestUserInput {
++                request_id: AppServerRequestId::Integer(request_id),
++                params: ToolRequestUserInputParams {
++                    thread_id: thread_id.to_string(),
++                    turn_id: "same-turn".to_string(),
++                    item_id: "same-call".to_string(),
++                    questions: Vec::new(),
++                    is_blocking: true,
++                    auto_resolution_ms: None,
++                },
++            });
++        }
++        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
++        let sender = AppEventSender::new(tx);
++        assert!(sender.user_input_answer(
++            &source_thread.to_string(),
++            "same-turn".to_string(),
++            "same-call".to_string(),
++            ToolRequestUserInputResponse {
++                answers: HashMap::new()
++            }
++        ));
++        let AppEvent::SubmitThreadOp { thread_id, op } = rx.try_recv().unwrap() else {
++            panic!("input answers must retain their source thread");
++        };
++        assert_eq!(thread_id, source_thread);
++        assert_ne!(thread_id, active_thread);
++        // event_dispatch forwards SubmitThreadOp's thread to take_resolution.
++        assert_eq!(
++            pending
++                .take_resolution(&thread_id.to_string(), &op)
++                .unwrap()
++                .unwrap()
++                .request_id,
++            AppServerRequestId::Integer(8)
++        );
++        assert_eq!(
++            pending
++                .take_resolution(&active_thread.to_string(), &op)
++                .unwrap()
++                .unwrap()
++                .request_id,
++            AppServerRequestId::Integer(9)
++        );
+     }
+ }
+diff --git a/codex-rs/tui/src/app/pending_interactive_replay.rs b/codex-rs/tui/src/app/pending_interactive_replay.rs
+index 09fd8f28..fa922480 100644
+--- a/codex-rs/tui/src/app/pending_interactive_replay.rs
++++ b/codex-rs/tui/src/app/pending_interactive_replay.rs
+@@ -33,8 +33,7 @@ impl ElicitationRequestKey {
+ //
+ // We keep both fast lookup sets (for snapshot filtering by call_id/request key) and
+ // turn-indexed queues/vectors so turn completion or interruption can clear
+-// stale prompts tied to a turn. `request_user_input` removal is FIFO because
+-// the overlay answers queued prompts in FIFO order for a shared `turn_id`.
++// stale prompts tied to a turn. Input replies resolve the exact (turn, call).
+ pub(super) struct PendingInteractiveReplayState {
+     exec_approval_call_ids: HashSet<String>,
+     exec_approval_call_ids_by_turn_id: HashMap<String, Vec<String>>,
+@@ -43,7 +42,7 @@ pub(super) struct PendingInteractiveReplayState {
+     elicitation_requests: HashSet<ElicitationRequestKey>,
+     request_permissions_call_ids: HashSet<String>,
+     request_permissions_call_ids_by_turn_id: HashMap<String, Vec<String>>,
+-    request_user_input_call_ids: HashSet<String>,
++    request_user_input_call_ids: HashSet<(String, String)>,
+     request_user_input_call_ids_by_turn_id: HashMap<String, Vec<String>>,
+     pending_requests_by_request_id: HashMap<AppServerRequestId, PendingInteractiveRequest>,
+ }
+@@ -140,18 +139,16 @@ impl PendingInteractiveReplayState {
+                     },
+                 );
+             }
+-            // `Op::UserInputAnswer` identifies the turn, not the prompt call_id. The UI
+-            // answers queued prompts for the same turn in FIFO order, so remove the oldest
+-            // queued call_id for that turn.
+-            AppCommand::UserInputAnswer { id, .. } => {
++            AppCommand::UserInputAnswer { id, call_id, .. } => {
+                 let mut remove_turn_entry = false;
+                 if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.get_mut(id) {
+-                    if !call_ids.is_empty() {
+-                        let call_id = call_ids.remove(0);
+-                        self.request_user_input_call_ids.remove(&call_id);
++                    if let Some(index) = call_ids.iter().position(|queued| queued == call_id) {
++                        call_ids.remove(index);
++                        self.request_user_input_call_ids
++                            .remove(&(id.clone(), call_id.clone()));
+                         self.pending_requests_by_request_id.retain(
+                             |_, pending| {
+-                                !matches!(pending, PendingInteractiveRequest::RequestUserInput { item_id, .. } if *item_id == call_id)
++                                !matches!(pending, PendingInteractiveRequest::RequestUserInput { turn_id, item_id } if turn_id==id && item_id == call_id)
+                             },
+                         );
+                     }
+@@ -215,7 +212,7 @@ impl PendingInteractiveReplayState {
+             }
+             ServerRequest::ToolRequestUserInput { request_id, params } => {
+                 self.request_user_input_call_ids
+-                    .insert(params.item_id.clone());
++                    .insert((params.turn_id.clone(), params.item_id.clone()));
+                 self.request_user_input_call_ids_by_turn_id
+                     .entry(params.turn_id.clone())
+                     .or_default()
+@@ -310,7 +307,8 @@ impl PendingInteractiveReplayState {
+                     ));
+             }
+             ServerRequest::ToolRequestUserInput { params, .. } => {
+-                self.request_user_input_call_ids.remove(&params.item_id);
++                self.request_user_input_call_ids
++                    .remove(&(params.turn_id.clone(), params.item_id.clone()));
+                 let mut remove_turn_entry = false;
+                 if let Some(call_ids) = self
+                     .request_user_input_call_ids_by_turn_id
+@@ -363,9 +361,9 @@ impl PendingInteractiveReplayState {
+                     params.server_name.clone(),
+                     request_id.clone(),
+                 )),
+-            ServerRequest::ToolRequestUserInput { params, .. } => {
+-                self.request_user_input_call_ids.contains(&params.item_id)
+-            }
++            ServerRequest::ToolRequestUserInput { params, .. } => self
++                .request_user_input_call_ids
++                .contains(&(params.turn_id.clone(), params.item_id.clone())),
+             ServerRequest::PermissionsRequestApproval { params, .. } => {
+                 self.request_permissions_call_ids.contains(&params.item_id)
+             }
+@@ -387,7 +385,8 @@ impl PendingInteractiveReplayState {
+     fn clear_request_user_input_turn(&mut self, turn_id: &str) {
+         if let Some(call_ids) = self.request_user_input_call_ids_by_turn_id.remove(turn_id) {
+             for call_id in call_ids {
+-                self.request_user_input_call_ids.remove(&call_id);
++                self.request_user_input_call_ids
++                    .remove(&(turn_id.into(), call_id));
+             }
+         }
+         self.pending_requests_by_request_id.retain(
+@@ -512,7 +511,8 @@ impl PendingInteractiveReplayState {
+                 );
+             }
+             PendingInteractiveRequest::RequestUserInput { turn_id, item_id } => {
+-                self.request_user_input_call_ids.remove(&item_id);
++                self.request_user_input_call_ids
++                    .remove(&(turn_id.clone(), item_id.clone()));
+                 Self::remove_call_id_from_turn_map_entry(
+                     &mut self.request_user_input_call_ids_by_turn_id,
+                     &turn_id,
+@@ -601,6 +601,38 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn input_replay_same_call_in_distinct_turns_resolves_only_exact_turn() {
++        for removal in 0..4 {
++            let mut state = super::PendingInteractiveReplayState::default();
++            let first = request_user_input_request("same-call", "turn-1");
++            let mut second = request_user_input_request("same-call", "turn-2");
++            if let ServerRequest::ToolRequestUserInput { request_id, .. } = &mut second {
++                *request_id = AppServerRequestId::Integer(9);
++            }
++            state.note_server_request(&first);
++            state.note_server_request(&second);
++            match removal {
++                0 => state.note_outbound_op(Op::UserInputAnswer {
++                    id: "turn-1".into(),
++                    call_id: "same-call".into(),
++                    response: ToolRequestUserInputResponse {
++                        answers: std::collections::HashMap::new(),
++                    },
++                }),
++                1 => state.note_evicted_server_request(&first),
++                2 => state.clear_request_user_input_turn("turn-1"),
++                _ => state.remove_request(&AppServerRequestId::Integer(1)),
++            }
++            assert!(!state.should_replay_snapshot_request(&first));
++            assert!(
++                state.should_replay_snapshot_request(&second),
++                "another turn owns an independent waiter"
++            );
++            assert_eq!(state.pending_requests_by_request_id.len(), 1);
++        }
++    }
++
+     fn exec_approval_request(
+         call_id: &str,
+         approval_id: Option<&str>,
+@@ -719,6 +751,7 @@ mod tests {
+ 
+         store.note_outbound_op(&Op::UserInputAnswer {
+             id: "turn-1".to_string(),
++            call_id: "call-1".into(),
+             response: ToolRequestUserInputResponse {
+                 answers: HashMap::new(),
+             },
+@@ -810,6 +843,7 @@ mod tests {
+ 
+         store.note_outbound_op(&Op::UserInputAnswer {
+             id: "turn-1".to_string(),
++            call_id: "call-1".into(),
+             response: ToolRequestUserInputResponse {
+                 answers: HashMap::new(),
+             },
+@@ -838,6 +872,7 @@ mod tests {
+ 
+         store.note_outbound_op(&Op::UserInputAnswer {
+             id: "turn-1".to_string(),
++            call_id: "call-1".into(),
+             response: ToolRequestUserInputResponse {
+                 answers: HashMap::new(),
+             },
+diff --git a/codex-rs/tui/src/app/tests/startup.rs b/codex-rs/tui/src/app/tests/startup.rs
+index b0e14416..6dc7f1f8 100644
+--- a/codex-rs/tui/src/app/tests/startup.rs
++++ b/codex-rs/tui/src/app/tests/startup.rs
+@@ -659,7 +659,14 @@ async fn startup_draft_handoff_recognizes_late_user_input_as_new_protected_view(
+     assert_eq!(app.chat_widget.composer_text_with_pending(), "x");
+     while let Ok(event) = app_event_rx.try_recv() {
+         assert!(
+-            !matches!(event, AppEvent::CodexOp(Op::UserInputAnswer { .. })),
++            !matches!(
++                event,
++                AppEvent::CodexOp(Op::UserInputAnswer { .. })
++                    | AppEvent::SubmitThreadOp {
++                        op: Op::UserInputAnswer { .. },
++                        ..
++                    }
++            ),
+             "showing the protected user input request must not submit an answer: {event:?}"
+         );
+     }
+diff --git a/codex-rs/tui/src/app_command.rs b/codex-rs/tui/src/app_command.rs
+index fef3fbb5..77a201db 100644
+--- a/codex-rs/tui/src/app_command.rs
++++ b/codex-rs/tui/src/app_command.rs
+@@ -75,6 +75,7 @@ pub(crate) enum AppCommand {
+     },
+     UserInputAnswer {
+         id: String,
++        call_id: String,
+         response: ToolRequestUserInputResponse,
+     },
+     RequestPermissionsResponse {
+@@ -204,8 +205,16 @@ impl AppCommand {
+         }
+     }
+ 
+-    pub(crate) fn user_input_answer(id: String, response: ToolRequestUserInputResponse) -> Self {
+-        Self::UserInputAnswer { id, response }
++    pub(crate) fn user_input_answer(
++        id: String,
++        call_id: String,
++        response: ToolRequestUserInputResponse,
++    ) -> Self {
++        Self::UserInputAnswer {
++            id,
++            call_id,
++            response,
++        }
+     }
+ 
+     pub(crate) fn request_permissions_response(
+diff --git a/codex-rs/tui/src/app_event_sender.rs b/codex-rs/tui/src/app_event_sender.rs
+index 6c160676..45655699 100644
+--- a/codex-rs/tui/src/app_event_sender.rs
++++ b/codex-rs/tui/src/app_event_sender.rs
+@@ -65,10 +65,22 @@ impl AppEventSender {
+         )));
+     }
+ 
+-    pub(crate) fn user_input_answer(&self, id: String, response: ToolRequestUserInputResponse) {
+-        self.send(AppEvent::CodexOp(AppCommand::user_input_answer(
+-            id, response,
+-        )));
++    pub(crate) fn user_input_answer(
++        &self,
++        thread_id: &str,
++        id: String,
++        call_id: String,
++        response: ToolRequestUserInputResponse,
++    ) -> bool {
++        let Ok(thread_id) = ThreadId::from_string(thread_id) else {
++            tracing::warn!("request_user_input answer has an invalid source thread");
++            return false;
++        };
++        self.send(AppEvent::SubmitThreadOp {
++            thread_id,
++            op: AppCommand::user_input_answer(id, call_id, response),
++        });
++        true
+     }
+ 
+     pub(crate) fn exec_approval(
+diff --git a/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs b/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs
+index 5cb09f35..a9fe851d 100644
+--- a/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs
+@@ -917,12 +917,16 @@ impl RequestUserInputOverlay {
+                 },
+             );
+         }
+-        self.app_event_tx.user_input_answer(
++        if !self.app_event_tx.user_input_answer(
++            &self.request.thread_id,
+             self.request.turn_id.clone(),
++            self.request.item_id.clone(),
+             ToolRequestUserInputResponse {
+                 answers: answers.clone(),
+             },
+-        );
++        ) {
++            return;
++        }
+         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+             history_cell::RequestUserInputResultCell {
+                 questions: self.request.questions.clone(),
+@@ -936,12 +940,16 @@ impl RequestUserInputOverlay {
+     fn submit_empty_auto_resolution(&mut self, now: Instant) {
+         self.confirm_unanswered = None;
+         let answers: HashMap<String, ToolRequestUserInputAnswer> = HashMap::new();
+-        self.app_event_tx.user_input_answer(
++        if !self.app_event_tx.user_input_answer(
++            &self.request.thread_id,
+             self.request.turn_id.clone(),
++            self.request.item_id.clone(),
+             ToolRequestUserInputResponse {
+                 answers: answers.clone(),
+             },
+-        );
++        ) {
++            return;
++        }
+         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+             history_cell::RequestUserInputResultCell {
+                 questions: self.request.questions.clone(),
+@@ -953,14 +961,24 @@ impl RequestUserInputOverlay {
+     }
+ 
+     fn dismiss_resolved_request(&mut self, request: &ResolvedAppServerRequest) -> bool {
+-        let ResolvedAppServerRequest::UserInput { call_id } = request else {
++        let ResolvedAppServerRequest::UserInput {
++            thread_id,
++            turn_id,
++            call_id,
++        } = request
++        else {
+             return false;
+         };
+ 
++        let matches_request = |pending: &ToolRequestUserInputParams| {
++            pending.thread_id == *thread_id
++                && pending.turn_id == *turn_id
++                && pending.item_id == *call_id
++        };
+         let queue_len = self.queue.len();
+         self.queue
+-            .retain(|queued_request| queued_request.item_id != *call_id);
+-        if self.request.item_id == *call_id {
++            .retain(|queued_request| !matches_request(queued_request));
++        if matches_request(&self.request) {
+             self.advance_queue_or_complete_at(Instant::now());
+             return true;
+         }
+@@ -1721,7 +1739,7 @@ mod tests {
+         questions: Vec<ToolRequestUserInputQuestion>,
+     ) -> ToolRequestUserInputParams {
+         ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-1".to_string(),
+             turn_id: turn_id.to_string(),
+             questions,
+@@ -1799,7 +1817,7 @@ mod tests {
+             /*disable_paste_burst*/ false,
+         );
+         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-2".to_string(),
+             turn_id: "turn-2".to_string(),
+             questions: vec![question_with_options("q2", "Second")],
+@@ -1807,7 +1825,7 @@ mod tests {
+             auto_resolution_ms: None,
+         });
+         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-3".to_string(),
+             turn_id: "turn-3".to_string(),
+             questions: vec![question_with_options("q3", "Third")],
+@@ -1821,6 +1839,20 @@ mod tests {
+         expect_interrupt_only(&mut rx);
+     }
+ 
++    #[test]
++    fn invalid_source_thread_preserves_the_input_prompt_and_emits_no_answer() {
++        let (tx, mut rx) = test_sender();
++        let mut request = request_event("turn-1", vec![question_with_options("q1", "First")]);
++        request.thread_id = "invalid-thread".to_owned();
++        let mut overlay = RequestUserInputOverlay::new(request, tx, true, false, false);
++        overlay.submit_answers();
++        assert!(!overlay.done);
++        assert!(rx.try_recv().is_err());
++        overlay.submit_empty_auto_resolution(Instant::now());
++        assert!(!overlay.done);
++        assert!(rx.try_recv().is_err());
++    }
++
+     #[test]
+     fn auto_resolution_absent_has_no_timer() {
+         let (tx, _rx) = test_sender();
+@@ -1867,7 +1899,11 @@ mod tests {
+         assert!(overlay.done);
+ 
+         let event = rx.try_recv().expect("expected UserInputAnswer event");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { id, response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer event");
+         };
+         assert_eq!(id, "turn-1");
+@@ -1992,7 +2028,11 @@ mod tests {
+         assert!(overlay.done);
+ 
+         let event = rx.try_recv().expect("expected UserInputAnswer event");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { id, response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer event");
+         };
+         assert_eq!(id, "turn-1");
+@@ -2099,7 +2139,7 @@ mod tests {
+         let (tx, mut rx) = test_sender();
+         let mut overlay = RequestUserInputOverlay::new(
+             ToolRequestUserInputParams {
+-                thread_id: "thread-1".to_string(),
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                 item_id: "call-1".to_string(),
+                 turn_id: "turn-1".to_string(),
+                 questions: vec![question_with_options("q1", "First")],
+@@ -2114,6 +2154,8 @@ mod tests {
+ 
+         assert!(
+             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-1".to_string(),
+                 call_id: "call-1".to_string(),
+             })
+         );
+@@ -2124,12 +2166,67 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn resolved_request_preserves_same_call_id_in_other_turns_and_threads() {
++        let (tx, mut rx) = test_sender();
++        let current = ToolRequestUserInputParams {
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++            turn_id: "turn-1".to_string(),
++            item_id: "same-call".to_string(),
++            questions: vec![question_with_options("q1", "First")],
++            is_blocking: true,
++            auto_resolution_ms: None,
++        };
++        let mut overlay = RequestUserInputOverlay::new(current.clone(), tx, true, false, false);
++        let mut other_turn = current.clone();
++        other_turn.turn_id = "turn-2".to_string();
++        let mut other_thread = current;
++        other_thread.thread_id = "thread-2".to_string();
++        overlay.try_consume_user_input_request(other_turn);
++        overlay.try_consume_user_input_request(other_thread);
++        assert!(
++            !overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-3".to_string(),
++                turn_id: "turn-1".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(overlay.queue.len(), 2);
++        assert!(
++            overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-2".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(overlay.queue.len(), 1);
++        assert_eq!(overlay.request.turn_id, "turn-1");
++        assert_eq!(overlay.queue.front().unwrap().thread_id, "thread-2");
++        assert!(
++            overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-1".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(overlay.request.thread_id, "thread-2");
++        assert!(!overlay.done);
++        assert!(
++            !overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-1".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert!(rx.try_recv().is_err());
++    }
++
+     #[test]
+     fn resolved_current_request_advances_to_next_same_turn_prompt() {
+         let (tx, mut rx) = test_sender();
+         let mut overlay = RequestUserInputOverlay::new(
+             ToolRequestUserInputParams {
+-                thread_id: "thread-1".to_string(),
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                 item_id: "call-1".to_string(),
+                 turn_id: "turn-1".to_string(),
+                 questions: vec![question_with_options("q1", "First")],
+@@ -2142,7 +2239,7 @@ mod tests {
+             /*disable_paste_burst*/ false,
+         );
+         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-2".to_string(),
+             turn_id: "turn-1".to_string(),
+             questions: vec![question_with_options("q2", "Second")],
+@@ -2152,6 +2249,8 @@ mod tests {
+ 
+         assert!(
+             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-1".to_string(),
+                 call_id: "call-1".to_string(),
+             })
+         );
+@@ -2171,7 +2270,7 @@ mod tests {
+         let (tx, mut rx) = test_sender();
+         let mut overlay = RequestUserInputOverlay::new(
+             ToolRequestUserInputParams {
+-                thread_id: "thread-1".to_string(),
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                 item_id: "call-1".to_string(),
+                 turn_id: "turn-1".to_string(),
+                 questions: vec![question_with_options("q1", "First")],
+@@ -2184,7 +2283,7 @@ mod tests {
+             /*disable_paste_burst*/ false,
+         );
+         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-2".to_string(),
+             turn_id: "turn-1".to_string(),
+             questions: vec![question_with_options("q2", "Second")],
+@@ -2192,7 +2291,7 @@ mod tests {
+             auto_resolution_ms: None,
+         });
+         overlay.try_consume_user_input_request(ToolRequestUserInputParams {
+-            thread_id: "thread-1".to_string(),
++            thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
+             item_id: "call-3".to_string(),
+             turn_id: "turn-1".to_string(),
+             questions: vec![question_with_options("q3", "Third")],
+@@ -2202,6 +2301,8 @@ mod tests {
+ 
+         assert!(
+             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
++                thread_id: "11111111-1111-4111-8111-111111111111".to_string(),
++                turn_id: "turn-1".to_string(),
+                 call_id: "call-2".to_string(),
+             })
+         );
+@@ -2238,7 +2339,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { id, response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         assert_eq!(id, "turn-1");
+@@ -2260,7 +2365,11 @@ mod tests {
+         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -2296,7 +2405,11 @@ mod tests {
+ 
+         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let mut expected = HashMap::new();
+@@ -2329,7 +2442,11 @@ mod tests {
+         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -2702,7 +2819,11 @@ mod tests {
+         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -3093,7 +3214,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -3118,7 +3243,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -3161,7 +3290,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -3197,7 +3330,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+@@ -3311,7 +3448,11 @@ mod tests {
+         overlay.submit_answers();
+ 
+         let event = rx.try_recv().expect("expected AppEvent");
+-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
++        let AppEvent::SubmitThreadOp {
++            op: Op::UserInputAnswer { response, .. },
++            ..
++        } = event
++        else {
+             panic!("expected UserInputAnswer");
+         };
+         let answer = response.answers.get("q1").expect("answer missing");
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 331b347b..78a847da 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -1035,11 +1035,9 @@ impl ChatWidget {
+         let request_thread_id = match request {
+             ResolvedAppServerRequest::ExecApproval { thread_id, .. }
+             | ResolvedAppServerRequest::FileChangeApproval { thread_id, .. }
+-            | ResolvedAppServerRequest::PermissionsApproval { thread_id, .. } => {
+-                Some(thread_id.as_str())
+-            }
+-            ResolvedAppServerRequest::UserInput { .. }
+-            | ResolvedAppServerRequest::McpElicitation { .. } => None,
++            | ResolvedAppServerRequest::PermissionsApproval { thread_id, .. }
++            | ResolvedAppServerRequest::UserInput { thread_id, .. } => Some(thread_id.as_str()),
++            ResolvedAppServerRequest::McpElicitation { .. } => None,
+         };
+         let removed_deferred = request_thread_id.is_none_or(|request_thread_id| {
+             self.thread_id
+diff --git a/codex-rs/tui/src/chatwidget/interrupts.rs b/codex-rs/tui/src/chatwidget/interrupts.rs
+index 35a9cb56..59f0573f 100644
+--- a/codex-rs/tui/src/chatwidget/interrupts.rs
++++ b/codex-rs/tui/src/chatwidget/interrupts.rs
+@@ -144,8 +144,8 @@ impl QueuedInterrupt {
+                     if ev.call_id == id.as_str())
+             }
+             QueuedInterrupt::RequestUserInput(ev) => {
+-                matches!(request, ResolvedAppServerRequest::UserInput { call_id }
+-                    if ev.item_id == call_id.as_str())
++                matches!(request, ResolvedAppServerRequest::UserInput { thread_id, turn_id, call_id }
++                    if ev.thread_id == *thread_id && ev.turn_id == *turn_id && ev.item_id == *call_id)
+             }
+             QueuedInterrupt::ItemStarted(_) | QueuedInterrupt::ItemCompleted(_) => false,
+         }
+@@ -217,6 +217,8 @@ mod tests {
+ 
+         assert!(
+             manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn".to_string(),
+                 call_id: "call-b".to_string(),
+             })
+         );
+@@ -229,12 +231,51 @@ mod tests {
+         assert_eq!(remaining.item_id, "call-a");
+         assert!(
+             manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn".to_string(),
+                 call_id: "call-a".to_string(),
+             })
+         );
+         assert!(!manager.has_pending_prompt());
+     }
+ 
++    #[test]
++    fn remove_resolved_prompt_keeps_same_call_id_for_other_turns_and_threads() {
++        let mut manager = InterruptManager::new();
++        manager.push_user_input(user_input("same-call", "turn-1"));
++        manager.push_user_input(user_input("same-call", "turn-2"));
++        let mut other_thread = user_input("same-call", "turn-1");
++        other_thread.thread_id = "thread-2".to_string();
++        manager.push_user_input(other_thread);
++        assert!(
++            !manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-3".to_string(),
++                turn_id: "turn-1".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert!(
++            manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn-2".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(manager.queue.len(), 2);
++        assert!(
++            manager.remove_resolved_prompt(&ResolvedAppServerRequest::UserInput {
++                thread_id: "thread-1".to_string(),
++                turn_id: "turn-1".to_string(),
++                call_id: "same-call".to_string(),
++            })
++        );
++        assert_eq!(manager.queue.len(), 1);
++        let Some(QueuedInterrupt::RequestUserInput(remaining)) = manager.queue.front() else {
++            panic!("expected foreign-thread input");
++        };
++        assert_eq!(remaining.thread_id, "thread-2");
++    }
++
+     #[test]
+     fn remove_resolved_prompt_matches_exec_approval_id() {
+         let mut manager = InterruptManager::new();

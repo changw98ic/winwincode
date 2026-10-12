@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable `ClientNode` registry and exchange cursor contract tests.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -141,7 +139,6 @@ fn refreshes_device_reported_projection_on_re_registration() {
         Some("cix_99999999999999999999999999")
     );
     assert_eq!(second.record.max_concurrent_worker_sessions, 8);
-    // Presence, lock, and connection facts are not part of registration.
     assert_eq!(
         second.record.presence_state,
         ClientPresenceState::PendingEnrollment
@@ -193,32 +190,27 @@ fn enforces_frozen_presence_transitions() {
         .record;
     let node = registered.client_node_id.clone();
 
-    // pending_enrollment -> offline is not legal.
     let illegal = registry
         .update_presence(&node, ClientPresenceState::Offline, 1)
         .expect_err("pending_enrollment -> offline must be illegal");
     assert_eq!(illegal.kind(), ClientRegistryErrorKind::PresenceTransition);
 
-    // pending_enrollment -> online on enrollment acceptance.
     let online = registry
         .update_presence(&node, ClientPresenceState::Online, 1)
         .expect("pending_enrollment -> online");
     assert_eq!(online.presence_state, ClientPresenceState::Online);
     assert_eq!(online.revision, 2);
 
-    // online -> degraded while local reconciliation is unfinished.
     let degraded = registry
         .update_presence(&node, ClientPresenceState::Degraded, 2)
         .expect("online -> degraded");
     assert_eq!(degraded.presence_state, ClientPresenceState::Degraded);
 
-    // degraded -> online once the reconcile result is accepted.
     let online_again = registry
         .update_presence(&node, ClientPresenceState::Online, 3)
         .expect("degraded -> online");
     assert_eq!(online_again.presence_state, ClientPresenceState::Online);
 
-    // online -> locked and locked -> online.
     let locked = registry
         .update_presence(&node, ClientPresenceState::Locked, 4)
         .expect("online -> locked");
@@ -228,7 +220,6 @@ fn enforces_frozen_presence_transitions() {
         .expect("locked -> online");
     assert_eq!(unlocked.presence_state, ClientPresenceState::Online);
 
-    // online -> offline -> revoked (terminal).
     let offline = registry
         .update_presence(&node, ClientPresenceState::Offline, 6)
         .expect("online -> offline");
@@ -238,7 +229,6 @@ fn enforces_frozen_presence_transitions() {
         .expect("offline -> revoked");
     assert_eq!(revoked.presence_state, ClientPresenceState::Revoked);
 
-    // revoked is terminal.
     let revive = registry
         .update_presence(&node, ClientPresenceState::Online, 8)
         .expect_err("revoked is terminal");
@@ -281,7 +271,6 @@ fn heartbeat_reconnects_offline_and_rejects_unenrolled_devices() {
         .record;
     let node = registered.client_node_id.clone();
 
-    // Enrollment acceptance has not happened yet.
     let early = registry
         .heartbeat(&node, 0, &instant(T1), 1)
         .expect_err("pending_enrollment heartbeat must be rejected");
@@ -355,7 +344,6 @@ fn sweep_offline_projects_only_stale_online_and_degraded_devices() {
         .expect("register")
         .record;
 
-    // Nothing expires before the cutoff.
     let early = registry.sweep_offline(&instant(T1)).expect("early sweep");
     assert!(early.is_empty());
 
@@ -409,7 +397,6 @@ fn exchange_cursors_advance_monotonically_per_direction() {
             server_to_client_ack_sequence: 5,
         }
     );
-    // Replayed or older acknowledgements never regress a direction.
     let replayed = registry
         .advance_exchange_cursors(&node, 1, 9)
         .expect("replayed advance");
@@ -552,5 +539,60 @@ fn rejects_invalid_instant_and_unknown_snapshots() {
             .snapshot(&node_id(16))
             .expect("unknown snapshot")
             .is_none()
+    );
+}
+
+#[test]
+fn exchange_deduplication_survives_restart_and_detects_changed_payloads() {
+    let root = temporary_directory("durable-receipts");
+    let node = node_id(31);
+    {
+        let mut storage = open(root.clone());
+        let mut registry = storage.client_node_registry().expect("registry");
+        registry
+            .register(&registration(31), 0, &instant(T0))
+            .expect("register");
+        assert!(
+            !registry
+                .reserve_exchange_frame(&node, 1, "message-1", "digest-a", Some("command-1"))
+                .expect("reserve")
+        );
+        assert!(
+            !registry
+                .reserve_exchange_frame(&node, 1, "message-1", "digest-a", Some("command-1"))
+                .expect("unfinished command must replay")
+        );
+        registry
+            .complete_exchange_frame(&node, 1, Some("command-1"))
+            .expect("complete");
+    }
+    let mut storage = open(root);
+    let mut registry = storage.client_node_registry().expect("registry");
+    assert!(
+        registry
+            .reserve_exchange_frame(&node, 2, "message-2", "digest-a", Some("command-1"))
+            .expect("same command in another exchange")
+    );
+    assert_eq!(
+        registry
+            .reserve_exchange_frame(&node, 3, "message-3", "digest-b", Some("command-1"))
+            .expect_err("changed command bytes")
+            .kind(),
+        ClientRegistryErrorKind::IdentityConflict
+    );
+    assert_eq!(
+        registry
+            .reserve_exchange_frame(&node, 1, "message-1", "digest-b", None)
+            .expect_err("changed old frame bytes")
+            .kind(),
+        ClientRegistryErrorKind::IdentityConflict
+    );
+    assert_eq!(
+        registry
+            .exchange_cursors(&node)
+            .expect("cursor")
+            .expect("node")
+            .client_to_server_ack_sequence,
+        1
     );
 }

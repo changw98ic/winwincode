@@ -1,0 +1,373 @@
+diff --git a/codex-rs/core/src/tools/authorization_tests.rs b/codex-rs/core/src/tools/authorization_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/authorization_tests.rs
+@@ -0,0 +1,368 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolRegistry;
++use codex_tools::ToolExecutor;
++use codex_tools::ToolName;
++use futures::future::BoxFuture;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++
++struct RecordingGate {
++    requests: Arc<Mutex<Vec<crate::ToolCallGateRequest>>>,
++    reject_revalidation: bool,
++}
++
++impl crate::ToolCallGate for RecordingGate {
++    fn authorize(
++        &self,
++        request: crate::ToolCallGateRequest,
++    ) -> BoxFuture<'static, Result<crate::ToolCallGateAuthorization, crate::ToolCallGateRejection>>
++    {
++        self.requests.lock().unwrap().push(request);
++        Box::pin(async { Ok(crate::ToolCallGateAuthorization::default()) })
++    }
++
++    fn revalidate(
++        &self,
++        request: crate::ToolCallGateRequest,
++        _authorization: crate::ToolCallGateAuthorization,
++    ) -> BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
++        self.requests.lock().unwrap().push(request);
++        let reject = self.reject_revalidation;
++        Box::pin(async move {
++            if reject {
++                Err(crate::ToolCallGateRejection::new(
++                    "PERMISSION_CHANGED",
++                    "permission changed",
++                ))
++            } else {
++                Ok(())
++            }
++        })
++    }
++}
++
++struct RecordingTool {
++    calls: Arc<AtomicUsize>,
++    freeform: bool,
++}
++
++impl ToolExecutor<ToolInvocation> for RecordingTool {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("example")
++    }
++
++    fn spec(&self) -> codex_tools::ToolSpec {
++        if self.freeform {
++            return codex_tools::ToolSpec::Freeform(codex_tools::FreeformTool {
++                name: "example".to_string(),
++                description: "Record freeform input".to_string(),
++                defer_loading: None,
++                format: codex_tools::FreeformToolFormat {
++                    r#type: "grammar".to_string(),
++                    syntax: "lark".to_string(),
++                    definition: "start: /.+/".to_string(),
++                },
++            });
++        }
++        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            name: "example".to_string(),
++            description: "Record the effective input".to_string(),
++            strict: false,
++            defer_loading: None,
++            parameters: codex_tools::JsonSchema::default(),
++            output_schema: None,
++        })
++    }
++
++    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++        self.calls.fetch_add(1, Ordering::SeqCst);
++        Box::pin(async move {
++            let value = match invocation.payload {
++                ToolPayload::Function { arguments } => serde_json::from_str(&arguments).unwrap(),
++                ToolPayload::Custom { input } => json!(input),
++                ToolPayload::ToolSearch { .. } => panic!("expected function or freeform input"),
++            };
++            Ok(crate::tools::context::boxed_tool_output(
++                codex_tools::JsonToolOutput::new(value),
++            ))
++        })
++    }
++}
++
++impl CoreToolRuntime for RecordingTool {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(
++            (self.freeform, payload),
++            (true, ToolPayload::Custom { .. }) | (false, ToolPayload::Function { .. })
++        )
++    }
++}
++
++#[tokio::test]
++async fn hooks_precede_authorization_and_revalidation_of_the_effective_input() {
++    for freeform in [false, true] {
++        for (hook_blocks, gate_rejects) in [(false, false), (true, false), (false, true)] {
++            let (session, mut turn) = crate::session::tests::make_session_and_context().await;
++            let mut output = json!({"hookSpecificOutput":{
++                "hookEventName":"PreToolUse",
++                "permissionDecision":if hook_blocks { "deny" } else { "allow" },
++                "permissionDecisionReason":"fixture decision",
++                "updatedInput": if freeform { json!("rewritten") } else { json!({"value":"rewritten"}) },
++            }});
++            if hook_blocks {
++                output["hookSpecificOutput"]
++                    .as_object_mut()
++                    .unwrap()
++                    .remove("updatedInput");
++            }
++            let user_config = json!({"hooks":{"PreToolUse":[{
++                "matcher":"example", "hooks":[{
++                    "type":"command", "command":format!("printf '%s\\n' '{output}'"),
++                }],
++            }]}});
++            install_trusted_hooks(&session, &mut turn, user_config);
++            let records = Arc::new(Mutex::new(Vec::new()));
++            session
++                .services
++                .thread_extension_data
++                .insert(crate::ToolCallGateAttachment::new(Arc::new(
++                    RecordingGate {
++                        requests: Arc::clone(&records),
++                        reject_revalidation: gate_rejects,
++                    },
++                )));
++            let calls = Arc::new(AtomicUsize::new(0));
++            let registry = ToolRegistry::from_tools([Arc::new(RecordingTool {
++                calls: Arc::clone(&calls),
++                freeform,
++            }) as Arc<dyn CoreToolRuntime>]);
++            let session = Arc::new(session);
++            let turn = Arc::new(turn);
++            let expected = crate::ToolCallGateRequest {
++                thread_id: session.thread_id.to_string(),
++                turn_id: turn.sub_id.clone(),
++                call_id: "child-1".to_string(),
++                namespace: Some("functions".to_string()),
++                tool_name: "example".to_string(),
++                payload: if freeform {
++                    crate::ToolCallGatePayload::Custom {
++                        input: "rewritten".to_string(),
++                    }
++                } else {
++                    crate::ToolCallGatePayload::Function {
++                        arguments: "{\"value\":\"rewritten\"}".to_string(),
++                    }
++                },
++            };
++            let result = registry
++                .dispatch_any_with_terminal_outcome(
++                    ToolInvocation {
++                        step_context: crate::session::step_context::StepContext::for_test(
++                            Arc::clone(&turn),
++                        ),
++                        session,
++                        turn,
++                        cancellation_token: tokio_util::sync::CancellationToken::new(),
++                        tracker: Arc::new(tokio::sync::Mutex::new(
++                            crate::turn_diff_tracker::TurnDiffTracker::new(),
++                        )),
++                        call_id: "child-1".to_string(),
++                        tool_name: ToolName::plain("example").with_default_namespace(),
++                        source: ToolCallSource::CodeMode {
++                            cell_id: "cell-1".to_string(),
++                            runtime_tool_call_id: "runtime-1".to_string(),
++                        },
++                        payload: if freeform {
++                            ToolPayload::Custom {
++                                input: "original".to_string(),
++                            }
++                        } else {
++                            ToolPayload::Function {
++                                arguments: "{\"value\":\"original\"}".to_string(),
++                            }
++                        },
++                    },
++                    None,
++                )
++                .await;
++            assert_eq!(
++                *records.lock().unwrap(),
++                if hook_blocks {
++                    Vec::new()
++                } else {
++                    vec![expected.clone(), expected]
++                }
++            );
++            assert_eq!(
++                calls.load(Ordering::SeqCst),
++                usize::from(!hook_blocks && !gate_rejects)
++            );
++            if !hook_blocks && !gate_rejects {
++                assert_eq!(
++                    result.unwrap().code_mode_result(),
++                    if freeform {
++                        json!("rewritten")
++                    } else {
++                        json!({"value":"rewritten"})
++                    }
++                );
++            } else {
++                assert!(result.is_err());
++            }
++        }
++    }
++}
++
++fn install_trusted_hooks(
++    session: &crate::session::session::Session,
++    turn: &mut crate::session::turn_context::TurnContext,
++    mut user_config: serde_json::Value,
++) {
++    let mut config = (*turn.config).clone();
++    let config_path = config.codex_home.join("config.toml");
++    let stack = config
++        .config_layer_stack
++        .with_user_config(
++            &config_path,
++            serde_json::from_value(user_config.clone()).unwrap(),
++        )
++        .unwrap();
++    let listed = codex_hooks::list_hooks(codex_hooks::HooksConfig {
++        feature_enabled: true,
++        config_layer_stack: Some(stack),
++        ..Default::default()
++    });
++    assert_eq!(listed.hooks.len(), 1);
++    for hook in listed.hooks {
++        user_config["hooks"]["state"][hook.key] = json!({"trusted_hash":hook.current_hash});
++    }
++    config.config_layer_stack = config
++        .config_layer_stack
++        .with_user_config(&config_path, serde_json::from_value(user_config).unwrap())
++        .unwrap();
++    let (hooks, _results) = codex_hooks::Hooks::new(
++        codex_hooks::HooksConfig {
++            feature_enabled: true,
++            config_layer_stack: Some(config.config_layer_stack.clone()),
++            ..Default::default()
++        },
++        session.thread_id,
++        Arc::new(crate::hook_mcp_executor::CoreHookMcpExecutor {
++            runtime: Arc::clone(&session.services.mcp_runtime),
++            thread_id: session.thread_id,
++        }),
++    )
++    .unwrap();
++    session.services.hooks.store(Arc::new(hooks));
++    turn.config = Arc::new(config);
++}
++
++#[tokio::test]
++async fn image_reads_revalidate_the_resolved_path_before_filesystem_access() {
++    let (session, turn) = crate::session::tests::make_session_and_context().await;
++    let records = Arc::new(Mutex::new(Vec::new()));
++    session
++        .services
++        .thread_extension_data
++        .insert(crate::ToolCallGateAttachment::new(Arc::new(
++            RecordingGate {
++                requests: Arc::clone(&records),
++                reject_revalidation: true,
++            },
++        )));
++    let turn = Arc::new(turn);
++    let result = crate::tools::handlers::ViewImageHandler::default()
++        .handle(ToolInvocation {
++            session: Arc::new(session),
++            step_context: crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
++            turn,
++            cancellation_token: tokio_util::sync::CancellationToken::new(),
++            tracker: Arc::new(tokio::sync::Mutex::new(
++                crate::turn_diff_tracker::TurnDiffTracker::new(),
++            )),
++            call_id: "image-read".into(),
++            tool_name: ToolName::plain("view_image"),
++            source: ToolCallSource::CodeMode {
++                cell_id: "cell-1".into(),
++                runtime_tool_call_id: "read-1".into(),
++            },
++            payload: ToolPayload::Function {
++                arguments: json!({"path":"missing-gated-image.png"}).to_string(),
++            },
++        })
++        .await;
++    assert!(
++        matches!(result, Err(crate::function_tool::FunctionCallError::RespondToModel(message)) if message.contains("PERMISSION_CHANGED"))
++    );
++    let records = records.lock().unwrap();
++    assert_eq!(records.len(), 2);
++    assert_eq!(records[0], records[1]);
++    assert!(
++        matches!(&records[0].payload, crate::ToolCallGatePayload::FileRead { path } if std::path::Path::new(path).is_absolute() && path.ends_with("missing-gated-image.png"))
++    );
++}
++
++#[tokio::test]
++async fn post_hook_rejection_keeps_the_terminal_handoff_uncommitted() {
++    let (session, mut turn) = crate::session::tests::make_session_and_context().await;
++    turn.submit_change_batch = true;
++    install_trusted_hooks(
++        &session,
++        &mut turn,
++        json!({"hooks":{"PostToolUse":[{
++            "matcher":"submit_change_batch", "hooks":[{
++                "type":"command", "command":"printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"proposal rejected\"}'",
++            }],
++        }]}}),
++    );
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let registry =
++        ToolRegistry::from_tools([
++            Arc::new(crate::tools::handlers::SubmitChangeBatchHandler) as Arc<dyn CoreToolRuntime>
++        ]);
++    let result = registry
++        .dispatch_any_with_terminal_outcome(
++            ToolInvocation {
++                step_context: crate::session::step_context::StepContext::for_test(Arc::clone(
++                    &turn,
++                )),
++                session: Arc::clone(&session),
++                turn,
++                cancellation_token: tokio_util::sync::CancellationToken::new(),
++                tracker: Arc::new(tokio::sync::Mutex::new(
++                    crate::turn_diff_tracker::TurnDiffTracker::new(),
++                )),
++                call_id: "proposal-1".to_string(),
++                tool_name: ToolName::plain("submit_change_batch").with_default_namespace(),
++                source: ToolCallSource::CodeMode {
++                    cell_id: "cell-1".to_string(),
++                    runtime_tool_call_id: "runtime-1".to_string(),
++                },
++                payload: ToolPayload::Custom {
++                    input: "fixture proposal".to_string(),
++                },
++            },
++            None,
++        )
++        .await;
++    assert!(
++        matches!(result, Err(crate::function_tool::FunctionCallError::RespondToModel(message)) if message.contains("proposal rejected"))
++    );
++    assert!(
++        !session
++            .services
++            .code_mode_service
++            .terminal_handoffs
++            .is_pending(&codex_code_mode::CellId::new("cell-1".to_string()))
++    );
++}

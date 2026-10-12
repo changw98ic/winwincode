@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Narrow Control Plane handler for the Worker-facing `ExecutionPort` messages.
-//!
-//! The service translates generated wire DTOs into the durable
-//! [`winwincode_storage::ExecutionRegistry`] requests.  It never treats a
-//! lease carried by a Worker message as authority: every job-scoped result is
-//! joined to the Worker and lease rows loaded from the registry first.
-
 use std::fmt;
 
 use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
@@ -46,14 +39,8 @@ use crate::{
     RepositoryExecutionSchedulerError, WorkerExecutionLifecycleError,
 };
 
-/// Default interval advertised to a registered Worker.
 pub const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 5_000;
 
-/// Control Plane-owned metadata for one Worker replay command.
-///
-/// The caller identifies the durable Job and supplies only command-envelope
-/// values. Session, Worker, lease, and `WorkRun` identity are loaded from the
-/// committed Delivery binding and execution registry below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeReplayRequestCommand {
     pub job_id: ExecutionJobId,
@@ -63,24 +50,15 @@ pub struct RuntimeReplayRequestCommand {
     pub sent_at: Instant,
 }
 
-/// Errors raised before a generated response can be produced.
 #[derive(Debug)]
 pub enum ExecutionPortServiceError {
-    /// The persistent registry rejected or failed to process a request.
     Storage(StorageError),
-    /// A generated message was not valid for this handler.
     Protocol(&'static str),
-    /// A scheduler claim did not match its already durable Job.
     JobMismatch(&'static str),
-    /// The current Delivery binding or execution lease is missing, stale, or foreign.
     AuthorityRejected(&'static str),
-    /// The registry rejected a scheduler claim; no dispatch was created.
     ClaimRejected(LeaseWriteStatus),
-    /// The durable Worker lifecycle failed before a dispatch could be built.
     WorkerLifecycle(WorkerExecutionLifecycleError),
-    /// Action Policy evaluation or receipt issuance failed closed.
     ActionPolicy(crate::ActionPolicyEnforcementError),
-    /// The requested message direction is handled by another Control Plane seam.
     UnsupportedMessage,
 }
 
@@ -118,11 +96,6 @@ impl From<StorageError> for ExecutionPortServiceError {
     }
 }
 
-/// The minimum Worker-facing Control Plane service.
-///
-/// The registry owns durable Worker, heartbeat, and lease authority.  The
-/// service owns only DTO conversion and response semantics; local and remote
-/// adapters can therefore call the same methods.
 pub struct ExecutionPortService<'storage> {
     storage: &'storage mut SqliteStorage,
     server_time: Instant,
@@ -130,7 +103,6 @@ pub struct ExecutionPortService<'storage> {
 }
 
 impl<'storage> ExecutionPortService<'storage> {
-    /// Creates a service over one already opened persistent storage adapter.
     #[must_use = "use the configured ExecutionPort service"]
     pub fn new(storage: &'storage mut SqliteStorage, server_time: Instant) -> Self {
         Self {
@@ -140,14 +112,6 @@ impl<'storage> ExecutionPortService<'storage> {
         }
     }
 
-    /// Creates a service with an explicit advertised heartbeat interval.
-    ///
-    /// The interval is protocol configuration, not Worker input.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error when the interval falls outside the canonical
-    /// one-second to five-minute range.
     #[must_use = "use the configured ExecutionPort service"]
     pub fn with_heartbeat_interval(
         storage: &'storage mut SqliteStorage,
@@ -168,13 +132,6 @@ impl<'storage> ExecutionPortService<'storage> {
         self.storage.execution_registry()
     }
 
-    /// Handles an action enforcement request using an explicitly installed
-    /// Control Plane issuer. Other messages retain the ordinary service path.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same protocol/storage errors as [`Self::handle`], or a
-    /// fail-closed action Policy issuance error.
     pub fn handle_with_action_enforcement(
         &mut self,
         message: ExecutionPortMessage,
@@ -188,12 +145,6 @@ impl<'storage> ExecutionPortService<'storage> {
         }
     }
 
-    /// Issues or exactly replays one immutable action enforcement receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid action facts or stale durable execution authority before
-    /// signing, and returns durable Policy/storage failures unchanged.
     pub fn enforce_action(
         &mut self,
         issuer: &ActionEnforcementIssuer,
@@ -203,16 +154,6 @@ impl<'storage> ExecutionPortService<'storage> {
             .map_err(ExecutionPortServiceError::ActionPolicy)
     }
 
-    /// Handles the Worker-to-Control-Plane messages owned by this slice.
-    ///
-    /// Registration, heartbeat, and dispatch-result handling all consult the
-    /// same durable registry. Job dispatch creation is exposed separately as
-    /// [`Self::claim_execution_job`] because it is a scheduler-side operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol or storage error for an invalid supported message,
-    /// and `UnsupportedMessage` for a direction handled by another service.
     pub fn handle(
         &mut self,
         message: ExecutionPortMessage,
@@ -231,17 +172,6 @@ impl<'storage> ExecutionPortService<'storage> {
         }
     }
 
-    /// Converts and durably registers one embedded Community Worker process
-    /// in the canonical `LocalDefaultScope`.
-    ///
-    /// Fleet transports carry authenticated tenant scope at a different
-    /// platform boundary and must call
-    /// [`ExecutionRegistry::register_worker_for_scope`] explicitly.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error for malformed Worker facts or the storage
-    /// error produced by the durable registration transaction.
     pub fn register_worker(
         &mut self,
         message: &WorkerRegisterMessage,
@@ -262,14 +192,6 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
-    /// Registers an embedded local Worker in the Server's configured
-    /// repository scope. The scope is supplied by the canonical ingress
-    /// composition rather than inferred from the Worker message.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same protocol and durable registry errors as
-    /// [`Self::register_worker`].
     pub fn register_local_worker_for_scope(
         &mut self,
         message: &WorkerRegisterMessage,
@@ -299,16 +221,6 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
-    /// Registers one remote Worker using transport-authenticated identity and
-    /// tenant scope supplied by the remote pool adapter.
-    ///
-    /// The Worker message contributes capabilities and process identity only;
-    /// it cannot choose the authentication principal, scope, or security zone.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error for malformed Worker facts or the storage
-    /// error produced by the single durable Worker Registry.
     pub(crate) fn register_authenticated_remote_worker(
         &mut self,
         message: &WorkerRegisterMessage,
@@ -363,12 +275,6 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
-    /// Converts and durably records one Worker heartbeat.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error for malformed capacity or lease facts, or the
-    /// storage error produced by the durable heartbeat transaction.
     pub fn record_heartbeat(
         &mut self,
         message: &WorkerHeartbeatMessage,
@@ -407,17 +313,6 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
-    /// Claims a durable Job for a registered Worker and builds the exact
-    /// `job.dispatch` message from the lease returned by storage.
-    ///
-    /// The caller supplies the immutable Job plus scheduler-created claim
-    /// request.  Storage remains authoritative: the returned lease is loaded
-    /// from the registry receipt, rather than copied from caller input.
-    ///
-    /// # Errors
-    ///
-    /// Returns a Job mismatch, a rejected durable claim status, or the storage
-    /// error produced while claiming the lease.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "claim ownership is consumed after the durable identity join"
@@ -495,35 +390,21 @@ impl<'storage> ExecutionPortService<'storage> {
             replacement_authority: None,
             request_id: claim.request_id,
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             sent_at: lease.issued_at.clone(),
         })
     }
 
-    /// Builds one CP-to-Worker `runtime.replay_request` from durable authority.
-    ///
-    /// The caller supplies only the command envelope metadata and the durable
-    /// Job id. The current Delivery-stage binding and execution lease provide
-    /// every Worker/session identity and lease field in the generated frame.
-    /// No frame is returned when the binding is pending, stale, foreign, or
-    /// the current lease has expired.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error for invalid command metadata, a storage error
-    /// for unavailable durable state, or an authority rejection before a
-    /// transport frame can be emitted.
     pub fn build_runtime_replay_request(
         &mut self,
         command: RuntimeReplayRequestCommand,
     ) -> Result<TypedFrame, ExecutionPortServiceError> {
         validate_runtime_replay_command(&command)?;
         let (durable_job_event, job) = load_durable_execution_job(self.storage, &command.job_id)?;
-        let authority = load_runtime_replay_authority(self.storage, &job, &self.server_time)?;
-        if command.sent_at.0 < authority.lease.issued_at.0
-            || command.sent_at.0 > authority.lease.expires_at.0
-        {
+        let authority = load_runtime_replay_authority(self.storage, &job)?;
+        if command.sent_at.0 < authority.lease.issued_at.0 {
             return Err(ExecutionPortServiceError::AuthorityRejected(
-                "replay command time is outside the current lease",
+                "replay command time precedes the original execution",
             ));
         }
         let after_sequence = runtime_ack_sequence_for_replay(
@@ -550,13 +431,6 @@ impl<'storage> ExecutionPortService<'storage> {
         .map_err(|_| ExecutionPortServiceError::Protocol("runtime.replay_request"))
     }
 
-    /// Joins a Worker dispatch result to the durable registry and records its
-    /// accepted receipt before returning the generated response DTO.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error for an invalid generated message or a storage
-    /// error while reading or updating its durable Worker and lease authority.
     pub fn accept_dispatch_result(
         &mut self,
         mut message: JobDispatchResultMessage,
@@ -580,13 +454,6 @@ impl ExecutionPortCore for ExecutionPortService<'_> {
     }
 }
 
-/// The already-resolved facts needed to submit one runtime event.
-///
-/// `scope` and `authority` are deliberately kept together.  A resolver must
-/// obtain both from the same committed `ExecutionJob` and `SessionBinding`
-/// context; the generated Worker message is never treated as a source of
-/// scheduler authority.  [`ControlPlane::accept_runtime_event`] performs the
-/// final durable join and rejects a route that is foreign or stale.
 #[derive(Clone, Debug)]
 pub struct RuntimeEventRoute {
     scope: RepositoryScope,
@@ -594,15 +461,6 @@ pub struct RuntimeEventRoute {
 }
 
 impl RuntimeEventRoute {
-    /// Seals one route from scheduler-owned authority and its repository
-    /// scope.  The authority type has no public raw-field constructor, so a
-    /// caller cannot manufacture a lease window from the wire message.
-    ///
-    /// # Safety contract
-    ///
-    /// The caller must resolve the scope and authority from the same durable
-    /// Job/SessionBinding record.  The Control Plane checks that relationship
-    /// again before writing the runtime ledger.
     #[must_use]
     pub fn from_sealed_scheduler(
         scope: RepositoryScope,
@@ -611,35 +469,20 @@ impl RuntimeEventRoute {
         Self { scope, authority }
     }
 
-    /// Returns the resolved repository scope.
     #[must_use]
     pub const fn scope(&self) -> &RepositoryScope {
         &self.scope
     }
 
-    /// Returns the opaque scheduler-owned authority.
     #[must_use]
     pub const fn authority(&self) -> &SessionBindingAuthority {
         &self.authority
     }
 }
 
-/// Resolves runtime ingress facts from the Control Plane's durable context.
-///
-/// A production implementation should load the exact committed
-/// `ExecutionJob` and `SessionBinding` before returning a route.  It receives
-/// the Control Plane rather than a caller-supplied scope, and the router passes
-/// only the generated runtime event to this seam.
 pub trait RuntimeEventRouteResolver {
-    /// Resolver-specific infrastructure error.
     type Error;
 
-    /// Resolves one route for a generated runtime event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a resolver error when the durable Job/SessionBinding context is
-    /// unavailable or does not identify a route.
     fn resolve(
         &mut self,
         control_plane: &ControlPlane,
@@ -662,14 +505,10 @@ where
     }
 }
 
-/// Errors produced by the production runtime-event composition seam.
 #[derive(Debug)]
 pub enum RuntimeEventPortError<ResolverError> {
-    /// Durable Job/SessionBinding route resolution failed.
     Resolution(ResolverError),
-    /// The canonical Control Plane runtime transaction rejected or failed.
     ControlPlane(crate::RuntimeMessageError),
-    /// A message belonging to another `ExecutionPort` handler was received.
     UnsupportedMessage,
 }
 
@@ -701,11 +540,6 @@ impl<ResolverError: std::error::Error + 'static> std::error::Error
     }
 }
 
-/// Production composition core for the runtime-event `ExecutionPort` seam.
-///
-/// Both local and remote adapters call this same router.  It resolves the
-/// scheduler-owned route once, then delegates the actual write to the existing
-/// [`ControlPlane::accept_runtime_event`] transaction.
 pub struct RuntimeEventPortRouter<'control_plane, Resolver> {
     control_plane: &'control_plane mut ControlPlane,
     resolver: Resolver,
@@ -713,7 +547,6 @@ pub struct RuntimeEventPortRouter<'control_plane, Resolver> {
 }
 
 impl<'control_plane, Resolver> RuntimeEventPortRouter<'control_plane, Resolver> {
-    /// Creates a runtime-event router over one running Control Plane.
     #[must_use]
     pub fn new(
         control_plane: &'control_plane mut ControlPlane,
@@ -732,12 +565,6 @@ impl<Resolver> RuntimeEventPortRouter<'_, Resolver>
 where
     Resolver: RuntimeEventRouteResolver,
 {
-    /// Resolves and submits one generated runtime event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a resolver error before the transaction is called, or the
-    /// canonical runtime transaction error.
     pub fn accept_runtime_event(
         &mut self,
         message: &RuntimeEventMessage,
@@ -792,14 +619,35 @@ fn validate_runtime_replay_command(
     Ok(())
 }
 
+pub(crate) fn load_running_runtime_authority(
+    storage: &mut SqliteStorage,
+    job: &ExecutionJob,
+    now: &Instant,
+) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
+    let authority = load_runtime_authority(storage, job, true)?;
+    if now.0 < authority.lease.issued_at.0 || now.0 >= authority.lease.expires_at.0 {
+        return Err(ExecutionPortServiceError::AuthorityRejected(
+            "current execution lease is expired",
+        ));
+    }
+    Ok(authority)
+}
+
+pub(crate) fn load_runtime_replay_authority(
+    storage: &mut SqliteStorage,
+    job: &ExecutionJob,
+) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
+    load_runtime_authority(storage, job, false)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the durable identity join stays one fail-closed seam"
 )]
-pub(crate) fn load_runtime_replay_authority(
+fn load_runtime_authority(
     storage: &mut SqliteStorage,
     job: &ExecutionJob,
-    now: &Instant,
+    require_running: bool,
 ) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
     let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(ExecutionPortServiceError::AuthorityRejected(
@@ -901,7 +749,7 @@ pub(crate) fn load_runtime_replay_authority(
             .ok_or(ExecutionPortServiceError::AuthorityRejected(
                 "SessionBinding CodexThread is pending",
             ))?;
-    if !matches!(run.state, winwincode_domain::WorkRunState::Running) {
+    if require_running && !matches!(run.state, winwincode_domain::WorkRunState::Running) {
         return Err(ExecutionPortServiceError::AuthorityRejected(
             "current WorkRun is stale or foreign",
         ));
@@ -950,11 +798,6 @@ pub(crate) fn load_runtime_replay_authority(
                 ExecutionPortServiceError::AuthorityRejected("current execution lease is missing"),
             )?
         };
-    if now.0 >= lease.expires_at.0 {
-        return Err(ExecutionPortServiceError::AuthorityRejected(
-            "current execution lease is expired",
-        ));
-    }
     if lease.job_id != job.job_id
         || lease.payload_digest != job.payload_digest
         || lease.attempt != attempt
@@ -1118,6 +961,11 @@ fn worker_registration_request(
     security_zone: String,
 ) -> Result<WorkerRegistrationRequest, ExecutionPortServiceError> {
     validate_worker_register(message)?;
+    if message.usage_accounting_version != 2 {
+        return Err(ExecutionPortServiceError::Protocol(
+            "usageAccountingVersion",
+        ));
+    }
     let max_slots = u64::try_from(message.capabilities.max_concurrent_jobs)
         .map_err(|_| ExecutionPortServiceError::Protocol("capabilities.maxConcurrentJobs"))?;
     Ok(WorkerRegistrationRequest {

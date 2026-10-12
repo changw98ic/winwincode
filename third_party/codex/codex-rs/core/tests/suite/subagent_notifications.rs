@@ -1825,6 +1825,10 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
     });
+    // This fixture exercises encrypted function-call arguments on the direct tool surface.
+    if model.is_some() {
+        builder = builder.with_model_info_override("gpt-5.6-sol", |model| model.tool_mode = None);
+    }
     let test = builder.build(&server).await?;
     let root_thread_id = test.session_configured.thread_id;
 

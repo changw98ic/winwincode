@@ -1,24 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Owner-facing Device Client repository registry surface for the `wwc`
-//! CLI (plan §13.1, §16.8: the CLI is always the no-desktop fallback).
-//!
-//! `wwc repo add|list|remove` drive the canonical
-//! [`winwincode_device_client::repository`] library — the same registration
-//! check chain the Device Client uses — and never re-implement Git probing,
-//! binding-id generation, or frame construction. Boundaries carried over
-//! from the device surface:
-//!
-//! - The canonical absolute path and the Git common directory live only in
-//!   the local Device Client store. `repo list` may display them (the CLI is
-//!   the local display surface); every server-bound frame the registration
-//!   enqueues carries the binding identity and derived digests only.
-//! - Frames require an adopted enrollment, so a repository projection can
-//!   never be stranded on the placeholder stream the daemon could not
-//!   re-key.
-//! - The foreground Device service owns `clientInstanceId` rotation;
-//!   administrative CLI commands append to that active stream.
-
 use std::fmt;
 use std::path::Path;
 
@@ -32,36 +13,20 @@ use winwincode_device_client::{
 
 use crate::device_admin::{DeviceAdminError, open_store};
 
-/// Secret-free local view of one repository binding (`wwc repo list` row).
-///
-/// The canonical path and Git common directory are displayed on purpose:
-/// this is the local display surface, and these fields never reach a server
-/// frame.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryBindingView {
-    /// Stable binding identity (`rbd_…`).
     pub repository_binding_id: String,
-    /// Local-only canonical absolute path.
     pub canonical_path: String,
-    /// Local-only Git common directory, when Git reported one.
     pub git_common_directory: Option<String>,
-    /// Plan 13.5 availability of the last scan (`available`, `dirty`,
-    /// `moved`, …).
     pub availability: String,
-    /// Dirty projection of the last scan (`clean` / `dirty`), when scanned.
     pub dirty_state: Option<String>,
-    /// Default branch, when this view was built from a fresh registration.
     pub default_branch: Option<String>,
-    /// Last observed HEAD commit, when scanned.
     pub head_commit: Option<String>,
-    /// RFC 3339 stamp of the last scan, when scanned.
     pub last_scanned_at: Option<String>,
-    /// RFC 3339 stamp of the last successful canonicalization.
     pub last_canonicalized_at: Option<String>,
 }
 
-/// Human- and JSON-readable result of one `wwc repo` registry command.
 #[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "status",
@@ -69,49 +34,29 @@ pub struct RepositoryBindingView {
     rename_all_fields = "camelCase"
 )]
 pub enum RepoAdminOutcome {
-    /// A repository binding was registered locally.
     Registered {
-        /// The registered binding view.
         repository: RepositoryBindingView,
-        /// Whether Git was initialized after the explicit confirmation.
         git_initialized: bool,
     },
-    /// Every locally registered binding, in binding-id order.
     List {
-        /// The binding views.
         repositories: Vec<RepositoryBindingView>,
     },
-    /// A binding was removed locally.
     Removed {
-        /// The removed binding id.
         repository_binding_id: String,
     },
 }
 
-/// Failure of one `wwc repo` registry command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoAdminError {
-    /// The data directory holds no device identity: the Device Client never
-    /// ran here.
     NotInitialized,
-    /// The device has not completed enrollment with a Server, so a
-    /// repository frame could never be re-keyed onto the assigned node.
     NotEnrolled,
-    /// The binding id is unknown in this data directory.
     NotFound,
-    /// The registration check chain refused the directory; `availability`
-    /// carries the plan 13.5 failure state in its wire spelling.
     Rejected {
-        /// The seven-state failure (`invalid_git`, `moved`, …).
         availability: String,
-        /// Local-only human-readable reason.
         detail: String,
     },
-    /// The command cannot be completed. `code` is stable for scripting.
     Failed {
-        /// Stable machine-readable failure code.
         code: &'static str,
-        /// Human-readable explanation in the CLI language.
         message: String,
     },
 }
@@ -131,14 +76,6 @@ impl fmt::Display for RepoAdminError {
     }
 }
 
-/// Registers a directory as a repository binding (plan §13.1 `wwc repo add`).
-///
-/// # Errors
-///
-/// Returns [`RepoAdminError::NotInitialized`] before the first device boot,
-/// [`RepoAdminError::NotEnrolled`] before the enrollment adoption,
-/// [`RepoAdminError::Rejected`] when the registration check chain refuses
-/// the directory, and [`RepoAdminError::Failed`] for durable failures.
 pub fn repo_add(
     data_directory: &Path,
     requested_path: &Path,
@@ -161,14 +98,6 @@ pub fn repo_add(
     })
 }
 
-/// Lists every locally registered binding with its latest scan projection
-/// (plan §13.1 `wwc repo list`). Read-only: no scan runs and no frame is
-/// produced, so no enrollment is required.
-///
-/// # Errors
-///
-/// Returns [`RepoAdminError::NotInitialized`] before the first device boot
-/// and [`RepoAdminError::Failed`] when the store cannot serve the read.
 pub fn repo_list(data_directory: &Path) -> Result<RepoAdminOutcome, RepoAdminError> {
     let store = open_store(data_directory).map_err(repo_store_failed)?;
     if load_device_identity(&store)
@@ -183,16 +112,6 @@ pub fn repo_list(data_directory: &Path) -> Result<RepoAdminOutcome, RepoAdminErr
     })
 }
 
-/// Removes a repository binding (plan §13.1 `wwc repo remove`): the local
-/// mapping and scan projection are deleted and the durable
-/// `client.repository.removed` frame rides the outbox to the Server.
-///
-/// # Errors
-///
-/// Returns [`RepoAdminError::NotInitialized`] before the first device boot,
-/// [`RepoAdminError::NotEnrolled`] before the enrollment adoption,
-/// [`RepoAdminError::NotFound`] for an unknown binding id, and
-/// [`RepoAdminError::Failed`] for durable failures.
 pub fn repo_remove(
     data_directory: &Path,
     repository_binding_id: &str,
@@ -212,10 +131,6 @@ pub fn repo_remove(
     })
 }
 
-/// Loads the identity, requires the adopted enrollment, and binds the durable
-/// outbox stream without replacing the foreground service's launch identity.
-/// Returns the bound `(clientNodeId,
-/// clientInstanceId)` sender pair.
 fn prepare_bound_stream(store: &mut DeviceStore) -> Result<(String, String), RepoAdminError> {
     let Some(identity) = load_device_identity(store).map_err(|error| store_failure(&error))? else {
         return Err(RepoAdminError::NotInitialized);
@@ -305,8 +220,6 @@ fn map_registry_error(error: RepositoryRegistryError) -> RepoAdminError {
     }
 }
 
-/// Narrow a registry failure down to its store variant for the shared
-/// store-failure rendering.
 fn map_registry_store_error(error: RepositoryRegistryError) -> RepoAdminError {
     match error {
         RepositoryRegistryError::Store(store) => store_failure(&store),

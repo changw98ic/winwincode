@@ -1,0 +1,109 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -62,7 +62,13 @@
+ pub use codex_core::ToolCallGatePayload;
+ pub use codex_core::ToolCallGateRejection;
+ pub use codex_core::ToolCallGateRequest;
++pub use codex_core::ToolCoalescingPermission;
++pub use codex_core::ToolDependencySnapshot;
++pub use codex_core::ToolInputContext;
++pub use codex_core::ToolInputProof;
++pub use codex_core::ToolInputProofRequest;
+ pub use codex_core::ToolResultReadRequest;
++pub use codex_core::ToolReusePermission;
+ pub use codex_core::TurnInput;
+ pub use codex_core::TurnInputRequest;
+ pub use codex_core::TurnInputSubmission;
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -123,6 +123,7 @@
+ pub use thread_manager::build_models_manager;
+ pub use thread_manager::local_agent_graph_store_from_state_db;
+ pub use thread_manager::thread_store_from_config;
++mod tool_input_adapter;
+ pub use tool_call_gate::ToolCallGate;
+ pub use tool_call_gate::ToolCallGateAttachment;
+ pub use tool_call_gate::ToolCallGateAuthorization;
+@@ -133,6 +134,12 @@
+ pub use tool_call_gate::ToolCallGateRejection;
+ pub use tool_call_gate::ToolCallGateRequest;
+ pub use tool_call_gate::ToolResultReadRequest;
++pub use tool_input_adapter::ToolCoalescingPermission;
++pub use tool_input_adapter::ToolDependencySnapshot;
++pub use tool_input_adapter::ToolInputContext;
++pub use tool_input_adapter::ToolInputProof;
++pub use tool_input_adapter::ToolInputProofRequest;
++pub use tool_input_adapter::ToolReusePermission;
+ pub use tools::handlers::WaitForEnvironmentToolConfig;
+ pub use web_search::web_search_action_detail;
+ pub use windows_sandbox_read_grants::grant_read_root_non_elevated;
+diff --git a/codex-rs/core/src/tool_call_gate.rs b/codex-rs/core/src/tool_call_gate.rs
+--- a/codex-rs/core/src/tool_call_gate.rs
++++ b/codex-rs/core/src/tool_call_gate.rs
+@@ -231,6 +231,24 @@
+ 
+ /// Typed host admission boundary invoked before every Codex tool handler.
+ pub trait ToolCallGate: Send + Sync {
++    /// Freeze trusted dependency, policy and authority identities. Unknown
++    /// adapters execute normally and receive no result-sharing permission.
++    fn freeze_tool_input(
++        &self,
++        _context: crate::ToolInputContext,
++    ) -> BoxFuture<'static, Option<crate::ToolDependencySnapshot>> {
++        Box::pin(async { None })
++    }
++
++    /// Verify the real execution source from adapter-owned evidence. A missing
++    /// proof cannot make an output reusable or advance diagnostic progress.
++    fn verify_tool_input(
++        &self,
++        _request: crate::ToolInputProofRequest,
++    ) -> BoxFuture<'static, Option<crate::ToolInputProof>> {
++        Box::pin(async { None })
++    }
++
+     /// Authorize access to this exact stored receipt under current authority.
+     /// Hosts must implement this independently of operation execution permission.
+     fn authorize_result_read(
+diff --git a/codex-rs/core/src/tool_input_adapter.rs b/codex-rs/core/src/tool_input_adapter.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tool_input_adapter.rs
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: Apache-2.0
++pub use codex_state::ToolCoalescingPermission;
++pub use codex_state::ToolDependencySnapshot;
++pub use codex_state::ToolInputProof;
++pub use codex_state::ToolReusePermission;
++
++/// Effective post-hook operation resolved by Core. The host selects an adapter
++/// from trusted registration; model annotations never grant sharing permission.
++#[derive(Clone)]
++pub struct ToolInputContext {
++    pub request: crate::ToolCallGateRequest,
++    pub request_sequence: i64,
++    pub operation_digest: String,
++    pub mcp_server: Option<String>,
++}
++
++/// Private execution output provided only to the trusted adapter. It must check
++/// its original frozen input or host-owned receipt before issuing a proof.
++#[derive(Clone)]
++pub struct ToolInputProofRequest {
++    pub context: ToolInputContext,
++    pub snapshot: ToolDependencySnapshot,
++    pub output: serde_json::Value,
++}
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -5,6 +5,7 @@
+ mod result_recovery;
+ mod tool_diagnostics;
+ mod tool_reconciliation;
++mod tool_sharing;
+ pub(crate) use authorization::authorize_request;
+ pub(crate) mod code_mode;
+ pub(crate) mod context;

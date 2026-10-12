@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-job Git worktree, temporary home, sandbox, and Artifact isolation.
-//!
-//! This module owns only Worker-local files. Durable lease/session authority
-//! remains in the Control Plane; an [`ActiveJob`](crate::ActiveJob) is copied
-//! into immutable candidate and Artifact provenance at the boundary.
-
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -22,7 +16,10 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
+    SnapshotFreezeReceipt, SnapshotFreezeReceiptMessage, SnapshotFreezeReceiptMessageKind,
+    SnapshotFreezeRequestMessage,
 };
+use winwincode_execution_port::snapshot_freeze::{seal_freeze_receipt, validate_freeze_receipt};
 
 use crate::ActiveJob;
 use crate::candidate_ref;
@@ -36,12 +33,12 @@ const RECOVERY_MANIFEST_SCHEMA: u8 = 3;
 const CANDIDATE_MANIFEST_SCHEMA: u8 = 1;
 const MAX_PATH_BYTES: usize = 4_096;
 
-/// Stable categories for workspace failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceErrorCode {
     InvalidInput,
     NotFound,
     Conflict,
+    UnchangedCandidate,
     PathEscape,
     DigestMismatch,
     Corrupt,
@@ -49,7 +46,23 @@ pub enum WorkspaceErrorCode {
     Io,
 }
 
-/// Test-only process interruption points in durable workspace creation.
+impl WorkspaceErrorCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "WORKSPACE_INVALID_INPUT",
+            Self::NotFound => "WORKSPACE_NOT_FOUND",
+            Self::Conflict => "WORKSPACE_CONFLICT",
+            Self::UnchangedCandidate => "WORKSPACE_UNCHANGED_CANDIDATE",
+            Self::PathEscape => "WORKSPACE_PATH_ESCAPE",
+            Self::DigestMismatch => "WORKSPACE_DIGEST_MISMATCH",
+            Self::Corrupt => "WORKSPACE_CORRUPT",
+            Self::Git => "WORKSPACE_GIT",
+            Self::Io => "WORKSPACE_IO",
+        }
+    }
+}
+
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCreationInterruption {
@@ -58,7 +71,6 @@ pub enum WorkspaceCreationInterruption {
     AfterWorktreeAdded,
 }
 
-/// Test-only process interruption points in durable workspace cleanup.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCleanupInterruption {
@@ -70,7 +82,6 @@ pub enum WorkspaceCleanupInterruption {
     FailParentSync,
 }
 
-/// Test-only cleanup failure selected for a normal creation rollback.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCreationRollbackFailure {
@@ -155,7 +166,6 @@ impl From<WorkspaceCreationRollbackFailure> for CleanupInterruption {
     }
 }
 
-/// Failure returned by Worker-local workspace operations.
 #[derive(Debug)]
 pub struct WorkspaceError {
     code: WorkspaceErrorCode,
@@ -178,7 +188,6 @@ impl WorkspaceError {
         Self::new(WorkspaceErrorCode::Io, format!("{context}: {error}"))
     }
 
-    /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn code(&self) -> WorkspaceErrorCode {
         self.code
@@ -193,7 +202,6 @@ impl fmt::Display for WorkspaceError {
 
 impl std::error::Error for WorkspaceError {}
 
-/// Immutable lease, attempt, Worker, and session binding copied from an active job.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceProvenance {
@@ -267,6 +275,18 @@ impl WorkspaceProvenance {
     }
 }
 
+fn same_provenance_with_extended_lease(
+    previous: &WorkspaceProvenance,
+    current: &WorkspaceProvenance,
+) -> bool {
+    if current.lease_expires_at.0 < previous.lease_expires_at.0 {
+        return false;
+    }
+    let mut expected = previous.clone();
+    expected.lease_expires_at = current.lease_expires_at.clone();
+    expected == *current
+}
+
 fn logical_execution_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, WorkspaceError> {
     let mut value = serde_json::to_value(job).map_err(|error| {
         WorkspaceError::io("logical ExecutionJob authority cannot be encoded", error)
@@ -306,7 +326,7 @@ fn validate_replacement_authority(
     };
     bounded_identity(&replacement.receipt_id.0, "replacement receipt")?;
     if !valid_sha256_digest(&replacement.receipt_digest)
-        || replacement.successor_lease != active.lease
+        || !lease_extends(&replacement.successor_lease, &active.lease)
         || !same_replacement_scope(&replacement.scope, &active.job.scope)
         || replacement.logical_job_digest != current.logical_execution_job_digest
         || replacement.predecessor_lease.job_id != active.job.job_id
@@ -316,7 +336,7 @@ fn validate_replacement_authority(
         || replacement.predecessor_lease.worker_id != replacement.successor_lease.worker_id
         || replacement.predecessor_lease.worker_instance_id
             == replacement.successor_lease.worker_instance_id
-        || !provenance_matches_lease(current, &replacement.successor_lease)
+        || !provenance_extends_lease(current, &replacement.successor_lease)
         || !provenance_matches_session(current, Some(&active.session_identity))
     {
         return Err(WorkspaceError::conflict(
@@ -377,6 +397,19 @@ fn validate_replacement_predecessor(
     Ok(())
 }
 
+fn lease_extends(previous: &ExecutionLeaseStamp, current: &ExecutionLeaseStamp) -> bool {
+    let mut expected = previous.clone();
+    expected.expires_at = current.expires_at.clone();
+    current.expires_at.0 >= previous.expires_at.0 && expected == *current
+}
+
+fn provenance_extends_lease(provenance: &WorkspaceProvenance, lease: &ExecutionLeaseStamp) -> bool {
+    let mut original = provenance.clone();
+    original.lease_expires_at = lease.expires_at.clone();
+    provenance.lease_expires_at.0 >= lease.expires_at.0
+        && provenance_matches_lease(&original, lease)
+}
+
 fn provenance_matches_lease(provenance: &WorkspaceProvenance, lease: &ExecutionLeaseStamp) -> bool {
     u64::try_from(lease.attempt).ok() == Some(provenance.attempt)
         && provenance.execution_job_id == lease.job_id
@@ -409,7 +442,6 @@ fn valid_sha256_digest(digest: &Sha256Digest) -> bool {
     })
 }
 
-/// Paths allocated exclusively to one active write job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceLayout {
     root: PathBuf,
@@ -421,44 +453,37 @@ pub struct WorkspaceLayout {
 }
 
 impl WorkspaceLayout {
-    /// Entire job-private directory removed at terminal cleanup.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Detached Git worktree used by the embedded executor.
     #[must_use]
     pub fn checkout(&self) -> &Path {
         &self.checkout
     }
 
-    /// Job-private home directory.
     #[must_use]
     pub fn home(&self) -> &Path {
         &self.home
     }
 
-    /// Job-private sandbox state directory.
     #[must_use]
     pub fn sandbox(&self) -> &Path {
         &self.sandbox
     }
 
-    /// Job-private temporary directory.
     #[must_use]
     pub fn temporary(&self) -> &Path {
         &self.temporary
     }
 
-    /// Job-private Artifact staging directory.
     #[must_use]
     pub fn artifacts(&self) -> &Path {
         &self.artifacts
     }
 }
 
-/// Why an isolated workspace reached terminal cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceCloseReason {
     Completed,
@@ -466,7 +491,6 @@ pub enum WorkspaceCloseReason {
     Failed,
 }
 
-/// Evidence that one job-private directory was removed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceCleanupReport {
     pub workspace_id: String,
@@ -474,7 +498,6 @@ pub struct WorkspaceCleanupReport {
     pub removed_root: PathBuf,
 }
 
-/// One file in a complete Artifact staging snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceArtifactFile {
@@ -483,7 +506,6 @@ pub struct WorkspaceArtifactFile {
     pub digest: Sha256Digest,
 }
 
-/// Verifiable Artifact-set identity bound to exact execution authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceArtifactSnapshot {
@@ -492,25 +514,68 @@ pub struct WorkspaceArtifactSnapshot {
     pub content_digest: Sha256Digest,
 }
 
-/// Immutable candidate identity produced from the detached worktree.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CandidateSnapshot {
-    pub repository_id: RepositoryId,
-    pub checkout_revision: String,
-    pub source_commit_id: String,
-    pub source_tree_id: String,
-    pub candidate_commit_id: String,
-    pub candidate_tree_id: String,
-    pub content_digest: Sha256Digest,
-    pub origin_provenance: WorkspaceProvenance,
-    pub provenance: WorkspaceProvenance,
+pub struct CandidateFreezeFact {
+    repository_id: RepositoryId,
+    checkout_revision: String,
+    source_commit_id: String,
+    source_tree_id: String,
+    candidate_commit_id: String,
+    candidate_tree_id: String,
+    content_digest: Sha256Digest,
+    origin_provenance: WorkspaceProvenance,
+    provenance: WorkspaceProvenance,
     #[serde(skip)]
     manifest_bytes: Vec<u8>,
 }
 
-impl CandidateSnapshot {
-    /// Canonical candidate Artifact bytes consumed by the trusted source resolver.
+impl CandidateFreezeFact {
+    #[must_use]
+    pub fn repository_id(&self) -> &RepositoryId {
+        &self.repository_id
+    }
+
+    #[must_use]
+    pub fn checkout_revision(&self) -> &str {
+        &self.checkout_revision
+    }
+
+    #[must_use]
+    pub fn source_commit_id(&self) -> &str {
+        &self.source_commit_id
+    }
+
+    #[must_use]
+    pub fn source_tree_id(&self) -> &str {
+        &self.source_tree_id
+    }
+
+    #[must_use]
+    pub fn candidate_commit_id(&self) -> &str {
+        &self.candidate_commit_id
+    }
+
+    #[must_use]
+    pub fn candidate_tree_id(&self) -> &str {
+        &self.candidate_tree_id
+    }
+
+    #[must_use]
+    pub const fn content_digest(&self) -> &Sha256Digest {
+        &self.content_digest
+    }
+
+    #[must_use]
+    pub const fn origin_provenance(&self) -> &WorkspaceProvenance {
+        &self.origin_provenance
+    }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &WorkspaceProvenance {
+        &self.provenance
+    }
+
     #[must_use]
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
@@ -554,9 +619,21 @@ struct RecoveryManifest {
     current_provenance: WorkspaceProvenance,
     replacement: Option<WorkspaceReplacementSeal>,
     max_artifact_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_freeze: Option<RetainedSnapshotFreeze>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    snapshot_freeze_history: Vec<RetainedSnapshotFreeze>,
 }
 
-/// Factory and startup recovery boundary for Worker-local workspaces.
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedSnapshotFreeze {
+    request: SnapshotFreezeRequestMessage,
+    response: SnapshotFreezeReceiptMessage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<winwincode_domain::CanonicalSnapshot>,
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -626,11 +703,6 @@ impl WorkspaceManager {
         reconcile_cleaning_workspaces(&self.root, &self.source_root)
     }
 
-    /// Opens controlled source and workspace roots.
-    ///
-    /// # Errors
-    ///
-    /// Rejects missing source roots and overlapping source/workspace roots.
     pub fn open(
         root: impl AsRef<Path>,
         source_root: impl AsRef<Path>,
@@ -655,12 +727,6 @@ impl WorkspaceManager {
         Ok(manager)
     }
 
-    /// Creates one exclusive detached worktree for an authenticated active job.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched authority, foreign repositories, duplicate opens,
-    /// invalid revisions, and filesystem or Git failures.
     pub fn create(&self, active: &ActiveJob) -> Result<WorkerWorkspace, WorkspaceError> {
         let plan = self.plan(active)?;
         Self::create_plan(plan)
@@ -712,17 +778,6 @@ impl WorkspaceManager {
         )
     }
 
-    /// Creates the exact Job worktree or resumes its original private checkout.
-    ///
-    /// Recovery never rebuilds mutable files from source. The deterministic
-    /// workspace identity, canonical manifest, controlled repository, private
-    /// directory layout, Git worktree root, source commit, and full active Job
-    /// provenance must all still match before the checkout is returned.
-    ///
-    /// # Errors
-    ///
-    /// Rejects foreign/corrupt directories, changed authority, links, missing
-    /// worktree state, or any normal creation failure.
     pub fn create_or_recover(
         &self,
         active: &ActiveJob,
@@ -993,6 +1048,7 @@ impl WorkspaceManager {
                 },
             )));
         }
+        archive_predecessor_snapshot_freeze(&mut manifest)?;
         manifest.current_provenance = request.provenance.clone();
         manifest.replacement = Some(replacement.clone());
         replace_recovery_manifest(&path, &manifest)?;
@@ -1144,6 +1200,30 @@ fn duplicate_workspace_error() -> WorkspaceError {
     WorkspaceError::conflict("more than one checkout exists for the same sealed Job authority")
 }
 
+fn archive_predecessor_snapshot_freeze(
+    manifest: &mut RecoveryManifest,
+) -> Result<(), WorkspaceError> {
+    if let Some(retained) = manifest.snapshot_freeze.take() {
+        validate_freeze_receipt(&retained.request, &retained.response)
+            .map_err(WorkspaceError::invalid)?;
+        if !provenance_extends_lease(&manifest.current_provenance, &retained.request.lease)
+            || manifest.current_provenance.execution_job_digest
+                != Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(serde_json::to_vec(&retained.request.dispatch.job).map_err(
+                        |error| WorkspaceError::io("retained freeze Job cannot be encoded", error)
+                    )?)
+                ))
+        {
+            return Err(WorkspaceError::conflict(
+                "retained freeze differs from the sealed predecessor",
+            ));
+        }
+        manifest.snapshot_freeze_history.push(retained);
+    }
+    Ok(())
+}
+
 fn validate_recovery_request(
     manifest: &RecoveryManifest,
     request: &WorkspaceRequest,
@@ -1199,7 +1279,6 @@ fn recovery_workspace_plan(
     }
 }
 
-/// Live exclusive workspace for one active job.
 #[derive(Debug)]
 pub struct WorkerWorkspace {
     workspace_id: String,
@@ -1216,65 +1295,74 @@ pub struct WorkerWorkspace {
 }
 
 impl WorkerWorkspace {
+    pub(crate) fn source_commit_id(&self) -> &str {
+        &self.source_commit_id
+    }
     pub(crate) fn has_source_changes(&self) -> Result<bool, WorkspaceError> {
         Ok(!workspace_checkout_clean(&self.layout.checkout)?
             || rev_parse(&self.layout.checkout, "HEAD^{tree}")? != self.source_tree_id)
     }
 
-    /// Stable opaque workspace identity derived from source and lease authority.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.workspace_id
     }
 
-    /// Job-private directory layout.
     #[must_use]
     pub const fn layout(&self) -> &WorkspaceLayout {
         &self.layout
     }
 
-    /// Immutable authority bound to all snapshots produced here.
     #[must_use]
     pub const fn provenance(&self) -> &WorkspaceProvenance {
         &self.current_provenance
     }
 
-    /// Immutable authority that originally allocated this checkout and binds
-    /// deterministic candidate commits across sealed Worker replacement.
+    pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), WorkspaceError> {
+        let current = WorkspaceProvenance::from_active_job(active)?;
+        if !same_provenance_with_extended_lease(&self.current_provenance, &current) {
+            return Err(WorkspaceError::conflict(
+                "workspace renewal changed authority",
+            ));
+        }
+        let mut manifest = read_recovery_manifest(&self.layout.root)?;
+        if manifest.phase != WorkspaceRecoveryPhase::Active
+            || manifest.origin_provenance != self.origin_provenance
+            || (manifest.current_provenance != self.current_provenance
+                && manifest.current_provenance != current)
+        {
+            return Err(WorkspaceError::conflict(
+                "workspace renewal manifest changed",
+            ));
+        }
+        if current != self.current_provenance {
+            manifest.current_provenance = current.clone();
+            validate_cleanup_provenance(&manifest)?;
+            replace_recovery_manifest(&self.layout.root, &manifest)?;
+            self.current_provenance = current;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn origin_provenance(&self) -> &WorkspaceProvenance {
         &self.origin_provenance
     }
 
-    /// Exact commit this detached checkout was created from.
-    ///
-    /// This is immutable base authority for deterministic batch receipts. It is
-    /// not a candidate snapshot or a later workflow barrier.
     #[must_use]
     pub fn resolved_source_commit(&self) -> &str {
         &self.source_commit_id
     }
 
-    /// Exact sealed source tree used as the first accepted workspace revision.
     #[must_use]
     pub fn resolved_source_tree(&self) -> WorkspaceRevision {
         WorkspaceRevision(format!("git-tree:{}", self.source_tree_id))
     }
 
-    /// Resolves a relative checkout path without permitting traversal or links.
-    ///
-    /// # Errors
-    ///
-    /// Rejects absolute paths, parent traversal, and symbolic links.
     pub fn checkout_path(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WorkspaceError> {
         controlled_path(&self.layout.checkout, relative.as_ref(), false)
     }
 
-    /// Writes one new Artifact file below the job-private staging directory.
-    ///
-    /// # Errors
-    ///
-    /// Rejects traversal, links, replacement, or writes beyond the job limit.
     pub fn write_artifact(
         &mut self,
         relative: impl AsRef<Path>,
@@ -1323,21 +1411,12 @@ impl WorkerWorkspace {
         artifact_file(&self.layout.artifacts, &path)
     }
 
-    /// Freezes checkout changes into a deterministic detached candidate commit.
-    ///
-    /// The stable `refs/winwincode/candidates/<candidate-id>` ref is recorded
-    /// before the snapshot is returned, so the ref always exists ahead of any
-    /// later Worktree cleanup. A ref failure fails the freeze, which keeps the
-    /// Candidate from being announced as deliverable.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unchanged tree, unsupported path types, or Git failures.
-    pub fn snapshot_candidate(&mut self) -> Result<CandidateSnapshot, WorkspaceError> {
+    pub fn freeze_candidate(&mut self) -> Result<CandidateFreezeFact, WorkspaceError> {
         git_status(&self.layout.checkout, &["add", "--all"])?;
         let candidate_tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
         if candidate_tree_id == self.source_tree_id {
-            return Err(WorkspaceError::conflict(
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::UnchangedCandidate,
                 "candidate tree has no source changes",
             ));
         }
@@ -1369,7 +1448,7 @@ impl WorkerWorkspace {
         )?;
         let content_digest = tree_digest(&self.layout.checkout, &candidate_commit_id)?;
         let manifest_bytes = candidate_manifest(&self.layout.checkout, &candidate_commit_id)?;
-        Ok(CandidateSnapshot {
+        Ok(CandidateFreezeFact {
             repository_id: self.repository_id.clone(),
             checkout_revision: self.checkout_revision.clone(),
             source_commit_id: self.source_commit_id.clone(),
@@ -1383,24 +1462,18 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Captures the exact clean checkout used by a read-only verification Job.
-    ///
-    /// Verification workspaces are created from the frozen writer candidate
-    /// commit. They must not create a second commit or mutate the checkout;
-    /// this snapshot binds the existing commit and tree to the verifier's
-    /// lease so its terminal outcome can carry an independently acknowledged
-    /// candidate Artifact.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a dirty checkout, an invalid Git head, or Git failures.
-    pub fn snapshot_verification(&self) -> Result<CandidateSnapshot, WorkspaceError> {
+    pub fn freeze_verification(&self) -> Result<CandidateFreezeFact, WorkspaceError> {
         if !workspace_checkout_clean(&self.layout.checkout)? {
             return Err(WorkspaceError::conflict(
                 "verification checkout contains unaccepted changes",
             ));
         }
         let candidate_commit_id = rev_parse(&self.layout.checkout, "HEAD^{commit}")?;
+        if candidate_commit_id != self.source_commit_id {
+            return Err(WorkspaceError::conflict(
+                "verification checkout differs from its frozen source",
+            ));
+        }
         let candidate_tree_id = rev_parse(
             &self.layout.checkout,
             &format!("{candidate_commit_id}^{{tree}}"),
@@ -1415,7 +1488,7 @@ impl WorkerWorkspace {
             },
         )?;
         let manifest_bytes = candidate_manifest(&self.layout.checkout, &candidate_commit_id)?;
-        Ok(CandidateSnapshot {
+        Ok(CandidateFreezeFact {
             repository_id: self.repository_id.clone(),
             checkout_revision: self.checkout_revision.clone(),
             source_commit_id: self.source_commit_id.clone(),
@@ -1429,20 +1502,176 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Rebuilds a candidate's source, tree, digest, manifest, and provenance.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DigestMismatch` for altered or foreign snapshot facts.
-    pub fn verify_candidate(&self, snapshot: &CandidateSnapshot) -> Result<(), WorkspaceError> {
+    pub(crate) fn retain_snapshot_freeze(
+        &self,
+        request: &SnapshotFreezeRequestMessage,
+        now: &Instant,
+    ) -> Result<SnapshotFreezeReceiptMessage, WorkspaceError> {
+        let facts = self.freeze_verification()?;
+        let base_commit = rev_parse(
+            &self.layout.checkout,
+            &format!("{}^{{commit}}", request.candidate.base_commit),
+        )?;
+        let base_tree = rev_parse(&self.layout.checkout, &format!("{base_commit}^{{tree}}"))?;
+        git_status(
+            &self.layout.checkout,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &base_commit,
+                facts.candidate_commit_id(),
+            ],
+        )?;
+        let range = format!("{base_commit}..{}", facts.candidate_commit_id());
+        let diff = git_output(
+            &self.layout.checkout,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "--full-index",
+                &range,
+            ],
+        )?;
+        let mut receipt = SnapshotFreezeReceipt {
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            receipt_id: request.request_id.clone(),
+            request_id: request.request_id.clone(),
+            candidate_id: request.candidate.id.clone(),
+            work_run_id: request.candidate.work_run_id.clone(),
+            worker_id: self.current_provenance.worker_id.clone(),
+            worker_instance_id: self.current_provenance.worker_instance_id.clone(),
+            lease_id: self.current_provenance.lease_id.clone(),
+            attempt: i64::try_from(self.current_provenance.attempt)
+                .map_err(|_| WorkspaceError::invalid("freeze attempt is invalid"))?,
+            fencing_token: self.current_provenance.fencing_token.clone(),
+            repository_id: facts.repository_id().clone(),
+            base_commit_id: winwincode_domain::GitObjectId(base_commit),
+            base_tree_id: winwincode_domain::GitObjectId(base_tree),
+            candidate_commit_id: winwincode_domain::GitObjectId(
+                facts.candidate_commit_id().to_owned(),
+            ),
+            candidate_tree_id: winwincode_domain::GitObjectId(facts.candidate_tree_id().to_owned()),
+            diff_sha256: Sha256Digest(format!("sha256:{:x}", Sha256::digest(diff))),
+            content_digest: facts.content_digest().clone(),
+            validation_seal: Sha256Digest(String::new()),
+            frozen_at: now.clone(),
+        };
+        receipt.validation_seal = seal_freeze_receipt(&receipt)
+            .map_err(|error| WorkspaceError::io("freeze receipt cannot be sealed", error))?;
+        let mut response = SnapshotFreezeReceiptMessage {
+            kind: SnapshotFreezeReceiptMessageKind::SnapshotFreezeReceipt,
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            message_id: request.message_id.clone(),
+            sent_at: now.clone(),
+            lease: request.lease.clone(),
+            receipt,
+        };
+        validate_freeze_receipt(request, &response).map_err(WorkspaceError::invalid)?;
+        let mut manifest = read_recovery_manifest(&self.layout.root)?;
+        if let Some(retained) = manifest.snapshot_freeze {
+            if retained.request != *request {
+                return Err(WorkspaceError::conflict(
+                    "freeze request changed for the same workspace",
+                ));
+            }
+            validate_freeze_receipt(request, &retained.response)
+                .map_err(WorkspaceError::invalid)?;
+            response.receipt.frozen_at = retained.response.receipt.frozen_at.clone();
+            response.receipt.validation_seal = seal_freeze_receipt(&response.receipt)
+                .map_err(|error| WorkspaceError::io("freeze receipt cannot be resealed", error))?;
+            response.sent_at = retained.response.sent_at.clone();
+            if response != retained.response {
+                return Err(WorkspaceError::conflict(
+                    "retained freeze facts no longer match the workspace",
+                ));
+            }
+            return Ok(retained.response);
+        }
+        manifest.snapshot_freeze = Some(RetainedSnapshotFreeze {
+            request: request.clone(),
+            response: response.clone(),
+            snapshot: None,
+        });
+        replace_recovery_manifest(&self.layout.root, &manifest)?;
+        Ok(response)
+    }
+
+    pub(crate) fn bind_snapshot_dispatch(
+        &self,
+        message: &winwincode_execution_port::generated::SnapshotVerificationDispatchMessage,
+    ) -> Result<SnapshotFreezeRequestMessage, WorkspaceError> {
+        let snapshot = winwincode_domain::CanonicalSnapshot::try_from(message.snapshot.clone())
+            .map_err(|_| WorkspaceError::invalid("verification Snapshot identity is invalid"))?;
+        if !winwincode_domain::verify_snapshot_seal(&snapshot)
+            || message.dispatch.snapshot_id.as_ref() != Some(snapshot.snapshot_id())
+        {
+            return Err(WorkspaceError::invalid(
+                "verification Snapshot seal or dispatch binding is invalid",
+            ));
+        }
+        let mut manifest = read_recovery_manifest(&self.layout.root)?;
+        let retained = manifest
+            .snapshot_freeze
+            .as_mut()
+            .ok_or_else(|| WorkspaceError::invalid("verification has no retained freeze"))?;
+        let mut planned = message.dispatch.clone();
+        planned.snapshot_id = None;
+        let receipt = &retained.response.receipt;
+        let facts = snapshot.as_contract();
+        if planned != retained.request.dispatch
+            || facts.candidate_id != receipt.candidate_id
+            || facts.work_run_id != receipt.work_run_id
+            || facts.repository_id != receipt.repository_id
+            || facts.base_commit_id != receipt.base_commit_id
+            || facts.base_tree_id != receipt.base_tree_id
+            || facts.candidate_commit_id != receipt.candidate_commit_id
+            || facts.candidate_tree_id != receipt.candidate_tree_id
+            || facts.diff_sha256 != receipt.diff_sha256
+            || facts.content_digest != receipt.content_digest
+            || retained
+                .snapshot
+                .as_ref()
+                .is_some_and(|existing| existing != &snapshot)
+        {
+            return Err(WorkspaceError::conflict(
+                "verification Snapshot differs from frozen input",
+            ));
+        }
+        retained.snapshot = Some(snapshot);
+        let request = retained.request.clone();
+        replace_recovery_manifest(&self.layout.root, &manifest)?;
+        Ok(request)
+    }
+
+    pub(crate) fn snapshot_dispatch_is_bound(
+        &self,
+        dispatch: &winwincode_execution_port::generated::JobDispatchMessage,
+    ) -> Result<bool, WorkspaceError> {
+        let manifest = read_recovery_manifest(&self.layout.root)?;
+        let Some(retained) = manifest.snapshot_freeze else {
+            return Ok(false);
+        };
+        let Some(snapshot) = retained.snapshot else {
+            return Ok(false);
+        };
+        let mut planned = dispatch.clone();
+        planned.snapshot_id = None;
+        Ok(planned == retained.request.dispatch
+            && dispatch.snapshot_id.as_ref() == Some(snapshot.snapshot_id()))
+    }
+
+    pub fn verify_candidate(&self, snapshot: &CandidateFreezeFact) -> Result<(), WorkspaceError> {
         let candidate_tree = rev_parse(
             &self.layout.checkout,
             &format!("{}^{{tree}}", snapshot.candidate_commit_id),
         )?;
-        let candidate_parent = rev_parse(
-            &self.layout.checkout,
-            &format!("{}^", snapshot.candidate_commit_id),
-        )?;
+        let source_matches = snapshot.candidate_commit_id == self.source_commit_id
+            || rev_parse(
+                &self.layout.checkout,
+                &format!("{}^", snapshot.candidate_commit_id),
+            )? == self.source_commit_id;
         let manifest = GitCandidateArtifactManifest::decode(&snapshot.manifest_bytes)
             .map_err(|error| WorkspaceError::io("candidate manifest cannot be decoded", error))?;
         let digest = tree_digest(&self.layout.checkout, &snapshot.candidate_commit_id)?;
@@ -1452,7 +1681,7 @@ impl WorkerWorkspace {
             || snapshot.source_tree_id != self.source_tree_id
             || snapshot.origin_provenance != self.origin_provenance
             || snapshot.provenance != self.current_provenance
-            || candidate_parent != self.source_commit_id
+            || !source_matches
             || candidate_tree != snapshot.candidate_tree_id
             || digest != snapshot.content_digest
             || manifest.candidate_commit_id() != snapshot.candidate_commit_id
@@ -1465,50 +1694,6 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Rebuilds and verifies a read-only verification snapshot.
-    ///
-    /// Unlike an executor candidate, a verifier's candidate commit is the
-    /// workspace source commit itself, so no parent/source rewrite is allowed.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DigestMismatch` for altered or foreign snapshot facts.
-    pub fn verify_verification(&self, snapshot: &CandidateSnapshot) -> Result<(), WorkspaceError> {
-        let checkout_head = rev_parse(&self.layout.checkout, "HEAD^{commit}")?;
-        let candidate_tree = rev_parse(
-            &self.layout.checkout,
-            &format!("{}^{{tree}}", snapshot.candidate_commit_id),
-        )?;
-        let manifest = GitCandidateArtifactManifest::decode(&snapshot.manifest_bytes)
-            .map_err(|error| WorkspaceError::io("candidate manifest cannot be decoded", error))?;
-        let digest = tree_digest(&self.layout.checkout, &snapshot.candidate_commit_id)?;
-        if !workspace_checkout_clean(&self.layout.checkout)?
-            || snapshot.repository_id != self.repository_id
-            || snapshot.checkout_revision != self.checkout_revision
-            || snapshot.source_commit_id != self.source_commit_id
-            || snapshot.source_tree_id != self.source_tree_id
-            || snapshot.origin_provenance != self.origin_provenance
-            || snapshot.provenance != self.current_provenance
-            || checkout_head != self.source_commit_id
-            || snapshot.candidate_commit_id != self.source_commit_id
-            || candidate_tree != self.source_tree_id
-            || candidate_tree != snapshot.candidate_tree_id
-            || digest != snapshot.content_digest
-            || manifest.candidate_commit_id() != snapshot.candidate_commit_id
-        {
-            return Err(WorkspaceError::new(
-                WorkspaceErrorCode::DigestMismatch,
-                "verification source, authority, or content identity does not match",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Captures every staged Artifact file and one aggregate content digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects links, non-regular files, non-portable paths, and read failures.
     pub fn snapshot_artifacts(&self) -> Result<WorkspaceArtifactSnapshot, WorkspaceError> {
         let files = artifact_files(&self.layout.artifacts)?;
         let content_digest = artifact_set_digest(&files);
@@ -1519,11 +1704,6 @@ impl WorkerWorkspace {
         })
     }
 
-    /// Recomputes all Artifact file and aggregate digests.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DigestMismatch` when bytes or provenance changed.
     pub fn verify_artifacts(
         &self,
         snapshot: &WorkspaceArtifactSnapshot,
@@ -1538,25 +1718,12 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Captures an ephemeral Git tree without creating a candidate commit or
-    /// candidate ref. This is the snapshot primitive for `DebugExperiment`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a workspace error when the checkout cannot be staged or its
-    /// tree cannot be read.
     pub fn snapshot_ephemeral_revision(&mut self) -> Result<WorkspaceRevision, WorkspaceError> {
         git_status(&self.layout.checkout, &["add", "--all"])?;
         let tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
         Ok(WorkspaceRevision(format!("git-tree:{tree_id}")))
     }
 
-    /// Restores an ephemeral checkout to its accepted source commit. The base
-    /// revision is checked first so a foreign experiment cannot be reset.
-    ///
-    /// # Errors
-    ///
-    /// Returns a conflict for a foreign base or a Git error during reset.
     pub fn rollback_ephemeral_revision(
         &mut self,
         base_revision: &WorkspaceRevision,
@@ -1573,11 +1740,6 @@ impl WorkerWorkspace {
         git_status(&self.layout.checkout, &["clean", "-fdx"])
     }
 
-    /// Removes the worktree, sandbox, home, temporary files, and Artifact staging.
-    ///
-    /// # Errors
-    ///
-    /// Returns a Git or filesystem error after cleanup was attempted.
     pub fn close(
         mut self,
         reason: WorkspaceCloseReason,
@@ -1767,6 +1929,8 @@ fn recovery_manifest(
         current_provenance: plan.current_provenance.clone(),
         replacement: plan.replacement.clone(),
         max_artifact_bytes: plan.max_artifact_bytes,
+        snapshot_freeze: None,
+        snapshot_freeze_history: Vec::new(),
     })
 }
 
@@ -2252,7 +2416,10 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
         }
     }
     let Some(replacement) = manifest.replacement.as_ref() else {
-        if manifest.origin_provenance != manifest.current_provenance {
+        if !same_provenance_with_extended_lease(
+            &manifest.origin_provenance,
+            &manifest.current_provenance,
+        ) {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
                 "cleanup intent current authority has no replacement receipt",
@@ -2267,14 +2434,17 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
         || replacement.predecessor_lease.job_id != replacement.successor_lease.job_id
         || replacement.predecessor_lease.attempt.saturating_add(1)
             != replacement.successor_lease.attempt
-        || !provenance_matches_lease(&manifest.current_provenance, &replacement.successor_lease)
+        || !provenance_extends_lease(&manifest.current_provenance, &replacement.successor_lease)
     {
         return Err(WorkspaceError::new(
             WorkspaceErrorCode::Corrupt,
             "cleanup intent replacement authority changed",
         ));
     }
-    if manifest.origin_provenance == manifest.current_provenance {
+    if same_provenance_with_extended_lease(
+        &manifest.origin_provenance,
+        &manifest.current_provenance,
+    ) {
         if replacement.predecessor_session_identity.is_some() {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
@@ -2297,12 +2467,17 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
     if manifest.origin_provenance.attempt
         == u64::try_from(replacement.predecessor_lease.attempt).unwrap_or_default()
     {
-        validate_replacement_predecessor(
-            &manifest.origin_provenance,
-            &manifest.current_provenance,
-            replacement,
-        )
-        .map_err(|_| {
+        let mut predecessor = manifest.origin_provenance.clone();
+        if predecessor.lease_expires_at.0 > replacement.predecessor_lease.expires_at.0 {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Corrupt,
+                "cleanup intent predecessor lease was shortened",
+            ));
+        }
+        predecessor.lease_expires_at = replacement.predecessor_lease.expires_at.clone();
+        let mut successor = manifest.current_provenance.clone();
+        successor.lease_expires_at = replacement.successor_lease.expires_at.clone();
+        validate_replacement_predecessor(&predecessor, &successor, replacement).map_err(|_| {
             WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
                 "cleanup intent predecessor authority changed",
@@ -2357,7 +2532,11 @@ fn validate_recovered_plan(plan: &WorkspacePlan) -> Result<(), WorkspaceError> {
     )?);
     let reported_common = fs::canonicalize(reported_common)
         .map_err(|error| WorkspaceError::io("Git common directory cannot be recovered", error))?;
-    let expected_common = fs::canonicalize(plan.source_repository.join(".git"))
+    let expected_common = PathBuf::from(git_text(
+        &plan.source_repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let expected_common = fs::canonicalize(expected_common)
         .map_err(|error| WorkspaceError::io("source Git directory cannot be recovered", error))?;
     let source_tree = rev_parse(
         &plan.source_repository,
@@ -2777,7 +2956,7 @@ fn git_status(repository: &Path, arguments: &[&str]) -> Result<(), WorkspaceErro
     command_status(command, "Git operation failed")
 }
 
-fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
+pub(crate) fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
     let output = git_output(repository, arguments)?;
     let text = std::str::from_utf8(&output)
         .map_err(|_| WorkspaceError::new(WorkspaceErrorCode::Corrupt, "Git output is not UTF-8"))?;
@@ -2807,8 +2986,6 @@ fn candidate_manifest(
             format!("candidate bundle ref is invalid: {error}"),
         )
     })?;
-    // The Server rebuilds the candidate independently of the Device filesystem.
-    // ponytail: include history within the artifact byte limit; use negotiated incremental bundles if transfer cost warrants it.
     let bundle = git_output(repository, &["bundle", "create", "-", &reference])?;
     GitCandidateArtifactManifest::new(candidate_commit_id, bundle)
         .and_then(|manifest| manifest.encode())

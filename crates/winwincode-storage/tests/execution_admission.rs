@@ -109,9 +109,9 @@ fn reservation(
         job_id: ExecutionJobId(id("job", job)),
         request_id: RequestId(id("req", request)),
         repository_access: access,
-        reserved_tokens: 100,
-        reserved_cost_microunits: 1_000,
-        runtime_limit_millis: 30_000,
+        reserved_tokens: Some(100),
+        reserved_cost_microunits: Some(1_000),
+        runtime_limit_millis: Some(30_000),
         submitted_at: at(1),
     }
 }
@@ -131,10 +131,475 @@ fn generous_limits() -> ExecutionAdmissionLimits {
     ExecutionAdmissionLimits {
         max_concurrent: 10,
         max_queued: 20,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     }
+}
+
+fn former_runtime_limits(runtime_limited: bool) -> ExecutionAdmissionLimits {
+    ExecutionAdmissionLimits {
+        max_concurrent: 1,
+        max_queued: 10_000,
+        token_budget: None,
+        cost_budget_microunits: None,
+        max_runtime_millis: runtime_limited.then_some(604_800_000),
+    }
+}
+
+#[test]
+fn queued_runtime_jobs_upgrade_former_defaults_across_restart_and_keep_session_serial() {
+    for (pool_id, former_pool_limit) in [
+        ("wpl_00000000000000000000000001", 1),
+        ("wpl_000000000000000000000000D3", 1),
+        ("wpl_000000000000000000000000F7", 4),
+    ] {
+        for runtime_limited in [false, true] {
+            verify_runtime_policy_upgrade(pool_id, former_pool_limit, runtime_limited);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture checks legacy queued jobs, restart, all shared boundaries, and same-session exclusion"
+)]
+fn verify_runtime_policy_upgrade(pool_id: &str, former_pool_limit: u64, runtime_limited: bool) {
+    let root = temporary_directory("runtime-default-upgrade");
+    let worker_pool = WorkerPoolId(pool_id.to_owned());
+    let scopes = (0..5)
+        .map(|index| {
+            let mut request_scope = scope(400);
+            request_scope.product_session_id = ProductSessionId(id("psn", 400 + index));
+            request_scope
+        })
+        .collect::<Vec<_>>();
+    let requests = scopes
+        .iter()
+        .enumerate()
+        .map(|(index, request_scope)| {
+            let seed = 400 + u64::try_from(index).unwrap();
+            let mut request = reservation(
+                request_scope,
+                &worker_pool,
+                seed,
+                seed,
+                ExecutionRepositoryAccess::ReadOnly,
+            );
+            request.runtime_limit_millis = runtime_limited.then_some(30_000);
+            request
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        for request_scope in &scopes {
+            for boundary in boundaries(request_scope, &worker_pool) {
+                let limits = ExecutionAdmissionLimits {
+                    max_concurrent: if matches!(
+                        boundary,
+                        ExecutionAdmissionBoundary::WorkerPool { .. }
+                    ) {
+                        former_pool_limit
+                    } else {
+                        1
+                    },
+                    ..former_runtime_limits(runtime_limited)
+                };
+                admission
+                    .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
+                    .unwrap();
+            }
+        }
+        for request in &requests {
+            admission.reserve(request).unwrap();
+        }
+        admission.start(&start(&requests[0], 500)).unwrap();
+        assert_eq!(
+            admission
+                .start(&start(&requests[1], 501))
+                .unwrap_err()
+                .code(),
+            ExecutionAdmissionErrorCode::ConcurrencyExhausted
+        );
+    }
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        for request_scope in &scopes {
+            for boundary in boundaries(request_scope, &worker_pool) {
+                admission
+                    .configure_runtime_policy(boundary.clone(), runtime_limited)
+                    .unwrap();
+                assert!(
+                    !admission
+                        .configure_runtime_policy(boundary, runtime_limited)
+                        .unwrap()
+                );
+            }
+        }
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            admission
+                .start(&start(request, 500 + u64::try_from(index).unwrap()))
+                .unwrap();
+        }
+        let organization = ExecutionAdmissionBoundary::Organization {
+            organization_id: scopes[0].organization_id.clone(),
+        };
+        assert_eq!(admission.usage(&organization).unwrap().running, 5);
+        let mut same_session = reservation(
+            &scopes[0],
+            &worker_pool,
+            410,
+            410,
+            ExecutionRepositoryAccess::ReadOnly,
+        );
+        same_session.runtime_limit_millis = runtime_limited.then_some(30_000);
+        admission.reserve(&same_session).unwrap();
+        let error = admission.start(&start(&same_session, 510)).unwrap_err();
+        assert_eq!(
+            error.code(),
+            ExecutionAdmissionErrorCode::ConcurrencyExhausted
+        );
+        assert_eq!(
+            error.boundary(),
+            Some(&ExecutionAdmissionBoundary::ProductSession {
+                organization_id: scopes[0].organization_id.clone(),
+                project_id: scopes[0].project_id.clone(),
+                product_session_id: scopes[0].product_session_id.clone(),
+            })
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_default_upgrade_refuses_custom_limits_and_unknown_pool_policies() {
+    let root = temporary_directory("runtime-default-custom-policy");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    for (index, limits) in [
+        ExecutionAdmissionLimits {
+            max_concurrent: 2,
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            max_queued: 9999,
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            token_budget: Some(100),
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            cost_budget_microunits: Some(100),
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            max_runtime_millis: Some(100),
+            ..former_runtime_limits(true)
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let boundary = ExecutionAdmissionBoundary::Organization {
+            organization_id: OrganizationId(id("org", 600 + u64::try_from(index).unwrap())),
+        };
+        let original = ExecutionAdmissionPolicy {
+            boundary: boundary.clone(),
+            limits,
+        };
+        admission.configure_policy(&original).unwrap();
+        assert!(admission.configure_runtime_policy(boundary, true).is_err());
+        assert!(!admission.configure_policy(&original).unwrap());
+    }
+    let unknown_pool = ExecutionAdmissionBoundary::WorkerPool {
+        organization_id: OrganizationId(id("org", 610)),
+        worker_pool_id: pool(610),
+    };
+    let original = ExecutionAdmissionPolicy {
+        boundary: unknown_pool.clone(),
+        limits: former_runtime_limits(true),
+    };
+    admission.configure_policy(&original).unwrap();
+    assert!(
+        admission
+            .configure_runtime_policy(unknown_pool, true)
+            .is_err()
+    );
+    assert!(!admission.configure_policy(&original).unwrap());
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_default_upgrade_is_atomic_between_competing_connections() {
+    let root = temporary_directory("runtime-default-upgrade-race");
+    let boundary = ExecutionAdmissionBoundary::Organization {
+        organization_id: OrganizationId(id("org", 620)),
+    };
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        storage
+            .execution_admission()
+            .unwrap()
+            .configure_policy(&ExecutionAdmissionPolicy {
+                boundary: boundary.clone(),
+                limits: former_runtime_limits(true),
+            })
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let root = root.clone();
+            let boundary = boundary.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                let mut storage = SqliteStorage::open(root).unwrap();
+                let mut admission = storage.execution_admission().unwrap();
+                barrier.wait();
+                admission.configure_runtime_policy(boundary, true).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let changed = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(|changed| *changed)
+        .count();
+    assert_eq!(changed, 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn late_predecessor_receipts_are_additive_idempotent_and_do_not_revive_cancelled_work() {
+    for tokens_first in [true, false] {
+        reconcile_late_predecessor(tokens_first);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture checks both arrival orders across a restart and conflicting replays"
+)]
+fn reconcile_late_predecessor(tokens_first: bool) {
+    use winwincode_domain::{
+        FencingToken, LeaseId, ModelExchangeId, Sha256Digest, WorkerId, WorkerInstanceId,
+    };
+    use winwincode_execution_port::{
+        accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
+        action_enforcement::ActionEnforcementSigningKey,
+        generated::{
+            ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+        },
+    };
+    use winwincode_storage::ExecutionLeaseRecord;
+    let root = temporary_directory("late-predecessor-provider-receipts");
+    let scope = scope(190);
+    let pool = pool(190);
+    let request = reservation(&scope, &pool, 190, 190, ExecutionRepositoryAccess::ReadOnly);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    configure(&mut admission, &scope, &pool, generous_limits());
+    admission.reserve(&request).unwrap();
+    admission.start(&start(&request, 191)).unwrap();
+    let terminal = ExecutionReservationRelease {
+        scope: scope.clone(),
+        worker_pool_id: pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 192)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Cancelled,
+        released_at: at(3),
+    };
+    let lease = ExecutionLeaseStamp {
+        job_id: request.job_id.clone(),
+        lease_id: LeaseId(id("lse", 190)),
+        worker_id: WorkerId(id("wrk", 190)),
+        worker_instance_id: WorkerInstanceId(id("wki", 190)),
+        attempt: 1,
+        fencing_token: FencingToken("1".into()),
+        issued_at: at(1),
+        expires_at: at(2),
+    };
+    let previous = ExecutionLeaseRecord {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        payload_digest: Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+        fencing_token: lease.fencing_token.clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    };
+    let mut current = lease.clone();
+    current.attempt = 2;
+    current.lease_id = LeaseId(id("lse", 191));
+    current.fencing_token = FencingToken("2".into());
+    storage.execution_registry().unwrap();
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    fixture
+        .execute(
+            "INSERT INTO execution_attempt_accounting_pending VALUES(?1,1,?2,?3)",
+            rusqlite::params![
+                request.job_id.0,
+                serde_json::to_string(&previous).unwrap(),
+                at(2).0
+            ],
+        )
+        .unwrap();
+    fixture
+        .execute(
+            "INSERT INTO execution_leases VALUES(?1,?2,?3,?4,?5,2,?6,?7,?8)",
+            rusqlite::params![
+                current.job_id.0,
+                current.lease_id.0,
+                previous.payload_digest.0,
+                current.worker_id.0,
+                current.worker_instance_id.0,
+                current.fencing_token.0,
+                current.issued_at.0,
+                current.expires_at.0
+            ],
+        )
+        .unwrap();
+    drop(fixture);
+    let current_usage = ExecutionOutcomeUsage {
+        runtime_millis: 1000,
+        tokens: Some(20),
+        known_tokens: 20,
+        cost_microunits: Some(30),
+        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+    };
+    let combined = storage
+        .combine_execution_attempt_usage(&current, &current_usage)
+        .unwrap();
+    assert_eq!(combined.tokens, None);
+    storage
+        .execution_admission()
+        .unwrap()
+        .release_with_unknown_usage(&terminal, &combined)
+        .unwrap();
+    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+    let mut statement = AttemptAccountingStatement {
+        lease: lease.clone(),
+        manifest: vec!["primary:mdl_00000000000000000000000190".into()],
+        receipts: vec![ProviderAccountingReceipt {
+            slot: "primary:mdl_00000000000000000000000190".into(),
+            model_exchange_id: ModelExchangeId(id("mdl", 190)),
+            provider_id: "provider".into(),
+            provider_receipt_id: "provider-response-190".into(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: tokens_first.then_some(11),
+            cost_microunits: (!tokens_first).then_some(7),
+        }],
+        signature: Sha256Digest(String::new()),
+    };
+    statement.sign(&key).unwrap();
+    statement.verify(&key).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(4))
+        .unwrap();
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let usage:String=fixture.query_row("SELECT usage_json FROM execution_admission_reconciliation_facts ORDER BY sequence DESC LIMIT 1",[],|row|row.get(0)).unwrap();
+    let usage: ExecutionOutcomeUsage = serde_json::from_str(&usage).unwrap();
+    assert_eq!(usage.tokens, tokens_first.then_some(31));
+    assert_eq!(usage.cost_microunits, (!tokens_first).then_some(37));
+    assert!(
+        storage
+            .execution_has_unknown_predecessor(&request.job_id)
+            .unwrap()
+    );
+    drop(fixture);
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(5))
+        .unwrap();
+    let token_only = statement.clone();
+    statement.receipts[0].cost_microunits = Some(7);
+    statement.receipts[0].tokens = Some(11);
+    statement.receipts[0].source_digest = Sha256Digest(format!("sha256:{}", "c".repeat(64)));
+    statement.sign(&key).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(6))
+        .unwrap();
+    storage
+        .reconcile_provider_attempt(&token_only.verified(&key).unwrap(), &at(7))
+        .unwrap();
+    assert!(
+        !storage
+            .execution_has_unknown_predecessor(&request.job_id)
+            .unwrap()
+    );
+    let record = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&request.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, ExecutionReservationState::Released);
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let final_usage: String = fixture
+        .query_row(
+            "SELECT settlement_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",
+            [&request.job_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let final_usage: ExecutionOutcomeUsage = serde_json::from_str(&final_usage).unwrap();
+    assert_eq!(
+        (final_usage.tokens, final_usage.cost_microunits),
+        (Some(31), Some(37))
+    );
+    assert_eq!(
+        fixture
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM execution_attempt_accounting_pending",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1,
+        "original marker remains as audit evidence"
+    );
+    let mut foreign = statement.clone();
+    foreign.lease.fencing_token = FencingToken("999".into());
+    foreign.sign(&key).unwrap();
+    assert!(
+        storage
+            .reconcile_provider_attempt(&foreign.verified(&key).unwrap(), &at(8))
+            .is_err()
+    );
+    let mut changed = statement.clone();
+    changed.receipts[0].tokens = Some(12);
+    changed.sign(&key).unwrap();
+    assert!(
+        storage
+            .reconcile_provider_attempt(&changed.verified(&key).unwrap(), &at(8))
+            .is_err()
+    );
+    let mut reused = statement.clone();
+    reused.lease = current;
+    reused.manifest = vec!["primary:current".into()];
+    reused.receipts[0].slot = "primary:current".into();
+    reused.receipts[0].tokens = Some(20);
+    reused.receipts[0].cost_microunits = Some(30);
+    reused.sign(&key).unwrap();
+    assert_eq!(
+        storage
+            .reconcile_provider_attempt(&reused.verified(&key).unwrap(), &at(8))
+            .unwrap_err()
+            .kind(),
+        winwincode_storage::StorageErrorKind::InvalidInput,
+        "one Provider receipt cannot charge another attempt"
+    );
+    drop(fixture);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -144,8 +609,8 @@ fn concurrent_queue_and_budget_reservation_has_exactly_one_winner() {
     let worker_pool = pool(1);
     let limits = ExecutionAdmissionLimits {
         max_queued: 1,
-        token_budget: 100,
-        cost_budget_microunits: 1_000,
+        token_budget: Some(100),
+        cost_budget_microunits: Some(1_000),
         ..generous_limits()
     };
     let mut storage = SqliteStorage::open(&root).expect("storage open");
@@ -414,10 +879,22 @@ fn completion_settles_actual_usage_and_releases_unused_budget() {
         request_id: RequestId(id("req", 52)),
         expected_revision: 2,
         actual_tokens: 40,
-        actual_cost_microunits: 300,
+        actual_cost_microunits: Some(300),
         actual_runtime_millis: 20_000,
         completed_at: at(3),
     };
+    for (tokens, cost) in [(101, 300), (40, 1_001)] {
+        let mut excess = settlement.clone();
+        excess.actual_tokens = tokens;
+        excess.actual_cost_microunits = Some(cost);
+        assert_eq!(
+            admission
+                .settle(&excess)
+                .expect_err("finite reservation still enforced")
+                .code(),
+            ExecutionAdmissionErrorCode::InvalidInput
+        );
+    }
     let settled = admission.settle(&settlement).expect("settle");
     assert_eq!(
         settled.reservation.state,
@@ -431,7 +908,7 @@ fn completion_settles_actual_usage_and_releases_unused_budget() {
     assert_eq!(usage.reserved_tokens, 0);
     assert_eq!(usage.reserved_cost_microunits, 0);
     assert_eq!(usage.committed_tokens, 40);
-    assert_eq!(usage.committed_cost_microunits, 300);
+    assert_eq!(usage.committed_cost_microunits, Some(300));
     assert!(
         admission
             .settle(&settlement)
@@ -449,9 +926,9 @@ fn exhausted_budget_and_runtime_have_stable_rejection_codes() {
     let request_scope = scope(6);
     let worker_pool = pool(6);
     let limits = ExecutionAdmissionLimits {
-        token_budget: 50,
-        cost_budget_microunits: 500,
-        max_runtime_millis: 1_000,
+        token_budget: Some(50),
+        cost_budget_microunits: Some(500),
+        max_runtime_millis: Some(1_000),
         ..generous_limits()
     };
     let mut storage = SqliteStorage::open(&root).expect("storage open");
@@ -465,9 +942,9 @@ fn exhausted_budget_and_runtime_have_stable_rejection_codes() {
         60,
         ExecutionRepositoryAccess::ReadOnly,
     );
-    token.reserved_tokens = 51;
-    token.reserved_cost_microunits = 1;
-    token.runtime_limit_millis = 1;
+    token.reserved_tokens = Some(51);
+    token.reserved_cost_microunits = Some(1);
+    token.runtime_limit_millis = Some(1);
     assert_eq!(
         admission
             .reserve(&token)
@@ -479,8 +956,8 @@ fn exhausted_budget_and_runtime_have_stable_rejection_codes() {
     let mut cost = token.clone();
     cost.job_id = ExecutionJobId(id("job", 61));
     cost.request_id = RequestId(id("req", 61));
-    cost.reserved_tokens = 1;
-    cost.reserved_cost_microunits = 501;
+    cost.reserved_tokens = Some(1);
+    cost.reserved_cost_microunits = Some(501);
     assert_eq!(
         admission.reserve(&cost).expect_err("cost exhausted").code(),
         ExecutionAdmissionErrorCode::CostBudgetExhausted
@@ -489,8 +966,8 @@ fn exhausted_budget_and_runtime_have_stable_rejection_codes() {
     let mut runtime = cost;
     runtime.job_id = ExecutionJobId(id("job", 62));
     runtime.request_id = RequestId(id("req", 62));
-    runtime.reserved_cost_microunits = 1;
-    runtime.runtime_limit_millis = 1_001;
+    runtime.reserved_cost_microunits = Some(1);
+    runtime.runtime_limit_millis = Some(1_001);
     assert_eq!(
         admission
             .reserve(&runtime)
@@ -588,4 +1065,496 @@ fn repository_writes_serialize_unless_worktrees_are_distinct() {
 
     drop(storage);
     fs::remove_dir_all(root).expect("directory release");
+}
+
+#[test]
+fn unlimited_runtime_requires_unlimited_policy_and_survives_reopen_and_settlement() {
+    let root = temporary_directory("unlimited-runtime");
+    let request_scope = scope(90);
+    let worker_pool = pool(90);
+    let mut request = reservation(
+        &request_scope,
+        &worker_pool,
+        90,
+        90,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    request.runtime_limit_millis = None;
+    let mut missing_limit = serde_json::to_value(&request).expect("serialize");
+    missing_limit
+        .as_object_mut()
+        .expect("object")
+        .remove("runtime_limit_millis");
+    assert!(serde_json::from_value::<ExecutionReservationRequest>(missing_limit).is_err());
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let mut admission = storage.execution_admission().expect("admission");
+    configure(
+        &mut admission,
+        &request_scope,
+        &worker_pool,
+        generous_limits(),
+    );
+    assert_eq!(
+        admission
+            .reserve(&request)
+            .expect_err("bounded policy rejects unlimited job")
+            .code(),
+        ExecutionAdmissionErrorCode::RuntimeLimitExceeded
+    );
+    drop(storage);
+    fs::remove_dir_all(&root).expect("release bounded database");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let mut admission = storage.execution_admission().expect("admission");
+    configure(
+        &mut admission,
+        &request_scope,
+        &worker_pool,
+        ExecutionAdmissionLimits {
+            max_runtime_millis: None,
+            ..generous_limits()
+        },
+    );
+    let mut invalid = request.clone();
+    invalid.runtime_limit_millis = Some(0);
+    assert!(admission.reserve(&invalid).is_err());
+    assert_eq!(
+        admission
+            .reserve(&request)
+            .expect("reserve")
+            .reservation
+            .runtime_limit_millis,
+        None
+    );
+    admission.start(&start(&request, 91)).expect("start");
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let mut admission = storage.execution_admission().expect("reopen admission");
+    let current = admission
+        .load_reservation_by_job(&request.job_id)
+        .expect("load")
+        .expect("record");
+    assert_eq!(current.runtime_limit_millis, None);
+    let receipt = admission
+        .settle(&ExecutionReservationSettlement {
+            scope: request_scope,
+            worker_pool_id: worker_pool,
+            job_id: request.job_id,
+            request_id: RequestId(id("req", 92)),
+            expected_revision: current.revision,
+            actual_tokens: 10,
+            actual_cost_microunits: Some(10),
+            actual_runtime_millis: 3_600_001,
+            completed_at: Instant("2027-02-15T10:00:00.000Z".into()),
+        })
+        .expect("settle beyond one hour");
+    assert_eq!(receipt.reservation.actual_runtime_millis, Some(3_600_001));
+    drop(storage);
+    fs::remove_dir_all(root).expect("release");
+}
+
+#[test]
+fn unlimited_budget_cannot_bypass_finite_boundaries() {
+    let root = temporary_directory("unlimited-budget");
+    let request_scope = scope(91);
+    let worker_pool = pool(91);
+    let mut request = reservation(
+        &request_scope,
+        &worker_pool,
+        91,
+        91,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    for (tokens, cost, expected) in [
+        (
+            None,
+            Some(1),
+            ExecutionAdmissionErrorCode::TokenBudgetExhausted,
+        ),
+        (
+            Some(1),
+            None,
+            ExecutionAdmissionErrorCode::CostBudgetExhausted,
+        ),
+    ] {
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let mut admission = storage.execution_admission().expect("admission");
+        configure(
+            &mut admission,
+            &request_scope,
+            &worker_pool,
+            generous_limits(),
+        );
+        request.reserved_tokens = tokens;
+        request.reserved_cost_microunits = cost;
+        assert_eq!(
+            admission
+                .reserve(&request)
+                .expect_err("finite boundary rejects unlimited")
+                .code(),
+            expected
+        );
+        drop(storage);
+        fs::remove_dir_all(&root).expect("cleanup bounded database");
+    }
+}
+
+#[test]
+fn unlimited_budget_preserves_actual_usage_and_concurrency() {
+    let root = temporary_directory("unlimited-budget-usage");
+    let request_scope = scope(91);
+    let worker_pool = pool(91);
+    let mut request = reservation(
+        &request_scope,
+        &worker_pool,
+        91,
+        91,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    request.reserved_tokens = None;
+    request.reserved_cost_microunits = None;
+    for field in ["reserved_tokens", "reserved_cost_microunits"] {
+        let mut value = serde_json::to_value(&request).expect("serialize");
+        value.as_object_mut().expect("object").remove(field);
+        assert!(serde_json::from_value::<ExecutionReservationRequest>(value).is_err());
+    }
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let mut admission = storage.execution_admission().expect("admission");
+    configure(
+        &mut admission,
+        &request_scope,
+        &worker_pool,
+        ExecutionAdmissionLimits {
+            token_budget: None,
+            cost_budget_microunits: None,
+            max_concurrent: 1,
+            ..generous_limits()
+        },
+    );
+    admission.reserve(&request).expect("unlimited reserve");
+    admission
+        .start(&start(&request, 92))
+        .expect("unlimited start");
+    let mut second = request.clone();
+    second.job_id = ExecutionJobId(id("job", 93));
+    second.request_id = RequestId(id("req", 93));
+    admission.reserve(&second).expect("second queued");
+    assert_eq!(
+        admission
+            .start(&start(&second, 94))
+            .expect_err("concurrency still enforced")
+            .code(),
+        ExecutionAdmissionErrorCode::ConcurrencyExhausted
+    );
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("reopen before settlement");
+    let mut admission = storage.execution_admission().expect("admission");
+    let current = admission
+        .load_reservation_by_job(&request.job_id)
+        .expect("read")
+        .expect("reservation");
+    assert_eq!(
+        (current.reserved_tokens, current.reserved_cost_microunits),
+        (None, None)
+    );
+    let settlement = ExecutionReservationSettlement {
+        scope: request_scope.clone(),
+        worker_pool_id: worker_pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 95)),
+        expected_revision: current.revision,
+        actual_tokens: 1_000_000_001,
+        actual_cost_microunits: Some(2_000_000_003),
+        actual_runtime_millis: 10,
+        completed_at: at(3),
+    };
+    let settled = admission
+        .settle(&settlement)
+        .expect("settle above previous task and boundary caps");
+    assert_eq!(
+        settled.reservation.actual_tokens,
+        Some(settlement.actual_tokens)
+    );
+    assert_eq!(
+        settled.reservation.actual_cost_microunits,
+        settlement.actual_cost_microunits
+    );
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("reopen settled");
+    let mut admission = storage.execution_admission().expect("admission");
+    assert!(admission.settle(&settlement).expect("replay").replayed);
+    for boundary in boundaries(&request_scope, &worker_pool) {
+        let usage = admission
+            .usage(&boundary)
+            .expect("actual usage after restart");
+        assert_eq!(usage.committed_tokens, settlement.actual_tokens);
+        assert_eq!(
+            usage.committed_cost_microunits,
+            settlement.actual_cost_microunits
+        );
+        assert_eq!(usage.queued, 1);
+        assert_eq!(usage.running, 0);
+    }
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn unknown_charge_survives_settlement_replay_and_blocks_finite_cost_admission() {
+    for limited in [true, false] {
+        let root = temporary_directory("unknown-settled-cost");
+        let request_scope = scope(98);
+        let worker_pool = pool(98);
+        let request = reservation(
+            &request_scope,
+            &worker_pool,
+            98,
+            98,
+            ExecutionRepositoryAccess::ReadOnly,
+        );
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let mut admission = storage.execution_admission().expect("admission");
+        configure(
+            &mut admission,
+            &request_scope,
+            &worker_pool,
+            ExecutionAdmissionLimits {
+                cost_budget_microunits: if limited {
+                    generous_limits().cost_budget_microunits
+                } else {
+                    None
+                },
+                ..generous_limits()
+            },
+        );
+        admission.reserve(&request).expect("reserve");
+        admission.start(&start(&request, 99)).expect("start");
+        let settlement = ExecutionReservationSettlement {
+            scope: request_scope.clone(),
+            worker_pool_id: worker_pool.clone(),
+            job_id: request.job_id.clone(),
+            request_id: RequestId(id("req", 100)),
+            expected_revision: 2,
+            actual_tokens: 30,
+            actual_cost_microunits: None,
+            actual_runtime_millis: 10,
+            completed_at: at(3),
+        };
+        let receipt = admission
+            .settle(&settlement)
+            .expect("settle unknown actual cost");
+        assert_eq!(receipt.reservation.actual_cost_microunits, None);
+        assert_eq!(receipt.reservation.actual_tokens, Some(30));
+        drop(storage);
+        let mut storage = SqliteStorage::open(&root).expect("reopen");
+        let mut admission = storage.execution_admission().expect("admission");
+        assert!(
+            admission
+                .settle(&settlement)
+                .expect("exact replay")
+                .replayed
+        );
+        assert_eq!(
+            admission
+                .load_settlement_source(&request.job_id)
+                .expect("source")
+                .expect("source exists")
+                .fact
+                .actual_cost_microunits,
+            None
+        );
+        for boundary in boundaries(&request_scope, &worker_pool) {
+            assert_eq!(
+                admission
+                    .usage(&boundary)
+                    .expect("usage")
+                    .committed_cost_microunits,
+                None
+            );
+        }
+        let second = reservation(
+            &request_scope,
+            &worker_pool,
+            101,
+            101,
+            ExecutionRepositoryAccess::ReadOnly,
+        );
+        if limited {
+            assert_eq!(
+                admission
+                    .reserve(&second)
+                    .expect_err("unknown is not free")
+                    .code(),
+                ExecutionAdmissionErrorCode::CostBudgetExhausted
+            );
+        } else {
+            admission
+                .reserve(&second)
+                .expect("unlimited cost policy remains usable");
+        }
+        drop(storage);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn terminal_unknown_accounting_reconciles_tokens_and_cost_independently_across_restart() {
+    use winwincode_execution_port::generated::{
+        ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+    };
+    let root = temporary_directory("independent-reconciliation");
+    let scope = scope(120);
+    let worker_pool = pool(120);
+    let request = reservation(
+        &scope,
+        &worker_pool,
+        120,
+        120,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let mut admission = storage.execution_admission().expect("admission");
+    configure(&mut admission, &scope, &worker_pool, generous_limits());
+    admission.reserve(&request).expect("reserve");
+    admission.start(&start(&request, 121)).expect("start");
+    let terminal = ExecutionReservationRelease {
+        scope: scope.clone(),
+        worker_pool_id: worker_pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 122)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Failed,
+        released_at: at(3),
+    };
+    let unknown = ExecutionOutcomeUsage::unknown(1000, 10);
+    admission
+        .release_with_unknown_usage(&terminal, &unknown)
+        .expect("terminal unknown");
+    let next = reservation(
+        &scope,
+        &worker_pool,
+        130,
+        130,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    assert!(
+        admission.reserve(&next).is_err(),
+        "finite budgets block unknown usage"
+    );
+    let noop = RequestId(id("req", 123));
+    assert!(
+        !admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &noop,
+                &unknown,
+                &at(4)
+            )
+            .expect("noop accepted")
+    );
+    let tokens = ExecutionOutcomeUsage {
+        tokens: Some(30),
+        known_tokens: 30,
+        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        cost_microunits: None,
+        runtime_millis: 1000,
+    };
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &noop,
+                &tokens,
+                &at(4)
+            )
+            .is_err(),
+        "noop identity cannot be changed"
+    );
+    let token_id = RequestId(id("req", 124));
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &token_id,
+                &tokens,
+                &at(5)
+            )
+            .expect("tokens known")
+    );
+    assert!(admission.reserve(&next).is_err(), "cost remains unknown");
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let mut admission = storage.execution_admission().expect("admission");
+    let cost = ExecutionOutcomeUsage {
+        cost_microunits: Some(40),
+        ..tokens.clone()
+    };
+    let cost_id = RequestId(id("req", 125));
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &cost_id,
+                &cost,
+                &at(6)
+            )
+            .expect("cost-only reconciliation")
+    );
+    assert!(
+        !admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &token_id,
+                &tokens,
+                &at(5)
+            )
+            .expect("old settlement replay")
+    );
+    assert!(
+        admission
+            .release_with_unknown_usage(&terminal, &unknown)
+            .expect("original terminal replay")
+            .replayed
+    );
+    for boundary in boundaries(&scope, &worker_pool) {
+        let usage = admission.usage(&boundary).expect("usage");
+        assert_eq!(usage.accounting_pending, 0);
+        assert_eq!(usage.committed_tokens, 30);
+        assert_eq!(usage.committed_cost_microunits, Some(40));
+    }
+    admission.reserve(&next).expect("settled budgets reusable");
+    let lower = ExecutionOutcomeUsage {
+        known_tokens: 29,
+        tokens: Some(29),
+        ..cost.clone()
+    };
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &RequestId(id("req", 126)),
+                &lower,
+                &at(7)
+            )
+            .is_err()
+    );
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &RequestId(id("req", 127)),
+                &cost,
+                &Instant("invalid".into())
+            )
+            .is_err()
+    );
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
 }

@@ -11,17 +11,11 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 const MAX_TEXT_BYTES: usize = 128;
 
-/// Product-neutral scope identity supplied by the composing application.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct IntegrationScope(String);
 
 impl IntegrationScope {
-    /// Builds one bounded portable scope identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, or non-portable values.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         let valid = !value.is_empty()
@@ -35,24 +29,17 @@ impl IntegrationScope {
         Ok(Self(value))
     }
 
-    /// Returns the opaque scope identity without assigning product semantics.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Stable protocol mapper name without a concrete provider dependency.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ConnectorProtocol(String);
 
 impl ConnectorProtocol {
-    /// Builds a protocol name such as `webhook.v1`.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, overlong, or non-portable names.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         validate_name(&value)?;
@@ -65,17 +52,11 @@ impl ConnectorProtocol {
     }
 }
 
-/// Digest identity used for one outbound idempotency operation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct IntegrationOperationKey(Sha256Digest);
 
 impl IntegrationOperationKey {
-    /// Derives a non-reversible operation key from one caller-owned identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or overlong input.
     pub fn derive(value: &str) -> Result<Self, IntegrationError> {
         if value.is_empty() || value.len() > 512 {
             return Err(invalid());
@@ -97,17 +78,11 @@ impl IntegrationOperationKey {
     }
 }
 
-/// Canonical short-lived outbound claim identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct IntegrationLeaseId(String);
 
 impl IntegrationLeaseId {
-    /// Builds a canonical integration lease identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-canonical identifier.
     pub fn try_new(value: impl Into<String>) -> Result<Self, IntegrationError> {
         let value = value.into();
         validate_id(&value, "igl")?;
@@ -120,7 +95,6 @@ impl IntegrationLeaseId {
     }
 }
 
-/// Durable credential-call state for one connector.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorState {
@@ -128,7 +102,6 @@ pub enum ConnectorState {
     CredentialRevoked,
 }
 
-/// Initial connector authority facts.
 #[derive(Clone, Debug)]
 pub struct ConnectorRegistration {
     integration_id: IntegrationId,
@@ -139,11 +112,6 @@ pub struct ConnectorRegistration {
 }
 
 impl ConnectorRegistration {
-    /// Builds one scoped connector registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope, credential reference, or time facts.
     pub fn try_new(
         integration_id: IntegrationId,
         scope: IntegrationScope,
@@ -186,7 +154,6 @@ impl ConnectorRegistration {
     }
 }
 
-/// Exact active or revoked connector authority loaded from durable storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectorAuthority {
     integration_id: IntegrationId,
@@ -257,7 +224,6 @@ impl ConnectorAuthority {
     }
 }
 
-/// Durable registration response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectorRegistrationReceipt {
     authority: ConnectorAuthority,
@@ -282,7 +248,6 @@ impl ConnectorRegistrationReceipt {
     }
 }
 
-/// Raw inbound request that is never written to durable storage.
 #[derive(Clone, Debug)]
 pub struct InboundWebhookMetadata {
     event_type: String,
@@ -293,11 +258,6 @@ pub struct InboundWebhookMetadata {
 }
 
 impl InboundWebhookMetadata {
-    /// Builds bounded provider metadata used for exact replay and stream-local ordering.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid event names, identifiers, sequence, or time.
     pub fn try_new(
         event_type: impl Into<String>,
         external_event_id: impl Into<String>,
@@ -354,7 +314,6 @@ impl InboundWebhookMetadata {
     }
 }
 
-/// Raw inbound request that is never written to durable storage.
 #[derive(Clone, Debug)]
 pub struct InboundWebhookRequest {
     integration_id: IntegrationId,
@@ -365,11 +324,6 @@ pub struct InboundWebhookRequest {
 }
 
 impl InboundWebhookRequest {
-    /// Builds one bounded inbound request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope, sequence, time, or oversized raw inputs.
     pub fn try_new(
         integration_id: IntegrationId,
         scope: IntegrationScope,
@@ -451,7 +405,6 @@ impl InboundWebhookRequest {
     }
 }
 
-/// Secret-free context supplied to a provider protocol normalizer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundNormalizationContext {
     event_type: String,
@@ -494,7 +447,6 @@ impl InboundNormalizationContext {
     }
 }
 
-/// Canonical protocol output forwarded later to a formal Control Plane command adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedInboundEvent {
     name: String,
@@ -503,11 +455,6 @@ pub struct NormalizedInboundEvent {
 }
 
 impl NormalizedInboundEvent {
-    /// Builds one canonical JSON command payload.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid names, non-canonical JSON, or oversized payloads.
     pub fn try_new(
         command_name: impl Into<String>,
         command_payload: Vec<u8>,
@@ -540,7 +487,6 @@ impl NormalizedInboundEvent {
     }
 }
 
-/// Durable disposition for one authenticated inbound event.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundStatus {
@@ -548,7 +494,6 @@ pub enum InboundStatus {
     IgnoredOutOfOrder,
 }
 
-/// Immutable inbound delivery receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundReceipt {
     integration_id: IntegrationId,
@@ -633,7 +578,6 @@ impl InboundReceipt {
     }
 }
 
-/// One durable normalized command awaiting the formal Control Plane adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundDispatch {
     sequence: u64,
@@ -689,7 +633,6 @@ impl InboundDispatch {
     }
 }
 
-/// Finite capped exponential retry policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetryPolicy {
     max_attempts: u32,
@@ -698,11 +641,6 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Builds a bounded retry policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero, reversed, or unsafe limits.
     pub fn try_new(
         max_attempts: u32,
         initial_backoff_millis: u64,
@@ -739,19 +677,17 @@ impl RetryPolicy {
         if attempt == 0 || attempt > self.max_attempts {
             return Err(corrupt());
         }
-        let shift = attempt.saturating_sub(1).min(62);
-        let factor = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
-        let delay = self
-            .initial_backoff_millis
-            .saturating_mul(factor)
-            .min(self.max_backoff_millis);
+        let delay = winwincode_network::duration_millis(winwincode_network::exponential_delay(
+            attempt,
+            std::time::Duration::from_millis(self.initial_backoff_millis),
+            std::time::Duration::from_millis(self.max_backoff_millis),
+        ));
         let retry_at = failed_at.checked_add(delay).ok_or_else(invalid)?;
         validate_time(retry_at)?;
         Ok(retry_at)
     }
 }
 
-/// One durable outbound request. The payload must be canonical JSON.
 #[derive(Clone, Debug)]
 pub struct OutboundRequest {
     integration_id: IntegrationId,
@@ -765,11 +701,6 @@ pub struct OutboundRequest {
 }
 
 impl OutboundRequest {
-    /// Builds one retry-stable outbound request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid scope, name, payload, or time facts.
     pub fn try_new(
         integration_id: IntegrationId,
         scope: IntegrationScope,
@@ -832,7 +763,6 @@ impl OutboundRequest {
     }
 }
 
-/// Durable outbound queue state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundOperationState {
@@ -842,7 +772,6 @@ pub enum OutboundOperationState {
     DeadLetter,
 }
 
-/// Current secret-free outbound operation projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundOperation {
     integration_id: IntegrationId,
@@ -897,7 +826,6 @@ impl OutboundOperation {
     }
 }
 
-/// Idempotent enqueue response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundEnqueueReceipt {
     operation: OutboundOperation,
@@ -921,7 +849,6 @@ impl OutboundEnqueueReceipt {
     }
 }
 
-/// Exact leased call handed to a protocol adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundClaim {
     authority: ConnectorAuthority,
@@ -931,9 +858,34 @@ pub struct OutboundClaim {
     payload: Vec<u8>,
     attempt: u32,
     lease_id: IntegrationLeaseId,
+    reconciliation_required: bool,
 }
 
 impl OutboundClaim {
+    #[must_use]
+    pub const fn requiring_reconciliation(mut self, required: bool) -> Self {
+        self.reconciliation_required = required;
+        self
+    }
+    #[must_use]
+    pub const fn requires_reconciliation(&self) -> bool {
+        self.reconciliation_required
+    }
+    pub fn require_new_write_authority(&self) -> Result<(), crate::ConnectorCallError> {
+        if self.reconciliation_required {
+            Err(crate::ConnectorCallError::from_network(
+                "INTEGRATION_WRITE_OUTCOME_UNKNOWN",
+                winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::ProtocolInvalid,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::Persist,
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub const fn from_stored(
         authority: ConnectorAuthority,
         operation_key: IntegrationOperationKey,
@@ -951,6 +903,7 @@ impl OutboundClaim {
             payload,
             attempt,
             lease_id,
+            reconciliation_required: false,
         }
     }
 
@@ -984,7 +937,6 @@ impl OutboundClaim {
     }
 }
 
-/// Successful remote call receipt returned by a concrete protocol adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundCallReceipt {
     remote_receipt_digest: Sha256Digest,
@@ -992,11 +944,6 @@ pub struct OutboundCallReceipt {
 }
 
 impl OutboundCallReceipt {
-    /// Builds a secret-free remote receipt.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed digest.
     pub fn try_new(
         remote_receipt_digest: Sha256Digest,
         remote_write_performed: bool,
@@ -1018,7 +965,6 @@ impl OutboundCallReceipt {
     }
 }
 
-/// Immutable terminal outbound delivery/dead-letter receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundDeliveryReceipt {
     operation: OutboundOperation,
@@ -1066,7 +1012,6 @@ impl OutboundDeliveryReceipt {
     }
 }
 
-/// Result of one attempted outbound delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutboundAttemptResult {
     Delivered(OutboundDeliveryReceipt),
@@ -1074,7 +1019,6 @@ pub enum OutboundAttemptResult {
     DeadLettered(OutboundDeliveryReceipt),
 }
 
-/// Secret-free integration audit categories persisted in the audit outbox.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationAuditKind {
@@ -1088,8 +1032,6 @@ pub enum IntegrationAuditKind {
     OutboundDeadLettered,
 }
 
-/// Secret-safe durable audit fact. It contains only scope identity, connector
-/// identity, non-reversible request identity, stable outcome, and time.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationAuditFact {

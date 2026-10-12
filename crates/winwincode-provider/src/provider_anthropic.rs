@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anthropic Messages protocol translation for the external HTTPS/SSE adapter.
-//!
-//! This module is the only boundary which understands both the Codex
-//! `ModelStreamRequest` JSON shape and Anthropic Messages request/stream
-//! shapes. It never receives a Provider Credential and never retains request
-//! or response bodies after one conversion.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
@@ -48,18 +41,30 @@ impl ProviderTokenPricing {
         Ok(())
     }
 
-    fn cost_micros(self, usage: ProviderTokenUsage) -> Result<u64, AnthropicCodecError> {
+    pub(crate) fn cost_micros(
+        self,
+        usage: ProviderTokenUsage,
+    ) -> Result<Option<u64>, AnthropicCodecError> {
+        if self == Self::default() {
+            return Ok(None);
+        }
+        let cached = match usage.cached_input_tokens {
+            Some(value) => value,
+            None if self.input_micros_per_million_tokens
+                == self.cached_input_micros_per_million_tokens =>
+            {
+                0
+            }
+            None => return Ok(None),
+        };
         let standard_input_tokens = usage
             .input_tokens
-            .checked_sub(usage.cached_input_tokens)
+            .checked_sub(cached)
             .and_then(|value| value.checked_sub(usage.cache_write_input_tokens))
             .ok_or_else(AnthropicCodecError::protocol)?;
         let priced = [
             (standard_input_tokens, self.input_micros_per_million_tokens),
-            (
-                usage.cached_input_tokens,
-                self.cached_input_micros_per_million_tokens,
-            ),
+            (cached, self.cached_input_micros_per_million_tokens),
             (
                 usage.cache_write_input_tokens,
                 self.cache_write_micros_per_million_tokens,
@@ -80,7 +85,7 @@ impl ProviderTokenPricing {
             .and_then(|value| u64::try_from(value).ok())
             .filter(|value| *value <= MAX_SAFE_INTEGER)
             .ok_or_else(AnthropicCodecError::protocol)?;
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -103,35 +108,115 @@ impl AnthropicMessagesOptions {
 pub(crate) enum AnthropicCodecErrorKind {
     InvalidRequest,
     Protocol,
+    InvalidSse,
+    IncompleteStream,
     SizeLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AnthropicCodecDiagnostic {
+    pub stage: &'static str,
+    pub event_type: &'static str,
+    pub field_path: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AnthropicCodecError {
     kind: AnthropicCodecErrorKind,
+    diagnostic: Option<AnthropicCodecDiagnostic>,
 }
 
 impl AnthropicCodecError {
-    const fn invalid_request() -> Self {
+    pub(crate) const fn invalid_sse() -> Self {
+        Self {
+            kind: AnthropicCodecErrorKind::InvalidSse,
+            diagnostic: None,
+        }
+    }
+
+    pub(crate) const fn incomplete_stream() -> Self {
+        Self {
+            kind: AnthropicCodecErrorKind::IncompleteStream,
+            diagnostic: None,
+        }
+    }
+    pub(crate) const fn invalid_request() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::InvalidRequest,
+            diagnostic: None,
         }
     }
 
-    const fn protocol() -> Self {
+    pub(crate) const fn protocol() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::Protocol,
+            diagnostic: None,
         }
     }
 
-    const fn size_limit() -> Self {
+    pub(crate) const fn size_limit() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::SizeLimit,
+            diagnostic: None,
         }
     }
 
     pub(crate) const fn kind(self) -> AnthropicCodecErrorKind {
         self.kind
+    }
+
+    pub(crate) const fn diagnostic(self) -> Option<AnthropicCodecDiagnostic> {
+        self.diagnostic
+    }
+
+    pub(crate) const fn with_diagnostic(
+        mut self,
+        stage: &'static str,
+        event_type: &'static str,
+        field_path: &'static str,
+    ) -> Self {
+        if self.diagnostic.is_none() {
+            self.diagnostic = Some(AnthropicCodecDiagnostic {
+                stage,
+                event_type,
+                field_path,
+            });
+        }
+        self
+    }
+
+    fn at_response_field(self, field_path: &'static str) -> Self {
+        self.with_diagnostic("response_fields", "unknown", field_path)
+    }
+
+    fn in_response(mut self, event_type: &'static str) -> Self {
+        if self.kind == AnthropicCodecErrorKind::InvalidRequest {
+            self.kind = AnthropicCodecErrorKind::Protocol;
+        }
+        if let Some(diagnostic) = &mut self.diagnostic {
+            diagnostic.event_type = event_type;
+            if event_type == "message_start" {
+                diagnostic.field_path = match diagnostic.field_path {
+                    "$.usage" => "$.message.usage",
+                    "$.usage.input_tokens" => "$.message.usage.input_tokens",
+                    "$.usage.output_tokens" => "$.message.usage.output_tokens",
+                    "$.usage.cache_read_input_tokens" => "$.message.usage.cache_read_input_tokens",
+                    "$.usage.cache_creation_input_tokens" => {
+                        "$.message.usage.cache_creation_input_tokens"
+                    }
+                    "$.usage.service_tier" => "$.message.usage.service_tier",
+                    "$.usage.server_tool_use" => "$.message.usage.server_tool_use",
+                    path => path,
+                };
+            }
+        } else {
+            self.diagnostic = Some(AnthropicCodecDiagnostic {
+                stage: "response_lifecycle",
+                event_type,
+                field_path: "$",
+            });
+        }
+        self
     }
 }
 
@@ -145,6 +230,8 @@ pub(crate) struct AnthropicToolBindings {
     by_exposed_name: BTreeMap<String, ProviderToolIdentity>,
     by_identity: BTreeMap<ProviderToolIdentity, String>,
 }
+
+const UNADVERTISED_TOOL_NAMESPACE: &str = "winwincode_unadvertised";
 
 impl AnthropicToolBindings {
     fn insert(
@@ -163,8 +250,23 @@ impl AnthropicToolBindings {
         Ok(())
     }
 
-    fn identity(&self, exposed_name: &str) -> Option<&ProviderToolIdentity> {
+    pub(crate) fn identity(&self, exposed_name: &str) -> Option<&ProviderToolIdentity> {
         self.by_exposed_name.get(exposed_name)
+    }
+
+    pub(crate) fn response_identity(
+        &self,
+        exposed_name: &str,
+    ) -> Result<ProviderToolIdentity, AnthropicCodecError> {
+        if let Some(identity) = self.identity(exposed_name) {
+            return Ok(identity.clone());
+        }
+        ProviderToolIdentity::try_new(
+            ProviderToolKind::Function,
+            exposed_name.to_owned(),
+            Some(UNADVERTISED_TOOL_NAMESPACE.to_owned()),
+        )
+        .map_err(|_| AnthropicCodecError::protocol())
     }
 
     fn exposed_name(&self, identity: &ProviderToolIdentity) -> Option<&str> {
@@ -182,6 +284,63 @@ pub(crate) fn prepare_anthropic_request(
     upstream_model_id: &str,
     options: AnthropicMessagesOptions,
 ) -> Result<PreparedAnthropicRequest, AnthropicCodecError> {
+    let mut normalized = normalize_messages_request(payload, upstream_model_id, options)?;
+    for message in normalized.body["messages"]
+        .as_array_mut()
+        .ok_or_else(AnthropicCodecError::invalid_request)?
+    {
+        for block in message["content"]
+            .as_array_mut()
+            .ok_or_else(AnthropicCodecError::invalid_request)?
+        {
+            let content = if block["type"] == "tool_result" {
+                block["content"]
+                    .as_array_mut()
+                    .ok_or_else(AnthropicCodecError::invalid_request)?
+                    .as_mut_slice()
+            } else {
+                std::slice::from_mut(block)
+            };
+            for item in content {
+                if item["type"] == "audio" {
+                    return Err(AnthropicCodecError::invalid_request().with_diagnostic(
+                        "unsupported_media",
+                        "input_audio",
+                        "$.request.input[]",
+                    ));
+                }
+                if item["type"] == "image" {
+                    item.as_object_mut()
+                        .ok_or_else(AnthropicCodecError::invalid_request)?
+                        .remove("detail");
+                }
+            }
+        }
+    }
+    let body =
+        serde_json::to_vec(&normalized.body).map_err(|_| AnthropicCodecError::invalid_request())?;
+    if body.len() > MAX_REQUEST_TEXT_BYTES {
+        return Err(AnthropicCodecError::size_limit());
+    }
+    Ok(PreparedAnthropicRequest {
+        body,
+        tool_bindings: normalized.tool_bindings,
+    })
+}
+
+pub(crate) struct NormalizedMessagesRequest {
+    pub body: Value,
+    pub tool_bindings: AnthropicToolBindings,
+}
+
+pub(crate) fn normalize_messages_request(
+    payload: &[u8],
+    upstream_model_id: &str,
+    options: AnthropicMessagesOptions,
+) -> Result<NormalizedMessagesRequest, AnthropicCodecError> {
+    if payload.len() > MAX_REQUEST_TEXT_BYTES {
+        return Err(AnthropicCodecError::size_limit());
+    }
     options.validate()?;
     validate_token(upstream_model_id, 256)?;
     if has_local_context_annotation(upstream_model_id) {
@@ -258,12 +417,13 @@ pub(crate) fn prepare_anthropic_request(
     }
     let mut body = Map::new();
     body.insert("model".to_owned(), upstream_model_id.to_owned().into());
-    body.insert(
-        "max_tokens".to_owned(),
-        Value::Number(options.max_output_tokens.into()),
-    );
+    body.insert("max_tokens".to_owned(), options.max_output_tokens.into());
     body.insert("stream".to_owned(), Value::Bool(true));
-    insert_reasoning_controls(&mut body, reasoning_effort);
+    insert_output_controls(
+        &mut body,
+        reasoning_effort,
+        structured_output_format(request)?,
+    );
     if !system.is_empty() {
         body.insert("system".to_owned(), Value::String(system));
     }
@@ -274,30 +434,30 @@ pub(crate) fn prepare_anthropic_request(
             body.insert("tool_choice".to_owned(), tool_choice);
         }
     }
-    let body = serde_json::to_vec(&Value::Object(body))
-        .map_err(|_| AnthropicCodecError::invalid_request())?;
-    if body.len() > MAX_REQUEST_TEXT_BYTES {
-        return Err(AnthropicCodecError::size_limit());
-    }
-    Ok(PreparedAnthropicRequest {
-        body,
+    Ok(NormalizedMessagesRequest {
+        body: Value::Object(body),
         tool_bindings,
     })
 }
 
-fn insert_reasoning_controls(body: &mut Map<String, Value>, effort: Option<&str>) {
+fn insert_output_controls(
+    body: &mut Map<String, Value>,
+    effort: Option<&str>,
+    format: Option<&Map<String, Value>>,
+) {
     if let Some(effort) = effort {
         body.insert("thinking".to_owned(), json!({"type": "adaptive"}));
         body.insert("output_config".to_owned(), json!({"effort": effort}));
+    }
+    if let Some(format) = format {
+        let output = body.entry("output_config").or_insert_with(|| json!({}));
+        output["format"] = json!({"type": "json_schema", "schema": format["schema"]});
     }
 }
 
 fn validate_request_controls(
     request: &Map<String, Value>,
 ) -> Result<Option<&str>, AnthropicCodecError> {
-    if request.get("text").is_some_and(|value| !value.is_null()) {
-        return Err(AnthropicCodecError::invalid_request());
-    }
     let mut effort = None;
     if let Some(reasoning) = request.get("reasoning")
         && !reasoning.is_null()
@@ -343,6 +503,27 @@ fn validate_request_controls(
         }
     }
     Ok(effort)
+}
+
+fn structured_output_format(
+    request: &Map<String, Value>,
+) -> Result<Option<&Map<String, Value>>, AnthropicCodecError> {
+    let Some(text) = request.get("text").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let text = object(text)?;
+    exact_keys(text, &["format", "verbosity"])?;
+    if text.get("verbosity").is_some_and(|value| !value.is_null()) {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    let format = object(required(text, "format")?)?;
+    exact_keys(format, &["type", "name", "strict", "schema"])?;
+    if string(format, "type")? != "json_schema" || !boolean(format, "strict")? {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    validate_token(string(format, "name")?, 64)?;
+    object(required(format, "schema")?)?;
+    Ok(Some(format))
 }
 
 fn translate_tools(
@@ -416,6 +597,9 @@ fn translate_tool(
     canonical_names: &mut BTreeSet<(Option<String>, String)>,
     used_exposed_names: &mut BTreeSet<String>,
 ) -> Result<Value, AnthropicCodecError> {
+    if namespace == Some(UNADVERTISED_TOOL_NAMESPACE) {
+        return Err(AnthropicCodecError::invalid_request());
+    }
     let kind = match string(tool, "type")? {
         "function" => ProviderToolKind::Function,
         "custom" => ProviderToolKind::Custom,
@@ -476,6 +660,17 @@ fn translate_tool(
             for key in ["type", "syntax", "definition"] {
                 validate_text(string(format, key)?)?;
             }
+            let description = format!(
+                "Call this tool with a JSON object containing exactly one required field, \"input\", whose value is a string.\n\
+                 Put the complete raw custom-tool input in that string.\n\
+                 The raw-input instructions below apply to the string contents, not to the outer JSON object.\n\n\
+                 Custom tool input format:\nType: {}\nSyntax: {}\nDefinition:\n{}\n\n\
+                 Tool instructions:\n{description}",
+                string(format, "type")?,
+                string(format, "syntax")?,
+                string(format, "definition")?,
+            );
+            validate_text(&description)?;
             json!({
                 "name": exposed_name,
                 "description": description,
@@ -694,8 +889,6 @@ fn translate_tool_output(
         return Err(AnthropicCodecError::invalid_request());
     }
     let output = tool_output(required(item, "output")?)?;
-    // Some Messages providers do not expose tool_use_id to the model as text.
-    // Keep the original output intact and make its transport identity copyable.
     let mut content =
         vec![json!({"type":"text", "text":format!("Tool call source_id: {call_id}")})];
     match output {
@@ -739,11 +932,6 @@ fn translate_reasoning_item(
     }
     let text = fragments.join("\n");
     validate_text(&text)?;
-    // Anthropic requires provider-signed thinking blocks when replaying prior
-    // thinking. Canonical Codex history does not carry that signature, so the
-    // validated visible reasoning is retained as assistant text instead of
-    // forging or dropping a thinking block. Adjacent tool calls are appended
-    // to this same assistant message in their original order.
     push_message_block(messages, "assistant", json!({"type":"text", "text":text}))
 }
 
@@ -780,15 +968,30 @@ fn append_reasoning_fragments(
 fn exposed_history_tool_name<'bindings>(
     tool_bindings: &'bindings AnthropicToolBindings,
     kind: ProviderToolKind,
-    name: &str,
+    name: &'bindings str,
     namespace: Option<&str>,
 ) -> Result<&'bindings str, AnthropicCodecError> {
     let identity =
         ProviderToolIdentity::try_new(kind, name.to_owned(), namespace.map(str::to_owned))
             .map_err(|_| AnthropicCodecError::invalid_request())?;
-    tool_bindings
-        .exposed_name(&identity)
-        .ok_or_else(AnthropicCodecError::invalid_request)
+    if let Some(exposed_name) = tool_bindings.exposed_name(&identity) {
+        return Ok(exposed_name);
+    }
+    if kind == ProviderToolKind::Function {
+        let custom_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            name.to_owned(),
+            namespace.map(str::to_owned),
+        )
+        .map_err(|_| AnthropicCodecError::invalid_request())?;
+        if let Some(exposed_name) = tool_bindings.exposed_name(&custom_identity) {
+            return Ok(exposed_name);
+        }
+    }
+    if kind == ProviderToolKind::Function && namespace == Some(UNADVERTISED_TOOL_NAMESPACE) {
+        return Ok(name);
+    }
+    Err(AnthropicCodecError::invalid_request())
 }
 
 fn translate_message(
@@ -822,6 +1025,9 @@ fn translate_message(
                 }
             }
             "input_image" if role == "user" => blocks.push(image_block(value)?),
+            "input_audio" if role == "user" => {
+                blocks.push(crate::provider_media::normalize_audio(value)?);
+            }
             _ => return Err(AnthropicCodecError::invalid_request()),
         }
     }
@@ -848,11 +1054,10 @@ fn translate_message(
     Ok(())
 }
 
-// Anthropic Messages image source: https://platform.claude.com/docs/en/build-with-claude/vision
 fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError> {
     exact_keys(value, &["type", "image_url", "detail"])?;
     if value.get("detail").is_some_and(|detail| {
-        !detail.is_null() && !matches!(detail.as_str(), Some("auto" | "low" | "high"))
+        !detail.is_null() && !matches!(detail.as_str(), Some("auto" | "low" | "high" | "original"))
     }) {
         return Err(AnthropicCodecError::invalid_request());
     }
@@ -869,7 +1074,12 @@ fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError>
         content: data.to_owned(),
     }])
     .map_err(|_| AnthropicCodecError::invalid_request())?;
-    Ok(json!({"type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}}))
+    let mut block =
+        json!({"type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}});
+    if let Some(detail) = value.get("detail").filter(|value| !value.is_null()) {
+        block["detail"] = detail.clone();
+    }
+    Ok(block)
 }
 
 fn tool_output(value: &Value) -> Result<Value, AnthropicCodecError> {
@@ -883,13 +1093,17 @@ fn tool_output(value: &Value) -> Result<Value, AnthropicCodecError> {
     let mut blocks = Vec::with_capacity(values.len());
     for value in values {
         let value = object(value)?;
-        exact_keys(value, &["type", "text"])?;
-        if string(value, "type")? != "input_text" {
-            return Err(AnthropicCodecError::invalid_request());
+        match string(value, "type")? {
+            "input_text" => {
+                exact_keys(value, &["type", "text"])?;
+                let text = string(value, "text")?;
+                validate_text(text)?;
+                blocks.push(json!({"type":"text", "text":text}));
+            }
+            "input_image" => blocks.push(image_block(value)?),
+            "input_audio" => blocks.push(crate::provider_media::normalize_audio(value)?),
+            _ => return Err(AnthropicCodecError::invalid_request()),
         }
-        let text = string(value, "text")?;
-        validate_text(text)?;
-        blocks.push(json!({"type":"text", "text":text}));
     }
     Ok(Value::Array(blocks))
 }
@@ -929,7 +1143,6 @@ pub(crate) fn parse_anthropic_sse(
 }
 
 struct SseEnvelope {
-    event: Option<String>,
     data: Value,
 }
 
@@ -938,56 +1151,31 @@ fn parse_sse_envelopes(
     max_event_bytes: usize,
     max_events: usize,
 ) -> Result<Vec<SseEnvelope>, AnthropicCodecError> {
-    if bytes.contains(&0) {
-        return Err(AnthropicCodecError::protocol());
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| AnthropicCodecError::protocol())?;
-    let normalized = text.replace("\r\n", "\n");
-    if normalized.contains('\r') {
-        return Err(AnthropicCodecError::protocol());
-    }
-    let mut envelopes = Vec::new();
-    let mut event = None;
-    let mut data = String::new();
-    for line in normalized.split('\n') {
-        if line.len() > max_event_bytes {
-            return Err(AnthropicCodecError::size_limit());
-        }
-        if line.is_empty() {
-            dispatch_envelope(
-                &mut envelopes,
-                &mut event,
-                &mut data,
-                max_event_bytes,
-                max_events,
-            )?;
-        } else if line.starts_with(':') {
-        } else if let Some(value) = line.strip_prefix("event:") {
-            if event.is_some() || !data.is_empty() {
-                return Err(AnthropicCodecError::protocol());
-            }
-            let value = value.strip_prefix(' ').unwrap_or(value);
-            validate_token(value, 128)?;
-            event = Some(value.to_owned());
-        } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            if data.len() > max_event_bytes {
-                return Err(AnthropicCodecError::size_limit());
-            }
-        } else {
-            return Err(AnthropicCodecError::protocol());
-        }
-    }
-    dispatch_envelope(
-        &mut envelopes,
-        &mut event,
-        &mut data,
-        max_event_bytes,
-        max_events,
+    let frames = crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events).map_err(
+        |error| {
+            (match error {
+                crate::provider_sse_framing::SseFramingError::Utf8 => {
+                    AnthropicCodecError::invalid_sse()
+                }
+                crate::provider_sse_framing::SseFramingError::SizeLimit => {
+                    AnthropicCodecError::size_limit()
+                }
+            })
+            .with_diagnostic("sse_framing", "unknown", "$")
+        },
     )?;
+    let mut envelopes = Vec::new();
+    for frame in frames {
+        let mut event = frame.event.filter(|event| !event.is_empty());
+        let mut data = frame.data;
+        dispatch_envelope(
+            &mut envelopes,
+            &mut event,
+            &mut data,
+            max_event_bytes,
+            max_events,
+        )?;
+    }
     Ok(envelopes)
 }
 
@@ -1000,31 +1188,42 @@ fn dispatch_envelope(
 ) -> Result<(), AnthropicCodecError> {
     if data.is_empty() {
         if event.take().is_some() {
-            return Err(AnthropicCodecError::protocol());
+            return Err(AnthropicCodecError::invalid_sse().with_diagnostic(
+                "sse_framing",
+                "unknown",
+                "$",
+            ));
         }
         return Ok(());
     }
     if data.len() > max_event_bytes || envelopes.len() >= max_events || data == "[DONE]" {
         return Err(
-            if data.len() > max_event_bytes || envelopes.len() >= max_events {
+            (if data.len() > max_event_bytes || envelopes.len() >= max_events {
                 AnthropicCodecError::size_limit()
             } else {
                 AnthropicCodecError::protocol()
-            },
+            })
+            .with_diagnostic("sse_framing", "unknown", "$"),
         );
     }
-    let value: Value = serde_json::from_str(data).map_err(|_| AnthropicCodecError::protocol())?;
-    let event_name = value
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(AnthropicCodecError::protocol)?;
+    let event_type = event
+        .as_deref()
+        .map_or("unknown", safe_anthropic_event_type);
+    let value: Value = serde_json::from_str(data).map_err(|_| {
+        AnthropicCodecError::protocol().with_diagnostic("json_decode", event_type, "$")
+    })?;
+    let event_name = value.get("type").and_then(Value::as_str).ok_or_else(|| {
+        AnthropicCodecError::protocol().with_diagnostic("response_fields", event_type, "$.type")
+    })?;
     if event.as_deref().is_some_and(|value| value != event_name) {
-        return Err(AnthropicCodecError::protocol());
+        return Err(AnthropicCodecError::protocol().with_diagnostic(
+            "sse_event",
+            event_type,
+            "$.type",
+        ));
     }
-    envelopes.push(SseEnvelope {
-        event: event.take(),
-        data: value,
-    });
+    envelopes.push(SseEnvelope { data: value });
+    event.take();
     data.clear();
     Ok(())
 }
@@ -1069,18 +1268,24 @@ impl<'a> AnthropicStreamParser<'a> {
     }
 
     fn push(&mut self, envelope: &SseEnvelope) -> Result<(), AnthropicCodecError> {
+        let value = response_object(&envelope.data, "$")?;
+        let event_name = response_string(value, "type", "$.type")?;
+        self.push_event(value, event_name)
+            .map_err(|error| error.in_response(safe_anthropic_event_type(event_name)))
+    }
+
+    fn push_event(
+        &mut self,
+        value: &Map<String, Value>,
+        event_name: &str,
+    ) -> Result<(), AnthropicCodecError> {
+        if event_name == "ping" {
+            return Ok(());
+        }
         if self.terminal.is_some() {
             return Err(AnthropicCodecError::protocol());
         }
-        let _ = &envelope.event;
-        let value = object(&envelope.data)?;
-        match string(value, "type")? {
-            "ping" => {
-                exact_keys(value, &["type"])?;
-                if !self.started {
-                    return Err(AnthropicCodecError::protocol());
-                }
-            }
+        match event_name {
             "message_start" => self.message_start(value)?,
             "content_block_start" => self.content_block_start(value)?,
             "content_block_delta" => self.content_block_delta(value)?,
@@ -1094,21 +1299,32 @@ impl<'a> AnthropicStreamParser<'a> {
     }
 
     fn message_start(&mut self, value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "message"])?;
         if self.started {
             return Err(AnthropicCodecError::protocol());
         }
-        let message = object(required(value, "message")?)?;
-        let response_id = string(message, "id")?;
-        validate_token(response_id, 200)?;
-        if string(message, "type")? != "message" || string(message, "role")? != "assistant" {
-            return Err(AnthropicCodecError::protocol());
+        let message = response_object(
+            response_required(value, "message", "$.message")?,
+            "$.message",
+        )?;
+        let response_id = response_string(message, "id", "$.message.id")?;
+        validate_token(response_id, 200)
+            .map_err(|error| error.at_response_field("$.message.id"))?;
+        if response_string(message, "type", "$.message.type")? != "message" {
+            return Err(AnthropicCodecError::protocol().at_response_field("$.message.type"));
         }
-        let usage = anthropic_usage(required(message, "usage")?, None)?;
+        if response_string(message, "role", "$.message.role")? != "assistant" {
+            return Err(AnthropicCodecError::protocol().at_response_field("$.message.role"));
+        }
+        let usage = anthropic_usage(
+            response_required(message, "usage", "$.message.usage")?,
+            None,
+        )?;
         self.usage = Some(usage);
         self.started = true;
         self.events.push(ProviderStreamEvent::ResponseStarted {
             provider_response_id: response_id.to_owned(),
+            observed_model_id: response_optional_string(message, "model", "$.message.model")?
+                .map(str::to_owned),
         });
         Ok(())
     }
@@ -1117,64 +1333,78 @@ impl<'a> AnthropicStreamParser<'a> {
         &mut self,
         value: &Map<String, Value>,
     ) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "index", "content_block"])?;
         self.require_started()?;
-        let index = index(value)?;
+        let index = response_index(value)?;
         if self.blocks.contains_key(&index) {
-            return Err(AnthropicCodecError::protocol());
+            return Err(AnthropicCodecError::protocol().with_diagnostic(
+                "response_lifecycle",
+                "unknown",
+                "$.index",
+            ));
         }
-        let block = object(required(value, "content_block")?)?;
-        let open = match string(block, "type")? {
-            "text" => {
-                if block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| !value.is_empty())
-                {
-                    return Err(AnthropicCodecError::protocol());
+        let block = response_object(
+            response_required(value, "content_block", "$.content_block")?,
+            "$.content_block",
+        )?;
+        let open =
+            match response_string(block, "type", "$.content_block.type")? {
+                "text" => {
+                    if block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_none_or(|value| !value.is_empty())
+                    {
+                        return Err(AnthropicCodecError::protocol()
+                            .at_response_field("$.content_block.text"));
+                    }
+                    self.events.push(ProviderStreamEvent::TextStarted { index });
+                    OpenAnthropicBlock::Text
                 }
-                self.events.push(ProviderStreamEvent::TextStarted { index });
-                OpenAnthropicBlock::Text
-            }
-            "thinking" | "redacted_thinking" => {
-                self.events.push(ProviderStreamEvent::ReasoningStarted {
-                    index,
-                    summary_index: 0,
-                });
-                OpenAnthropicBlock::Thinking
-            }
-            "tool_use" => {
-                let call_id = string(block, "id")?;
-                let name = string(block, "name")?;
-                validate_token(call_id, 200)?;
-                validate_tool_name(name)?;
-                let identity = self
-                    .tool_bindings
-                    .identity(name)
-                    .cloned()
-                    .ok_or_else(AnthropicCodecError::protocol)?;
-                let input = required(block, "input")?;
-                if !input.is_object() {
-                    return Err(AnthropicCodecError::protocol());
+                "thinking" | "redacted_thinking" => {
+                    self.events.push(ProviderStreamEvent::ReasoningStarted {
+                        index,
+                        summary_index: 0,
+                    });
+                    OpenAnthropicBlock::Thinking
                 }
-                let partial_json = if input.as_object().is_some_and(Map::is_empty) {
-                    String::new()
-                } else {
-                    serde_json::to_string(input).map_err(|_| AnthropicCodecError::protocol())?
-                };
-                self.events.push(ProviderStreamEvent::ToolCallStarted {
-                    index,
-                    provider_call_id: call_id.to_owned(),
-                    identity: identity.clone(),
-                });
-                OpenAnthropicBlock::Tool {
-                    call_id: call_id.to_owned(),
-                    identity,
-                    partial_json,
+                "tool_use" => {
+                    let call_id = response_string(block, "id", "$.content_block.id")?;
+                    let name = response_string(block, "name", "$.content_block.name")?;
+                    validate_token(call_id, 200)
+                        .map_err(|error| error.at_response_field("$.content_block.id"))?;
+                    validate_tool_name(name)
+                        .map_err(|error| error.at_response_field("$.content_block.name"))?;
+                    let identity = self
+                        .tool_bindings
+                        .response_identity(name)
+                        .map_err(|error| error.at_response_field("$.content_block.name"))?;
+                    let input = response_required(block, "input", "$.content_block.input")?;
+                    if !input.is_object() {
+                        return Err(AnthropicCodecError::protocol()
+                            .at_response_field("$.content_block.input"));
+                    }
+                    let partial_json = if input.as_object().is_some_and(Map::is_empty) {
+                        String::new()
+                    } else {
+                        serde_json::to_string(input).map_err(|_| AnthropicCodecError::protocol())?
+                    };
+                    self.events.push(ProviderStreamEvent::ToolCallStarted {
+                        index,
+                        provider_call_id: call_id.to_owned(),
+                        identity: identity.clone(),
+                    });
+                    OpenAnthropicBlock::Tool {
+                        call_id: call_id.to_owned(),
+                        identity,
+                        partial_json,
+                    }
                 }
-            }
-            _ => return Err(AnthropicCodecError::protocol()),
-        };
+                _ => {
+                    return Err(
+                        AnthropicCodecError::protocol().at_response_field("$.content_block.type")
+                    );
+                }
+            };
         self.blocks.insert(index, open);
         Ok(())
     }
@@ -1183,16 +1413,15 @@ impl<'a> AnthropicStreamParser<'a> {
         &mut self,
         value: &Map<String, Value>,
     ) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "index", "delta"])?;
         self.require_started()?;
-        let index = index(value)?;
-        let delta = object(required(value, "delta")?)?;
-        let delta_type = string(delta, "type")?;
+        let index = response_index(value)?;
+        let delta = response_object(response_required(value, "delta", "$.delta")?, "$.delta")?;
+        let delta_type = response_string(delta, "type", "$.delta.type")?;
         match (self.blocks.get_mut(&index), delta_type) {
             (Some(OpenAnthropicBlock::Text), "text_delta") => {
-                let text = string(delta, "text")?;
+                let text = response_string(delta, "text", "$.delta.text")?;
                 if !text.is_empty() {
-                    validate_text(text)?;
+                    validate_text(text).map_err(|error| error.at_response_field("$.delta.text"))?;
                     self.events.push(ProviderStreamEvent::TextDelta {
                         index,
                         delta: text.to_owned(),
@@ -1200,9 +1429,10 @@ impl<'a> AnthropicStreamParser<'a> {
                 }
             }
             (Some(OpenAnthropicBlock::Thinking), "thinking_delta") => {
-                let thinking = string(delta, "thinking")?;
+                let thinking = response_string(delta, "thinking", "$.delta.thinking")?;
                 if !thinking.is_empty() {
-                    validate_text(thinking)?;
+                    validate_text(thinking)
+                        .map_err(|error| error.at_response_field("$.delta.thinking"))?;
                     self.events
                         .push(ProviderStreamEvent::ReasoningContentDelta {
                             index,
@@ -1212,16 +1442,19 @@ impl<'a> AnthropicStreamParser<'a> {
                 }
             }
             (Some(OpenAnthropicBlock::Thinking), "signature_delta") => {
-                validate_text(string(delta, "signature")?)?;
+                validate_text(response_string(delta, "signature", "$.delta.signature")?)
+                    .map_err(|error| error.at_response_field("$.delta.signature"))?;
             }
             (Some(OpenAnthropicBlock::Tool { partial_json, .. }), "input_json_delta") => {
-                let value = string(delta, "partial_json")?;
+                let value = response_string(delta, "partial_json", "$.delta.partial_json")?;
                 if partial_json.len().saturating_add(value.len()) > MAX_TOOL_ARGUMENT_BYTES {
-                    return Err(AnthropicCodecError::size_limit());
+                    return Err(
+                        AnthropicCodecError::size_limit().at_response_field("$.delta.partial_json")
+                    );
                 }
                 partial_json.push_str(value);
             }
-            _ => return Err(AnthropicCodecError::protocol()),
+            _ => return Err(AnthropicCodecError::protocol().at_response_field("$.delta.type")),
         }
         Ok(())
     }
@@ -1230,14 +1463,15 @@ impl<'a> AnthropicStreamParser<'a> {
         &mut self,
         value: &Map<String, Value>,
     ) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "index"])?;
         self.require_started()?;
-        let index = index(value)?;
-        match self
-            .blocks
-            .remove(&index)
-            .ok_or_else(AnthropicCodecError::protocol)?
-        {
+        let index = response_index(value)?;
+        match self.blocks.remove(&index).ok_or_else(|| {
+            AnthropicCodecError::protocol().with_diagnostic(
+                "response_lifecycle",
+                "unknown",
+                "$.index",
+            )
+        })? {
             OpenAnthropicBlock::Text => {
                 self.events.push(ProviderStreamEvent::TextEnded { index });
             }
@@ -1253,30 +1487,34 @@ impl<'a> AnthropicStreamParser<'a> {
                 let input = if partial_json.is_empty() {
                     Value::Object(Map::new())
                 } else {
-                    serde_json::from_str::<Value>(&partial_json)
-                        .map_err(|_| AnthropicCodecError::protocol())?
+                    serde_json::from_str::<Value>(&partial_json).map_err(|_| {
+                        AnthropicCodecError::protocol().at_response_field("$.content_block.input")
+                    })?
                 };
-                let input = input
-                    .as_object()
-                    .ok_or_else(AnthropicCodecError::protocol)?;
+                let input = input.as_object().ok_or_else(|| {
+                    AnthropicCodecError::protocol().at_response_field("$.content_block.input")
+                })?;
                 let arguments = match identity.kind() {
                     ProviderToolKind::Function => {
                         serde_json::to_string(input).map_err(|_| AnthropicCodecError::protocol())?
                     }
                     ProviderToolKind::Custom => {
-                        exact_keys(input, &["input"])?;
-                        string(input, "input")?.to_owned()
+                        crate::provider_tool_arguments::translated_custom_arguments(
+                            input,
+                            index,
+                            &call_id,
+                            &mut self.events,
+                        )?
                     }
                 };
-                if arguments.is_empty() {
-                    return Err(AnthropicCodecError::protocol());
+                if !arguments.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: call_id.clone(),
+                            delta: arguments,
+                        });
                 }
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: call_id.clone(),
-                        delta: arguments,
-                    });
                 self.events.push(ProviderStreamEvent::ToolCallEnded {
                     index,
                     provider_call_id: call_id,
@@ -1287,26 +1525,31 @@ impl<'a> AnthropicStreamParser<'a> {
     }
 
     fn message_delta(&mut self, value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "delta", "usage"])?;
         self.require_started()?;
         if !self.blocks.is_empty() || self.finish_reason.is_some() {
             return Err(AnthropicCodecError::protocol());
         }
-        let delta = object(required(value, "delta")?)?;
-        let stop_reason = string(delta, "stop_reason")?;
+        let delta = response_object(response_required(value, "delta", "$.delta")?, "$.delta")?;
+        let stop_reason = response_string(delta, "stop_reason", "$.delta.stop_reason")?;
         self.finish_reason = Some(match stop_reason {
             "end_turn" | "stop_sequence" => ProviderFinishReason::Stop,
             "tool_use" => ProviderFinishReason::ToolCalls,
             "max_tokens" => ProviderFinishReason::MaxTokens,
-            _ => return Err(AnthropicCodecError::protocol()),
+            _ => {
+                return Err(
+                    AnthropicCodecError::protocol().at_response_field("$.delta.stop_reason")
+                );
+            }
         });
         let previous = self.usage.ok_or_else(AnthropicCodecError::protocol)?;
-        self.usage = Some(anthropic_usage(required(value, "usage")?, Some(previous))?);
+        self.usage = Some(anthropic_usage(
+            response_required(value, "usage", "$.usage")?,
+            Some(previous),
+        )?);
         Ok(())
     }
 
-    fn message_stop(&mut self, value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type"])?;
+    fn message_stop(&mut self, _value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
         self.require_started()?;
         if !self.blocks.is_empty() {
             return Err(AnthropicCodecError::protocol());
@@ -1325,11 +1568,10 @@ impl<'a> AnthropicStreamParser<'a> {
     }
 
     fn error(&mut self, value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "error"])?;
-        let error = object(required(value, "error")?)?;
-        exact_keys(error, &["type", "message"])?;
-        validate_text(string(error, "message")?)?;
-        let kind = match string(error, "type")? {
+        let error = response_object(response_required(value, "error", "$.error")?, "$.error")?;
+        validate_text(response_string(error, "message", "$.error.message")?)
+            .map_err(|error| error.at_response_field("$.error.message"))?;
+        let kind = match response_string(error, "type", "$.error.type")? {
             "authentication_error" | "permission_error" => {
                 ProviderStreamFailureKind::Authentication
             }
@@ -1361,7 +1603,13 @@ impl<'a> AnthropicStreamParser<'a> {
     }
 
     fn finish(self) -> Result<ParsedAnthropicStream, AnthropicCodecError> {
-        let terminal = self.terminal.ok_or_else(AnthropicCodecError::protocol)?;
+        let terminal = self.terminal.ok_or_else(|| {
+            AnthropicCodecError::incomplete_stream().with_diagnostic(
+                "response_lifecycle",
+                "eof",
+                "$",
+            )
+        })?;
         Ok(ParsedAnthropicStream {
             events: self.events,
             terminal,
@@ -1373,29 +1621,18 @@ fn anthropic_usage(
     value: &Value,
     previous: Option<ProviderTokenUsage>,
 ) -> Result<ProviderTokenUsage, AnthropicCodecError> {
-    let value = object(value)?;
-    exact_keys(
-        value,
-        &[
-            "input_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "output_tokens",
-            "server_tool_use",
-            "service_tier",
-        ],
-    )?;
+    let value = response_object(value, "$.usage")?;
     validate_usage_extensions(value)?;
     let prior = previous.unwrap_or(ProviderTokenUsage {
         input_tokens: 0,
-        cached_input_tokens: 0,
+        cached_input_tokens: Some(0),
         cache_write_input_tokens: 0,
         output_tokens: 0,
         reasoning_output_tokens: 0,
     });
     let prior_standard_input = prior
         .input_tokens
-        .checked_sub(prior.cached_input_tokens)
+        .checked_sub(prior.cached_input_tokens.unwrap_or(0))
         .and_then(|value| value.checked_sub(prior.cache_write_input_tokens))
         .ok_or_else(AnthropicCodecError::protocol)?;
     let standard_input_tokens = usage_counter(
@@ -1408,7 +1645,7 @@ fn anthropic_usage(
         value,
         "cache_read_input_tokens",
         false,
-        prior.cached_input_tokens,
+        prior.cached_input_tokens.unwrap_or(0),
     )?;
     let cache_write_input_tokens = usage_counter(
         value,
@@ -1422,52 +1659,55 @@ fn anthropic_usage(
         previous.is_none(),
         prior.output_tokens,
     )?;
-    if previous.is_some()
-        && (standard_input_tokens < prior_standard_input
-            || cached_input_tokens < prior.cached_input_tokens
-            || cache_write_input_tokens < prior.cache_write_input_tokens
-            || output_tokens < prior.output_tokens)
-    {
-        return Err(AnthropicCodecError::protocol());
-    }
     let input_tokens = standard_input_tokens
         .checked_add(cached_input_tokens)
         .and_then(|value| value.checked_add(cache_write_input_tokens))
-        .ok_or_else(AnthropicCodecError::protocol)?;
+        .ok_or_else(|| AnthropicCodecError::protocol().at_response_field("$.usage"))?;
+    if previous.is_some()
+        && (input_tokens < prior.input_tokens || output_tokens < prior.output_tokens)
+    {
+        return Err(AnthropicCodecError::protocol().at_response_field("$.usage"));
+    }
     let usage = ProviderTokenUsage {
         input_tokens,
-        cached_input_tokens,
+        cached_input_tokens: Some(cached_input_tokens),
         cache_write_input_tokens,
         output_tokens,
         reasoning_output_tokens: 0,
     };
     if [
         usage.input_tokens,
-        usage.cached_input_tokens,
+        usage.cached_input_tokens.unwrap_or(0),
         usage.cache_write_input_tokens,
         usage.output_tokens,
     ]
     .into_iter()
     .any(|value| value > MAX_SAFE_INTEGER)
     {
-        return Err(AnthropicCodecError::protocol());
+        return Err(AnthropicCodecError::protocol().at_response_field("$.usage"));
     }
     Ok(usage)
 }
 
 fn validate_usage_extensions(value: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
-    if let Some(service_tier) = optional_string(value, "service_tier")? {
-        validate_token(service_tier, 128)?;
+    if let Some(service_tier) =
+        response_optional_string(value, "service_tier", "$.usage.service_tier")?
+    {
+        validate_token(service_tier, 128)
+            .map_err(|error| error.at_response_field("$.usage.service_tier"))?;
     }
     if let Some(server_tool_use) = value.get("server_tool_use") {
         if server_tool_use.is_null() {
             return Ok(());
         }
-        let counters = object(server_tool_use)?;
+        let counters = response_object(server_tool_use, "$.usage.server_tool_use")?;
         for (name, count) in counters {
-            validate_token(name, 128)?;
+            validate_token(name, 128)
+                .map_err(|error| error.at_response_field("$.usage.server_tool_use"))?;
             if count.as_u64() != Some(0) {
-                return Err(AnthropicCodecError::protocol());
+                return Err(
+                    AnthropicCodecError::protocol().at_response_field("$.usage.server_tool_use")
+                );
             }
         }
     }
@@ -1476,31 +1716,185 @@ fn validate_usage_extensions(value: &Map<String, Value>) -> Result<(), Anthropic
 
 fn usage_counter(
     usage: &Map<String, Value>,
-    key: &str,
+    key: &'static str,
     required: bool,
     fallback: u64,
 ) -> Result<u64, AnthropicCodecError> {
-    match optional_u64(usage, key)? {
+    let field_path = match key {
+        "input_tokens" => "$.usage.input_tokens",
+        "cache_read_input_tokens" => "$.usage.cache_read_input_tokens",
+        "cache_creation_input_tokens" => "$.usage.cache_creation_input_tokens",
+        "output_tokens" => "$.usage.output_tokens",
+        _ => "$.usage",
+    };
+    match optional_u64(usage, key).map_err(|error| error.at_response_field(field_path))? {
         Some(value) => Ok(value),
-        None if required => Err(AnthropicCodecError::protocol()),
+        None if required => Err(AnthropicCodecError::protocol().at_response_field(field_path)),
         None => Ok(fallback),
     }
 }
 
-fn exact_keys(object: &Map<String, Value>, allowed: &[&str]) -> Result<(), AnthropicCodecError> {
+fn safe_anthropic_event_type(event_type: &str) -> &'static str {
+    match event_type {
+        "ping" => "ping",
+        "message_start" => "message_start",
+        "content_block_start" => "content_block_start",
+        "content_block_delta" => "content_block_delta",
+        "content_block_stop" => "content_block_stop",
+        "message_delta" => "message_delta",
+        "message_stop" => "message_stop",
+        "error" => "error",
+        _ => "unknown",
+    }
+}
+
+fn response_object<'a>(
+    value: &'a Value,
+    field_path: &'static str,
+) -> Result<&'a Map<String, Value>, AnthropicCodecError> {
+    value
+        .as_object()
+        .ok_or_else(|| AnthropicCodecError::protocol().at_response_field(field_path))
+}
+
+fn response_required<'a>(
+    value: &'a Map<String, Value>,
+    key: &str,
+    field_path: &'static str,
+) -> Result<&'a Value, AnthropicCodecError> {
+    value
+        .get(key)
+        .ok_or_else(|| AnthropicCodecError::protocol().at_response_field(field_path))
+}
+
+fn response_string<'a>(
+    value: &'a Map<String, Value>,
+    key: &str,
+    field_path: &'static str,
+) -> Result<&'a str, AnthropicCodecError> {
+    response_required(value, key, field_path)?
+        .as_str()
+        .ok_or_else(|| AnthropicCodecError::protocol().at_response_field(field_path))
+}
+
+fn response_optional_string<'a>(
+    value: &'a Map<String, Value>,
+    key: &str,
+    field_path: &'static str,
+) -> Result<Option<&'a str>, AnthropicCodecError> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| AnthropicCodecError::protocol().at_response_field(field_path)),
+    }
+}
+
+fn response_index(value: &Map<String, Value>) -> Result<u32, AnthropicCodecError> {
+    response_required(value, "index", "$.index")?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| AnthropicCodecError::protocol().at_response_field("$.index"))
+}
+
+pub(crate) fn observed_anthropic_receipt(
+    bytes: &[u8],
+    max_event_bytes: usize,
+    max_events: usize,
+    options: AnthropicMessagesOptions,
+) -> Option<(String, ProviderTokenUsage)> {
+    options.validate().ok()?;
+    let frames =
+        crate::provider_sse_framing::parse_prefix(bytes, max_event_bytes, max_events).ok()?;
+    let mut envelopes = Vec::new();
+    for frame in frames {
+        let mut event = frame.event.filter(|event| !event.is_empty());
+        let mut data = frame.data;
+        if dispatch_envelope(
+            &mut envelopes,
+            &mut event,
+            &mut data,
+            max_event_bytes,
+            max_events,
+        )
+        .is_err()
+        {
+            break;
+        }
+    }
+    let bindings = AnthropicToolBindings::default();
+    let mut start = None;
+    let mut final_receipt = None;
+    for envelope in envelopes {
+        let value = response_object(&envelope.data, "$").ok()?;
+        match response_string(value, "type", "$.type").ok()? {
+            "message_start" => {
+                if start.is_some() {
+                    return None;
+                }
+                let mut parser = AnthropicStreamParser::new(&bindings, options.pricing, 1);
+                parser.message_start(value).ok()?;
+                let ProviderStreamEvent::ResponseStarted {
+                    provider_response_id,
+                    ..
+                } = parser.events.pop()?
+                else {
+                    return None;
+                };
+                start = Some((provider_response_id, parser.usage?));
+            }
+            "message_delta" => {
+                if final_receipt.is_some() {
+                    return None;
+                }
+                let (response_id, initial_usage) = start.as_ref()?;
+                let delta = response_object(
+                    response_required(value, "delta", "$.delta").ok()?,
+                    "$.delta",
+                )
+                .ok()?;
+                if !matches!(
+                    response_string(delta, "stop_reason", "$.delta.stop_reason").ok()?,
+                    "end_turn" | "stop_sequence" | "tool_use" | "max_tokens"
+                ) {
+                    return None;
+                }
+                let usage_value = response_required(value, "usage", "$.usage").ok()?;
+                let usage = anthropic_usage(usage_value, Some(*initial_usage)).ok()?;
+                response_required(
+                    response_object(usage_value, "$.usage").ok()?,
+                    "output_tokens",
+                    "$.usage.output_tokens",
+                )
+                .ok()?
+                .as_u64()?;
+                final_receipt = Some((response_id.clone(), usage));
+            }
+            "error" => return None,
+            _ => {}
+        }
+    }
+    final_receipt
+}
+
+pub(crate) fn exact_keys(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), AnthropicCodecError> {
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(AnthropicCodecError::invalid_request());
     }
     Ok(())
 }
 
-fn object(value: &Value) -> Result<&Map<String, Value>, AnthropicCodecError> {
+pub(crate) fn object(value: &Value) -> Result<&Map<String, Value>, AnthropicCodecError> {
     value
         .as_object()
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn required<'a>(
+pub(crate) fn required<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<&'a Value, AnthropicCodecError> {
@@ -1509,13 +1903,16 @@ fn required<'a>(
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn string<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str, AnthropicCodecError> {
+pub(crate) fn string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, AnthropicCodecError> {
     required(object, key)?
         .as_str()
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn optional_string<'a>(
+pub(crate) fn optional_string<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<Option<&'a str>, AnthropicCodecError> {
@@ -1547,7 +1944,7 @@ fn boolean(object: &Map<String, Value>, key: &str) -> Result<bool, AnthropicCode
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn array<'a>(
+pub(crate) fn array<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<&'a [Value], AnthropicCodecError> {
@@ -1570,21 +1967,14 @@ fn optional_u64(
     }
 }
 
-fn index(object: &Map<String, Value>) -> Result<u32, AnthropicCodecError> {
-    required(object, "index")?
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(AnthropicCodecError::protocol)
-}
-
-fn validate_text(value: &str) -> Result<(), AnthropicCodecError> {
-    if value.len() > MAX_REQUEST_TEXT_BYTES || value.contains('\0') {
+pub(crate) fn validate_text(value: &str) -> Result<(), AnthropicCodecError> {
+    if value.len() > MAX_REQUEST_TEXT_BYTES {
         return Err(AnthropicCodecError::size_limit());
     }
     Ok(())
 }
 
-fn validate_token(value: &str, max_len: usize) -> Result<(), AnthropicCodecError> {
+pub(crate) fn validate_token(value: &str, max_len: usize) -> Result<(), AnthropicCodecError> {
     if value.is_empty()
         || value.len() > max_len
         || value.trim() != value
@@ -1694,6 +2084,50 @@ mod tests {
             }
         }))
         .expect("canonical request JSON")
+    }
+
+    #[test]
+    fn tool_output_preserves_nul_as_json_text_and_enforces_real_byte_limits() {
+        let mut request: Value = serde_json::from_slice(&canonical_request()).unwrap();
+        let text = format!("command output:{}done", "\0".repeat(255));
+        request["request"]["input"][5]["output"] = json!(text);
+        let prepared = prepare_anthropic_request(
+            &serde_json::to_vec(&request).unwrap(),
+            "glm-5.3-flash",
+            options(),
+        )
+        .expect("NUL in tool output is valid JSON text");
+        assert!(
+            !prepared.body.contains(&0),
+            "JSON must escape control bytes"
+        );
+        let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+        let output = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call-1")
+            .expect("retained tool output");
+        assert_eq!(
+            output["content"],
+            json!([
+                {"type":"text", "text":"Tool call source_id: call-1"},
+                {"type":"text", "text":text},
+            ])
+        );
+        assert_eq!(
+            validate_text(&"x".repeat(MAX_REQUEST_TEXT_BYTES + 1))
+                .unwrap_err()
+                .kind,
+            AnthropicCodecErrorKind::SizeLimit
+        );
+        request["request"]["input"][5]["output"] = json!("\0".repeat(MAX_REQUEST_TEXT_BYTES / 6));
+        assert!(
+            matches!(prepare_anthropic_request(&serde_json::to_vec(&request).unwrap(), "glm", options()),
+                Err(error) if error.kind() == AnthropicCodecErrorKind::SizeLimit),
+            "the escaped HTTP body still has a real byte limit"
+        );
     }
 
     #[test]
@@ -1961,6 +2395,11 @@ mod tests {
             options(),
         )
         .expect("parse Anthropic SSE");
+        assert!(matches!(
+            &parsed.events[0],
+            ProviderStreamEvent::ResponseStarted { observed_model_id: Some(model), .. }
+                if model == "glm-5.2"
+        ));
         assert!(parsed.events.iter().any(|event| matches!(
             event,
             ProviderStreamEvent::ReasoningContentDelta { delta, .. } if delta == "check"
@@ -1975,12 +2414,12 @@ mod tests {
             ProviderGatewayTerminal::Completed {
                 usage: ProviderTokenUsage {
                     input_tokens: 16,
-                    cached_input_tokens: 2,
+                    cached_input_tokens: Some(2),
                     cache_write_input_tokens: 3,
                     output_tokens: 7,
                     reasoning_output_tokens: 0,
                 },
-                actual_cost_micros: 38,
+                actual_cost_micros: Some(38),
             }
         ));
     }
@@ -2087,10 +2526,14 @@ mod tests {
             json!({"cache_read_input_tokens":1,"output_tokens":7}),
             json!({"cache_creation_input_tokens":0,"output_tokens":7}),
             json!({"output_tokens":2}),
-            json!({"output_tokens":7,"unknown":1}),
         ] {
             assert!(anthropic_usage(&value, Some(initial)).is_err());
         }
+        assert_eq!(
+            anthropic_usage(&json!({"output_tokens":7,"unknown":1}), Some(initial))
+                .expect("optional upstream usage metadata"),
+            advanced,
+        );
     }
 
     #[test]
@@ -2141,14 +2584,23 @@ mod tests {
     #[test]
     fn anthropic_stream_unknown_order_limit_error_and_disconnect_fail_closed() {
         let tool_bindings = AnthropicToolBindings::default();
-        for body in [
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-            "event: unknown\ndata: {\"type\":\"unknown\"}\n\n",
-            concat!(
-                "event: message_start\n",
-                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",",
-                "\"type\":\"message\",\"role\":\"assistant\",",
-                "\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+        for (body, expected) in [
+            (
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                AnthropicCodecErrorKind::Protocol,
+            ),
+            (
+                "event: unknown\ndata: {\"type\":\"unknown\"}\n\n",
+                AnthropicCodecErrorKind::Protocol,
+            ),
+            (
+                concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",",
+                    "\"type\":\"message\",\"role\":\"assistant\",",
+                    "\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+                ),
+                AnthropicCodecErrorKind::IncompleteStream,
             ),
         ] {
             let Err(error) =
@@ -2156,7 +2608,7 @@ mod tests {
             else {
                 panic!("invalid lifecycle must fail");
             };
-            assert_eq!(error.kind(), AnthropicCodecErrorKind::Protocol);
+            assert_eq!(error.kind(), expected);
         }
 
         let too_many = concat!(
@@ -2218,3 +2670,15 @@ mod provider_anthropic_namespace_tests;
 #[cfg(test)]
 #[path = "provider_anthropic_namespace_safety_tests.rs"]
 mod provider_anthropic_namespace_safety_tests;
+
+#[cfg(test)]
+#[path = "provider_anthropic_response_tests.rs"]
+mod provider_anthropic_response_tests;
+
+#[cfg(test)]
+#[path = "provider_anthropic_heartbeat_tests.rs"]
+mod provider_anthropic_heartbeat_tests;
+
+#[cfg(test)]
+#[path = "provider_anthropic_cache_snapshot_tests.rs"]
+mod provider_anthropic_cache_snapshot_tests;

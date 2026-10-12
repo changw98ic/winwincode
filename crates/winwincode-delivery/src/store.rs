@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Append-only Delivery records and the atomic persistence seam.
-//!
-//! [`DeliveryJournalPort`] is the only interface a `SQLite` or `PostgreSQL`
-//! adapter must implement. It moves opaque, verified bytes and performs one
-//! compare-and-publish operation; domain validation, replay, revision checks,
-//! record encoding, and digest-chain recovery stay inside this module.
-
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
@@ -19,6 +12,7 @@ use crate::{
     application::{
         CoordinationError, CoordinationErrorCode,
         attention::ResolvedAttentionTransition,
+        candidate_rejection::{CandidateRejectedTransition, current_candidate_rejection},
         session_binding::{
             DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
             accept_replacement_worker_session_with_authority, accept_worker_session_with_authority,
@@ -53,6 +47,8 @@ pub enum DeliveryMutationOperation {
     WorkRunDispatchStarted,
     #[serde(rename = "workrun.terminal")]
     WorkRunTerminal,
+    #[serde(rename = "candidate.rejected")]
+    CandidateRejected,
     #[serde(rename = "session.bound")]
     SessionBound,
     #[serde(rename = "execution.attempt.replaced")]
@@ -80,6 +76,7 @@ impl FromStr for DeliveryMutationOperation {
             "delivery.spec.updated" => Ok(Self::DeliverySpecUpdated),
             "workrun.dispatch.started" => Ok(Self::WorkRunDispatchStarted),
             "workrun.terminal" => Ok(Self::WorkRunTerminal),
+            "candidate.rejected" => Ok(Self::CandidateRejected),
             "session.bound" => Ok(Self::SessionBound),
             "execution.attempt.replaced" => Ok(Self::ExecutionAttemptReplaced),
             "attention.resolved" => Ok(Self::AttentionResolved),
@@ -128,14 +125,11 @@ impl DeliveryStoreError {
         &self.message
     }
 
-    /// Revision supplied by the rejected command, when the failure is a
-    /// concurrency conflict.
     #[must_use]
     pub const fn expected_revision(&self) -> Option<u64> {
         self.expected_revision
     }
 
-    /// Authoritative revision observed while rejecting a stale command.
     #[must_use]
     pub const fn current_revision(&self) -> Option<u64> {
         self.current_revision
@@ -239,9 +233,6 @@ pub struct AppendDelivery {
     pub snapshot: Delivery,
 }
 
-/// Typed `WorkerSession` attachment. The Store derives the next snapshot from
-/// the scheduler-owned authority instead of accepting a caller-provided
-/// `SessionBinding` snapshot.
 #[derive(Debug, Clone)]
 pub struct AcceptDeliveryWorkerSession {
     pub request_id: RequestId,
@@ -252,8 +243,6 @@ pub struct AcceptDeliveryWorkerSession {
     pub now_millis: u64,
 }
 
-/// Typed `CodexThread` attachment. The Store derives the next snapshot from the
-/// already accepted `WorkerSession` and the same scheduler-owned authority.
 #[derive(Debug, Clone)]
 pub struct ReportDeliveryCodexThread {
     pub request_id: RequestId,
@@ -266,7 +255,6 @@ pub struct ReportDeliveryCodexThread {
     pub now_millis: u64,
 }
 
-/// Scheduler-sealed replacement of one fully bound running Delivery attempt.
 #[derive(Debug, Clone)]
 pub struct ReplaceDeliveryExecutionAttempt {
     pub request_id: RequestId,
@@ -278,7 +266,6 @@ pub struct ReplaceDeliveryExecutionAttempt {
     pub now_millis: u64,
 }
 
-/// Creates an initial batch of controller-owned work items in the current contract.
 #[derive(Debug, Clone)]
 pub struct CreateDeliveryWorkItems {
     pub delivery_id: DeliveryId,
@@ -302,8 +289,6 @@ pub struct AppendDeliveryWorkRun {
     pub now_millis: u64,
 }
 
-/// Specialized verdict append that can be created only by the application
-/// service from sealed candidate, verification, and Evidence facts.
 #[derive(Debug, Clone)]
 pub struct SubmitDeliveryVerdict {
     pub request_id: RequestId,
@@ -312,9 +297,6 @@ pub struct SubmitDeliveryVerdict {
     pub transition: ComputedVerdictTransition,
 }
 
-/// Specialized canonical `WorkRun` dispatch append.  Unlike a stage start it
-/// changes no historical stage projection; it only seals the Delivery
-/// revision before the scheduler accepts the immutable job.
 #[derive(Debug, Clone)]
 pub struct StartDeliveryWorkRunDispatch {
     pub request_id: RequestId,
@@ -323,9 +305,6 @@ pub struct StartDeliveryWorkRunDispatch {
     pub transition: WorkRunStartResult,
 }
 
-/// Specialized terminal-outcome append. The Store re-verifies the sealed
-/// scheduler/Worker facts against its current journal tail before applying the
-/// canonical terminal transition.
 #[derive(Debug, Clone)]
 pub struct ApplyDeliveryTerminalOutcome {
     pub delivery_id: DeliveryId,
@@ -333,10 +312,9 @@ pub struct ApplyDeliveryTerminalOutcome {
     pub request_digest: String,
     pub expected_revision: u64,
     pub facts: DeliveryTerminalOutcomeFacts,
+    pub unchanged_recovery: Option<crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
 }
 
-/// Specialized Attention append created only from
-/// [`crate::application::attention::resolve_attention`].
 #[derive(Debug, Clone)]
 pub struct ResolveDeliveryAttention {
     pub request_id: RequestId,
@@ -345,8 +323,14 @@ pub struct ResolveDeliveryAttention {
     pub transition: ResolvedAttentionTransition,
 }
 
-/// Specialized bounded-rework clarification append created only from
-/// [`crate::application::workrun_execution::advance_rework`].
+#[derive(Debug, Clone)]
+pub struct RejectDeliveryCandidate {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: CandidateRejectedTransition,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClarifyDeliveryRework {
     pub request_id: RequestId,
@@ -366,6 +350,7 @@ pub enum DeliveryCommand {
     ReplaceExecutionAttempt(Box<ReplaceDeliveryExecutionAttempt>),
     StartWorkRunDispatch(Box<StartDeliveryWorkRunDispatch>),
     ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
+    RejectCandidate(Box<RejectDeliveryCandidate>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
     ClarifyRework(Box<ClarifyDeliveryRework>),
@@ -382,46 +367,18 @@ pub enum DeliveryQuery {
     },
 }
 
-/// One-method write interface for the Control Plane application layer.
-///
-/// This aggregate journal resolves replay only inside one Delivery. The HTTP
-/// command receipt resolves the canonical `actor + scope + requestId` identity
-/// before commands reach this port.
 pub trait DeliveryCommandPort: Send + Sync {
-    /// Applies a validated create or append command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for invalid input, replay conflicts,
-    /// stale revisions, corrupt records, or backend publication failures.
     fn execute(
         &self,
         command: DeliveryCommand,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError>;
 }
 
-/// One-method read interface for the Control Plane application layer.
 pub trait DeliveryQueryPort: Send + Sync {
-    /// Reconstructs and verifies one Delivery from its record chain.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the Delivery is absent, corrupt, or
-    /// cannot be loaded from the backend.
     fn query(&self, query: DeliveryQuery) -> Result<Delivery, DeliveryStoreError>;
 }
 
-/// Sealed append-only history projection used by the rework application path.
-///
-/// The adapter verifies the complete Delivery journal and returns only the
-/// derived fact. Callers cannot omit or rewrite prior verdict snapshots.
 pub trait DeliveryReworkHistoryPort: Send + Sync {
-    /// Derives the current rework history from one verified journal tail.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the supplied Delivery is not the
-    /// exact current tail or its append-only history is corrupt or incomplete.
     fn validated_rework_history(
         &self,
         delivery: &Delivery,
@@ -438,7 +395,6 @@ pub enum JournalEntryState {
 pub struct JournalRecordBytes {
     pub sequence: u64,
     pub state: JournalEntryState,
-    /// Digest metadata used for opaque compare-and-publish and verified on recovery.
     pub digest: String,
     pub bytes: Vec<u8>,
 }
@@ -487,87 +443,36 @@ impl JournalBackendError {
     }
 }
 
-/// Backend seam for `SQLite` (local) and `PostgreSQL` (enterprise) adapters.
-///
-/// `publish` must atomically compare the expected tail and publish or stage the
-/// new record in its current transaction. A long-lived adapter makes it
-/// authoritative before returning. A transaction-scoped adapter makes it
-/// authoritative with the containing state-and-outbox commit. A pending record
-/// is never authoritative and may be returned by `load`; recovery ignores it.
 pub trait DeliveryJournalPort: Send + Sync {
-    /// Loads the opaque manifest and all published or pending record bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalBackendError`] for backend read failures.
     fn load(
         &self,
         delivery_id: &DeliveryId,
     ) -> Result<Option<LoadedDeliveryJournal>, JournalBackendError>;
 
-    /// Atomically creates a journal or compares and appends one record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JournalBackendError`] for an existing Delivery, a changed
-    /// tail, a missing journal, or backend write failure.
     fn publish(&self, publication: AtomicPublication) -> Result<(), JournalBackendError>;
 }
 
-/// Canonical codec used by migration tools and persistence diagnostics.
-///
-/// Storage adapters normally keep these bytes opaque. Exposing the codec here
-/// gives one verified implementation for import/recovery without making a
-/// database adapter understand domain JSON or digest rules.
 pub struct DeliveryJournalCodec;
 
 impl DeliveryJournalCodec {
-    /// Encodes a canonical journal manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] if JSON serialization fails.
     pub fn encode_manifest(
         manifest: &DeliveryStoreManifest,
     ) -> Result<Vec<u8>, DeliveryStoreError> {
         encode_manifest(manifest)
     }
 
-    /// Strictly decodes and validates a journal manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] when the bytes are malformed or use an
-    /// unsupported store schema.
     pub fn decode_manifest(bytes: &[u8]) -> Result<DeliveryStoreManifest, DeliveryStoreError> {
         decode_manifest(bytes)
     }
 
-    /// Encodes one canonical append-only record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] if JSON serialization fails.
     pub fn encode_record(record: &DeliveryStoreRecord) -> Result<Vec<u8>, DeliveryStoreError> {
         encode_record(record)
     }
 
-    /// Strictly decodes and verifies one append-only record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for malformed bytes, invalid domain
-    /// facts, or a changed digest.
     pub fn decode_record(bytes: &[u8]) -> Result<DeliveryStoreRecord, DeliveryStoreError> {
         decode_record(bytes)
     }
 
-    /// Reconstructs one Delivery and verifies every chain relationship.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeliveryStoreError`] for a malformed manifest, a gap,
-    /// duplicate request, broken digest chain, or mismatched snapshot.
     pub fn verify(
         delivery_id: &DeliveryId,
         journal: LoadedDeliveryJournal,
@@ -586,7 +491,6 @@ pub struct DeliveryStore<'journal> {
 }
 
 impl DeliveryStore<'static> {
-    /// Builds a long-lived command/query module from a shared journal adapter.
     pub fn new<J>(journal: Arc<J>) -> Self
     where
         J: DeliveryJournalPort + 'static,
@@ -598,21 +502,12 @@ impl DeliveryStore<'static> {
 }
 
 impl<'journal> DeliveryStore<'journal> {
-    /// Builds a transaction-scoped module over a borrowed journal adapter.
-    ///
-    /// Phase 2.1 can use this constructor inside a `ProductStateStorage`
-    /// transaction, stage [`AtomicPublication`] together with its outbox event,
-    /// and make both authoritative in the outer transaction commit.
     pub fn borrowed(journal: &'journal dyn DeliveryJournalPort) -> Self {
         Self {
             journal: DeliveryJournalHandle::Borrowed(journal),
         }
     }
 
-    /// Restores the exact source and history of a committed rework dispatch.
-    ///
-    /// # Errors
-    /// Rejects a missing dispatch, a corrupt journal, or a non-reworking source.
     pub fn rework_dispatch_source(
         &self,
         delivery_id: &DeliveryId,
@@ -755,6 +650,7 @@ impl<'journal> DeliveryStore<'journal> {
             command.operation,
             DeliveryMutationOperation::WorkRunDispatchStarted
                 | DeliveryMutationOperation::WorkRunTerminal
+                | DeliveryMutationOperation::CandidateRejected
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
                 | DeliveryMutationOperation::ReworkClarified
@@ -1035,6 +931,18 @@ impl<'journal> DeliveryStore<'journal> {
             &verified,
         )
         .map_err(|error| map_terminal_outcome_error(&error, &command, &stored.snapshot))?;
+        let snapshot = if let Some(recovery) = &command.unchanged_recovery {
+            recovery
+                .apply(&stored.snapshot, &snapshot)
+                .map_err(|error| {
+                    store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        error.to_string(),
+                    )
+                })?
+        } else {
+            snapshot
+        };
         let append = AppendDelivery {
             delivery_id: command.delivery_id,
             request_id: command.request_id,
@@ -1043,7 +951,27 @@ impl<'journal> DeliveryStore<'journal> {
             expected_revision: command.expected_revision,
             snapshot,
         };
-        self.append_authorized(append, AppendAuthority::Terminal(&command.facts))
+        self.append_authorized(
+            append,
+            AppendAuthority::Terminal(&command.facts, command.unchanged_recovery.as_ref()),
+        )
+    }
+
+    fn reject_candidate(
+        &self,
+        command: RejectDeliveryCandidate,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.transition.delivery().id().clone(),
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::CandidateRejected,
+                expected_revision: command.expected_revision,
+                snapshot: command.transition.delivery().clone(),
+            },
+            AppendAuthority::CandidateRejected(&command.transition),
+        )
     }
 
     fn resolve_attention(
@@ -1427,6 +1355,13 @@ impl<'journal> DeliveryStore<'journal> {
                     .unwrap_or(&before.work_run_aggregate)
                     != &after.work_run_aggregate
                     || before.session_bindings != after.session_bindings
+                    || after.same_candidate_reverification
+                        != (if matches!(&transition.effect, WorkRunStartEffect::Dispatch(intent) if intent.rework_authorization().is_some())
+                        {
+                            None
+                        } else {
+                            before.same_candidate_reverification.clone()
+                        })
                     || before.attention_items != after.attention_items
                     || match &transition.effect {
                         WorkRunStartEffect::Dispatch(intent)
@@ -1443,7 +1378,7 @@ impl<'journal> DeliveryStore<'journal> {
                     ));
                 }
             }
-            AppendAuthority::Terminal(facts) => {
+            AppendAuthority::Terminal(facts, recovery) => {
                 validate_authorized_operation(
                     command.operation,
                     DeliveryMutationOperation::WorkRunTerminal,
@@ -1459,10 +1394,38 @@ impl<'journal> DeliveryStore<'journal> {
                     &verified,
                 )
                 .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                let expected = if let Some(recovery) = recovery {
+                    recovery
+                        .apply(&stored.snapshot, &expected)
+                        .map_err(|error| {
+                            store_error(
+                                DeliveryStoreErrorCode::InvalidStoreOptions,
+                                error.to_string(),
+                            )
+                        })?
+                } else {
+                    expected
+                };
                 if expected != command.snapshot {
                     return Err(store_error(
                         DeliveryStoreErrorCode::InvalidStoreOptions,
                         "terminal outcome command differs from its sealed transition",
+                    ));
+                }
+            }
+            AppendAuthority::CandidateRejected(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::CandidateRejected,
+                    "candidate.rejected",
+                )?;
+                transition
+                    .validate_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if transition.delivery() != &command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "candidate refusal differs from its sealed transition",
                     ));
                 }
             }
@@ -1671,8 +1634,12 @@ enum AppendAuthority<'transition> {
         now_millis: u64,
     },
     WorkRunDispatch(&'transition WorkRunStartResult),
-    Terminal(&'transition DeliveryTerminalOutcomeFacts),
+    Terminal(
+        &'transition DeliveryTerminalOutcomeFacts,
+        Option<&'transition crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
+    ),
     Attention(&'transition ResolvedAttentionTransition),
+    CandidateRejected(&'transition CandidateRejectedTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition WorkRunStartResult),
     WorkRun(
@@ -1908,6 +1875,7 @@ fn validate_generic_append_delta(
         )),
         DeliveryMutationOperation::DeliveryCreated
         | DeliveryMutationOperation::WorkRunTerminal
+        | DeliveryMutationOperation::CandidateRejected
         | DeliveryMutationOperation::AttentionResolved
         | DeliveryMutationOperation::VerdictSubmitted
         | DeliveryMutationOperation::ReworkClarified
@@ -1931,6 +1899,7 @@ fn validate_page_annotation_delta(
         || after.spec != before.spec
         || after.work_run_aggregate != before.work_run_aggregate
         || after.session_bindings != before.session_bindings
+        || after.same_candidate_reverification != before.same_candidate_reverification
         || after.verdict != before.verdict
         || after.status != before.status
         || after.created_at_millis != before.created_at_millis
@@ -1965,7 +1934,8 @@ fn validate_page_annotation_delta(
         || attention.resolved_at_millis.is_some()
         || evidence.delivery_spec_id != after.spec.id
         || evidence.delivery_spec_revision != after.spec.revision
-        || evidence.candidate_ref.is_empty()
+        || !winwincode_domain::is_canonical_prefixed_id(&evidence.candidate_id.0, "cnd_")
+        || !winwincode_domain::is_canonical_prefixed_id(&evidence.snapshot_id.0, "snap_")
         || evidence.evidence_type != crate::domain::EvidenceRefType::ReviewFinding
     {
         return Err(store_error(
@@ -1980,6 +1950,7 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
     let snapshot = delivery.snapshot();
     if snapshot.revision != 1
         || snapshot.status != DeliveryStatus::Draft
+        || snapshot.same_candidate_reverification.is_some()
         || !snapshot.work_run_aggregate.items.is_empty()
         || !snapshot.work_run_aggregate.runs.is_empty()
         || !snapshot.session_bindings.is_empty()
@@ -2001,17 +1972,34 @@ fn validate_spec_update_delta(
     before: &Delivery,
     after: &Delivery,
 ) -> Result<(), DeliveryStoreError> {
+    let restart_refused_candidate = current_candidate_rejection(before).is_some_and(|fact| {
+        !before.snapshot().work_run_aggregate.runs.iter().any(|run| {
+            matches!(
+                run.state,
+                winwincode_domain::WorkRunState::Queued
+                    | winwincode_domain::WorkRunState::Leased
+                    | winwincode_domain::WorkRunState::Running
+            )
+        }) && before
+            .snapshot()
+            .attention_items
+            .iter()
+            .filter(|item| item.blocking && item.status == crate::domain::AttentionItemStatus::Open)
+            .all(|item| item.id == fact.attention_id())
+    });
     let before = before.snapshot();
     let after = after.snapshot();
-    let valid = matches!(
+    let valid = (matches!(
         before.status,
         DeliveryStatus::Draft | DeliveryStatus::Clarifying | DeliveryStatus::Ready
-    ) && after.schema_version == before.schema_version
+    ) || restart_refused_candidate)
+        && after.schema_version == before.schema_version
         && after.id == before.id
         && after.revision == before.revision.saturating_add(1)
         && after.status == DeliveryStatus::Ready
         && after.created_at_millis == before.created_at_millis
         && after.updated_at_millis >= before.updated_at_millis
+        && after.same_candidate_reverification.is_none()
         && after.spec.delivery_id == before.id
         && after.spec.id != before.spec.id
         && after.spec.revision == before.spec.revision.saturating_add(1)
@@ -2078,6 +2066,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             }
             DeliveryCommand::StartWorkRunDispatch(start) => self.start_workrun_dispatch(*start),
             DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
+            DeliveryCommand::RejectCandidate(rejected) => self.reject_candidate(*rejected),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
             DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),
@@ -2840,6 +2829,43 @@ mod tests {
             }))
             .expect_err("WorkContract must be derived from the current Spec");
         assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
+    fn ordinary_needs_attention_cannot_replace_its_spec() {
+        let mut pending = snapshot(1, "draft").into_snapshot();
+        pending.status = DeliveryStatus::NeedsAttention;
+        pending.attention_items.push(crate::domain::AttentionItem {
+            schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+            id: winwincode_domain::AttentionItemId("att_01J00000000000000000000001".into()),
+            delivery_id: pending.id.clone(),
+            delivery_spec_id: pending.spec.id.clone(),
+            work_run_id: None,
+            item_type: crate::domain::AttentionItemType::VerificationBlocked,
+            title: "Ordinary verification is blocked".into(),
+            context: "Existing unresolved verification".into(),
+            options: vec![],
+            assigned_to: None,
+            blocking: true,
+            status: crate::domain::AttentionItemStatus::Open,
+            resolution: None,
+            resolved_by: None,
+            created_at_millis: pending.updated_at_millis,
+            resolved_at_millis: None,
+        });
+        let pending = Delivery::try_from_snapshot(pending).expect("ordinary blocking Attention");
+        let replacement = snapshot(2, "ready");
+        let mut ready = pending.clone().into_snapshot();
+        ready.status = DeliveryStatus::Ready;
+        let ready = Delivery::try_from_snapshot(ready).expect("allowed source state control");
+        validate_spec_update_delta(&ready, &replacement)
+            .expect("the rest of the exact Spec delta is valid");
+        assert_eq!(
+            validate_spec_update_delta(&pending, &replacement)
+                .expect_err("ordinary Attention has no refused-candidate restart authority")
+                .code(),
+            DeliveryStoreErrorCode::InvalidStoreOptions
+        );
     }
 
     #[test]

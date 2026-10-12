@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable routing from sealed Gate decisions to Approval and Attention facts.
-//!
-//! This service persists business facts only. The Action Gateway remains the
-//! only action execution point, [`InteractionRouter`] remains the authority for
-//! human-response semantics, and UI/Inbox state is produced by downstream
-//! projections.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -32,13 +25,11 @@ use crate::{
     ProductSessionService, ProductSessionServiceError,
 };
 
-/// Version of the durable Gate interaction state and event payload.
 pub const GATE_INTERACTION_SCHEMA_VERSION: u8 = 1;
 const GATE_INTERACTION_RECEIPT_TOPIC: &str = "gate-interaction.receipt.internal.v1";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_BOUNDED_TEXT: usize = 2_000;
 
-/// Authenticated owner sealed into a pending Approval or Attention route.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateInteractionActor {
@@ -47,7 +38,6 @@ pub enum GateInteractionActor {
     System(SystemActorId),
 }
 
-/// Exact identity of the user-facing business fact.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateInteractionSubject {
@@ -55,7 +45,6 @@ pub enum GateInteractionSubject {
     Attention(AttentionItemId),
 }
 
-/// Non-executing Gate/Observer decisions that require a human route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutableGateDecisionKind {
@@ -66,7 +55,6 @@ pub enum RoutableGateDecisionKind {
     Replan,
 }
 
-/// Secret-safe Gate decision fact. Free-form policy text is retained only by digest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoutableGateDecision {
@@ -75,11 +63,6 @@ pub struct RoutableGateDecision {
 }
 
 impl RoutableGateDecision {
-    /// Converts one Action Gateway stop decision into its safe routing fact.
-    ///
-    /// # Errors
-    ///
-    /// Allowing decisions do not create Approval or Attention business state.
     pub fn from_gate(decision: &GateDecision) -> Result<Self, GateInteractionServiceError> {
         let (kind, reason) = match decision {
             GateDecision::RequestPlanDelta { reason } => {
@@ -104,11 +87,6 @@ impl RoutableGateDecision {
         })
     }
 
-    /// Converts one durable Observer projection into its safe routing fact.
-    ///
-    /// # Errors
-    ///
-    /// WATCH is observational and does not create a human interaction.
     pub fn from_observer(
         projection: &ObserverDecisionProjection,
     ) -> Result<Self, GateInteractionServiceError> {
@@ -140,7 +118,6 @@ impl RoutableGateDecision {
     }
 }
 
-/// Action and envelope facts which the Action Gateway seals around an Observer decision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateActionSeal {
@@ -151,7 +128,6 @@ pub struct GateActionSeal {
     pub candidate: Option<GateCandidateIdentity>,
 }
 
-/// Optional candidate identity sealed with an action decision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateCandidateIdentity {
@@ -160,7 +136,6 @@ pub struct GateCandidateIdentity {
     pub candidate_revision: u64,
 }
 
-/// Exact action and envelope fact produced by the Gate/Observer or embedded Core path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateDecisionFact {
@@ -174,8 +149,6 @@ pub struct GateDecisionFact {
 }
 
 impl GateDecisionFact {
-    /// Seals the embedded Core's approval envelope after ingress authenticated its Worker.
-    /// This requests a human decision; it does not grant execution permission.
     pub(crate) fn from_core_approval(
         request: &winwincode_execution_port::generated::ApprovalRequestMessage,
     ) -> Result<Self, GateInteractionServiceError> {
@@ -190,7 +163,6 @@ impl GateDecisionFact {
             },
             action_id: format!("core-approval:{}", request.approval_id.0),
             action_digest: sha256(&action),
-            // This digest binds the canonical winwincode/v1 approval.request envelope.
             envelope_version: 1,
             envelope_digest: sha256(&envelope),
             decision_revision: 1,
@@ -199,13 +171,13 @@ impl GateDecisionFact {
     }
 }
 
-/// All execution facts that must remain exact while a human route is pending.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateInteractionAuthority {
     pub execution_scope: ExecutionQueueScope,
     pub worker_pool_id: WorkerPoolId,
-    pub product_session_revision: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub product_session_revision: Option<u64>,
     pub work_contract_id: Option<winwincode_domain::WorkContractId>,
     pub work_contract_revision: Option<winwincode_domain::Revision>,
     pub work_item_id: Option<winwincode_domain::WorkItemId>,
@@ -219,12 +191,6 @@ pub struct GateInteractionAuthority {
 }
 
 impl GateInteractionAuthority {
-    /// Joins one durable Observer projection to the Action Gateway seal which
-    /// identified the stopped action.
-    ///
-    /// # Errors
-    ///
-    /// Rejects WATCH projections and internally inconsistent Observer sources.
     pub fn from_observer(
         projection: &ObserverDecisionProjection,
         action: GateActionSeal,
@@ -242,7 +208,7 @@ impl GateInteractionAuthority {
         Ok(Self {
             execution_scope: source.execution_scope.clone(),
             worker_pool_id: source.worker_pool_id.clone(),
-            product_session_revision: source.product_session_revision,
+            product_session_revision: Some(source.product_session_revision),
             work_contract_id: source.work_contract_id.clone(),
             work_contract_revision: source.work_contract_revision.clone(),
             work_item_id: source.work_item_id.clone(),
@@ -274,7 +240,6 @@ impl GateInteractionAuthority {
     }
 }
 
-/// Common durable command facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionCommandContext {
     pub receipt_identity: ReceiptIdentity,
@@ -282,7 +247,6 @@ pub struct GateInteractionCommandContext {
     pub occurred_at: Instant,
 }
 
-/// Registers one sealed Gate decision as Approval or Attention.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -290,11 +254,9 @@ pub struct RegisterGateInteractionCommand {
     pub authority: GateInteractionAuthority,
     pub authorized_actor: GateInteractionActor,
     pub expires_at: Instant,
-    /// Empty for Approval; the only accepted resolutions for Attention.
     pub attention_decisions: Vec<String>,
 }
 
-/// Typed human decision accepted by the Gate interaction route.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum GateHumanDecision {
@@ -310,7 +272,6 @@ pub enum GateHumanDecision {
     },
 }
 
-/// Responds to one exact pending route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RespondGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -321,7 +282,6 @@ pub struct RespondGateInteractionCommand {
     pub responded_at: Instant,
 }
 
-/// Expires one exact unresolved route without authorizing an action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExpireGateInteractionCommand {
     pub context: GateInteractionCommandContext,
@@ -330,7 +290,6 @@ pub struct ExpireGateInteractionCommand {
     pub expired_at: Instant,
 }
 
-/// Durable lifecycle state exposed to business projections.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateInteractionState {
@@ -341,7 +300,6 @@ pub enum GateInteractionState {
     Expired,
 }
 
-/// Secret-safe durable business fact. It carries no UI layout or Inbox state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateInteractionRecord {
@@ -354,15 +312,12 @@ pub struct GateInteractionRecord {
     pub current_revision: u64,
 }
 
-/// Replay-safe mutation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionMutationReceipt {
     pub record: GateInteractionRecord,
     pub replayed: bool,
 }
 
-/// One prepared Gate-state write that another Control Plane aggregate can
-/// attach to the same durable receipt transaction.
 pub struct PreparedGateInteractionMutation {
     stream_id: String,
     expected_revision: u64,
@@ -383,7 +338,6 @@ impl PreparedGateInteractionMutation {
     }
 }
 
-/// Stable fail-closed service code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateInteractionServiceErrorCode {
     InvalidInput,
@@ -400,7 +354,6 @@ pub enum GateInteractionServiceErrorCode {
     Storage,
 }
 
-/// Gate interaction service failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateInteractionServiceError {
     code: GateInteractionServiceErrorCode,
@@ -422,7 +375,6 @@ impl fmt::Display for GateInteractionServiceError {
 
 impl std::error::Error for GateInteractionServiceError {}
 
-/// Durable application service joining Gate facts to the human route state machine.
 pub struct GateInteractionService<'storage> {
     storage: &'storage mut dyn ProductSessionPersistence,
 }
@@ -433,11 +385,6 @@ impl<'storage> GateInteractionService<'storage> {
         Self { storage }
     }
 
-    /// Persists one Approval or Attention registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale, expired, cross-scope, or non-routable decisions before writing.
     pub fn register(
         &mut self,
         command: &RegisterGateInteractionCommand,
@@ -486,12 +433,6 @@ impl<'storage> GateInteractionService<'storage> {
         )
     }
 
-    /// Applies one authenticated response to an exact pending route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects mismatched or stale facts. A response after the sealed deadline
-    /// deterministically records Expired and never authorizes the action.
     pub fn respond(
         &mut self,
         command: &RespondGateInteractionCommand,
@@ -509,12 +450,6 @@ impl<'storage> GateInteractionService<'storage> {
         )
     }
 
-    /// Prepares the canonical Gate write for an application transaction that
-    /// also updates another Control Plane state stream.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a missing, terminal, stale, cross-scope, or unauthorized fact.
     pub fn prepare_response(
         &mut self,
         command: &RespondGateInteractionCommand,
@@ -591,11 +526,6 @@ impl<'storage> GateInteractionService<'storage> {
         })
     }
 
-    /// Expires one exact pending route.
-    ///
-    /// # Errors
-    ///
-    /// Rejects early expiry, binding mismatch, final state, and storage errors.
     pub fn expire(
         &mut self,
         command: &ExpireGateInteractionCommand,
@@ -628,11 +558,6 @@ impl<'storage> GateInteractionService<'storage> {
         self.commit(&command.context, digest, stored_revision, &persisted)
     }
 
-    /// Reads one exact business fact after restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns corruption or storage errors for an invalid durable record.
     pub fn get(
         &self,
         scope: &ReceiptScopeKey,
@@ -650,12 +575,6 @@ impl<'storage> GateInteractionService<'storage> {
         Ok(Some(persisted.record))
     }
 
-    /// Revalidates one pending durable Gate fact against the current
-    /// `ProductSession`, Worker slot, admission, lease, and fence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a terminal, expired, stale, or corrupt durable fact.
     pub fn require_current_pending(
         &mut self,
         scope: &ReceiptScopeKey,
@@ -721,16 +640,20 @@ impl<'storage> GateInteractionService<'storage> {
                 "Worker lease has expired",
             ));
         }
-        let record = ProductSessionService::new(self.storage)
-            .get(scope, &authority.execution_scope.product_session_id)
-            .map_err(|error| product_session_error(&error))?
-            .ok_or_else(|| {
-                error(
-                    GateInteractionServiceErrorCode::AuthorityMismatch,
-                    "ProductSession is not current in this receipt scope",
-                )
-            })?;
-        require_product_session(&record, authority)?;
+        if authority.product_session_revision.is_none() {
+            require_workrun_binding(self.storage, scope, authority)?;
+        } else {
+            let record = ProductSessionService::new(self.storage)
+                .get(scope, &authority.execution_scope.product_session_id)
+                .map_err(|error| product_session_error(&error))?
+                .ok_or_else(|| {
+                    error(
+                        GateInteractionServiceErrorCode::AuthorityMismatch,
+                        "ProductSession is not current in this receipt scope",
+                    )
+                })?;
+            require_product_session(&record, authority)?;
+        }
         let current = self
             .storage
             .load_worker_interaction_source(
@@ -757,11 +680,21 @@ impl<'storage> GateInteractionService<'storage> {
             || lease.worker_instance_id != authority.runtime.worker_instance_id
             || lease.attempt != authority.runtime.attempt
             || lease.fencing_token != authority.runtime.fencing_token
-            || lease.expires_at != authority.lease_expires_at
         {
             return Err(authority_mismatch(
                 "current Worker slot, lease, fence, or admission does not match",
             ));
+        }
+        if lease.expires_at != authority.lease_expires_at {
+            let mut period = lease.clone();
+            period.expires_at.clone_from(&authority.lease_expires_at);
+            let proven = self
+                .storage
+                .load_live_lease_for_period(&period, now)
+                .map_err(|error| storage_error(&error))?;
+            if proven.as_ref() != Some(&lease) {
+                return Err(authority_mismatch("Gate lease period is unproven"));
+            }
         }
         Ok(())
     }
@@ -938,12 +871,95 @@ fn rebuild_router(
     Ok(router)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exact WorkRun identity join stays one fail-closed seam"
+)]
+pub(crate) fn require_workrun_binding(
+    storage: &mut dyn ProductSessionPersistence,
+    scope: &ReceiptScopeKey,
+    authority: &GateInteractionAuthority,
+) -> Result<(), GateInteractionServiceError> {
+    use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind};
+    let execution = &authority.execution_scope;
+    let expected_scope =
+        winwincode_storage::receipt_scope_key(&winwincode_storage::PublicEventScope::Repository {
+            organization_id: execution.organization_id.clone(),
+            workspace_id: execution.workspace_id.clone(),
+            project_id: execution.project_id.clone(),
+            repository_id: execution.repository_id.clone(),
+        })
+        .map_err(|error| storage_error(&error))?;
+    if scope != &expected_scope || authority.product_session_revision.is_some() {
+        return Err(authority_mismatch("WorkRun receipt scope differs"));
+    }
+    let delivery_id = execution
+        .delivery_id
+        .as_ref()
+        .ok_or_else(|| authority_mismatch("WorkRun Delivery is missing"))?;
+    let state = storage
+        .load_state(&format!("delivery:{}", delivery_id.0))
+        .map_err(|error| storage_error(&error))?
+        .ok_or_else(|| authority_mismatch("WorkRun Delivery is missing"))?;
+    let delivery = Delivery::decode_json(&state.payload)
+        .map_err(|_| authority_mismatch("WorkRun Delivery is invalid"))?;
+    if delivery.id() != delivery_id || delivery.revision() != state.revision {
+        return Err(authority_mismatch("WorkRun Delivery is stale"));
+    }
+    let runtime = &authority.runtime;
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            binding.delivery_id == *delivery_id
+                && Some(&binding.work_contract_id) == authority.work_contract_id.as_ref()
+                && Some(&binding.work_contract_revision)
+                    == authority.work_contract_revision.as_ref()
+                && Some(&binding.work_item_id) == authority.work_item_id.as_ref()
+                && Some(&binding.work_item_revision) == authority.work_item_revision.as_ref()
+                && Some(&binding.work_run_id) == authority.work_run_id.as_ref()
+                && binding.product_session_id == execution.product_session_id
+                && binding.execution_job_id == runtime.job_id
+                && binding.worker_session_id.as_ref() == Some(&runtime.worker_session_id)
+                && binding.codex_thread_id.as_ref() == Some(&runtime.codex_thread_id)
+                && binding.worker_id.as_ref() == Some(&runtime.worker_id)
+                && binding.worker_instance_id.as_ref() == Some(&runtime.worker_instance_id)
+                && binding.lease_id.as_ref() == Some(&runtime.lease_id)
+                && binding.fencing_token.as_ref() == Some(&runtime.fencing_token)
+                && binding.attempt == runtime.attempt
+                && binding.source_provenance.kind() == SessionBindingSourceKind::ExecutionPort
+        });
+    let binding = bindings
+        .next()
+        .ok_or_else(|| authority_mismatch("WorkRun binding differs"))?;
+    if bindings.next().is_some()
+        || !delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .any(|run| {
+                run.id == binding.work_run_id
+                    && run.work_contract_id == binding.work_contract_id
+                    && run.contract_revision == binding.work_contract_revision
+                    && run.work_item_id == binding.work_item_id
+                    && run.work_item_revision == binding.work_item_revision
+                    && u64::try_from(run.attempt).ok() == Some(runtime.attempt)
+                    && run.state == winwincode_domain::WorkRunState::Running
+            })
+    {
+        return Err(authority_mismatch("WorkRun is no longer current"));
+    }
+    Ok(())
+}
+
 fn require_product_session(
     record: &crate::ProductSessionRecord,
     authority: &GateInteractionAuthority,
 ) -> Result<(), GateInteractionServiceError> {
     let session = record.session();
-    if session.revision() != authority.product_session_revision
+    if Some(session.revision()) != authority.product_session_revision
         || session.id() != &authority.execution_scope.product_session_id
         || session.project_id() != &authority.execution_scope.project_id
         || session.repository_id() != &authority.execution_scope.repository_id
@@ -1000,8 +1016,9 @@ fn validate_authority_shape(
         || authority.runtime.job_id.0.is_empty()
         || authority.runtime.attempt == 0
         || authority.runtime.attempt > 1_000
-        || authority.product_session_revision == 0
-        || authority.product_session_revision > MAX_SAFE_INTEGER
+        || authority
+            .product_session_revision
+            .is_some_and(|revision| revision == 0 || revision > MAX_SAFE_INTEGER)
         || authority.job_revision == 0
         || authority.job_revision > MAX_SAFE_INTEGER
         || authority.worker_slot_revision == 0

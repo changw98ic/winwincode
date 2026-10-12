@@ -1,6 +1,5 @@
-// SPDX-License-Identifier: Apache-2.0
-
 #![allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::PathBuf;
@@ -130,7 +129,7 @@ fn execution_config(repository: u64) -> ProductSessionExecutionConfig {
         },
         "0123456789abcdef0123456789abcdef01234567",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")
@@ -313,9 +312,9 @@ fn prepare_slot_for_job(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 10,
         max_queued: 10,
-        token_budget: 100_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -332,9 +331,9 @@ fn prepare_slot_for_job(
                 job_id: job_id.clone(),
                 request_id: RequestId(id("req", request_seed)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: at(4),
             })
             .expect("admission reserve");
@@ -532,8 +531,10 @@ fn assistant_command(
                 status: ExecutionOutcomeStatus::Succeeded,
                 usage: Some(ExecutionOutcomeUsage {
                     runtime_millis: 15,
-                    tokens: 10,
-                    cost_microunits: 1,
+                    tokens: Some(10),
+ known_tokens: 10,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+                    cost_microunits: Some(1),
                 }),
                 last_event_sequence: ExecutionAckSequence(
                     i64::try_from(stream_sequence).expect("stream sequence"),
@@ -1487,9 +1488,6 @@ fn metadata_and_attachments_survive_restart_and_preserve_execution() {
     );
 }
 
-/// y2es: inject a process exit after the ProductSession cancel catalog commit
-/// but before the RepositoryScheduler cancel commit. Recovery must cancel the
-/// job and release admission without user retry, without rewriting identity.
 #[test]
 fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
     let directory = TestDirectory::new("cancel-reconcile");
@@ -1508,8 +1506,16 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
             .execution_job_id
     };
     prepare_worker(&mut storage, 1);
-    let (execution_scope, authority) =
-        prepare_slot_for_job(&mut storage, 55, None, execution_job_id.clone(), 55, 55, 55, 700);
+    let (execution_scope, authority) = prepare_slot_for_job(
+        &mut storage,
+        55,
+        None,
+        execution_job_id.clone(),
+        55,
+        55,
+        55,
+        700,
+    );
     {
         let mut bind = continue_command(&scope_key, 55, 77, authority.clone(), execution_scope);
         bind.context.expected_revision = 2;
@@ -1533,7 +1539,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),
@@ -1545,9 +1551,11 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         )
         .expect("job")
         .expect("cancelled job");
-    assert_eq!(cancelled.state, winwincode_storage::ExecutionJobState::Cancelling);
+    assert_eq!(
+        cancelled.state,
+        winwincode_storage::ExecutionJobState::Cancelling
+    );
 
-    // Inject the crash window: session cancel is durable, queue cancel is not.
     {
         let connection = Connection::open(directory.0.join("control-plane.sqlite3"))
             .expect("open SQLite for crash fixture");
@@ -1557,7 +1565,10 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
                  SET state = 'running', revision = ?1,
                      cancellation_request_id = NULL, cancellation_requested_at = NULL
                  WHERE job_id = ?2",
-                params![i64::try_from(original_revision).expect("revision"), &execution_job_id.0],
+                params![
+                    i64::try_from(original_revision).expect("revision"),
+                    &execution_job_id.0
+                ],
             )
             .expect("restore job to pre-cancel state");
         connection
@@ -1577,7 +1588,6 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
     }
     drop(storage);
 
-    // Restart: recovery auto-aligns the queue without user retry.
     let mut reopened = SqliteStorage::open(&directory.0).expect("restart after crash window");
     let public_scope_for_recovery = public_scope.clone();
     let applied = ProductSessionService::new(&mut reopened)
@@ -1588,7 +1598,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),
@@ -1620,8 +1630,6 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         );
     }
 
-    // Identity-stable replay: a second recovery does not invent a new request
-    // or rewrite Worker identity.
     let again = ProductSessionService::new(&mut reopened)
         .reconcile_cancelled_session_routes(&public_scope_for_recovery)
         .expect("second reconcile");
@@ -1630,7 +1638,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),

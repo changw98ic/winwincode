@@ -49,6 +49,7 @@ function response(status, payload) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    ...(status >= 500 ? { headers: { get: name => name === 'retry-after' ? '301' : null } } : {}),
     async text() {
       return JSON.stringify(payload)
     },
@@ -92,7 +93,7 @@ function publicationSummary(revision = 2, state = 'cancelled') {
     deliveryId,
     deliverySpecId: 'spec:current',
     deliverySpecRevision: 1,
-    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    candidateRef: `refs/winwincode/candidates/${'b'.repeat(40)}`,
     deliveryVerdictId: 'verdict:current:pass',
     verdictStatus: 'pass',
     approvalAttentionItemId: 'att_00000000000000000000000001',
@@ -318,7 +319,9 @@ function deliveryRuntimeProjection(cursor) {
 
 function candidateProjection() {
   return {
-    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    candidateId: canonicalId('cnd', 2),
+    candidateDigest: `sha256:${'a'.repeat(64)}`,
+    candidateRef: `refs/winwincode/candidates/${'b'.repeat(40)}`,
     deliverySpecId: 'spec:current',
     deliverySpecRevision: 1,
     producerWorkRunId: workRunId,
@@ -647,7 +650,7 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
     client.submitQuery({ ...query, requestId: requestId(3) }),
     error => {
       assert.ok(error instanceof ControlPlaneClientError)
-      assert.deepEqual(Reflect.ownKeys(error).sort(), [
+      assert.deepEqual(Object.keys(error).sort(), [
         'code',
         'details',
         'message',
@@ -856,7 +859,8 @@ test('generated HTTP client validates exact Evidence and closed Artifact reads',
     deliverySpecRevision: 1,
     workRunId,
     sessionBindingId: 'binding:reviewer',
-    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    candidateId: canonicalId('cnd', 2),
+    snapshotId: canonicalId('snap', 2),
     type: 'runtime_event',
     sourceRef: canonicalId('exe', 2),
     createdAt: '2026-08-25T00:00:00.000Z',
@@ -892,7 +896,8 @@ test('generated HTTP client validates exact Evidence and closed Artifact reads',
     atCursor: cursor,
     readPageLimit: 20,
     evidenceId: evidence.id,
-    candidateRef: evidence.candidateRef,
+    candidateId: evidence.candidateId,
+    snapshotId: evidence.snapshotId,
     workRunId: evidence.workRunId,
     sessionBindingId: evidence.sessionBindingId,
     type: evidence.type,
@@ -995,7 +1000,8 @@ test('generated HTTP client validates exact Evidence and closed Artifact reads',
             deliveryRevision: cursor.deliveryRevision,
             workRunId,
             sessionBindingId: evidence.sessionBindingId,
-            candidateRef: evidence.candidateRef,
+            candidateId: evidence.candidateId,
+    snapshotId: evidence.snapshotId,
             evidenceId: evidence.id,
           },
         },
@@ -1844,6 +1850,7 @@ test('recursive error cleaning rejects every canonical sensitive key and prototy
       return {
         ok: false,
         status: 500,
+        headers: { get: name => name === 'retry-after' ? '301' : null },
         async text() {
           return JSON.stringify({
             schemaVersion,

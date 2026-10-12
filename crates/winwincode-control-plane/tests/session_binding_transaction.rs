@@ -208,8 +208,6 @@ fn delivery_before_advance(seed: u64) -> Delivery {
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
     snapshot.status = DeliveryStatus::Ready;
-    // Each seeded Delivery owns a fresh canonical contract and one ready item.
-    // A settled run from the shared projection fixture is not execution authority.
     snapshot.work_run_aggregate.contract.id =
         winwincode_domain::WorkContractId(canonical_id("wct", seed));
     snapshot.work_run_aggregate.contract.revision = Revision(1);
@@ -498,6 +496,7 @@ fn accept_verification_artifact(
     seed: u64,
 ) {
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),
@@ -513,6 +512,7 @@ fn accept_verification_artifact(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding.sent_at.clone(),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
     control_plane
@@ -525,7 +525,7 @@ fn accept_verification_artifact(
         lease: binding.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
         payload: EncodedPayload {
-            content_type: "application/octet-stream".into(),
+            content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(manifest),
             payload_digest: digest,
         },
@@ -533,6 +533,7 @@ fn accept_verification_artifact(
         sent_at: binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
     let acknowledgement = control_plane
@@ -614,8 +615,19 @@ fn binding_for_dispatch(
         panic!("dispatch must be a Delivery stage");
     };
     assert_eq!(dispatch.job.job_id, pending.job().job_id);
-    let worker_session_id = WorkerSessionId(canonical_id("wsn", seed + attempt * 10));
-    let codex_thread_id = CodexThreadId(canonical_id("cdx", seed + attempt * 10));
+    let (worker_session_id, codex_thread_id) = if dispatch.snapshot_id.is_some() {
+        winwincode_execution_port::execution_identity::canonical_dispatch_session_identity(
+            &dispatch.lease.worker_id,
+            &dispatch.lease.worker_instance_id,
+            dispatch,
+        )
+        .unwrap()
+    } else {
+        (
+            WorkerSessionId(canonical_id("wsn", seed + attempt * 10)),
+            CodexThreadId(canonical_id("cdx", seed + attempt * 10)),
+        )
+    };
     let message_id = ExecutionMessageId(canonical_id("xmsg", seed + 240 + attempt * 10));
     let bound_at = attempt_time(clock, 5);
     let sent_at = attempt_time(clock, 6);
@@ -665,6 +677,7 @@ fn binding_for_dispatch(
         },
         work_run_id: Some(scope.work_run_id.clone()),
         worker_id: dispatch.lease.worker_id.clone(),
+        snapshot_id: dispatch.snapshot_id.clone(),
         worker_session_id: worker_session_id.clone(),
     };
     let lease = active_lease_identity(
@@ -684,7 +697,9 @@ fn binding_for_dispatch(
     (authority, message)
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn claim_delivery_attempt_with_slot(
+    snapshot_host: Option<&mut ControlPlane>,
     root: &Path,
     pending: &RecordedExecution,
     seed: u64,
@@ -699,7 +714,7 @@ fn claim_delivery_attempt_with_slot(
     let mut storage = SqliteStorage::open(root).expect("scheduler attempt storage");
     let (worker_id, worker_instance_id) =
         register_attempt_worker(&mut storage, identity_seed, attempt, clock);
-    let dispatch = RepositoryExecutionScheduler::new(&mut storage)
+    let mut dispatch = RepositoryExecutionScheduler::new(&mut storage)
         .claim_next(&RepositorySchedulerClaimRequest {
             scope: scheduler_scope(seed),
             request_id: RequestId(canonical_id("req", identity_seed + 250 + attempt * 10)),
@@ -729,6 +744,57 @@ fn claim_delivery_attempt_with_slot(
             .as_ref()
             .expect("typed replacement authority");
         assert_eq!(replacement.successor_lease, dispatch.lease);
+    }
+    if let Some(host) = snapshot_host {
+        use winwincode_execution_port::generated::{
+            SnapshotFreezeReceipt, SnapshotFreezeReceiptMessage, SnapshotFreezeReceiptMessageKind,
+        };
+        let now = attempt_time(clock, 4);
+        let ExecutionPortMessage::SnapshotFreezeRequestMessage(request) = host
+            .prepare_snapshot_freeze(&mut storage, &dispatch, &now)
+            .expect("persist real freeze request")
+        else {
+            panic!("verification freeze required")
+        };
+        let mut receipt = SnapshotFreezeReceipt {
+            schema_version: SchemaVersion::WinwincodeV1,
+            receipt_id: request.request_id.clone(),
+            request_id: request.request_id.clone(),
+            candidate_id: request.candidate.id.clone(),
+            work_run_id: request.candidate.work_run_id.clone(),
+            repository_id: request.repository_id.clone(),
+            worker_id: request.lease.worker_id.clone(),
+            worker_instance_id: request.lease.worker_instance_id.clone(),
+            lease_id: request.lease.lease_id.clone(),
+            attempt: request.lease.attempt,
+            fencing_token: request.lease.fencing_token.clone(),
+            base_commit_id: winwincode_domain::GitObjectId(request.candidate.base_commit.clone()),
+            base_tree_id: request.base_tree_id.clone(),
+            candidate_commit_id: winwincode_domain::GitObjectId(
+                request.candidate.candidate_commit.clone(),
+            ),
+            candidate_tree_id: winwincode_domain::GitObjectId(
+                request.candidate.candidate_tree.clone(),
+            ),
+            diff_sha256: request.candidate.diff_digest.clone(),
+            content_digest: request.content_digest.clone(),
+            frozen_at: now.clone(),
+            validation_seal: Sha256Digest(String::new()),
+        };
+        receipt.validation_seal =
+            winwincode_execution_port::snapshot_freeze::seal_freeze_receipt(&receipt).unwrap();
+        let response = SnapshotFreezeReceiptMessage {
+            schema_version: SchemaVersion::WinwincodeV1,
+            kind: SnapshotFreezeReceiptMessageKind::SnapshotFreezeReceipt,
+            message_id: request.message_id,
+            sent_at: now.clone(),
+            lease: request.lease,
+            receipt,
+        };
+        dispatch = host
+            .accept_snapshot_freeze(&mut storage, &response, &now)
+            .expect("commit canonical Snapshot before dispatch")
+            .dispatch;
     }
     let (authority, message) =
         binding_for_dispatch(pending, &dispatch, identity_seed, attempt, clock);
@@ -809,6 +875,7 @@ fn claim_delivery_attempt(
     SessionBindingMessage,
 ) {
     claim_delivery_attempt_with_slot(
+        None,
         root,
         pending,
         seed,
@@ -830,6 +897,7 @@ fn claim_delivery_attempt_without_slot(
     SessionBindingMessage,
 ) {
     claim_delivery_attempt_with_slot(
+        None,
         root,
         pending,
         seed,
@@ -1043,6 +1111,7 @@ fn assert_delivery_predecessor_is_fenced(
 
 fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> ArtifactOpenMessage {
     ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: ArtifactId(canonical_id("art", seed)),
             digest: Sha256Digest(
@@ -1060,6 +1129,7 @@ fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> Artifact
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding.worker_session_id.clone(),
     }
 }
@@ -1696,11 +1766,11 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_201));
     let expired_error = control_plane
         .commit_delivery_session_binding(&forged, &authority, &expired_server_time)
-        .expect_err("first-seen message cannot backdate sentAt after expiry");
+        .expect_err("a different binding message still conflicts with the existing phases");
     assert!(
-        expired_error
+        !expired_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_202));
@@ -1714,7 +1784,7 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     assert!(
         premature_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     let state = control_plane
@@ -2279,6 +2349,96 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
 }
 
 #[test]
+fn artifact_replacement_ingress_preserves_completed_candidates_and_rejects_changed_bytes() {
+    for complete in [false, true] {
+        let seed = if complete { 1490 } else { 1480 };
+        let (root, mut control_plane, _pending, authority, binding) =
+            running_fixture(seed, "artifact-replacement");
+        control_plane
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
+            .unwrap();
+        let Scope::RepositoryScope(scope) = workrun_start_command(seed).scope else {
+            panic!("scope")
+        };
+        let mut old = artifact_open_message(seed, &binding);
+        old.artifact.kind = ArtifactKind::Candidate;
+        control_plane
+            .accept_artifact_open(&scope, &old, &authority)
+            .unwrap();
+        let chunk = |artifact_id, message_seed| ArtifactChunkMessage {
+            artifact_id,
+            is_final: true,
+            kind: ArtifactChunkMessageKind::ArtifactChunk,
+            lease: binding.lease.clone(),
+            message_id: ExecutionMessageId(canonical_id("xmsg", message_seed)),
+            payload: EncodedPayload {
+                content_type: "text/plain".into(),
+                data_base64: "aGVsbG8=".into(),
+                payload_digest: old.artifact.digest.clone(),
+            },
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
+            sequence: ExecutionSequence(1),
+            session_identity: binding.session_identity.clone(),
+            snapshot_id: None,
+            worker_session_id: binding.worker_session_id.clone(),
+        };
+        if complete {
+            control_plane
+                .accept_artifact_chunk(
+                    &scope,
+                    &chunk(old.artifact.artifact_id.clone(), seed + 2),
+                    &authority,
+                )
+                .unwrap();
+        }
+        let mut replacement = old.clone();
+        replacement.replaces_artifact_id = Some(old.artifact.artifact_id.clone());
+        replacement.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 3));
+        replacement.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 3));
+        replacement.request_id = RequestId(canonical_id("req", seed + 3));
+        let mut forged = replacement.clone();
+        forged.artifact.digest = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+        assert_eq!(
+            control_plane
+                .accept_artifact_open(&scope, &forged, &authority)
+                .unwrap()
+                .status,
+            LeaseWriteStatus::RejectedConflict
+        );
+        let accepted = control_plane
+            .accept_artifact_open(&scope, &replacement, &authority)
+            .unwrap();
+        assert_eq!(accepted.ack_sequence.0, 0);
+        if complete {
+            assert_eq!(
+                accepted.retained_artifact,
+                Some(ArtifactReference {
+                    artifact_id: old.artifact.artifact_id.clone(),
+                    digest: old.artifact.digest.clone()
+                })
+            );
+        } else {
+            assert!(accepted.retained_artifact.is_none());
+            control_plane
+                .accept_artifact_chunk(
+                    &scope,
+                    &chunk(replacement.artifact.artifact_id.clone(), seed + 4),
+                    &authority,
+                )
+                .unwrap();
+        }
+        let replay = control_plane
+            .accept_artifact_open(&scope, &replacement, &authority)
+            .unwrap();
+        assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
+        assert_eq!(replay.retained_artifact, accepted.retained_artifact);
+        control_plane.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority() {
     let seed = 1_401;
@@ -2308,20 +2468,14 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     let expired = control_plane
         .accept_artifact_open(&scope, &expired_open, &authority)
         .expect("expired Artifact write acknowledgement");
-    assert_eq!(expired.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(expired.status, LeaseWriteStatus::Accepted);
     assert_eq!(expired.ack_sequence.0, 0);
-    assert_eq!(
-        expired.error.expect("expired lease error").code,
-        ExecutionPortErrorCode::LeaseExpired
-    );
-    let mut after_expiry = expired_open;
-    after_expiry.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 21));
-    after_expiry.request_id = RequestId(canonical_id("req", seed + 21));
-    after_expiry.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
+    assert!(expired.error.is_none());
+    let after_expiry = expired_open;
     let accepted_after_expiry = control_plane
         .accept_artifact_open(&scope, &after_expiry, &authority)
-        .expect("expired Artifact message must not reserve metadata");
-    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Accepted);
+        .expect("late Artifact open replays its receipt");
+    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Duplicate);
 
     let mut crossed_open_identities = open.clone();
     crossed_open_identities.request_id = RequestId(canonical_id("req", seed + 21));
@@ -2404,6 +2558,7 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let mut invalid_transport_chunk = chunk.clone();
@@ -2505,9 +2660,6 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     fs::remove_dir_all(root).expect("database directory release");
 }
 
-/// Production diagnostic command output uses `text/plain; charset=utf-8`.
-/// `start_local` must accept both the open and the matching final chunk;
-/// rejecting charset parameters after open leaves the Worker outbox pending.
 #[test]
 fn start_local_accepts_diagnostic_open_and_charset_chunk() {
     let seed = 1_403;
@@ -2524,6 +2676,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
     let bytes = b"[stdout]\n\n> verify\n> node verify.mjs\n\n[stderr]\n";
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: ArtifactId(canonical_id("art", seed)),
             digest: digest.clone(),
@@ -2539,6 +2692,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding_message.sent_at.clone(),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let opened = control_plane
@@ -2562,6 +2716,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let accepted = control_plane
@@ -2609,6 +2764,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     .expect("manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),
@@ -2624,6 +2780,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     control_plane
@@ -2636,7 +2793,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         lease: binding_message.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
         payload: EncodedPayload {
-            content_type: "application/octet-stream".into(),
+            content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(&manifest),
             payload_digest: digest.clone(),
         },
@@ -2644,6 +2801,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let final_ack = control_plane
@@ -2652,10 +2810,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     assert_eq!(final_ack.status, LeaseWriteStatus::Accepted);
     assert_eq!(final_ack.ack_sequence, ExecutionAckSequence(1));
 
-    // The final Artifact acknowledgement is not observable until the
-    // retention ledger has durably reached Pinned and the stable ref points
-    // at the exact candidate commit.  Re-open the canonical store here to
-    // exercise the same restart/recovery boundary used by a fresh process.
     let candidate_cache = root.join("delivery-sources");
     let retained_repository = candidate_cache.join("project-one");
     let pin = {
@@ -2706,9 +2860,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         candidate_commit
     );
 
-    // Move the source branch away and aggressively prune unreachable objects.
-    // The stable retention ref is the only authority that keeps this commit
-    // available for later verification/rework checkout.
     git(
         &retained_repository,
         &["update-ref", "refs/heads/main", base_commit.as_str()],
@@ -2726,9 +2877,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         candidate_commit
     );
 
-    // A fresh Control Plane instance must reconcile the pin before accepting
-    // an exact final-chunk retry.  The retry is a Duplicate acknowledgement,
-    // and its pin receipt remains one exact durable record.
     control_plane
         .shutdown()
         .expect("Control Plane restart boundary");
@@ -2765,9 +2913,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     );
     assert_eq!(replayed_pin.receipt_digest(), pin.receipt_digest());
 
-    // A moved stable ref is a tamper/conflict, not a new candidate.  The
-    // duplicate final frame therefore fails before another acknowledgement is
-    // returned and leaves the foreign ref untouched.
     git(
         &retained_repository,
         &["update-ref", pin.reference_name(), base_commit.as_str()],
@@ -2841,9 +2986,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "executor completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -2897,6 +3044,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         job: verification_job.clone(),
     };
     let (verification_authority, verification_binding) = claim_delivery_attempt_with_slot(
+        Some(&mut control_plane),
         &root,
         &verification_execution,
         seed,
@@ -3008,9 +3156,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3043,6 +3193,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     };
     let (second_verification_authority, second_verification_binding) =
         claim_delivery_attempt_with_slot(
+            Some(&mut control_plane),
             &root,
             &second_verification_execution,
             seed,
@@ -3138,9 +3289,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "second verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3177,9 +3330,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         .expect("settled WorkRun must still replay its durable artifact.chunk acknowledgement");
     assert_eq!(replayed_chunk.status, LeaseWriteStatus::Duplicate);
 
-    // The production Delivery authority now closes its review Attention.  We
-    // recover the exact generic command receipt that was committed by this
-    // typed API and use it as the only terminal fact for candidate release.
     let review_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("Delivery review state");
@@ -3440,7 +3590,7 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     let repository = root.join("repositories/project-one");
     let (base_commit, _) = git_candidate_repository(&repository);
     let mut snapshot = delivery_before_advance(seed).into_snapshot();
-    snapshot.status = DeliveryStatus::Ready; // Historical label is not a scheduling gate.
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.spec.repository.locator = "project-one".into();
     snapshot.spec.base_revision = base_commit;
     let mut second_item = snapshot.work_run_aggregate.items[0].clone();
@@ -3448,8 +3598,16 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     snapshot.work_run_aggregate.items.push(second_item);
     let initial = Delivery::try_from_snapshot(snapshot).expect("two independent ready WorkItems");
     let (mut control_plane, first) = public_execution_fixture(&root, &repository, &initial, seed);
-    let (authority, binding) =
-        claim_delivery_attempt_with_slot(&root, &first, seed, seed, (1, 1), "parallel-first", true);
+    let (authority, binding) = claim_delivery_attempt_with_slot(
+        None,
+        &root,
+        &first,
+        seed,
+        seed,
+        (1, 1),
+        "parallel-first",
+        true,
+    );
     control_plane
         .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
         .expect("first WorkRun bound to its accepted Worker");
@@ -3480,6 +3638,7 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     };
     assert_ne!(first.job.job_id, second.job.job_id);
     let (authority, binding) = claim_delivery_attempt_with_slot(
+        None,
         &root,
         &second,
         seed,

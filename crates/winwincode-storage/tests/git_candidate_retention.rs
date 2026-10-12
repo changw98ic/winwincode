@@ -203,6 +203,112 @@ fn final_ack_digest(seed: u8) -> Sha256Digest {
     ))
 }
 
+#[test]
+fn readonly_retention_keeps_the_pinned_cut_and_never_repairs_missing_or_foreign_refs() {
+    let (root, artifacts, receipt, source, base, candidate) = pin_fixture();
+    let repository_root = root.join("repositories");
+    let repository = repository_root.join("project-one");
+    let mut writer = SqliteStorage::open(root.join("control")).unwrap();
+    let empty_cut = SqliteStorage::open_read_snapshot(writer.database_path()).unwrap();
+    let pin = writer
+        .git_candidate_retention(&repository_root)
+        .unwrap()
+        .pin_after_final_artifact_ack(&receipt, &source, &final_ack_digest(b'a'))
+        .unwrap();
+    let refs = git(&repository, &["show-ref"]);
+    assert!(
+        empty_cut
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap()
+            .is_empty(),
+        "a new pin cannot enter an already fixed database cut"
+    );
+    assert_eq!(git(&repository, &["show-ref"]), refs);
+    let pinned_cut = SqliteStorage::open_read_snapshot(writer.database_path()).unwrap();
+    assert_eq!(
+        pinned_cut
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap()[0]
+            .state(),
+        CandidateGitRetentionState::Pinned
+    );
+
+    git(&repository, &["update-ref", pin.reference_name(), &base]);
+    let error = pinned_cut
+        .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        winwincode_storage::CandidateGitRetentionErrorKind::Conflict
+    );
+    assert_eq!(
+        git(&repository, &["rev-parse", pin.reference_name()]),
+        base,
+        "a read must never overwrite a foreign ref"
+    );
+    git(&repository, &["update-ref", "-d", pin.reference_name()]);
+    let error = pinned_cut
+        .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        winwincode_storage::CandidateGitRetentionErrorKind::NotFound
+    );
+    assert!(
+        git_status_missing(&repository, pin.reference_name()),
+        "a read must never recreate a missing ref"
+    );
+    git(
+        &repository,
+        &["update-ref", pin.reference_name(), &candidate],
+    );
+    assert_eq!(
+        pinned_cut
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap()[0]
+            .candidate_commit_id(),
+        candidate
+    );
+
+    release_after_restart(&mut writer, &repository_root, &repository, &pin, &candidate);
+    assert_eq!(
+        pinned_cut
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap_err()
+            .kind(),
+        winwincode_storage::CandidateGitRetentionErrorKind::NotFound
+    );
+    assert_eq!(
+        writer
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap()[0]
+            .state(),
+        CandidateGitRetentionState::Released
+    );
+    git(
+        &repository,
+        &["update-ref", pin.reference_name(), &candidate],
+    );
+    assert_eq!(
+        writer
+            .read_candidate_git_retention_for_delivery(&repository_root, pin.delivery_id())
+            .unwrap_err()
+            .kind(),
+        winwincode_storage::CandidateGitRetentionErrorKind::Conflict
+    );
+    assert_eq!(
+        git(&repository, &["rev-parse", pin.reference_name()]),
+        candidate,
+        "a Released read must not delete a residual ref"
+    );
+    git(&repository, &["update-ref", "-d", pin.reference_name()]);
+    Box::new(empty_cut).close().unwrap();
+    Box::new(pinned_cut).close().unwrap();
+    Box::new(writer).close().unwrap();
+    artifacts.close().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn release_after_restart(
     storage: &mut SqliteStorage,
     controlled_repository_root: &Path,
