@@ -386,11 +386,10 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         })
         .expect("reloaded worker request");
     let output = request.custom_tool_call_output("catalog-followup-call");
-    let tools: Vec<String> = serde_json::from_str(
-        output["output"][1]["text"]
-            .as_str()
-            .expect("nested catalog"),
-    )?;
+    let tools: Vec<String> =
+        serde_json::from_str(output["output"][1]["text"].as_str().unwrap_or_else(|| {
+            panic!("nested catalog missing from real worker output: {output}")
+        }))?;
     assert!(tools.iter().any(|name| name == "exec_command"));
     assert!(tools.iter().any(|name| name == "write_stdin"));
 

@@ -7,6 +7,7 @@ use crate::ToolCallGateRequest;
 use crate::session::step_context::StepContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolCallSource;
+use crate::tools::execution_facts::ExecutionFacts;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolRegistry;
 use codex_tools::ResponsesApiTool;
@@ -218,6 +219,11 @@ async fn restarted_core_recovers_accepted_receipt_under_current_read_authority()
         .await
         .unwrap()
         .into_response();
+    // Keep the old session allocated, as residency callers may retain its Arc.
+    let old_session = Arc::clone(&first.session);
+    ExecutionFacts::seal(&old_session);
+    ExecutionFacts::finish_shutdown(&old_session, Ok(())).await;
+    ExecutionFacts::shutdown_result(&old_session).unwrap();
     let (mut session, _) = crate::session::tests::make_session_and_context().await;
     session.thread_id = first.session.thread_id;
     let gate = Arc::new(ReadGate {
@@ -467,4 +473,39 @@ async fn optional_diagnostic_rollback_keeps_registry_output_and_replay_without_d
     assert_eq!(offered[0].boundary_request_sequence, Some(boundary));
     assert_eq!(offered[0].diagnostic.evidence_version, boundary);
     pool.close().await;
+}
+
+#[tokio::test]
+async fn failed_core_shutdown_keeps_exclusive_ownership_and_rejects_replacement() {
+    let (first, _, tool) = setup().await;
+    let registry = ToolRegistry::with_handler_for_test(tool.clone());
+    registry
+        .dispatch_any_with_terminal_outcome(first.clone(), None)
+        .await
+        .unwrap();
+    let old_session = Arc::clone(&first.session);
+    ExecutionFacts::seal(&old_session);
+    ExecutionFacts::finish_shutdown(&old_session, Err("runtime drain failed".into())).await;
+    assert!(
+        ExecutionFacts::shutdown_result(&old_session)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime drain failed")
+    );
+    let (mut session, _) = crate::session::tests::make_session_and_context().await;
+    session.thread_id = first.session.thread_id;
+    let error = registry
+        .dispatch_any_with_terminal_outcome(
+            ToolInvocation {
+                session: Arc::new(session),
+                ..first
+            },
+            None,
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("execution_owner_unverified"));
+    assert_eq!(tool.effects.load(Ordering::SeqCst), 1);
 }

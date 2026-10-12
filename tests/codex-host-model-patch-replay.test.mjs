@@ -79,3 +79,26 @@ test('host model retry patch has declared source targets and a verified digest',
   assert.deepEqual(patches.filter(({ targets }) => targets.some(path => Object.hasOwn(originalHashes, path))).map(({ id }) => id),
     ['codex-host-model-retry-semantics', 'codex-execution-terminal-cause-and-drain', 'codex-model-authority-expiry-cause'])
 })
+
+test('internal error schema binary patch reproduces the pinned artifact exactly', t => {
+  const path = 'codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst'
+  const originalHash = '5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3'
+  const patch = patches.find(({ id }) => id === 'codex-app-server-internal-error-schema')
+  assert.ok(patch)
+  assert.deepEqual(patch.targets, [path])
+  assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256)
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-internal-schema-replay-'))
+  t.after(() => rmSync(directory, { force: true, recursive: true }))
+  const current = readFileSync(join(root, 'third_party/codex', path))
+  mkdirSync(dirname(join(directory, path)), { recursive: true })
+  writeFileSync(join(directory, path), current)
+  for (const reverse of [true, false]) {
+    const result = spawnSync('git', [
+      'apply', '--binary', ...(reverse ? ['--reverse'] : []), join(root, patch.file),
+    ], { cwd: directory, encoding: 'utf8' })
+    assert.equal(result.error, undefined, patch.file)
+    assert.equal(result.status, 0, `${patch.file}\n${result.stdout}\n${result.stderr}`)
+    if (reverse) assert.equal(digest(readFileSync(join(directory, path))), originalHash)
+    else assert.deepEqual(readFileSync(join(directory, path)), current)
+  }
+})

@@ -12,6 +12,8 @@ const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.jso
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
 const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context' || ["codex-mechanism-behavior-audit","codex-task-state-compaction-budget","codex-runtime-timer-and-pending-cost","codex-stdio-lifecycle-deadlines","codex-exact-input-call-routing","codex-private-input-recovery-store","codex-input-recovery-dispatch-and-pages","codex-required-tool-fact-storage-fatal","codex-terminal-core-error-rollout","codex-execution-terminal-cause-and-drain","codex-host-model-retry-semantics","codex-model-authority-expiry-cause"].includes(id))
 const originalHashes = {
+  "codex-rs/core/tests/suite/current_time_reminder.rs": "c9bf96edf689676bfb81935e0d95326f71f4b9ae3340d8c663b90bba4d12783f",
+  "codex-rs/core/tests/suite/retry_after.rs": "7d1a5d883b4f4b0b292fff1ddd4517a32b8ce2c52be9716093471c4b02be884f",
   "codex-rs/codex-api/src/error.rs": "3fd2ea3cd5490b1f744e98d51a283fbe09aa940bfbd7eb9bacf2f3fe9c512dd0",
   "codex-rs/codex-api/src/api_bridge.rs": "a6c185eac08d05f7d28e58bb88fde713db10a14bcf48dcf37a84db4be1bdfd99",
   "codex-rs/protocol/src/error.rs": "982d6968960b97ccb592c31c7b1cea4832b541be1f22ac054fa15c2b5b2b2d10",
@@ -367,7 +369,7 @@ test('the tool runtime manifest and ordered patch digests describe the dispatch 
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-seatbelt-explicit-literal-deny')?.file, 'upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-zsh-parent-approval-context')?.file, 'upstream/patches/codex/0097-zsh-parent-approval-context.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-mechanism-behavior-audit')?.file, 'upstream/patches/codex/0098-mechanism-behavior-audit.patch')
-  assert.equal(patches.length, 97)
+  assert.equal(patches.length, 99)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

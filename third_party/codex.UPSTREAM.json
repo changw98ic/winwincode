@@ -118,6 +118,9 @@
     "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
     "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
     "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
-    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch"
+    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+    "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+    "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+    "upstream/patches/codex/0115-app-server-internal-error-schema.patch"
   ]
 }

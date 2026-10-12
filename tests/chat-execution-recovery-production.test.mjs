@@ -584,6 +584,11 @@ function installCutPoint(database, point, productSessionId) {
     database.exec(`CREATE TRIGGER pause_chat_recovery BEFORE UPDATE ON worker_session_slots
       WHEN NEW.state='completed' AND NEW.job_id IN (${selectedJob})
       BEGIN SELECT RAISE(ABORT,'injected after CP terminal commit before business ACK'); END`)
+    // Settlement precedes slot cleanup. Hold both real writes so the selected
+    // crash boundary remains stable while the Core evidence is inspected.
+    database.exec(`CREATE TRIGGER pause_chat_recovery_settlement BEFORE INSERT ON execution_admission_settlement_sources
+      WHEN NEW.job_id IN (${selectedJob})
+      BEGIN SELECT RAISE(ABORT,'injected before Chat settlement commit'); END`)
   }
 }
 
@@ -743,6 +748,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           assert.equal(originalCore.commands[0].delivery, 'offered')
           assertSuccessfulCoreCommand(originalCore.commands[0])
           const originalSettlementSources = settlementSources(database, job.job_id)
+          assert.equal(originalSettlementSources.length, 0, 'the real crash cut precedes settlement')
           const calls = readDeviceExecutionReceipts(directory).calls.filter(call => call.jobId === job.job_id)
           assert.ok(calls.length >= 2, 'the real model/tool/model loop retained physical Provider calls')
           assert.ok(calls.every(call => call.providerAttempts.length === 1 && call.providerAttempts[0].state === 'completed'))
@@ -762,6 +768,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           assert.deepEqual(settlementSources(database, job.job_id), originalSettlementSources)
           assert.equal(devicePath.modelServer.requests.length, httpCount)
           database.exec('DROP TRIGGER pause_chat_recovery')
+          database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
           const settled = await waitFor(async () => {
             const accepted = acceptedOutcome(database, job.job_id)
             const terminal = database.prepare('SELECT * FROM execution_lease_terminals WHERE job_id=?').get(job.job_id)
@@ -805,6 +812,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
             signal: restarted.signal, businessAcknowledged: true }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery')
+          database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
           database.close()
         }
       } },

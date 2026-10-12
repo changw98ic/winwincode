@@ -57,15 +57,24 @@ impl ToolFactOwner {
         }
     }
 
-    pub(super) fn finish(&self, result: Result<(), String>) {
+    pub(super) fn finish(&self, result: Result<(), String>, owner_lock: Option<&std::fs::File>) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.result = Some(result.and_then(|()| match &state.failure {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }));
+        state.result = Some(
+            result
+                .and_then(|()| match &state.failure {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(()),
+                })
+                .and_then(|()| match owner_lock {
+                    // Retained Session Arcs may outlive a successfully closed Core.
+                    // Seal, drain and the SQLite fence make releasing its lock safe.
+                    Some(lock) => lock.unlock().map_err(|error| error.to_string()),
+                    None => Ok(()),
+                }),
+        );
     }
 
     pub(super) fn result(&self) -> Result<(), String> {
@@ -130,6 +139,7 @@ impl super::ExecutionFacts {
                 .and(cells_result)
                 .and(calls_result)
                 .and(fence_result),
+            facts.owner_lock.get(),
         );
     }
 }

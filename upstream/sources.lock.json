@@ -1633,6 +1633,38 @@
         "codex-rs/core/src/tools/registry.rs",
         "codex-rs/core/src/tools/code_mode/terminal_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-shutdown-owner-release",
+      "file": "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+      "planned": false,
+      "patchSha256": "5f8de5f2e0349de0bc57ffd545d97bfa1c50ef3afea13a59583d3fa8ac25b801",
+      "targets": [
+        "codex-rs/core/src/tools/tool_fact_owner.rs",
+        "codex-rs/core/src/tools/result_recovery_tests.rs",
+        "codex-rs/core/tests/suite/agent_execution.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-call-pair-regressions",
+      "file": "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+      "planned": false,
+      "patchSha256": "46db0e3ba564360031f7353745492c50b87cb1cc1beaab9c7ce9574af14f6443",
+      "targets": [
+        "codex-rs/core/src/tools/control_input_recovery_tests.rs",
+        "codex-rs/core/tests/suite/current_time_reminder.rs",
+        "codex-rs/core/tests/suite/retry_after.rs",
+        "codex-rs/core/tests/suite/rollout_budget.rs"
+      ]
+    },
+    {
+      "id": "codex-app-server-internal-error-schema",
+      "file": "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+      "planned": false,
+      "patchSha256": "e3edf05cae4eccdf6171aa74dd6cb5aebce8a237e69e954fe5c28e49ea4aa548",
+      "targets": [
+        "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst"
+      ]
     }
   ],
   "licenseObligations": {
